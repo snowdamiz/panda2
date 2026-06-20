@@ -181,14 +181,14 @@ func boolInt(value bool) int {
 
 func localStorageStatus(dir string) componentStatus {
 	if dir == "" {
-		return componentStatus{Status: "missing", Message: "DATA_DIR is not configured"}
+		return componentStatus{Status: "missing", Message: "data directory is not configured"}
 	}
 	info, err := os.Stat(dir)
 	if err != nil {
 		return componentStatus{Status: "error", Message: err.Error()}
 	}
 	if !info.IsDir() {
-		return componentStatus{Status: "error", Message: "DATA_DIR is not a directory"}
+		return componentStatus{Status: "error", Message: "data directory is not a directory"}
 	}
 	file, err := os.CreateTemp(dir, ".panda-health-*")
 	if err != nil {

@@ -29,6 +29,7 @@ USER panda:panda
 WORKDIR /app
 
 COPY --from=builder /out/panda /app/panda
+COPY --from=builder /src/panda.config.json /app/panda.config.json
 
 ENV PORT=8080
 EXPOSE 8080

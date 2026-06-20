@@ -1,6 +1,8 @@
 package config
 
 import (
+	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -10,6 +12,8 @@ import (
 )
 
 const (
+	configPathEnv      = "PANDA_CONFIG"
+	defaultConfigPath  = "panda.config.json"
 	defaultDevDataDir  = "data"
 	defaultProdDataDir = "/data"
 )
@@ -29,44 +33,62 @@ type Config struct {
 	OpenRouterCircuitBreakerCooldown         time.Duration
 	SQLitePath                               string
 	DataDir                                  string
-	AttachmentCacheTTL                       time.Duration
 	Port                                     string
-	MetricsAddr                              string
 	Environment                              string
 	LogLevel                                 string
 	OwnerUserIDs                             map[string]struct{}
-	PublicBaseURL                            string
 	UserRateLimit                            int
 	UserRateLimitWindow                      time.Duration
 }
 
-func Load() (Config, []string, error) {
-	cfg := Config{
-		DiscordBotToken:                          strings.TrimSpace(os.Getenv("DISCORD_BOT_TOKEN")),
-		DiscordApplicationID:                     strings.TrimSpace(os.Getenv("DISCORD_APPLICATION_ID")),
-		DiscordGuildID:                           strings.TrimSpace(os.Getenv("DISCORD_GUILD_ID")),
-		OpenRouterAPIKey:                         strings.TrimSpace(os.Getenv("OPENROUTER_API_KEY")),
-		OpenRouterBaseURL:                        firstNonEmpty(os.Getenv("OPENROUTER_BASE_URL"), "https://openrouter.ai/api/v1"),
-		OpenRouterModel:                          firstNonEmpty(os.Getenv("OPENROUTER_DEFAULT_MODEL"), "openrouter/auto"),
-		OpenRouterFallbackModels:                 parseCSVList(os.Getenv("OPENROUTER_FALLBACK_MODELS")),
-		OpenRouterEmbeddingModel:                 strings.TrimSpace(os.Getenv("OPENROUTER_EMBEDDING_MODEL")),
-		OpenRouterAppURL:                         strings.TrimSpace(os.Getenv("OPENROUTER_APP_URL")),
-		OpenRouterAppTitle:                       firstNonEmpty(os.Getenv("OPENROUTER_APP_TITLE"), "Panda Assistant"),
-		OpenRouterCircuitBreakerFailureThreshold: intFromEnv("OPENROUTER_CIRCUIT_FAILURE_THRESHOLD", 5),
-		OpenRouterCircuitBreakerCooldown:         durationFromEnv("OPENROUTER_CIRCUIT_COOLDOWN", 30*time.Second),
-		Port:                                     firstNonEmpty(os.Getenv("PORT"), "8080"),
-		MetricsAddr:                              strings.TrimSpace(os.Getenv("METRICS_ADDR")),
-		Environment:                              firstNonEmpty(os.Getenv("ENVIRONMENT"), "development"),
-		LogLevel:                                 firstNonEmpty(os.Getenv("LOG_LEVEL"), "info"),
-		OwnerUserIDs:                             parseCSVSet(os.Getenv("OWNER_USER_IDS")),
-		PublicBaseURL:                            strings.TrimSpace(os.Getenv("PUBLIC_BASE_URL")),
-		UserRateLimit:                            intFromEnv("USER_RATE_LIMIT", 5),
-		UserRateLimitWindow:                      durationFromEnv("USER_RATE_LIMIT_WINDOW", time.Minute),
-		AttachmentCacheTTL:                       durationFromEnv("ATTACHMENT_CACHE_TTL", 24*time.Hour),
-	}
+type fileConfig struct {
+	Discord    fileDiscordConfig    `json:"discord"`
+	OpenRouter fileOpenRouterConfig `json:"openrouter"`
+	Runtime    fileRuntimeConfig    `json:"runtime"`
+	Storage    fileStorageConfig    `json:"storage"`
+}
 
-	cfg.DataDir = firstNonEmpty(os.Getenv("DATA_DIR"), defaultDataDir(cfg.Environment))
-	cfg.SQLitePath = firstNonEmpty(os.Getenv("SQLITE_PATH"), cfg.DataDir+"/panda.db")
+type fileDiscordConfig struct {
+	ApplicationID string   `json:"application_id"`
+	GuildID       string   `json:"guild_id"`
+	OwnerUserIDs  []string `json:"owner_user_ids"`
+}
+
+type fileOpenRouterConfig struct {
+	BaseURL        string                   `json:"base_url"`
+	DefaultModel   string                   `json:"default_model"`
+	FallbackModels []string                 `json:"fallback_models"`
+	EmbeddingModel string                   `json:"embedding_model"`
+	AppURL         string                   `json:"app_url"`
+	AppTitle       string                   `json:"app_title"`
+	CircuitBreaker fileCircuitBreakerConfig `json:"circuit_breaker"`
+}
+
+type fileCircuitBreakerConfig struct {
+	FailureThreshold *int   `json:"failure_threshold"`
+	Cooldown         string `json:"cooldown"`
+}
+
+type fileRuntimeConfig struct {
+	Port                string `json:"port"`
+	Environment         string `json:"environment"`
+	LogLevel            string `json:"log_level"`
+	UserRateLimit       *int   `json:"user_rate_limit"`
+	UserRateLimitWindow string `json:"user_rate_limit_window"`
+}
+
+type fileStorageConfig struct {
+	DataDir    string `json:"data_dir"`
+	SQLitePath string `json:"sqlite_path"`
+}
+
+func Load() (Config, []string, error) {
+	cfg := defaultConfig()
+	if err := applyConfigFile(&cfg); err != nil {
+		return cfg, nil, err
+	}
+	applyEnv(&cfg)
+	finalize(&cfg)
 
 	warnings, err := cfg.Validate()
 	return cfg, warnings, err
@@ -75,34 +97,31 @@ func Load() (Config, []string, error) {
 func (c Config) Validate() ([]string, error) {
 	var warnings []string
 	if c.Port == "" {
-		return nil, errors.New("PORT must not be empty")
+		return nil, errors.New("runtime.port (PORT) must not be empty")
 	}
 	if _, err := strconv.Atoi(c.Port); err != nil {
-		return nil, fmt.Errorf("PORT must be numeric: %w", err)
+		return nil, fmt.Errorf("runtime.port (PORT) must be numeric: %w", err)
 	}
 	if c.SQLitePath == "" {
-		return nil, errors.New("SQLITE_PATH must not be empty")
+		return nil, errors.New("storage.sqlite_path (SQLITE_PATH) must not be empty")
 	}
 	if c.OpenRouterBaseURL == "" {
-		return nil, errors.New("OPENROUTER_BASE_URL must not be empty")
+		return nil, errors.New("openrouter.base_url (OPENROUTER_BASE_URL) must not be empty")
 	}
 	if c.OpenRouterModel == "" {
-		return nil, errors.New("OPENROUTER_DEFAULT_MODEL must not be empty")
+		return nil, errors.New("openrouter.default_model (OPENROUTER_DEFAULT_MODEL) must not be empty")
 	}
 	if c.OpenRouterCircuitBreakerFailureThreshold < 0 {
-		return nil, errors.New("OPENROUTER_CIRCUIT_FAILURE_THRESHOLD must not be negative")
+		return nil, errors.New("openrouter.circuit_breaker.failure_threshold (OPENROUTER_CIRCUIT_FAILURE_THRESHOLD) must not be negative")
 	}
 	if c.OpenRouterCircuitBreakerFailureThreshold > 0 && c.OpenRouterCircuitBreakerCooldown <= 0 {
-		return nil, errors.New("OPENROUTER_CIRCUIT_COOLDOWN must be greater than zero")
+		return nil, errors.New("openrouter.circuit_breaker.cooldown (OPENROUTER_CIRCUIT_COOLDOWN) must be greater than zero")
 	}
 	if c.UserRateLimit <= 0 {
-		return nil, errors.New("USER_RATE_LIMIT must be greater than zero")
+		return nil, errors.New("runtime.user_rate_limit (USER_RATE_LIMIT) must be greater than zero")
 	}
 	if c.UserRateLimitWindow <= 0 {
-		return nil, errors.New("USER_RATE_LIMIT_WINDOW must be greater than zero")
-	}
-	if c.AttachmentCacheTTL <= 0 {
-		return nil, errors.New("ATTACHMENT_CACHE_TTL must be greater than zero")
+		return nil, errors.New("runtime.user_rate_limit_window (USER_RATE_LIMIT_WINDOW) must be greater than zero")
 	}
 
 	if !c.DiscordConfigured() {
@@ -114,7 +133,7 @@ func (c Config) Validate() ([]string, error) {
 
 	if strings.EqualFold(c.Environment, "production") {
 		if !c.DiscordConfigured() {
-			return warnings, errors.New("production requires DISCORD_BOT_TOKEN and DISCORD_APPLICATION_ID")
+			return warnings, errors.New("production requires DISCORD_BOT_TOKEN and a Discord application ID")
 		}
 		if !c.OpenRouterConfigured() {
 			return warnings, errors.New("production requires OPENROUTER_API_KEY")
@@ -137,48 +156,211 @@ func (c Config) IsOwner(userID string) bool {
 	return ok
 }
 
+func defaultConfig() Config {
+	return Config{
+		OpenRouterBaseURL:                        "https://openrouter.ai/api/v1",
+		OpenRouterModel:                          "openrouter/auto",
+		OpenRouterAppTitle:                       "Panda Assistant",
+		OpenRouterCircuitBreakerFailureThreshold: 5,
+		OpenRouterCircuitBreakerCooldown:         30 * time.Second,
+		Port:                                     "8080",
+		Environment:                              defaultEnvironment(),
+		LogLevel:                                 "info",
+		OwnerUserIDs:                             map[string]struct{}{},
+		UserRateLimit:                            5,
+		UserRateLimitWindow:                      time.Minute,
+	}
+}
+
+func applyConfigFile(cfg *Config) error {
+	path, required := configFilePath()
+	data, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		if required {
+			return fmt.Errorf("read %s %q: %w", configPathEnv, path, err)
+		}
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("read config file %q: %w", path, err)
+	}
+
+	var file fileConfig
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&file); err != nil {
+		return fmt.Errorf("parse config file %q: %w", path, err)
+	}
+	return applyFileConfig(cfg, file)
+}
+
+func configFilePath() (string, bool) {
+	if value, ok := os.LookupEnv(configPathEnv); ok {
+		value = strings.TrimSpace(value)
+		if value != "" {
+			return value, true
+		}
+	}
+	return defaultConfigPath, false
+}
+
+func applyFileConfig(cfg *Config, file fileConfig) error {
+	if value := strings.TrimSpace(file.Discord.ApplicationID); value != "" {
+		cfg.DiscordApplicationID = value
+	}
+	if value := strings.TrimSpace(file.Discord.GuildID); value != "" {
+		cfg.DiscordGuildID = value
+	}
+	if file.Discord.OwnerUserIDs != nil {
+		cfg.OwnerUserIDs = listToSet(file.Discord.OwnerUserIDs)
+	}
+
+	if value := strings.TrimSpace(file.OpenRouter.BaseURL); value != "" {
+		cfg.OpenRouterBaseURL = value
+	}
+	if value := strings.TrimSpace(file.OpenRouter.DefaultModel); value != "" {
+		cfg.OpenRouterModel = value
+	}
+	if file.OpenRouter.FallbackModels != nil {
+		cfg.OpenRouterFallbackModels = normalizeList(file.OpenRouter.FallbackModels)
+	}
+	if value := strings.TrimSpace(file.OpenRouter.EmbeddingModel); value != "" {
+		cfg.OpenRouterEmbeddingModel = value
+	}
+	if value := strings.TrimSpace(file.OpenRouter.AppURL); value != "" {
+		cfg.OpenRouterAppURL = value
+	}
+	if value := strings.TrimSpace(file.OpenRouter.AppTitle); value != "" {
+		cfg.OpenRouterAppTitle = value
+	}
+	if file.OpenRouter.CircuitBreaker.FailureThreshold != nil {
+		cfg.OpenRouterCircuitBreakerFailureThreshold = *file.OpenRouter.CircuitBreaker.FailureThreshold
+	}
+	if value := strings.TrimSpace(file.OpenRouter.CircuitBreaker.Cooldown); value != "" {
+		parsed, err := parseDuration("openrouter.circuit_breaker.cooldown", value)
+		if err != nil {
+			return err
+		}
+		cfg.OpenRouterCircuitBreakerCooldown = parsed
+	}
+
+	if value := strings.TrimSpace(file.Runtime.Port); value != "" {
+		cfg.Port = value
+	}
+	if value := strings.TrimSpace(file.Runtime.Environment); value != "" {
+		cfg.Environment = value
+	}
+	if value := strings.TrimSpace(file.Runtime.LogLevel); value != "" {
+		cfg.LogLevel = value
+	}
+	if file.Runtime.UserRateLimit != nil {
+		cfg.UserRateLimit = *file.Runtime.UserRateLimit
+	}
+	if value := strings.TrimSpace(file.Runtime.UserRateLimitWindow); value != "" {
+		parsed, err := parseDuration("runtime.user_rate_limit_window", value)
+		if err != nil {
+			return err
+		}
+		cfg.UserRateLimitWindow = parsed
+	}
+
+	if value := strings.TrimSpace(file.Storage.DataDir); value != "" {
+		cfg.DataDir = value
+	}
+	if value := strings.TrimSpace(file.Storage.SQLitePath); value != "" {
+		cfg.SQLitePath = value
+	}
+	return nil
+}
+
+func applyEnv(cfg *Config) {
+	cfg.DiscordBotToken = stringFromEnv("DISCORD_BOT_TOKEN", cfg.DiscordBotToken)
+	cfg.DiscordApplicationID = nonEmptyStringFromEnv("DISCORD_APPLICATION_ID", cfg.DiscordApplicationID)
+	cfg.DiscordGuildID = nonEmptyStringFromEnv("DISCORD_GUILD_ID", cfg.DiscordGuildID)
+	cfg.OpenRouterAPIKey = stringFromEnv("OPENROUTER_API_KEY", cfg.OpenRouterAPIKey)
+	cfg.OpenRouterBaseURL = nonEmptyStringFromEnv("OPENROUTER_BASE_URL", cfg.OpenRouterBaseURL)
+	cfg.OpenRouterModel = nonEmptyStringFromEnv("OPENROUTER_DEFAULT_MODEL", cfg.OpenRouterModel)
+	if value, ok := csvListFromEnv("OPENROUTER_FALLBACK_MODELS"); ok {
+		cfg.OpenRouterFallbackModels = value
+	}
+	cfg.OpenRouterEmbeddingModel = nonEmptyStringFromEnv("OPENROUTER_EMBEDDING_MODEL", cfg.OpenRouterEmbeddingModel)
+	cfg.OpenRouterAppURL = nonEmptyStringFromEnv("OPENROUTER_APP_URL", cfg.OpenRouterAppURL)
+	cfg.OpenRouterAppTitle = nonEmptyStringFromEnv("OPENROUTER_APP_TITLE", cfg.OpenRouterAppTitle)
+	cfg.OpenRouterCircuitBreakerFailureThreshold = intFromEnv("OPENROUTER_CIRCUIT_FAILURE_THRESHOLD", cfg.OpenRouterCircuitBreakerFailureThreshold)
+	cfg.OpenRouterCircuitBreakerCooldown = durationFromEnv("OPENROUTER_CIRCUIT_COOLDOWN", cfg.OpenRouterCircuitBreakerCooldown)
+	cfg.Port = nonEmptyStringFromEnv("PORT", cfg.Port)
+	cfg.Environment = nonEmptyStringFromEnv("ENVIRONMENT", cfg.Environment)
+	cfg.LogLevel = nonEmptyStringFromEnv("LOG_LEVEL", cfg.LogLevel)
+	if value, ok := csvSetFromEnv("OWNER_USER_IDS"); ok {
+		cfg.OwnerUserIDs = value
+	}
+	cfg.UserRateLimit = intFromEnv("USER_RATE_LIMIT", cfg.UserRateLimit)
+	cfg.UserRateLimitWindow = durationFromEnv("USER_RATE_LIMIT_WINDOW", cfg.UserRateLimitWindow)
+	cfg.DataDir = stringFromEnv("DATA_DIR", cfg.DataDir)
+	cfg.SQLitePath = stringFromEnv("SQLITE_PATH", cfg.SQLitePath)
+}
+
+func finalize(cfg *Config) {
+	if cfg.DataDir == "" {
+		cfg.DataDir = defaultDataDir(cfg.Environment)
+	}
+	if cfg.SQLitePath == "" {
+		cfg.SQLitePath = cfg.DataDir + "/panda.db"
+	}
+}
+
+func defaultEnvironment() string {
+	if strings.TrimSpace(os.Getenv("FLY_APP_NAME")) != "" {
+		return "production"
+	}
+	return "development"
+}
+
 func defaultDataDir(environment string) string {
-	if strings.EqualFold(environment, "production") || os.Getenv("FLY_APP_NAME") != "" {
+	if strings.EqualFold(environment, "production") {
 		return defaultProdDataDir
 	}
 	return defaultDevDataDir
 }
 
-func firstNonEmpty(value, fallback string) string {
-	value = strings.TrimSpace(value)
+func stringFromEnv(name string, current string) string {
+	value, ok := os.LookupEnv(name)
+	if !ok {
+		return current
+	}
+	return strings.TrimSpace(value)
+}
+
+func nonEmptyStringFromEnv(name string, current string) string {
+	value := stringFromEnv(name, current)
 	if value == "" {
-		return fallback
+		return current
 	}
 	return value
 }
 
-func parseCSVSet(value string) map[string]struct{} {
-	result := map[string]struct{}{}
-	for _, part := range parseCSVList(value) {
-		result[part] = struct{}{}
+func csvSetFromEnv(name string) (map[string]struct{}, bool) {
+	value, ok := os.LookupEnv(name)
+	if !ok {
+		return nil, false
 	}
-	return result
+	return parseCSVSet(value), true
 }
 
-func parseCSVList(value string) []string {
-	seen := map[string]struct{}{}
-	var result []string
-	for _, part := range strings.Split(value, ",") {
-		part = strings.TrimSpace(part)
-		if part == "" {
-			continue
-		}
-		if _, ok := seen[part]; ok {
-			continue
-		}
-		seen[part] = struct{}{}
-		result = append(result, part)
+func csvListFromEnv(name string) ([]string, bool) {
+	value, ok := os.LookupEnv(name)
+	if !ok {
+		return nil, false
 	}
-	return result
+	return parseCSVList(value), true
 }
 
 func intFromEnv(name string, fallback int) int {
-	value := strings.TrimSpace(os.Getenv(name))
+	value, ok := os.LookupEnv(name)
+	if !ok {
+		return fallback
+	}
+	value = strings.TrimSpace(value)
 	if value == "" {
 		return fallback
 	}
@@ -190,7 +372,11 @@ func intFromEnv(name string, fallback int) int {
 }
 
 func durationFromEnv(name string, fallback time.Duration) time.Duration {
-	value := strings.TrimSpace(os.Getenv(name))
+	value, ok := os.LookupEnv(name)
+	if !ok {
+		return fallback
+	}
+	value = strings.TrimSpace(value)
 	if value == "" {
 		return fallback
 	}
@@ -199,4 +385,45 @@ func durationFromEnv(name string, fallback time.Duration) time.Duration {
 		return fallback
 	}
 	return parsed
+}
+
+func parseCSVSet(value string) map[string]struct{} {
+	return listToSet(strings.Split(value, ","))
+}
+
+func parseCSVList(value string) []string {
+	return normalizeList(strings.Split(value, ","))
+}
+
+func listToSet(values []string) map[string]struct{} {
+	result := map[string]struct{}{}
+	for _, value := range normalizeList(values) {
+		result[value] = struct{}{}
+	}
+	return result
+}
+
+func normalizeList(values []string) []string {
+	seen := map[string]struct{}{}
+	var result []string
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		result = append(result, value)
+	}
+	return result
+}
+
+func parseDuration(name, value string) (time.Duration, error) {
+	parsed, err := time.ParseDuration(value)
+	if err != nil {
+		return 0, fmt.Errorf("%s must be a valid duration: %w", name, err)
+	}
+	return parsed, nil
 }

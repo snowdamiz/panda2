@@ -1,0 +1,29 @@
+{
+  "discord": {
+    "application_id": "",
+    "guild_id": "",
+    "owner_user_ids": []
+  },
+  "openrouter": {
+    "base_url": "https://openrouter.ai/api/v1",
+    "default_model": "openrouter/auto",
+    "fallback_models": [],
+    "embedding_model": "",
+    "app_url": "",
+    "app_title": "Panda Assistant",
+    "circuit_breaker": {
+      "failure_threshold": 5,
+      "cooldown": "30s"
+    }
+  },
+  "runtime": {
+    "port": "8080",
+    "log_level": "info",
+    "user_rate_limit": 5,
+    "user_rate_limit_window": "1m"
+  },
+  "storage": {
+    "data_dir": "",
+    "sqlite_path": ""
+  }
+}

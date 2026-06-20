@@ -5,12 +5,15 @@ Panda is a Go Discord assistant bot implemented from `PLAN.md`.
 ## Local Development
 
 ```bash
-cp .env.example .env
 go test ./...
 go run ./cmd/bot
 ```
 
 The service can start without Discord or OpenRouter credentials in development. Local tests use fake LLM clients and SQLite fixtures, so no real credentials are needed for development verification.
+
+Non-secret settings live in `panda.config.json`. Set `PANDA_CONFIG=/path/to/config.json` to use another file. Environment variables are still supported for deployments and override file values when present.
+
+For live Discord/OpenRouter integrations, set `DISCORD_BOT_TOKEN` and `OPENROUTER_API_KEY` in your shell or deployment secrets, then set `discord.application_id` in `panda.config.json` or provide `DISCORD_APPLICATION_ID`.
 
 For queue-only processing without Discord or HTTP, run `go run ./cmd/worker`.
 
@@ -23,11 +26,11 @@ Health endpoints report configuration, Fiber, Discord, OpenRouter, SQLite, and l
 
 `/metrics` emits Prometheus-style local metrics for SQLite readiness, integration configuration, schema migration version, queue depth, and usage counters.
 
-Discord gateway startup and command registration activate when `DISCORD_BOT_TOKEN` and `DISCORD_APPLICATION_ID` are set. OpenRouter calls activate when `OPENROUTER_API_KEY` is set.
+Discord gateway startup and command registration activate when `DISCORD_BOT_TOKEN` and a Discord application ID are configured. OpenRouter calls activate when `OPENROUTER_API_KEY` is set.
 
-OpenRouter routing uses `OPENROUTER_DEFAULT_MODEL` plus optional comma-separated `OPENROUTER_FALLBACK_MODELS`. Guild admins can override the primary model, fallbacks, temperature, max response tokens, and tool policy with `/admin model`; transient OpenRouter/provider failures try the ordered fallback list before returning an error. The OpenRouter client also includes retries and a circuit breaker configured with `OPENROUTER_CIRCUIT_FAILURE_THRESHOLD` and `OPENROUTER_CIRCUIT_COOLDOWN`.
+OpenRouter routing uses `openrouter.default_model` plus optional `openrouter.fallback_models` in `panda.config.json`. Guild admins can override the primary model, fallbacks, temperature, max response tokens, and tool policy with `/admin model`; transient OpenRouter/provider failures try the ordered fallback list before returning an error. The OpenRouter client also includes retries and a circuit breaker configured with `openrouter.circuit_breaker`.
 
-SQLite knowledge search uses FTS5 when the binary is built with the `sqlite_fts5` tag. Default local builds fall back to an indexed table search so `go test ./...` works without custom flags. When `OPENROUTER_EMBEDDING_MODEL` is configured, admin-managed knowledge documents also store OpenRouter embeddings in SQLite; without it, memory remains keyword-search only.
+SQLite knowledge search uses FTS5 when the binary is built with the `sqlite_fts5` tag. Default local builds fall back to an indexed table search so `go test ./...` works without custom flags. When `openrouter.embedding_model` is configured, admin-managed knowledge documents also store OpenRouter embeddings in SQLite; without it, memory remains keyword-search only.
 
 ## Commands
 

@@ -311,27 +311,21 @@ Tracing:
 
 ## Configuration
 
-Environment variables:
+Secrets and deployment-provided environment variables:
 
 - `DISCORD_BOT_TOKEN`
-- `DISCORD_APPLICATION_ID`
 - `OPENROUTER_API_KEY`
-- `OPENROUTER_BASE_URL`
-- `OPENROUTER_DEFAULT_MODEL`
-- `OPENROUTER_EMBEDDING_MODEL`
-- `OPENROUTER_APP_URL`
-- `OPENROUTER_APP_TITLE`
-- `SQLITE_PATH`
-- `DATA_DIR`
-- `ATTACHMENT_CACHE_TTL`
 - `PORT`
 - `FLY_APP_NAME`
 - `FLY_PRIMARY_REGION`
-- `LOG_LEVEL`
-- `ENVIRONMENT`
-- `OWNER_USER_IDS`
-- `PUBLIC_BASE_URL`
-- `METRICS_ADDR`
+
+Non-secret app configuration lives in `panda.config.json`, with environment variable overrides still supported for deployments:
+
+- Discord application and guild IDs.
+- Owner user IDs.
+- OpenRouter routing, metadata, embedding model, and circuit breaker settings.
+- Storage paths.
+- Log level, environment, and rate limits.
 
 Runtime config:
 

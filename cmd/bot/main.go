@@ -54,6 +54,9 @@ func runHealthcheck() {
 	if port == "" {
 		port = "8080"
 	}
+	if cfg, _, err := config.Load(); err == nil && cfg.Port != "" {
+		port = cfg.Port
+	}
 
 	client := http.Client{Timeout: 2 * time.Second}
 	resp, err := client.Get("http://127.0.0.1:" + port + "/healthz")

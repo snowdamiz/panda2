@@ -13,13 +13,12 @@ The default test run covers the SQLite fallback search path. The tagged run cove
 ## Fly.io Deployment
 
 1. Create one Fly volume mounted at `/data`.
-2. Set secrets with `fly secrets set`:
+2. Set `discord.application_id` and `discord.owner_user_ids` in `panda.config.json`, or provide `DISCORD_APPLICATION_ID` and `OWNER_USER_IDS` as environment overrides.
+3. Set secrets with `fly secrets set`:
    - `DISCORD_BOT_TOKEN`
-   - `DISCORD_APPLICATION_ID`
    - `OPENROUTER_API_KEY`
-   - `OWNER_USER_IDS`
-3. Deploy with `fly deploy`.
-4. Check rollout status with `fly status`, `fly releases`, and `fly logs`.
+4. Deploy with `fly deploy`.
+5. Check rollout status with `fly status`, `fly releases`, and `fly logs`.
 
 Keep SQLite on a single primary Machine for v1. Do not scale writers horizontally until the storage plan changes.
 
@@ -64,7 +63,7 @@ Copy backups off the Fly volume after creation. Keep the main database, WAL, and
 2. Stop or scale down the app so SQLite has no active writer.
 3. Copy the selected backup back to the Fly volume.
 4. Move the existing database, WAL, and SHM files aside with timestamped names.
-5. Place the backup at the configured `SQLITE_PATH`.
+5. Place the backup at the configured SQLite path.
 6. Start the app and check `/readyz`, `/ops health`, and `fly logs`.
 7. Resume workers with `/ops resume` after the restored database passes health checks.
 
