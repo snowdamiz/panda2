@@ -62,6 +62,7 @@ func TestLoadConfigFile(t *testing.T) {
 		"discord": {
 			"application_id": "app-from-file",
 			"guild_id": "guild-1",
+			"public_key": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
 			"owner_user_ids": ["42", "77", "42"]
 		},
 		"openrouter": {
@@ -99,6 +100,9 @@ func TestLoadConfigFile(t *testing.T) {
 	}
 	if cfg.DiscordApplicationID != "app-from-file" || cfg.DiscordGuildID != "guild-1" {
 		t.Fatalf("unexpected discord config: app=%q guild=%q", cfg.DiscordApplicationID, cfg.DiscordGuildID)
+	}
+	if cfg.DiscordPublicKey != "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" {
+		t.Fatalf("unexpected discord public key: %q", cfg.DiscordPublicKey)
 	}
 	if !cfg.IsOwner("42") || !cfg.IsOwner("77") {
 		t.Fatalf("expected owner ids from config file, got %#v", cfg.OwnerUserIDs)
@@ -144,6 +148,7 @@ func TestEnvOverridesConfigFile(t *testing.T) {
 	}`)
 	t.Setenv("PANDA_CONFIG", configPath)
 	t.Setenv("DISCORD_APPLICATION_ID", "app-from-env")
+	t.Setenv("DISCORD_PUBLIC_KEY", "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789")
 	t.Setenv("OPENROUTER_DEFAULT_MODEL", "provider/from-env")
 	t.Setenv("OPENROUTER_FALLBACK_MODELS", "provider/env-a,provider/env-b")
 	t.Setenv("BRAVE_SEARCH_API_KEY", "brave-key")
@@ -157,6 +162,9 @@ func TestEnvOverridesConfigFile(t *testing.T) {
 	if cfg.DiscordApplicationID != "app-from-env" {
 		t.Fatalf("expected env application id, got %q", cfg.DiscordApplicationID)
 	}
+	if cfg.DiscordPublicKey != "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789" {
+		t.Fatalf("expected env public key, got %q", cfg.DiscordPublicKey)
+	}
 	if cfg.OpenRouterModel != "provider/from-env" {
 		t.Fatalf("expected env default model, got %q", cfg.OpenRouterModel)
 	}
@@ -168,6 +176,103 @@ func TestEnvOverridesConfigFile(t *testing.T) {
 	}
 	if !cfg.BraveSearchConfigured() || cfg.BraveSearchBaseURL != "https://brave-env.example/res/v1" {
 		t.Fatalf("expected env Brave Search settings, configured=%t base=%q", cfg.BraveSearchConfigured(), cfg.BraveSearchBaseURL)
+	}
+}
+
+func TestLoadEnvFile(t *testing.T) {
+	clearConfigEnv(t)
+	tempDir := t.TempDir()
+	configPath := filepath.Join(tempDir, "panda.config.json")
+	envPath := filepath.Join(tempDir, ".env")
+	writeConfigFile(t, configPath, `{
+		"discord": {
+			"application_id": "app-from-file",
+			"owner_user_ids": ["42"]
+		},
+		"openrouter": {
+			"default_model": "provider/from-file",
+			"fallback_models": ["provider/file-fallback"]
+		},
+		"runtime": {
+			"port": "8088",
+			"environment": "development"
+		},
+		"storage": {
+			"sqlite_path": ":memory:"
+		}
+	}`)
+	writeConfigFile(t, envPath, `
+# comments and blank lines are ignored
+export DISCORD_APPLICATION_ID=app-from-env-file
+DISCORD_BOT_TOKEN="bot token"
+OPENROUTER_API_KEY='router key'
+OPENROUTER_DEFAULT_MODEL=provider/from-env-file
+OPENROUTER_FALLBACK_MODELS=provider/env-a, provider/env-b, provider/env-a
+OWNER_USER_IDS=100, 200, 100
+PORT=9099 # local port
+USER_RATE_LIMIT=11
+USER_RATE_LIMIT_WINDOW=90s
+`)
+	t.Setenv("PANDA_CONFIG", configPath)
+	t.Setenv("PANDA_ENV_FILE", envPath)
+
+	cfg, _, err := Load()
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	if cfg.DiscordApplicationID != "app-from-env-file" || cfg.DiscordBotToken != "bot token" {
+		t.Fatalf("expected env file discord settings, app=%q token=%q", cfg.DiscordApplicationID, cfg.DiscordBotToken)
+	}
+	if cfg.OpenRouterAPIKey != "router key" || cfg.OpenRouterModel != "provider/from-env-file" {
+		t.Fatalf("expected env file OpenRouter settings, key=%q model=%q", cfg.OpenRouterAPIKey, cfg.OpenRouterModel)
+	}
+	if len(cfg.OpenRouterFallbackModels) != 2 || cfg.OpenRouterFallbackModels[0] != "provider/env-a" || cfg.OpenRouterFallbackModels[1] != "provider/env-b" {
+		t.Fatalf("expected env file fallback models, got %#v", cfg.OpenRouterFallbackModels)
+	}
+	if cfg.IsOwner("42") || !cfg.IsOwner("100") || !cfg.IsOwner("200") {
+		t.Fatalf("expected env file owner ids to override file ids, got %#v", cfg.OwnerUserIDs)
+	}
+	if cfg.Port != "9099" || cfg.UserRateLimit != 11 || cfg.UserRateLimitWindow.String() != "1m30s" {
+		t.Fatalf("unexpected runtime overrides: port=%q limit=%d window=%s", cfg.Port, cfg.UserRateLimit, cfg.UserRateLimitWindow)
+	}
+}
+
+func TestShellEnvOverridesEnvFile(t *testing.T) {
+	clearConfigEnv(t)
+	tempDir := t.TempDir()
+	configPath := filepath.Join(tempDir, "panda.config.json")
+	envPath := filepath.Join(tempDir, ".env")
+	writeConfigFile(t, configPath, `{
+		"runtime": {
+			"environment": "development"
+		},
+		"storage": {
+			"sqlite_path": ":memory:"
+		}
+	}`)
+	writeConfigFile(t, envPath, `
+DISCORD_APPLICATION_ID=app-from-env-file
+OPENROUTER_DEFAULT_MODEL=provider/from-env-file
+OWNER_USER_IDS=100
+`)
+	t.Setenv("PANDA_CONFIG", configPath)
+	t.Setenv("PANDA_ENV_FILE", envPath)
+	t.Setenv("DISCORD_APPLICATION_ID", "app-from-shell")
+	t.Setenv("OPENROUTER_DEFAULT_MODEL", "provider/from-shell")
+	t.Setenv("OWNER_USER_IDS", "200")
+
+	cfg, _, err := Load()
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	if cfg.DiscordApplicationID != "app-from-shell" {
+		t.Fatalf("expected shell env application id, got %q", cfg.DiscordApplicationID)
+	}
+	if cfg.OpenRouterModel != "provider/from-shell" {
+		t.Fatalf("expected shell env default model, got %q", cfg.OpenRouterModel)
+	}
+	if cfg.IsOwner("100") || !cfg.IsOwner("200") {
+		t.Fatalf("expected shell env owner ids to override env file ids, got %#v", cfg.OwnerUserIDs)
 	}
 }
 
@@ -206,13 +311,25 @@ func TestExplicitMissingConfigFileFails(t *testing.T) {
 	}
 }
 
+func TestExplicitMissingEnvFileFails(t *testing.T) {
+	clearConfigEnv(t)
+	t.Setenv("PANDA_ENV_FILE", filepath.Join(t.TempDir(), "missing.env"))
+
+	_, _, err := Load()
+	if err == nil {
+		t.Fatal("expected missing explicit env file to fail")
+	}
+}
+
 func clearConfigEnv(t *testing.T) {
 	t.Helper()
 	for _, name := range []string{
 		"PANDA_CONFIG",
+		"PANDA_ENV_FILE",
 		"DISCORD_BOT_TOKEN",
 		"DISCORD_APPLICATION_ID",
 		"DISCORD_GUILD_ID",
+		"DISCORD_PUBLIC_KEY",
 		"OPENROUTER_API_KEY",
 		"OPENROUTER_BASE_URL",
 		"OPENROUTER_DEFAULT_MODEL",
@@ -248,6 +365,7 @@ func clearConfigEnv(t *testing.T) {
 			}
 		}(name, oldValue, hadValue))
 	}
+	t.Setenv("PANDA_ENV_FILE", "")
 }
 
 func writeConfigFile(t *testing.T, path string, content string) {

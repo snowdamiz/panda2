@@ -262,15 +262,41 @@ func (s *Service) OpenRouterTools(ctx context.Context, request tools.DynamicTool
 		if report := ValidateSpec(spec, s.registry); !report.Valid {
 			continue
 		}
+		if !s.specAllowedForAccess(spec, request.Access) {
+			continue
+		}
 		result = append(result, OpenRouterTool(spec))
 	}
 	return result, nil
+}
+
+func (s *Service) CanInvoke(ctx context.Context, guildID, name string, access tools.ToolAccess, invocationType string) (bool, error) {
+	record, ok, err := s.currentRecordByNameOrWire(ctx, guildID, name)
+	if err != nil || !ok {
+		return false, err
+	}
+	spec, err := ParseSpec([]byte(record.Version.SpecJSON))
+	if err != nil {
+		return false, err
+	}
+	mode := firstNonEmpty(invocationType, InvocationManual)
+	if !hasInvocation(spec, mode) && !(mode == InvocationManual && hasInvocation(spec, InvocationChatTool)) {
+		return false, nil
+	}
+	return s.specAllowedForAccess(spec, access), nil
 }
 
 func (s *Service) ExecuteDynamicTool(ctx context.Context, request tools.DynamicExecutionRequest) (tools.ExecutionResult, error) {
 	input, err := parseArguments(request.Call.Function.Arguments)
 	if err != nil {
 		return tools.ExecutionResult{}, err
+	}
+	allowed, err := s.CanInvoke(ctx, request.GuildID, request.Call.Function.Name, request.Access, request.InvocationType)
+	if err != nil {
+		return tools.ExecutionResult{}, err
+	}
+	if !allowed {
+		return tools.ExecutionResult{}, fmt.Errorf("missing permission for composed tool %s", request.Call.Function.Name)
 	}
 	result, err := s.Run(ctx, RunRequest{
 		GuildID:        request.GuildID,
@@ -378,6 +404,14 @@ func (s *Service) Run(ctx context.Context, request RunRequest) (RunResult, error
 		"latency_ms":      strconv.FormatInt(finished.Sub(start).Milliseconds(), 10),
 	})
 	return RunResult{RunID: run.ID, Status: status, Output: output, Transcript: transcript, Error: message}, runErr
+}
+
+func (s *Service) currentRecordByNameOrWire(ctx context.Context, guildID, name string) (repository.ComposedToolRecord, bool, error) {
+	record, ok, err := s.repo.GetCurrent(ctx, guildID, name)
+	if err != nil || ok {
+		return record, ok, err
+	}
+	return s.findEnabledByWireName(ctx, guildID, name)
 }
 
 func (s *Service) HandleEventJob(ctx context.Context, job store.Job) error {
@@ -926,6 +960,72 @@ func approvedToolAccess(spec Spec) tools.ToolAccess {
 		admin.PermissionToolComposeInvoke:    {},
 	}
 	return tools.ToolAccess{Policy: tools.ToolPolicyWriteConfirmed, Permissions: permissions}
+}
+
+func (s *Service) specAllowedForAccess(spec Spec, access tools.ToolAccess) bool {
+	definition := ToolDefinition(spec)
+	if !access.AllowsComposedTool(spec.Name, definition.Name, definition.ModelName()) {
+		return false
+	}
+	if specUsesAdminTool(spec, s.registry) && !accessHasAdminToolPermission(access) {
+		return false
+	}
+	return true
+}
+
+func specUsesAdminTool(spec Spec, registry *tools.Registry) bool {
+	if registry == nil {
+		return false
+	}
+	for _, name := range spec.Runner.ToolAllowlist {
+		if nativeToolRequiresAdmin(registry, name) {
+			return true
+		}
+	}
+	for _, step := range spec.Steps {
+		if step.Type == StepToolCall && nativeToolRequiresAdmin(registry, step.Tool) {
+			return true
+		}
+	}
+	return false
+}
+
+func nativeToolRequiresAdmin(registry *tools.Registry, name string) bool {
+	definition, ok := registry.Get(name)
+	if !ok {
+		return false
+	}
+	switch definition.ToolClass {
+	case tools.ToolClassAdminRead, tools.ToolClassAdminWrite, tools.ToolClassOwnerOps:
+		return true
+	}
+	switch definition.RequiredPermission {
+	case admin.PermissionAdminConfigRead,
+		admin.PermissionAdminConfigWrite,
+		admin.PermissionAdminUsageRead,
+		admin.PermissionAdminAuditRead,
+		admin.PermissionAdminMemoryManage,
+		admin.PermissionOwnerOps:
+		return true
+	default:
+		return false
+	}
+}
+
+func accessHasAdminToolPermission(access tools.ToolAccess) bool {
+	for _, permission := range []string{
+		admin.PermissionAdminConfigRead,
+		admin.PermissionAdminConfigWrite,
+		admin.PermissionAdminUsageRead,
+		admin.PermissionAdminAuditRead,
+		admin.PermissionAdminMemoryManage,
+		admin.PermissionOwnerOps,
+	} {
+		if _, ok := access.Permissions[permission]; ok {
+			return true
+		}
+	}
+	return false
 }
 
 func runnerPrompt(spec Spec) string {

@@ -32,13 +32,16 @@ type Service struct {
 }
 
 type AskRequest struct {
-	RequestID          string
-	GuildID            string
-	UserID             string
-	ChannelID          string
-	ThreadID           string
-	Question           string
-	AllowedPermissions map[string]struct{}
+	RequestID                    string
+	GuildID                      string
+	UserID                       string
+	ChannelID                    string
+	ThreadID                     string
+	Question                     string
+	AllowedPermissions           map[string]struct{}
+	AllowedTools                 map[string]struct{}
+	RestrictedTools              map[string]struct{}
+	RequireExplicitComposedTools bool
 }
 
 type AskResponse struct {
@@ -57,16 +60,19 @@ type InteractionConfirmation struct {
 }
 
 type TaskRequest struct {
-	RequestID          string
-	GuildID            string
-	UserID             string
-	ChannelID          string
-	Command            string
-	Input              string
-	Tone               string
-	Language           string
-	Detail             string
-	AllowedPermissions map[string]struct{}
+	RequestID                    string
+	GuildID                      string
+	UserID                       string
+	ChannelID                    string
+	Command                      string
+	Input                        string
+	Tone                         string
+	Language                     string
+	Detail                       string
+	AllowedPermissions           map[string]struct{}
+	AllowedTools                 map[string]struct{}
+	RestrictedTools              map[string]struct{}
+	RequireExplicitComposedTools bool
 }
 
 type NaturalMessageRequest struct {
@@ -87,13 +93,16 @@ type NaturalMessageDecision struct {
 
 func (s *Service) Ask(ctx context.Context, request AskRequest) (AskResponse, error) {
 	return s.complete(ctx, TaskRequest{
-		RequestID:          request.RequestID,
-		GuildID:            request.GuildID,
-		UserID:             request.UserID,
-		ChannelID:          request.ChannelID,
-		Command:            "ask",
-		Input:              request.Question,
-		AllowedPermissions: request.AllowedPermissions,
+		RequestID:                    request.RequestID,
+		GuildID:                      request.GuildID,
+		UserID:                       request.UserID,
+		ChannelID:                    request.ChannelID,
+		Command:                      "ask",
+		Input:                        request.Question,
+		AllowedPermissions:           request.AllowedPermissions,
+		AllowedTools:                 request.AllowedTools,
+		RestrictedTools:              request.RestrictedTools,
+		RequireExplicitComposedTools: request.RequireExplicitComposedTools,
 	})
 }
 
@@ -180,7 +189,7 @@ func (s *Service) Chat(ctx context.Context, request AskRequest) (AskResponse, er
 	messages = append(messages, llm.Message{Role: "user", Content: sanitizePromptInput(request.Question)})
 
 	start := time.Now()
-	response, confirmations, err := s.completeWithTools(ctx, config, request.RequestID, request.UserID, request.ChannelID, request.AllowedPermissions, llm.ChatRequest{
+	response, confirmations, err := s.completeWithTools(ctx, config, request.RequestID, request.UserID, request.ChannelID, request.AllowedPermissions, request.AllowedTools, request.RestrictedTools, request.RequireExplicitComposedTools, llm.ChatRequest{
 		Messages:    messages,
 		Temperature: temperatureFromConfig(config, "chat"),
 		MaxTokens:   maxTokensFromConfig(config, "chat"),
@@ -230,7 +239,7 @@ func (s *Service) complete(ctx context.Context, request TaskRequest) (AskRespons
 	}
 
 	start := time.Now()
-	response, confirmations, err := s.completeWithTools(ctx, config, request.RequestID, request.UserID, request.ChannelID, request.AllowedPermissions, llm.ChatRequest{
+	response, confirmations, err := s.completeWithTools(ctx, config, request.RequestID, request.UserID, request.ChannelID, request.AllowedPermissions, request.AllowedTools, request.RestrictedTools, request.RequireExplicitComposedTools, llm.ChatRequest{
 		Messages:    s.taskMessages(ctx, config, request),
 		Temperature: temperatureFromConfig(config, request.Command),
 		MaxTokens:   maxTokensFromConfig(config, request.Command),
@@ -338,8 +347,8 @@ func (s *Service) guildConfig(ctx context.Context, guildID string) (store.GuildC
 	return config, true, nil
 }
 
-func (s *Service) completeWithTools(ctx context.Context, config store.GuildConfig, requestID, actorID, channelID string, allowedPermissions map[string]struct{}, request llm.ChatRequest) (llm.ChatResponse, []InteractionConfirmation, error) {
-	access := toolAccess(config, allowedPermissions)
+func (s *Service) completeWithTools(ctx context.Context, config store.GuildConfig, requestID, actorID, channelID string, allowedPermissions, allowedTools, restrictedTools map[string]struct{}, requireExplicitComposedTools bool, request llm.ChatRequest) (llm.ChatResponse, []InteractionConfirmation, error) {
+	access := toolAccess(config, allowedPermissions, allowedTools, restrictedTools, requireExplicitComposedTools)
 	if s.toolExecutor != nil && len(access.Permissions) > 0 {
 		request.Tools = s.toolExecutor.OpenRouterToolsForRequest(ctx, tools.DynamicToolListRequest{
 			GuildID:        config.GuildID,
@@ -547,7 +556,7 @@ func modelFromConfig(config store.GuildConfig, fallback string) string {
 	return firstNonEmpty(config.DefaultModel, fallback)
 }
 
-func toolAccess(config store.GuildConfig, allowedPermissions map[string]struct{}) tools.ToolAccess {
+func toolAccess(config store.GuildConfig, allowedPermissions, allowedTools, restrictedTools map[string]struct{}, requireExplicitComposedTools bool) tools.ToolAccess {
 	policy := strings.ToLower(strings.TrimSpace(config.ToolPolicy))
 	if policy == "" {
 		policy = tools.ToolPolicyOff
@@ -556,7 +565,13 @@ func toolAccess(config store.GuildConfig, allowedPermissions map[string]struct{}
 	if !config.MemoryEnabled {
 		delete(permissions, admin.PermissionAssistantMemoryRead)
 	}
-	return tools.ToolAccess{Policy: policy, Permissions: permissions}
+	return tools.ToolAccess{
+		Policy:                       policy,
+		Permissions:                  permissions,
+		AllowedTools:                 clonePermissions(allowedTools),
+		RestrictedTools:              clonePermissions(restrictedTools),
+		RequireExplicitComposedTools: requireExplicitComposedTools,
+	}
 }
 
 func clonePermissions(values map[string]struct{}) map[string]struct{} {

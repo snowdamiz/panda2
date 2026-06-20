@@ -3,6 +3,7 @@ package discord
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -10,8 +11,10 @@ import (
 	"unicode/utf8"
 
 	disgoDiscord "github.com/disgoorg/disgo/discord"
+	"github.com/disgoorg/disgo/rest"
 	"github.com/disgoorg/snowflake/v2"
 	"github.com/sn0w/panda2/internal/commands"
+	"github.com/sn0w/panda2/internal/config"
 	"github.com/sn0w/panda2/internal/store"
 )
 
@@ -21,6 +24,20 @@ type fakeAttachmentRecorder struct {
 
 type fakeInteractionJobQueue struct {
 	jobs []store.Job
+}
+
+type syncedGuildCommands struct {
+	applicationID snowflake.ID
+	guildID       snowflake.ID
+	commands      []disgoDiscord.ApplicationCommandCreate
+}
+
+type fakeCommandSyncer struct {
+	globalCommands        [][]disgoDiscord.ApplicationCommandCreate
+	globalApplicationIDs  []snowflake.ID
+	guildCommands         []syncedGuildCommands
+	globalRegistrationErr error
+	guildRegistrationErr  error
 }
 
 func (f *fakeAttachmentRecorder) Record(_ context.Context, attachment store.Attachment) (store.Attachment, error) {
@@ -33,6 +50,21 @@ func (f *fakeInteractionJobQueue) Enqueue(_ context.Context, job store.Job) (sto
 	job.ID = uint(len(f.jobs) + 1)
 	f.jobs = append(f.jobs, job)
 	return job, nil
+}
+
+func (f *fakeCommandSyncer) SetGlobalCommands(applicationID snowflake.ID, commands []disgoDiscord.ApplicationCommandCreate, _ ...rest.RequestOpt) ([]disgoDiscord.ApplicationCommand, error) {
+	f.globalApplicationIDs = append(f.globalApplicationIDs, applicationID)
+	f.globalCommands = append(f.globalCommands, append([]disgoDiscord.ApplicationCommandCreate(nil), commands...))
+	return nil, f.globalRegistrationErr
+}
+
+func (f *fakeCommandSyncer) SetGuildCommands(applicationID snowflake.ID, guildID snowflake.ID, commands []disgoDiscord.ApplicationCommandCreate, _ ...rest.RequestOpt) ([]disgoDiscord.ApplicationCommand, error) {
+	f.guildCommands = append(f.guildCommands, syncedGuildCommands{
+		applicationID: applicationID,
+		guildID:       guildID,
+		commands:      append([]disgoDiscord.ApplicationCommandCreate(nil), commands...),
+	})
+	return nil, f.guildRegistrationErr
 }
 
 func TestApplicationCommandsIncludeContextMenus(t *testing.T) {
@@ -50,6 +82,78 @@ func TestApplicationCommandsIncludeContextMenus(t *testing.T) {
 		if names[name] {
 			t.Fatalf("expected natural-language command %q not to be registered as a slash command", name)
 		}
+	}
+}
+
+func TestGlobalCommandRegistrationSetsGlobalCommands(t *testing.T) {
+	syncer := &fakeCommandSyncer{}
+	applicationID := snowflake.MustParse("100000000000000010")
+	commands := applicationCommands()
+
+	if err := syncApplicationCommands(syncer, applicationID, "", commands); err != nil {
+		t.Fatalf("syncApplicationCommands: %v", err)
+	}
+
+	if len(syncer.globalCommands) != 1 {
+		t.Fatalf("expected one global sync, got %d", len(syncer.globalCommands))
+	}
+	if len(syncer.globalCommands[0]) != len(commands) {
+		t.Fatalf("expected %d global commands, got %d", len(commands), len(syncer.globalCommands[0]))
+	}
+	if len(syncer.guildCommands) != 0 {
+		t.Fatalf("expected no guild syncs, got %+v", syncer.guildCommands)
+	}
+	if len(syncer.globalApplicationIDs) != 1 || syncer.globalApplicationIDs[0] != applicationID {
+		t.Fatalf("unexpected global application ids: %+v", syncer.globalApplicationIDs)
+	}
+}
+
+func TestGuildCommandRegistrationClearsGlobalCommandsBeforeGuildSync(t *testing.T) {
+	syncer := &fakeCommandSyncer{}
+	applicationID := snowflake.MustParse("100000000000000010")
+	guildID := snowflake.MustParse("100000000000000011")
+	commands := applicationCommands()
+
+	if err := syncApplicationCommands(syncer, applicationID, guildID.String(), commands); err != nil {
+		t.Fatalf("syncApplicationCommands: %v", err)
+	}
+
+	if len(syncer.globalCommands) != 1 {
+		t.Fatalf("expected one global clear, got %d", len(syncer.globalCommands))
+	}
+	if len(syncer.globalCommands[0]) != 0 {
+		t.Fatalf("expected global commands to be cleared before guild sync, got %d commands", len(syncer.globalCommands[0]))
+	}
+	if len(syncer.guildCommands) != 1 {
+		t.Fatalf("expected one guild sync, got %d", len(syncer.guildCommands))
+	}
+	guildSync := syncer.guildCommands[0]
+	if guildSync.applicationID != applicationID || guildSync.guildID != guildID {
+		t.Fatalf("unexpected guild sync target: %+v", guildSync)
+	}
+	if len(guildSync.commands) != len(commands) {
+		t.Fatalf("expected %d guild commands, got %d", len(commands), len(guildSync.commands))
+	}
+}
+
+func TestDevelopmentGuildCommandRegistrationAccessErrorIsRecoverable(t *testing.T) {
+	bot := &Bot{cfg: config.Config{Environment: "development", DiscordGuildID: "100000000000000001"}}
+	err := fmt.Errorf("register commands: %w", &rest.Error{
+		Code:    rest.JSONErrorCodeMissingAccess,
+		Message: "Missing Access",
+	})
+
+	if !bot.canContinueAfterCommandRegistrationError(err) {
+		t.Fatal("expected development guild command access error to be recoverable")
+	}
+}
+
+func TestProductionGuildCommandRegistrationAccessErrorIsFatal(t *testing.T) {
+	bot := &Bot{cfg: config.Config{Environment: "production", DiscordGuildID: "100000000000000001"}}
+	err := &rest.Error{Code: rest.JSONErrorCodeMissingAccess, Message: "Missing Access"}
+
+	if bot.canContinueAfterCommandRegistrationError(err) {
+		t.Fatal("expected production guild command access error to stay fatal")
 	}
 }
 
@@ -200,6 +304,49 @@ func TestAdminModelCommandIncludesRuntimeOptions(t *testing.T) {
 		if !optionNames[name] {
 			t.Fatalf("expected /admin model option %q", name)
 		}
+	}
+}
+
+func TestAdminBadgeCommandIncludesRequiredRolePicker(t *testing.T) {
+	badge := adminSubcommand(t, adminSlashCommand(t), "badge")
+	option, ok := findSubcommandRoleOption(badge, "role")
+	if !ok {
+		t.Fatal("expected /admin badge to include role picker")
+	}
+	if !option.Required {
+		t.Fatal("role should be required because badge only sets delegated admin access")
+	}
+}
+
+func TestAdminToolCommandIncludesAccessOptions(t *testing.T) {
+	tool := adminSubcommand(t, adminSlashCommand(t), "tool")
+	action := subcommandStringOption(t, tool, "action")
+	if !action.Required {
+		t.Fatal("action should be required")
+	}
+	if !subcommandHasStringOption(tool, "tool_name") {
+		t.Fatal("expected /admin tool to include tool_name")
+	}
+	role, ok := findSubcommandRoleOption(tool, "role")
+	if !ok {
+		t.Fatal("expected /admin tool to include role picker")
+	}
+	if role.Required {
+		t.Fatal("role should be optional so action=list can omit it")
+	}
+}
+
+func TestGuildOwnerCountsAsGuildAdmin(t *testing.T) {
+	ownerID := snowflake.MustParse("100000000000000001")
+	guild := disgoDiscord.Guild{OwnerID: ownerID}
+	if !userOwnsGuild(ownerID, guild, true) {
+		t.Fatal("expected guild owner to count as guild admin")
+	}
+	if userOwnsGuild(snowflake.MustParse("100000000000000002"), guild, true) {
+		t.Fatal("expected non-owner to not count as guild admin")
+	}
+	if userOwnsGuild(ownerID, guild, false) {
+		t.Fatal("expected uncached guild to not count as owned")
 	}
 }
 
@@ -377,4 +524,19 @@ func subcommandHasBoolOption(subcommand disgoDiscord.ApplicationCommandOptionSub
 		}
 	}
 	return false
+}
+
+func subcommandHasRoleOption(subcommand disgoDiscord.ApplicationCommandOptionSubCommand, name string) bool {
+	_, ok := findSubcommandRoleOption(subcommand, name)
+	return ok
+}
+
+func findSubcommandRoleOption(subcommand disgoDiscord.ApplicationCommandOptionSubCommand, name string) (disgoDiscord.ApplicationCommandOptionRole, bool) {
+	for _, option := range subcommand.Options {
+		roleOption, ok := option.(disgoDiscord.ApplicationCommandOptionRole)
+		if ok && roleOption.Name == name {
+			return roleOption, true
+		}
+	}
+	return disgoDiscord.ApplicationCommandOptionRole{}, false
 }

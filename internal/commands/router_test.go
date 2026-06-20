@@ -145,19 +145,206 @@ func TestRouterPing(t *testing.T) {
 	}
 }
 
-func TestAdminSetupRequiresAdmin(t *testing.T) {
+func TestRouterHelpHidesElevatedGuidanceFromRegularUsers(t *testing.T) {
 	router := newTestRouter(t, &fakeLLM{}, 5)
-	response := router.Handle(context.Background(), Request{Command: "admin", Subcommand: "setup", GuildID: "guild-1", UserID: "user-1"})
+	response := router.Handle(context.Background(), Request{Command: "help", UserID: "user-1"})
+	if !response.Ephemeral {
+		t.Fatalf("expected help response to be ephemeral: %+v", response)
+	}
+	for _, want := range []string{
+		"### Panda Help",
+		"**Chat naturally**",
+		"- Mention `Panda` in a normal message: `Panda is this true?`",
+		"**Message actions**",
+		"**Good things to ask**",
+	} {
+		if !strings.Contains(response.Content, want) {
+			t.Fatalf("help response missing %q:\n%s", want, response.Content)
+		}
+	}
+	for _, hidden := range []string{
+		"Admin commands",
+		"`/admin",
+		"tool_policy",
+		"action:add",
+		"Composed tools",
+		"`/tool",
+		"Moderator tools",
+		"Moderation guidance",
+		"Role/channel access",
+	} {
+		if strings.Contains(response.Content, hidden) {
+			t.Fatalf("regular help should not include %q:\n%s", hidden, response.Content)
+		}
+	}
+}
+
+func TestRouterHelpShowsAdminGuidanceToGuildAdmins(t *testing.T) {
+	router := newTestRouter(t, &fakeLLM{}, 5)
+	response := router.Handle(context.Background(), Request{Command: "help", GuildID: "guild-1", UserID: "admin", IsGuildAdmin: true})
+	if !response.Ephemeral {
+		t.Fatalf("expected help response to be ephemeral: %+v", response)
+	}
+	for _, want := range []string{
+		"**Admin commands**",
+		"- `/admin badge role:@Role` - treat that Discord role as Panda admins.",
+		"- `/admin tool action:list` - show role-specific native and composed tool grants.",
+		"- `/admin tool action:add tool_name:<tool> role:@Role` - allow a role to use a specific tool.",
+		"- `/admin tool action:remove tool_name:<tool> role:@Role` - remove that tool grant.",
+		"- `/admin model model:<slug> fallback_models:<slug,slug> temperature:<0-2> max_response_tokens:<64-4000> tool_policy:<policy> dry_run:<true|false>` - update model routing and the server-wide tool ceiling.",
+		"- Tool policy choices: `off`, `read_only`, `assistive`, `admin_only`, `moderator`, `write_confirmed`, `owner_ops`.",
+		"- `/admin prompt prompt:<text> dry_run:<true|false>` - set server instructions; omit `prompt` to open the modal.",
+		"- `/admin audit` - show recent privileged changes.",
+		"- `/admin enable dry_run:<true|false>` - allow Panda to answer again.",
+		"- `/admin disable confirm:<confirmation> dry_run:<true|false>` - pause Panda after confirmation.",
+		"- `/admin soul soul:<text> dry_run:<true|false>` - set Panda's personality and tone; omit `soul` to open the modal.",
+		"**Moderator tools**",
+		"**Composed tools**",
+		"- `/tool draft request:<description> dry_run:<true|false>` - draft a composed tool from natural language.",
+		"- `/tool draft spec_json:<json> dry_run:<true|false>` - draft from a complete composed-tool spec.",
+		"- Draft helpers: `role_id`, `role_name`, `channel_id`, `channel_name`, `welcome_text`, `model`.",
+		"- `/tool approve tool:<name> version:<n> confirm:<confirmation>` - approve and enable a version.",
+		"- `/tool list` - list composed tools for this server.",
+		"- `/tool show tool:<name>` - inspect versions and recent runs.",
+		"- `/tool pause|resume|disable|archive tool:<name> dry_run:<true|false>` - change tool status.",
+		"- `/tool run tool:<name> input_json:<object>` - run an approved composed tool.",
+		"- `/tool simulate tool:<name> input_json:<object>` - run with dry-run writes.",
+		"- `/tool export tool:<name>` - export the approved spec JSON.",
+		"- `/tool rollback tool:<name> version:<n> confirm:<confirmation>` - roll back to an approved version.",
+		"Moderation guidance",
+	} {
+		if !strings.Contains(response.Content, want) {
+			t.Fatalf("admin help response missing %q:\n%s", want, response.Content)
+		}
+	}
+}
+
+func TestRouterHelpShowsOnlyAllowedElevatedGuidanceToModerators(t *testing.T) {
+	ctx := context.Background()
+	router := newTestRouter(t, &fakeLLM{}, 5)
+	if _, err := router.admin.AddRolePermission(ctx, "guild-1", "admin", "role-mod", admin.PermissionModerationUse); err != nil {
+		t.Fatalf("AddRolePermission: %v", err)
+	}
+
+	response := router.Handle(ctx, Request{Command: "help", GuildID: "guild-1", UserID: "mod", RoleIDs: []string{"role-mod"}})
+	if !response.Ephemeral {
+		t.Fatalf("expected help response to be ephemeral: %+v", response)
+	}
+	for _, want := range []string{
+		"**Moderator tools**",
+		"- `/admin soul soul:<text> dry_run:<true|false>` - set Panda's personality and tone; omit `soul` to open the modal.",
+		"Moderation guidance",
+	} {
+		if !strings.Contains(response.Content, want) {
+			t.Fatalf("moderator help response missing %q:\n%s", want, response.Content)
+		}
+	}
+	for _, hidden := range []string{
+		"`/admin badge`",
+		"`/admin model`",
+		"Composed tools",
+		"`/tool draft`",
+		"Role/channel access",
+	} {
+		if strings.Contains(response.Content, hidden) {
+			t.Fatalf("moderator help should not include %q:\n%s", hidden, response.Content)
+		}
+	}
+}
+
+func TestAdminBadgeRequiresAdmin(t *testing.T) {
+	router := newTestRouter(t, &fakeLLM{}, 5)
+	response := router.Handle(context.Background(), Request{Command: "admin", Subcommand: "badge", GuildID: "guild-1", UserID: "user-1"})
 	if !response.Ephemeral || response.Content == "" {
 		t.Fatalf("expected denial response, got %+v", response)
 	}
 }
 
-func TestAdminSetupCreatesConfig(t *testing.T) {
+func TestAdminBadgeConfiguresDelegatedAdminRole(t *testing.T) {
+	ctx := context.Background()
+	router := newTestRouter(t, &fakeLLM{response: llm.ChatResponse{Content: "ok"}}, 5)
+	badge := router.Handle(ctx, Request{
+		Command:      "admin",
+		Subcommand:   "badge",
+		GuildID:      "guild-1",
+		UserID:       "owner",
+		IsGuildAdmin: true,
+		Options: map[string]string{
+			"badge_role_id":   "role-mod",
+			"badge_role_name": "MOD",
+		},
+	})
+	if !badge.Ephemeral || !strings.Contains(badge.Content, "Admin badge set to `MOD` (`role-mod`)") {
+		t.Fatalf("expected badge command to configure admin badge, got %+v", badge)
+	}
+
+	help := router.Handle(ctx, Request{Command: "help", GuildID: "guild-1", UserID: "mod", RoleIDs: []string{"role-mod"}})
+	for _, want := range []string{"**Admin commands**", "**Moderator tools**", "Role/channel access"} {
+		if !strings.Contains(help.Content, want) {
+			t.Fatalf("expected admin badge help to include %q:\n%s", want, help.Content)
+		}
+	}
+
+	model := router.Handle(ctx, Request{
+		Command:    "admin",
+		Subcommand: "model",
+		GuildID:    "guild-1",
+		UserID:     "mod",
+		RoleIDs:    []string{"role-mod"},
+		Options:    map[string]string{"model": "provider/new"},
+	})
+	if !strings.Contains(model.Content, "Model settings updated") {
+		t.Fatalf("expected admin badge to allow admin model update, got %+v", model)
+	}
+}
+
+func TestAdminToolConfiguresRoleToolAccess(t *testing.T) {
+	ctx := context.Background()
 	router := newTestRouter(t, &fakeLLM{}, 5)
-	response := router.Handle(context.Background(), Request{Command: "admin", Subcommand: "setup", GuildID: "guild-1", UserID: "admin", IsGuildAdmin: true})
-	if !response.Ephemeral || response.Content == "" {
-		t.Fatalf("expected setup response, got %+v", response)
+
+	add := router.Handle(ctx, Request{
+		Command:      "admin",
+		Subcommand:   "tool",
+		GuildID:      "guild-1",
+		UserID:       "admin",
+		IsGuildAdmin: true,
+		Options: map[string]string{
+			"action":    "add",
+			"tool_name": "web.search",
+			"role_id":   "role-search",
+			"role_name": "Searchers",
+		},
+	})
+	if !add.Ephemeral || !strings.Contains(add.Content, "Allowed `Searchers` (`role-search`) to use `web.search`") {
+		t.Fatalf("unexpected add response: %+v", add)
+	}
+
+	list := router.Handle(ctx, Request{
+		Command:      "admin",
+		Subcommand:   "tool",
+		GuildID:      "guild-1",
+		UserID:       "admin",
+		IsGuildAdmin: true,
+		Options:      map[string]string{"action": "list"},
+	})
+	if !strings.Contains(list.Content, "`web.search` -> `role-search`") {
+		t.Fatalf("unexpected list response: %+v", list)
+	}
+
+	remove := router.Handle(ctx, Request{
+		Command:      "admin",
+		Subcommand:   "tool",
+		GuildID:      "guild-1",
+		UserID:       "admin",
+		IsGuildAdmin: true,
+		Options: map[string]string{
+			"action":    "remove",
+			"tool_name": "web.search",
+			"role_id":   "role-search",
+		},
+	})
+	if !strings.Contains(remove.Content, "Removed `role-search` from `web.search`") {
+		t.Fatalf("unexpected remove response: %+v", remove)
 	}
 }
 
@@ -183,7 +370,7 @@ func TestAskHandlesMissingOpenRouterKey(t *testing.T) {
 		Options: map[string]string{"question": "hi"},
 	})
 	if !response.Ephemeral || response.Content == "" {
-		t.Fatalf("expected setup response, got %+v", response)
+		t.Fatalf("expected configuration error response, got %+v", response)
 	}
 }
 
@@ -204,10 +391,6 @@ func TestAdminModelAffectsAsk(t *testing.T) {
 	client := &fakeLLM{response: llm.ChatResponse{Content: "ok"}}
 	router := newTestRouter(t, client, 5)
 
-	setup := router.Handle(context.Background(), Request{Command: "admin", Subcommand: "setup", GuildID: "guild-1", UserID: "admin", IsGuildAdmin: true})
-	if setup.Content == "" {
-		t.Fatalf("expected setup response")
-	}
 	model := router.Handle(context.Background(), Request{
 		Command:      "admin",
 		Subcommand:   "model",
@@ -238,7 +421,6 @@ func TestAdminModelAffectsAsk(t *testing.T) {
 func TestAdminModelSetsRuntimeOptions(t *testing.T) {
 	client := &fakeLLM{response: llm.ChatResponse{Content: "ok"}}
 	router := newTestRouter(t, client, 5)
-	_ = router.Handle(context.Background(), Request{Command: "admin", Subcommand: "setup", GuildID: "guild-1", UserID: "admin", IsGuildAdmin: true})
 
 	model := router.Handle(context.Background(), Request{
 		Command:      "admin",
@@ -279,7 +461,6 @@ func TestAdminModelSetsRuntimeOptions(t *testing.T) {
 
 func TestAdminDisableRequiresConfirmation(t *testing.T) {
 	router := newTestRouter(t, &fakeLLM{response: llm.ChatResponse{Content: "ok"}}, 20)
-	_ = router.Handle(context.Background(), Request{Command: "admin", Subcommand: "setup", GuildID: "guild-1", UserID: "admin", IsGuildAdmin: true})
 
 	request := Request{Command: "admin", Subcommand: "disable", GuildID: "guild-1", UserID: "admin", IsGuildAdmin: true}
 	pending := router.Handle(context.Background(), request)
@@ -315,7 +496,6 @@ func TestAdminDisableRequiresConfirmation(t *testing.T) {
 func TestAdminDryRunDoesNotMutateState(t *testing.T) {
 	client := &fakeLLM{response: llm.ChatResponse{Content: "ok"}}
 	router := newTestRouter(t, client, 20)
-	_ = router.Handle(context.Background(), Request{Command: "admin", Subcommand: "setup", GuildID: "guild-1", UserID: "admin", IsGuildAdmin: true})
 
 	model := router.Handle(context.Background(), Request{
 		Command:      "admin",
@@ -365,7 +545,6 @@ func TestAdminDryRunDoesNotMutateState(t *testing.T) {
 
 func TestAdminPromptWithoutTextUsesModal(t *testing.T) {
 	router := newTestRouter(t, &fakeLLM{}, 20)
-	_ = router.Handle(context.Background(), Request{Command: "admin", Subcommand: "setup", GuildID: "guild-1", UserID: "admin", IsGuildAdmin: true})
 
 	prompt := router.Handle(context.Background(), Request{
 		Command:      "admin",
@@ -406,7 +585,6 @@ func TestAdminPromptWithoutTextUsesModal(t *testing.T) {
 func TestAdminSoulUpdatesSystemPrompt(t *testing.T) {
 	client := &fakeLLM{response: llm.ChatResponse{Content: "ok"}}
 	router := newTestRouter(t, client, 20)
-	_ = router.Handle(context.Background(), Request{Command: "admin", Subcommand: "setup", GuildID: "guild-1", UserID: "admin", IsGuildAdmin: true})
 
 	soul := router.Handle(context.Background(), Request{
 		Command:      "admin",
@@ -437,7 +615,6 @@ func TestAdminSoulUpdatesSystemPrompt(t *testing.T) {
 
 func TestAdminSoulWithoutTextUsesModal(t *testing.T) {
 	router := newTestRouter(t, &fakeLLM{}, 20)
-	_ = router.Handle(context.Background(), Request{Command: "admin", Subcommand: "setup", GuildID: "guild-1", UserID: "admin", IsGuildAdmin: true})
 
 	soul := router.Handle(context.Background(), Request{
 		Command:      "admin",
@@ -527,7 +704,6 @@ func TestToolConfirmationIDRestoresScopedRequest(t *testing.T) {
 
 func TestHandleToolConfirmationRemovesChannelRule(t *testing.T) {
 	router := newTestRouter(t, &fakeLLM{}, 20)
-	_ = router.Handle(context.Background(), Request{Command: "admin", Subcommand: "setup", GuildID: "guild-1", UserID: "admin", IsGuildAdmin: true})
 	if _, err := router.admin.SetChannelRule(context.Background(), "guild-1", "admin", "channel-1", "deny"); err != nil {
 		t.Fatalf("seed channel rule: %v", err)
 	}
@@ -571,7 +747,6 @@ func TestLLMToolConfirmationRendersButton(t *testing.T) {
 		{Model: "fixture/model", Content: "I found the channel rule and prepared the removal."},
 	}}
 	router := newTestRouter(t, client, 20)
-	_ = router.Handle(context.Background(), Request{Command: "admin", Subcommand: "setup", GuildID: "guild-1", UserID: "admin", IsGuildAdmin: true})
 	model := router.Handle(context.Background(), Request{
 		Command:      "admin",
 		Subcommand:   "model",

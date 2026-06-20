@@ -1,4 +1,4 @@
-FROM golang:1.26.0-bookworm AS builder
+FROM golang:1.26.4-bookworm AS builder
 
 WORKDIR /src
 ARG GO_TAGS=sqlite_fts5

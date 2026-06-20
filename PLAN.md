@@ -47,7 +47,8 @@ This plan is for the engineer who will build the first production-ready version 
 
 ### Admin And Moderator Tools
 
-- `/admin setup` walks an admin through first-time configuration.
+- `/admin badge` lets an admin delegate Panda admin access to a role.
+- `/admin tool` lets an admin allow specific roles to use specific native or composed tools.
 - `/admin model` sets default model, temperature, max response size, and tool policy.
 - `/admin prompt` manages server-level system instructions.
 - `/admin audit` shows recent privileged actions.
@@ -373,14 +374,14 @@ Exit criteria:
 - Register slash commands.
 - Handle deferred responses and edits.
 - Implement permission checks.
-- Implement `/ping`, `/help`, and `/admin setup`.
+- Implement `/ping`, `/help`, and initial admin commands.
 - Add command router tests.
 
 Exit criteria:
 
 - Bot can be invited to a test guild.
 - Commands register idempotently.
-- Admin setup writes guild config.
+- Admin writes create guild config automatically.
 - Unauthorized users receive ephemeral denial responses.
 
 ### Milestone 2: Basic LLM Assistant
@@ -417,7 +418,7 @@ Exit criteria:
 
 ### Milestone 4: Admin Controls
 
-- Implement thin setup/model/prompt/audit/enable/disable commands plus LLM-driven channel, role, usage, limit, memory, and moderation tool flows.
+- Implement thin admin model/prompt/audit/enable/disable commands plus LLM-driven channel, role, usage, limit, memory, and moderation tool flows.
 - Add confirmation components for dangerous operations, including model-triggered tool actions.
 - Add audit events for all config changes.
 - Add permission mapping through reviewed chat/tool flows with Discord buttons or modals where confirmation or structured input is needed.
@@ -529,7 +530,7 @@ The first slice should prove the architecture with the smallest useful bot:
 3. Initialize SQLite, GORM, migrations, and the storage repositories.
 4. Add Dockerfile and `fly.toml` with `/data` volume mount and health check config.
 5. Connect to Discord.
-6. Register `/ping` and `/admin setup`.
+6. Register `/ping`, `/help`, and initial admin commands.
 7. Store guild config and usage events.
 8. Call OpenRouter through an internal interface.
 9. Enforce a basic permission check and per-user rate limit.

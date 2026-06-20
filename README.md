@@ -5,21 +5,38 @@ Panda is a Go Discord assistant bot implemented from `PLAN.md`.
 ## Local Development
 
 ```bash
+make start
+make logs
+make stop
+```
+
+`make start` builds and starts the full local dev stack in the background. The stack is the Panda app process: it starts the HTTP server, opens and migrates SQLite at `data/panda.db` by default, and runs the queue worker. There is no separate database daemon to start for local development.
+
+Use `make stop` to stop the background stack, `make status` to check it, and `make restart` after config changes. For a foreground process you can interrupt with `Ctrl+C`, run:
+
+```bash
+make dev
+```
+
+```bash
 go test ./...
-go run ./cmd/bot
 ```
 
 The service can start without Discord or OpenRouter credentials in development. Local tests use fake LLM clients and SQLite fixtures, so no real credentials are needed for development verification.
 
-Non-secret settings live in `panda.config.json`. Set `PANDA_CONFIG=/path/to/config.json` to use another file. Environment variables are still supported for deployments and override file values when present.
+Non-secret settings live in `panda.config.json`. Secret settings can live in `.env`; Panda reads that file automatically for `make dev`, `make start`, and `go run ./cmd/bot`, so you do not need to export or source it first. Set `PANDA_CONFIG=/path/to/config.json` to use another config file, or `PANDA_ENV_FILE=/path/to/.env` to use another env file. Real shell/deployment environment variables are still supported and override `.env` and config file values when present.
 
-For live Discord/OpenRouter integrations, set `DISCORD_BOT_TOKEN` and `OPENROUTER_API_KEY` in your shell or deployment secrets, then set `discord.application_id` in `panda.config.json` or provide `DISCORD_APPLICATION_ID`.
+For live Discord/OpenRouter integrations, set `DISCORD_BOT_TOKEN` and `OPENROUTER_API_KEY` in `.env`, your shell, or deployment secrets, then set `discord.application_id` in `panda.config.json` or provide `DISCORD_APPLICATION_ID`.
+
+When `DISCORD_GUILD_ID` is set for fast local command registration, that guild must have the app installed. Guild-scoped command sync clears global command registrations first so Discord does not show both global and guild copies in the same server. In development, Panda logs Discord command registration access errors and keeps the gateway running so message/webhook testing can continue.
+
+Set `DISCORD_PUBLIC_KEY` from the Discord Developer Portal to enable signed Discord webhook events at `POST /discord/webhook-events`. Subscribe that endpoint to `APPLICATION_AUTHORIZED` events to enforce owner-only guild installs: Panda records the authorizing user as the guild's Panda owner when they match Discord's `guild.owner_id`; if a non-owner authorizes the app, Panda records the denial, audits it, and leaves the guild.
 
 To enable public web search, set `BRAVE_SEARCH_API_KEY`. Panda exposes Brave Search to the model as the read-only `web.search` tool when the key is configured, the guild tool policy allows read tools, and the caller has `assistant.web_search` permission. The optional `brave_search.base_url` setting defaults to `https://api.search.brave.com/res/v1`.
 
 For queue-only processing without Discord or HTTP, run `go run ./cmd/worker`.
 
-Health endpoints report configuration, Fiber, Discord, OpenRouter, Brave Search, SQLite, and local storage status:
+Health endpoints report configuration, Fiber, Discord gateway credentials, Discord webhook public key, OpenRouter, Brave Search, SQLite, and local storage status:
 
 - `GET /healthz`
 - `GET /readyz`
@@ -40,7 +57,8 @@ Panda listens to normal Discord messages that contain the word `Panda`, then use
 
 - `/ping`
 - `/help`
-- `/admin setup`
+- `/admin badge` to delegate Panda admin access to a role
+- `/admin tool` to allow a role to use a specific native or composed tool
 - `/admin model`
 - `/admin prompt`
 - `/admin soul`
@@ -56,7 +74,9 @@ Panda listens to normal Discord messages that contain the word `Panda`, then use
 - Message context menu: `Explain with Panda`
 - Message context menu: `Summarize with Panda`
 
-Role mappings are enforced when at least one `assistant.use` role is configured. Channel rules support explicit allow lists and deny rules; owners and guild administrators bypass assistant-use policy checks.
+Guild config is created automatically the first time an admin changes Panda settings. The installing owner can use `/admin badge` to choose any Discord role as Panda's admin badge; members with that badge are treated as Panda admins, so servers can use custom labels like `MOD` instead of Discord's built-in Administrator permission. Role mappings are enforced when at least one `assistant.use` role is configured. Channel rules support explicit allow lists and deny rules; owners, guild administrators, and the configured admin badge bypass assistant-use policy checks.
+
+Tool access has two layers: `tool_policy` sets the server-wide ceiling for tool classes, and `/admin tool` can restrict individual native or composed tools to specific roles. Native tools keep their underlying permissions, so allowing a role to use an admin tool does not grant admin access. Composed tools are admin-only for regular members until a role is explicitly allowed for that composed tool; composed tools that wrap native admin tools remain admin-only.
 
 Usage reports, request budgets, server knowledge, role permissions, channel rules, memory consent, and moderation guidance are available through Panda chat/tools instead of direct slash commands.
 

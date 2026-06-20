@@ -54,8 +54,11 @@ const (
 )
 
 type ToolAccess struct {
-	Policy      string
-	Permissions map[string]struct{}
+	Policy                       string
+	Permissions                  map[string]struct{}
+	AllowedTools                 map[string]struct{}
+	RestrictedTools              map[string]struct{}
+	RequireExplicitComposedTools bool
 }
 
 type Definition struct {
@@ -193,6 +196,9 @@ func (d Definition) AvailableTo(access ToolAccess) bool {
 	if _, ok := access.Permissions[d.RequiredPermission]; !ok {
 		return false
 	}
+	if !access.AllowsDefinition(d) {
+		return false
+	}
 	switch normalizeToolPolicy(access.Policy) {
 	case ToolPolicyOff:
 		return false
@@ -239,6 +245,34 @@ func (d Definition) AvailableTo(access ToolAccess) bool {
 	}
 }
 
+func (access ToolAccess) AllowsDefinition(definition Definition) bool {
+	return access.allowsTool(false, definition.Name, definition.ModelName())
+}
+
+func (access ToolAccess) AllowsComposedTool(names ...string) bool {
+	return access.allowsTool(access.RequireExplicitComposedTools, names...)
+}
+
+func (access ToolAccess) allowsTool(requireExplicit bool, names ...string) bool {
+	if len(access.RestrictedTools) == 0 && !requireExplicit {
+		return true
+	}
+	restricted := requireExplicit
+	for _, name := range names {
+		normalized := normalizeToolName(name)
+		if normalized == "" {
+			continue
+		}
+		if _, ok := access.AllowedTools[normalized]; ok {
+			return true
+		}
+		if _, ok := access.RestrictedTools[normalized]; ok {
+			restricted = true
+		}
+	}
+	return !restricted
+}
+
 func normalizeToolPolicy(policy string) string {
 	switch strings.ToLower(strings.TrimSpace(policy)) {
 	case ToolPolicyReadOnly:
@@ -256,6 +290,10 @@ func normalizeToolPolicy(policy string) string {
 	default:
 		return ToolPolicyOff
 	}
+}
+
+func normalizeToolName(name string) string {
+	return strings.ToLower(strings.TrimSpace(name))
 }
 
 func DefaultDefinitions() []Definition {
@@ -467,6 +505,19 @@ func DefaultDefinitions() []Definition {
 			Audit:                 AuditOnUse,
 			IncludeInModelContext: true,
 			RequiresConfirmation:  true,
+			SupportsDryRun:        true,
+		},
+		{
+			Name:                  "panda.manage_tool_access",
+			Description:           "List, add, or remove role-specific access for native and composed Panda tools.",
+			RequiredPermission:    admin.PermissionAdminConfigWrite,
+			ToolClass:             ToolClassAdminWrite,
+			InputSchema:           actionSchema([]string{"action"}, "action", "tool_name", "role_id", "dry_run"),
+			OutputSchema:          objectSchema("result"),
+			Timeout:               2 * time.Second,
+			Redaction:             RedactSecrets,
+			Audit:                 AuditOnUse,
+			IncludeInModelContext: true,
 			SupportsDryRun:        true,
 		},
 		{

@@ -68,6 +68,9 @@ type AdminOperations interface {
 	AddRolePermission(ctx context.Context, guildID, actorID, roleID, permission string) (store.GuildRole, error)
 	RemoveRolePermission(ctx context.Context, guildID, actorID, roleID, permission string) error
 	ListRolePermissions(ctx context.Context, guildID string) ([]store.GuildRole, error)
+	AddToolRole(ctx context.Context, guildID, actorID, toolName, roleID string) (store.GuildToolRole, error)
+	RemoveToolRole(ctx context.Context, guildID, actorID, toolName, roleID string) error
+	ListToolRoles(ctx context.Context, guildID string) ([]store.GuildToolRole, error)
 	SetChannelRule(ctx context.Context, guildID, actorID, channelID, rule string) (store.GuildChannelRule, error)
 	RemoveChannelRule(ctx context.Context, guildID, actorID, channelID string) error
 	ListChannelRules(ctx context.Context, guildID string) ([]store.GuildChannelRule, error)
@@ -282,6 +285,8 @@ func (e *Executor) Execute(ctx context.Context, request ExecutionRequest) (Execu
 		payload, err = e.manageKnowledge(toolCtx, request, arguments)
 	case "panda.manage_role_permission":
 		payload, err = e.manageRolePermission(toolCtx, request, arguments)
+	case "panda.manage_tool_access":
+		payload, err = e.manageToolAccess(toolCtx, request, arguments)
 	case "panda.manage_channel_rule":
 		payload, err = e.manageChannelRule(toolCtx, request, arguments)
 	case "panda.list_tools":
@@ -840,6 +845,55 @@ func (e *Executor) manageRolePermission(ctx context.Context, request ExecutionRe
 	}
 }
 
+func (e *Executor) manageToolAccess(ctx context.Context, request ExecutionRequest, arguments string) (any, error) {
+	if e.adminOps == nil {
+		return nil, fmt.Errorf("admin operations are not configured")
+	}
+	args, err := parseArguments(arguments)
+	if err != nil {
+		return nil, err
+	}
+	action := strings.ToLower(stringArgument(args, "action"))
+	toolName := firstNonEmpty(stringArgument(args, "tool_name"), stringArgument(args, "tool"))
+	switch action {
+	case "list":
+		roles, err := e.adminOps.ListToolRoles(ctx, request.GuildID)
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{"result": map[string]any{"tools": toolRolePayloads(roles)}}, nil
+	case "add", "allow":
+		roleID := stringArgument(args, "role_id")
+		if toolName == "" || roleID == "" {
+			return nil, fmt.Errorf("tool_name and role_id are required")
+		}
+		preview := map[string]any{"tool_name": toolName, "role_id": roleID}
+		if boolArgument(args, "dry_run") {
+			return dryRunToolResult("tool_access.add", preview), nil
+		}
+		toolRole, err := e.adminOps.AddToolRole(ctx, request.GuildID, request.ActorID, toolName, roleID)
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{"result": toolRolePayload(toolRole)}, nil
+	case "remove", "deny":
+		roleID := stringArgument(args, "role_id")
+		if toolName == "" || roleID == "" {
+			return nil, fmt.Errorf("tool_name and role_id are required")
+		}
+		preview := map[string]any{"tool_name": toolName, "role_id": roleID}
+		if boolArgument(args, "dry_run") {
+			return dryRunToolResult("tool_access.remove", preview), nil
+		}
+		if err := e.adminOps.RemoveToolRole(ctx, request.GuildID, request.ActorID, toolName, roleID); err != nil {
+			return nil, err
+		}
+		return map[string]any{"result": preview}, nil
+	default:
+		return nil, fmt.Errorf("action must be list, add, or remove")
+	}
+}
+
 func (e *Executor) manageChannelRule(ctx context.Context, request ExecutionRequest, arguments string) (any, error) {
 	if e.adminOps == nil {
 		return nil, fmt.Errorf("admin operations are not configured")
@@ -1028,7 +1082,7 @@ func (e *Executor) canExecute(name string) bool {
 		return e.attachments != nil
 	case "read_config":
 		return e.configs != nil
-	case "manage_memory_consent", "panda.usage_report", "panda.manage_soul", "panda.manage_budget_limit", "panda.manage_knowledge", "panda.manage_role_permission", "panda.manage_channel_rule":
+	case "manage_memory_consent", "panda.usage_report", "panda.manage_soul", "panda.manage_budget_limit", "panda.manage_knowledge", "panda.manage_role_permission", "panda.manage_tool_access", "panda.manage_channel_rule":
 		return e.adminOps != nil
 	case "draft_moderator_note", "generate_workflow_json", "panda.list_tools":
 		return true
@@ -1241,6 +1295,21 @@ func rolePermissionPayloads(roles []store.GuildRole) []map[string]any {
 	payloads := make([]map[string]any, 0, len(roles))
 	for _, role := range roles {
 		payloads = append(payloads, rolePermissionPayload(role))
+	}
+	return payloads
+}
+
+func toolRolePayload(role store.GuildToolRole) map[string]any {
+	return map[string]any{
+		"tool_name": role.ToolName,
+		"role_id":   role.RoleID,
+	}
+}
+
+func toolRolePayloads(roles []store.GuildToolRole) []map[string]any {
+	payloads := make([]map[string]any, 0, len(roles))
+	for _, role := range roles {
+		payloads = append(payloads, toolRolePayload(role))
 	}
 	return payloads
 }

@@ -2,7 +2,6 @@ package repository
 
 import (
 	"context"
-	"errors"
 	"time"
 
 	"github.com/sn0w/panda2/internal/store"
@@ -67,14 +66,14 @@ func (r *JobRepository) ClaimNext(ctx context.Context, kind, workerID string, le
 			query = query.Where("kind = ?", kind)
 		}
 
-		var job store.Job
-		err := query.Order("run_after ASC, id ASC").First(&job).Error
-		if err != nil {
-			if errors.Is(err, gorm.ErrRecordNotFound) {
-				return nil
-			}
+		var jobs []store.Job
+		if err := query.Order("run_after ASC, id ASC").Limit(1).Find(&jobs).Error; err != nil {
 			return err
 		}
+		if len(jobs) == 0 {
+			return nil
+		}
+		job := jobs[0]
 
 		leaseUntil := now.Add(lease)
 		result := tx.Model(&store.Job{}).

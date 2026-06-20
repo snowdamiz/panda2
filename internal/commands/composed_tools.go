@@ -11,6 +11,7 @@ import (
 	"github.com/sn0w/panda2/internal/composed"
 	"github.com/sn0w/panda2/internal/security"
 	"github.com/sn0w/panda2/internal/store"
+	toolsvc "github.com/sn0w/panda2/internal/tools"
 )
 
 func (r *Router) handleTool(ctx context.Context, request Request) Response {
@@ -158,9 +159,6 @@ func (r *Router) handleToolStatus(ctx context.Context, request Request, status s
 }
 
 func (r *Router) handleToolRun(ctx context.Context, request Request, simulate bool) Response {
-	if denied := r.ensureComposedPermission(ctx, request, r.admin.CanInvokeComposedTool, "You do not have permission to invoke composed tools."); denied.Content != "" {
-		return denied
-	}
 	name := toolNameOption(request)
 	if name == "" {
 		return Response{Content: "Provide a tool name.", Ephemeral: true}
@@ -168,6 +166,13 @@ func (r *Router) handleToolRun(ctx context.Context, request Request, simulate bo
 	input, err := parseToolInput(request.Options["input_json"])
 	if err != nil {
 		return Response{Content: "input_json must be a JSON object.", Ephemeral: true}
+	}
+	allowed, err := r.composed.CanInvoke(ctx, request.GuildID, name, r.toolAccess(ctx, request, toolsvc.ToolPolicyWriteConfirmed), composed.InvocationManual)
+	if err != nil {
+		return Response{Content: "Tool access lookup failed.", Ephemeral: true}
+	}
+	if !allowed {
+		return Response{Content: "You do not have permission to run this composed tool.", Ephemeral: true}
 	}
 	result, runErr := r.composed.Run(ctx, composed.RunRequest{
 		GuildID:        request.GuildID,

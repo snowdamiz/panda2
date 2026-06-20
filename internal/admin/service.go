@@ -22,6 +22,7 @@ type Service struct {
 	access       *repository.AccessRepository
 	budgets      *repository.BudgetRepository
 	members      *repository.MemberRepository
+	guilds       *repository.GuildRepository
 	models       llm.ModelLister
 	defaultModel string
 }
@@ -35,6 +36,7 @@ const (
 	PermissionAssistantWebSearch   = "assistant.web_search"
 	PermissionAssistantSoulWrite   = "assistant.soul.write"
 	PermissionModerationUse        = "moderation.use"
+	PermissionAdminBadge           = "admin.badge"
 	PermissionAdminConfigRead      = "admin.config.read"
 	PermissionAdminConfigWrite     = "admin.config.write"
 	PermissionAdminUsageRead       = "admin.usage.read"
@@ -58,6 +60,7 @@ const (
 type AssistantAccessRequest struct {
 	GuildID      string
 	ChannelID    string
+	UserID       string
 	RoleIDs      []string
 	IsGuildAdmin bool
 	IsOwner      bool
@@ -73,6 +76,16 @@ type ModelSettings struct {
 	MaxResponseTokensSet bool
 	ToolPolicy           string
 	ToolPolicySet        bool
+}
+
+type ToolRoleAccess struct {
+	AllowedTools    []string
+	RestrictedTools []string
+}
+
+func (s *Service) WithGuildRepository(guilds *repository.GuildRepository) *Service {
+	s.guilds = guilds
+	return s
 }
 
 type UsageReport struct {
@@ -99,20 +112,8 @@ func NewService(configs *repository.GuildConfigRepository, usage *repository.Usa
 	}
 }
 
-func (s *Service) SetupGuild(ctx context.Context, guildID, actorID string) (store.GuildConfig, error) {
-	config, err := s.configs.EnsureDefault(ctx, guildID, s.defaultModel)
-	if err != nil {
-		return store.GuildConfig{}, err
-	}
-	_ = s.audit.Record(ctx, store.AuditEvent{
-		GuildID:    guildID,
-		ActorID:    actorID,
-		Action:     "admin.setup",
-		TargetType: "guild_config",
-		TargetID:   guildID,
-		Metadata:   metadata(map[string]string{"default_model": config.DefaultModel}),
-	})
-	return config, nil
+func (s *Service) ensureGuildConfig(ctx context.Context, guildID string) (store.GuildConfig, error) {
+	return s.configs.EnsureDefault(ctx, guildID, s.defaultModel)
 }
 
 func (s *Service) SetModel(ctx context.Context, guildID, actorID, model string) (store.GuildConfig, error) {
@@ -182,6 +183,9 @@ func (s *Service) ConfigureModel(ctx context.Context, guildID, actorID string, s
 		return store.GuildConfig{}, fmt.Errorf("model setting is required")
 	}
 
+	if _, err := s.ensureGuildConfig(ctx, guildID); err != nil {
+		return store.GuildConfig{}, err
+	}
 	config, err := s.configs.UpdateModelSettings(ctx, guildID, updates)
 	if err != nil {
 		return store.GuildConfig{}, err
@@ -219,6 +223,9 @@ func (s *Service) SetPrompt(ctx context.Context, guildID, actorID, prompt string
 	if err != nil {
 		return store.GuildConfig{}, err
 	}
+	if _, err := s.ensureGuildConfig(ctx, guildID); err != nil {
+		return store.GuildConfig{}, err
+	}
 	config, err := s.configs.UpdatePrompt(ctx, guildID, prompt)
 	if err != nil {
 		return store.GuildConfig{}, err
@@ -239,6 +246,9 @@ func (s *Service) SetSoul(ctx context.Context, guildID, actorID, soul string) (s
 	if err != nil {
 		return store.GuildConfig{}, err
 	}
+	if _, err := s.ensureGuildConfig(ctx, guildID); err != nil {
+		return store.GuildConfig{}, err
+	}
 	config, err := s.configs.UpdateSoul(ctx, guildID, soul)
 	if err != nil {
 		return store.GuildConfig{}, err
@@ -255,6 +265,9 @@ func (s *Service) SetSoul(ctx context.Context, guildID, actorID, soul string) (s
 }
 
 func (s *Service) SetAssistantEnabled(ctx context.Context, guildID, actorID string, enabled bool) (store.GuildConfig, error) {
+	if _, err := s.ensureGuildConfig(ctx, guildID); err != nil {
+		return store.GuildConfig{}, err
+	}
 	config, err := s.configs.SetAssistantEnabled(ctx, guildID, enabled)
 	if err != nil {
 		return store.GuildConfig{}, err
@@ -274,6 +287,9 @@ func (s *Service) SetAssistantEnabled(ctx context.Context, guildID, actorID stri
 }
 
 func (s *Service) SetMemoryEnabled(ctx context.Context, guildID, actorID string, enabled bool) (store.GuildConfig, error) {
+	if _, err := s.ensureGuildConfig(ctx, guildID); err != nil {
+		return store.GuildConfig{}, err
+	}
 	config, err := s.configs.SetMemoryEnabled(ctx, guildID, enabled)
 	if err != nil {
 		return store.GuildConfig{}, err
@@ -416,6 +432,30 @@ func (s *Service) AddRolePermission(ctx context.Context, guildID, actorID, roleI
 	return role, nil
 }
 
+func (s *Service) SetAdminBadge(ctx context.Context, guildID, actorID, roleID string) (store.GuildRole, error) {
+	guildID = strings.TrimSpace(guildID)
+	roleID = strings.TrimSpace(roleID)
+	if roleID == "" {
+		return store.GuildRole{}, fmt.Errorf("admin badge role is required")
+	}
+	if guildID != "" && roleID == guildID {
+		return store.GuildRole{}, fmt.Errorf("admin badge cannot be @everyone")
+	}
+	role, err := s.access.SetRolePermission(ctx, guildID, roleID, PermissionAdminBadge)
+	if err != nil {
+		return store.GuildRole{}, err
+	}
+	_ = s.audit.Record(ctx, store.AuditEvent{
+		GuildID:    guildID,
+		ActorID:    actorID,
+		Action:     "admin.badge.set",
+		TargetType: "guild_role",
+		TargetID:   role.RoleID,
+		Metadata:   metadata(map[string]string{"permission": PermissionAdminBadge}),
+	})
+	return role, nil
+}
+
 func (s *Service) RemoveRolePermission(ctx context.Context, guildID, actorID, roleID, permission string) error {
 	permission = firstNonEmpty(strings.TrimSpace(permission), PermissionAssistantUse)
 	if !allowedPermissionName(permission) {
@@ -437,6 +477,69 @@ func (s *Service) RemoveRolePermission(ctx context.Context, guildID, actorID, ro
 
 func (s *Service) ListRolePermissions(ctx context.Context, guildID string) ([]store.GuildRole, error) {
 	return s.access.ListRolePermissions(ctx, guildID)
+}
+
+func (s *Service) AddToolRole(ctx context.Context, guildID, actorID, toolName, roleID string) (store.GuildToolRole, error) {
+	toolName = normalizeToolName(toolName)
+	roleID = strings.TrimSpace(roleID)
+	if toolName == "" {
+		return store.GuildToolRole{}, fmt.Errorf("tool name is required")
+	}
+	if roleID == "" {
+		return store.GuildToolRole{}, fmt.Errorf("role id is required")
+	}
+	toolRole, err := s.access.AddToolRole(ctx, guildID, toolName, roleID)
+	if err != nil {
+		return store.GuildToolRole{}, err
+	}
+	_ = s.audit.Record(ctx, store.AuditEvent{
+		GuildID:    guildID,
+		ActorID:    actorID,
+		Action:     "admin.tools.allow_role",
+		TargetType: "tool",
+		TargetID:   toolName,
+		Metadata:   metadata(map[string]string{"role_id": roleID}),
+	})
+	return toolRole, nil
+}
+
+func (s *Service) RemoveToolRole(ctx context.Context, guildID, actorID, toolName, roleID string) error {
+	toolName = normalizeToolName(toolName)
+	roleID = strings.TrimSpace(roleID)
+	if toolName == "" {
+		return fmt.Errorf("tool name is required")
+	}
+	if roleID == "" {
+		return fmt.Errorf("role id is required")
+	}
+	if err := s.access.RemoveToolRole(ctx, guildID, toolName, roleID); err != nil {
+		return err
+	}
+	_ = s.audit.Record(ctx, store.AuditEvent{
+		GuildID:    guildID,
+		ActorID:    actorID,
+		Action:     "admin.tools.remove_role",
+		TargetType: "tool",
+		TargetID:   toolName,
+		Metadata:   metadata(map[string]string{"role_id": roleID}),
+	})
+	return nil
+}
+
+func (s *Service) ListToolRoles(ctx context.Context, guildID string) ([]store.GuildToolRole, error) {
+	return s.access.ListToolRoles(ctx, guildID)
+}
+
+func (s *Service) ToolRoleAccess(ctx context.Context, guildID string, roleIDs []string) (ToolRoleAccess, error) {
+	restricted, err := s.access.RestrictedToolNames(ctx, guildID)
+	if err != nil {
+		return ToolRoleAccess{}, err
+	}
+	allowed, err := s.access.ToolNamesForRoles(ctx, guildID, roleIDs)
+	if err != nil {
+		return ToolRoleAccess{}, err
+	}
+	return ToolRoleAccess{AllowedTools: allowed, RestrictedTools: restricted}, nil
 }
 
 func (s *Service) SetChannelRule(ctx context.Context, guildID, actorID, channelID, rule string) (store.GuildChannelRule, error) {
@@ -532,7 +635,11 @@ func (s *Service) ConsumeBudget(ctx context.Context, request repository.BudgetCh
 }
 
 func (s *Service) CanUseAssistant(ctx context.Context, request AssistantAccessRequest) (bool, error) {
-	if request.IsOwner || request.IsGuildAdmin || request.GuildID == "" {
+	hasControl, err := s.hasGuildControl(ctx, request)
+	if err != nil {
+		return false, err
+	}
+	if hasControl || request.GuildID == "" {
 		return true, nil
 	}
 
@@ -555,8 +662,9 @@ func (s *Service) CanUseAssistant(ctx context.Context, request AssistantAccessRe
 }
 
 func (s *Service) CanUseModeration(ctx context.Context, request AssistantAccessRequest) (bool, error) {
-	if request.IsOwner || request.IsGuildAdmin {
-		return true, nil
+	hasControl, err := s.hasGuildControl(ctx, request)
+	if err != nil || hasControl {
+		return hasControl, err
 	}
 	if request.GuildID == "" {
 		return false, nil
@@ -581,8 +689,9 @@ func (s *Service) CanUseWebSearch(ctx context.Context, request AssistantAccessRe
 }
 
 func (s *Service) CanReadConfig(ctx context.Context, request AssistantAccessRequest) (bool, error) {
-	if request.IsOwner || request.IsGuildAdmin {
-		return true, nil
+	hasControl, err := s.hasGuildControl(ctx, request)
+	if err != nil || hasControl {
+		return hasControl, err
 	}
 	if request.GuildID == "" {
 		return false, nil
@@ -591,8 +700,9 @@ func (s *Service) CanReadConfig(ctx context.Context, request AssistantAccessRequ
 }
 
 func (s *Service) CanWriteConfig(ctx context.Context, request AssistantAccessRequest) (bool, error) {
-	if request.IsOwner || request.IsGuildAdmin {
-		return true, nil
+	hasControl, err := s.hasGuildControl(ctx, request)
+	if err != nil || hasControl {
+		return hasControl, err
 	}
 	if request.GuildID == "" {
 		return false, nil
@@ -601,8 +711,9 @@ func (s *Service) CanWriteConfig(ctx context.Context, request AssistantAccessReq
 }
 
 func (s *Service) CanWriteSoul(ctx context.Context, request AssistantAccessRequest) (bool, error) {
-	if request.IsOwner || request.IsGuildAdmin {
-		return true, nil
+	hasControl, err := s.hasGuildControl(ctx, request)
+	if err != nil || hasControl {
+		return hasControl, err
 	}
 	if request.GuildID == "" {
 		return false, nil
@@ -617,8 +728,9 @@ func (s *Service) CanWriteSoul(ctx context.Context, request AssistantAccessReque
 }
 
 func (s *Service) CanReadUsage(ctx context.Context, request AssistantAccessRequest) (bool, error) {
-	if request.IsOwner || request.IsGuildAdmin {
-		return true, nil
+	hasControl, err := s.hasGuildControl(ctx, request)
+	if err != nil || hasControl {
+		return hasControl, err
 	}
 	if request.GuildID == "" {
 		return false, nil
@@ -627,8 +739,9 @@ func (s *Service) CanReadUsage(ctx context.Context, request AssistantAccessReque
 }
 
 func (s *Service) CanReadAudit(ctx context.Context, request AssistantAccessRequest) (bool, error) {
-	if request.IsOwner || request.IsGuildAdmin {
-		return true, nil
+	hasControl, err := s.hasGuildControl(ctx, request)
+	if err != nil || hasControl {
+		return hasControl, err
 	}
 	if request.GuildID == "" {
 		return false, nil
@@ -637,8 +750,9 @@ func (s *Service) CanReadAudit(ctx context.Context, request AssistantAccessReque
 }
 
 func (s *Service) CanManageMemory(ctx context.Context, request AssistantAccessRequest) (bool, error) {
-	if request.IsOwner || request.IsGuildAdmin {
-		return true, nil
+	hasControl, err := s.hasGuildControl(ctx, request)
+	if err != nil || hasControl {
+		return hasControl, err
 	}
 	if request.GuildID == "" {
 		return false, nil
@@ -647,8 +761,9 @@ func (s *Service) CanManageMemory(ctx context.Context, request AssistantAccessRe
 }
 
 func (s *Service) CanDraftComposedTool(ctx context.Context, request AssistantAccessRequest) (bool, error) {
-	if request.IsOwner || request.IsGuildAdmin {
-		return true, nil
+	hasControl, err := s.hasGuildControl(ctx, request)
+	if err != nil || hasControl {
+		return hasControl, err
 	}
 	if request.GuildID == "" {
 		return false, nil
@@ -657,8 +772,9 @@ func (s *Service) CanDraftComposedTool(ctx context.Context, request AssistantAcc
 }
 
 func (s *Service) CanApproveComposedTool(ctx context.Context, request AssistantAccessRequest) (bool, error) {
-	if request.IsOwner || request.IsGuildAdmin {
-		return true, nil
+	hasControl, err := s.hasGuildControl(ctx, request)
+	if err != nil || hasControl {
+		return hasControl, err
 	}
 	if request.GuildID == "" {
 		return false, nil
@@ -667,8 +783,9 @@ func (s *Service) CanApproveComposedTool(ctx context.Context, request AssistantA
 }
 
 func (s *Service) CanInvokeComposedTool(ctx context.Context, request AssistantAccessRequest) (bool, error) {
-	if request.IsOwner || request.IsGuildAdmin {
-		return true, nil
+	hasControl, err := s.hasGuildControl(ctx, request)
+	if err != nil || hasControl {
+		return hasControl, err
 	}
 	if request.GuildID == "" {
 		return false, nil
@@ -677,8 +794,9 @@ func (s *Service) CanInvokeComposedTool(ctx context.Context, request AssistantAc
 }
 
 func (s *Service) CanAuditComposedTool(ctx context.Context, request AssistantAccessRequest) (bool, error) {
-	if request.IsOwner || request.IsGuildAdmin {
-		return true, nil
+	hasControl, err := s.hasGuildControl(ctx, request)
+	if err != nil || hasControl {
+		return hasControl, err
 	}
 	if request.GuildID == "" {
 		return false, nil
@@ -715,10 +833,35 @@ func (s *Service) RecordSensitiveReadAudit(ctx context.Context, guildID, actorID
 }
 
 func (s *Service) canUseOptionalAssistantPermission(ctx context.Context, request AssistantAccessRequest, permission string) (bool, error) {
-	if request.IsOwner || request.IsGuildAdmin || request.GuildID == "" {
-		return true, nil
+	hasControl, err := s.hasGuildControl(ctx, request)
+	if err != nil || hasControl || request.GuildID == "" {
+		return hasControl || request.GuildID == "", err
 	}
 	return s.canUsePermission(ctx, request.GuildID, request.RoleIDs, permission, true)
+}
+
+func (s *Service) HasGuildControl(ctx context.Context, request AssistantAccessRequest) (bool, error) {
+	return s.hasGuildControl(ctx, request)
+}
+
+func (s *Service) hasGuildControl(ctx context.Context, request AssistantAccessRequest) (bool, error) {
+	if request.IsOwner || request.IsGuildAdmin {
+		return true, nil
+	}
+	if request.GuildID != "" && len(request.RoleIDs) > 0 {
+		allowed, err := s.access.AnyRoleHasPermission(ctx, request.GuildID, request.RoleIDs, PermissionAdminBadge)
+		if err != nil || allowed {
+			return allowed, err
+		}
+	}
+	if s.guilds == nil || request.GuildID == "" || request.UserID == "" {
+		return false, nil
+	}
+	guild, ok, err := s.guilds.Get(ctx, request.GuildID)
+	if err != nil || !ok || guild.InstallStatus != repository.GuildInstallStatusActive {
+		return false, err
+	}
+	return guild.InstalledByUserID == request.UserID, nil
 }
 
 func (s *Service) canUsePermission(ctx context.Context, guildID string, roleIDs []string, permission string, allowWhenUnmapped bool) (bool, error) {
@@ -762,6 +905,10 @@ func allowedToolPolicy(policy string) bool {
 
 func allowedPermissionName(permission string) bool {
 	return IsPermissionNameAllowed(permission)
+}
+
+func normalizeToolName(value string) string {
+	return strings.ToLower(strings.TrimSpace(value))
 }
 
 func IsPermissionNameAllowed(permission string) bool {

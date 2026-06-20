@@ -40,15 +40,17 @@ type UsageEvent struct {
 }
 
 type Guild struct {
-	GuildID       string    `gorm:"primaryKey;size:32"`
-	Name          string    `gorm:"not null;default:''"`
-	InstallStatus string    `gorm:"not null;default:'active'"`
-	Locale        string    `gorm:"not null;default:''"`
-	FeatureFlags  string    `gorm:"not null;default:''"`
-	JoinedAt      time.Time `gorm:"not null"`
-	LeftAt        *time.Time
-	CreatedAt     time.Time `gorm:"not null"`
-	UpdatedAt     time.Time `gorm:"not null"`
+	GuildID           string    `gorm:"primaryKey;size:32"`
+	Name              string    `gorm:"not null;default:''"`
+	InstallStatus     string    `gorm:"not null;default:'active'"`
+	OwnerUserID       string    `gorm:"not null;default:'';size:32"`
+	InstalledByUserID string    `gorm:"not null;default:'';size:32"`
+	Locale            string    `gorm:"not null;default:''"`
+	FeatureFlags      string    `gorm:"not null;default:''"`
+	JoinedAt          time.Time `gorm:"not null"`
+	LeftAt            *time.Time
+	CreatedAt         time.Time `gorm:"not null"`
+	UpdatedAt         time.Time `gorm:"not null"`
 }
 
 type GuildRole struct {
@@ -58,6 +60,15 @@ type GuildRole struct {
 	Permission string    `gorm:"index;not null"`
 	CreatedAt  time.Time `gorm:"not null"`
 	UpdatedAt  time.Time `gorm:"not null"`
+}
+
+type GuildToolRole struct {
+	ID        uint      `gorm:"primaryKey"`
+	GuildID   string    `gorm:"index;not null;size:32"`
+	ToolName  string    `gorm:"index;not null;size:128"`
+	RoleID    string    `gorm:"index;not null;size:32"`
+	CreatedAt time.Time `gorm:"not null"`
+	UpdatedAt time.Time `gorm:"not null"`
 }
 
 type GuildChannelRule struct {

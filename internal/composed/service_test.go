@@ -65,8 +65,10 @@ func TestBuilderWelcomeDraftApprovalAdvertiseAndRun(t *testing.T) {
 		GuildID:        "guild-1",
 		InvocationType: InvocationChatTool,
 		Access: tools.ToolAccess{
-			Policy:      tools.ToolPolicyAssistive,
-			Permissions: map[string]struct{}{admin.PermissionToolComposeInvoke: {}},
+			Policy:                       tools.ToolPolicyAssistive,
+			Permissions:                  map[string]struct{}{admin.PermissionToolComposeInvoke: {}},
+			AllowedTools:                 map[string]struct{}{"builder_welcome": {}},
+			RequireExplicitComposedTools: true,
 		},
 	})
 	if err != nil {
@@ -79,12 +81,29 @@ func TestBuilderWelcomeDraftApprovalAdvertiseAndRun(t *testing.T) {
 	if _, err := service.Approve(ctx, "guild-1", "builder_welcome", 1, "admin-1"); err != nil {
 		t.Fatalf("Approve: %v", err)
 	}
+	hidden, err := service.OpenRouterTools(ctx, tools.DynamicToolListRequest{
+		GuildID:        "guild-1",
+		InvocationType: InvocationChatTool,
+		Access: tools.ToolAccess{
+			Policy:                       tools.ToolPolicyAssistive,
+			Permissions:                  map[string]struct{}{admin.PermissionToolComposeInvoke: {}},
+			RequireExplicitComposedTools: true,
+		},
+	})
+	if err != nil {
+		t.Fatalf("OpenRouterTools hidden: %v", err)
+	}
+	if len(hidden) != 0 {
+		t.Fatalf("composed tool should require an explicit tool role grant: %+v", hidden)
+	}
 	advertised, err := service.OpenRouterTools(ctx, tools.DynamicToolListRequest{
 		GuildID:        "guild-1",
 		InvocationType: InvocationChatTool,
 		Access: tools.ToolAccess{
-			Policy:      tools.ToolPolicyAssistive,
-			Permissions: map[string]struct{}{admin.PermissionToolComposeInvoke: {}},
+			Policy:                       tools.ToolPolicyAssistive,
+			Permissions:                  map[string]struct{}{admin.PermissionToolComposeInvoke: {}},
+			AllowedTools:                 map[string]struct{}{"builder_welcome": {}},
+			RequireExplicitComposedTools: true,
 		},
 	})
 	if err != nil {
@@ -112,6 +131,69 @@ func TestBuilderWelcomeDraftApprovalAdvertiseAndRun(t *testing.T) {
 	call := provider.calls[0]
 	if call.ToolName != "discord.send_message" || call.Arguments["channel_id"] != "channel-general" || !strings.Contains(call.Arguments["content"].(string), "<@user-1>") {
 		t.Fatalf("unexpected Discord call: %+v", call)
+	}
+}
+
+func TestComposedToolUsingAdminNativeToolRequiresAdminAccess(t *testing.T) {
+	ctx := context.Background()
+	service, _ := newComposedTestService(t)
+	spec := NormalizeSpec(Spec{
+		SchemaVersion: 1,
+		Name:          "config_reader",
+		Description:   "Read Panda config",
+		InputSchema:   rawObjectSchema(nil, map[string]string{}),
+		OutputSchema:  rawObjectSchema([]string{"ok"}, map[string]string{"ok": "boolean"}),
+		Runner: RunnerSpec{
+			Type:          RunnerDeterministic,
+			ToolAllowlist: []string{"read_config"},
+		},
+		Steps: []StepSpec{{
+			ID:        "read",
+			Type:      StepToolCall,
+			Tool:      "read_config",
+			Arguments: map[string]any{"guild_id": "guild-1"},
+			OutputKey: "config",
+		}},
+		Invocations: []InvocationSpec{{Type: InvocationChatTool}},
+		Safety:      SafetySpec{MaxNestedDepth: 2},
+	})
+	if _, err := service.Draft(ctx, DraftRequest{GuildID: "guild-1", ActorID: "admin-1", SpecJSON: mustJSON(spec)}); err != nil {
+		t.Fatalf("Draft: %v", err)
+	}
+	if _, err := service.Approve(ctx, "guild-1", "config_reader", 1, "admin-1"); err != nil {
+		t.Fatalf("Approve: %v", err)
+	}
+
+	regular, err := service.OpenRouterTools(ctx, tools.DynamicToolListRequest{
+		GuildID:        "guild-1",
+		InvocationType: InvocationChatTool,
+		Access: tools.ToolAccess{
+			Policy:                       tools.ToolPolicyWriteConfirmed,
+			Permissions:                  map[string]struct{}{admin.PermissionToolComposeInvoke: {}},
+			AllowedTools:                 map[string]struct{}{"config_reader": {}},
+			RequireExplicitComposedTools: true,
+		},
+	})
+	if err != nil {
+		t.Fatalf("OpenRouterTools regular: %v", err)
+	}
+	if len(regular) != 0 {
+		t.Fatalf("admin-native composed tool should stay hidden from regular access: %+v", regular)
+	}
+
+	elevated, err := service.OpenRouterTools(ctx, tools.DynamicToolListRequest{
+		GuildID:        "guild-1",
+		InvocationType: InvocationChatTool,
+		Access: tools.ToolAccess{
+			Policy:      tools.ToolPolicyWriteConfirmed,
+			Permissions: map[string]struct{}{admin.PermissionToolComposeInvoke: {}, admin.PermissionAdminConfigRead: {}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("OpenRouterTools elevated: %v", err)
+	}
+	if len(elevated) != 1 || elevated[0].Function.Name != "config_reader" {
+		t.Fatalf("expected elevated access to see config_reader, got %+v", elevated)
 	}
 }
 

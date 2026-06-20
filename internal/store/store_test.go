@@ -30,8 +30,8 @@ func TestOpenRunsMigrationsAndPragmas(t *testing.T) {
 	if err := store.DB.Table("schema_migrations").Count(&count).Error; err != nil {
 		t.Fatalf("schema migration count failed: %v", err)
 	}
-	if count != 9 {
-		t.Fatalf("expected nine migrations, got %d", count)
+	if count != 11 {
+		t.Fatalf("expected eleven migrations, got %d", count)
 	}
 
 	var tableCount int64
@@ -49,6 +49,15 @@ func TestOpenRunsMigrationsAndPragmas(t *testing.T) {
 		t.Fatalf("expected discord events table, got %d", tableCount)
 	}
 
+	for _, column := range []string{"owner_user_id", "installed_by_user_id"} {
+		if err := store.DB.Raw("SELECT COUNT(*) FROM pragma_table_info('guilds') WHERE name = ?", column).Scan(&tableCount).Error; err != nil {
+			t.Fatalf("%s column lookup failed: %v", column, err)
+		}
+		if tableCount != 1 {
+			t.Fatalf("expected guilds.%s column, got %d", column, tableCount)
+		}
+	}
+
 	for _, table := range []string{"composed_tools", "composed_tool_versions", "composed_tool_runs", "composed_tool_dedupes"} {
 		if err := store.DB.Raw("SELECT COUNT(*) FROM sqlite_master WHERE name = ?", table).Scan(&tableCount).Error; err != nil {
 			t.Fatalf("%s table lookup failed: %v", table, err)
@@ -56,6 +65,13 @@ func TestOpenRunsMigrationsAndPragmas(t *testing.T) {
 		if tableCount != 1 {
 			t.Fatalf("expected %s table, got %d", table, tableCount)
 		}
+	}
+
+	if err := store.DB.Raw("SELECT COUNT(*) FROM sqlite_master WHERE name = 'guild_tool_roles'").Scan(&tableCount).Error; err != nil {
+		t.Fatalf("guild tool roles table lookup failed: %v", err)
+	}
+	if tableCount != 1 {
+		t.Fatalf("expected guild_tool_roles table, got %d", tableCount)
 	}
 }
 

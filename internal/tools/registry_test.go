@@ -23,7 +23,7 @@ func TestDefaultRegistryDefinitionsAreValid(t *testing.T) {
 		t.Fatalf("NewDefaultRegistry: %v", err)
 	}
 	definitions := registry.Definitions()
-	if len(definitions) != 79 {
+	if len(definitions) != 80 {
 		t.Fatalf("expected full Discord tool surface plus assistant tools, got %d", len(definitions))
 	}
 	for _, definition := range definitions {
@@ -78,6 +78,41 @@ func TestOpenRouterToolsFiltersByPermission(t *testing.T) {
 		if strings.Contains(tool.Function.Name, ".") {
 			t.Fatalf("wire tool name should be provider-safe: %s", tool.Function.Name)
 		}
+	}
+}
+
+func TestOpenRouterToolsHonorsRoleToolRestrictions(t *testing.T) {
+	registry, err := NewDefaultRegistry()
+	if err != nil {
+		t.Fatalf("NewDefaultRegistry: %v", err)
+	}
+
+	restricted := registry.OpenRouterToolsForAccess(ToolAccess{
+		Policy:          ToolPolicyReadOnly,
+		Permissions:     map[string]struct{}{admin.PermissionAssistantWebSearch: {}},
+		RestrictedTools: map[string]struct{}{"web.search": {}},
+	})
+	if toolNames(restricted)["web_search"] {
+		t.Fatalf("web_search should be hidden when restricted to another role: %+v", toolNames(restricted))
+	}
+
+	allowed := registry.OpenRouterToolsForAccess(ToolAccess{
+		Policy:          ToolPolicyReadOnly,
+		Permissions:     map[string]struct{}{admin.PermissionAssistantWebSearch: {}},
+		AllowedTools:    map[string]struct{}{"web.search": {}},
+		RestrictedTools: map[string]struct{}{"web.search": {}},
+	})
+	if !toolNames(allowed)["web_search"] {
+		t.Fatalf("web_search should be visible to an allowed role: %+v", toolNames(allowed))
+	}
+
+	adminOnly := registry.OpenRouterToolsForAccess(ToolAccess{
+		Policy:       ToolPolicyOwnerOps,
+		Permissions:  map[string]struct{}{admin.PermissionAssistantUse: {}},
+		AllowedTools: map[string]struct{}{"read_config": {}},
+	})
+	if toolNames(adminOnly)["read_config"] {
+		t.Fatalf("tool allowlist should not grant admin permissions: %+v", toolNames(adminOnly))
 	}
 }
 
@@ -411,9 +446,6 @@ func TestExecutorRunsAdminServiceTools(t *testing.T) {
 		t.Fatalf("NewDefaultRegistry: %v", err)
 	}
 	adminOps := newToolAdminService(t)
-	if _, err := adminOps.SetupGuild(context.Background(), "guild-1", "admin"); err != nil {
-		t.Fatalf("setup guild: %v", err)
-	}
 	executor := NewExecutor(registry, nil, nil).WithAdminOperations(adminOps)
 
 	consent, err := executor.Execute(context.Background(), ExecutionRequest{
@@ -494,6 +526,26 @@ func TestExecutorRunsAdminServiceTools(t *testing.T) {
 	}
 	if !strings.Contains(search.Message.Content, "Deploy notes") {
 		t.Fatalf("unexpected knowledge search result: %+v", search)
+	}
+
+	toolAccess, err := executor.Execute(context.Background(), ExecutionRequest{
+		GuildID: "guild-1",
+		ActorID: "admin",
+		Access:  testAccess(ToolPolicyWriteConfirmed, admin.PermissionAdminConfigWrite),
+		Call: llm.ToolCall{
+			ID:   "call-tool-access",
+			Type: "function",
+			Function: llm.ToolCallFunction{
+				Name:      "panda_manage_tool_access",
+				Arguments: `{"action":"add","tool_name":"web.search","role_id":"role-search"}`,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Execute tool access add: %v", err)
+	}
+	if !strings.Contains(toolAccess.Message.Content, "web.search") || !strings.Contains(toolAccess.Message.Content, "role-search") {
+		t.Fatalf("unexpected tool access result: %+v", toolAccess)
 	}
 }
 

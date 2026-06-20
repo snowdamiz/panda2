@@ -281,12 +281,12 @@ func TestJobClaimReclaimsExpiredLease(t *testing.T) {
 	}
 	defer db.Close()
 
+	now := time.Date(2026, 6, 20, 12, 0, 0, 0, time.UTC)
 	repo := NewJobRepository(db.DB)
-	job, err := repo.Enqueue(ctx, store.Job{Kind: "summarize", GuildID: "guild-1", Payload: "{}", MaxAttempts: 2})
+	job, err := repo.Enqueue(ctx, store.Job{Kind: "summarize", GuildID: "guild-1", Payload: "{}", MaxAttempts: 2, RunAfter: now.Add(-time.Minute)})
 	if err != nil {
 		t.Fatalf("Enqueue: %v", err)
 	}
-	now := time.Date(2026, 6, 20, 12, 0, 0, 0, time.UTC)
 	claimed, ok, err := repo.ClaimNext(ctx, "summarize", "worker-1", time.Minute, now)
 	if err != nil || !ok {
 		t.Fatalf("first ClaimNext ok=%t err=%v", ok, err)
@@ -316,12 +316,12 @@ func TestJobClaimFailsExpiredLeaseAfterMaxAttempts(t *testing.T) {
 	}
 	defer db.Close()
 
+	now := time.Date(2026, 6, 20, 12, 0, 0, 0, time.UTC)
 	repo := NewJobRepository(db.DB)
-	job, err := repo.Enqueue(ctx, store.Job{Kind: "summarize", GuildID: "guild-1", Payload: "{}", MaxAttempts: 1})
+	job, err := repo.Enqueue(ctx, store.Job{Kind: "summarize", GuildID: "guild-1", Payload: "{}", MaxAttempts: 1, RunAfter: now.Add(-time.Minute)})
 	if err != nil {
 		t.Fatalf("Enqueue: %v", err)
 	}
-	now := time.Date(2026, 6, 20, 12, 0, 0, 0, time.UTC)
 	if _, ok, err := repo.ClaimNext(ctx, "summarize", "worker-1", time.Minute, now); err != nil || !ok {
 		t.Fatalf("first ClaimNext ok=%t err=%v", ok, err)
 	}

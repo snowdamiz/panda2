@@ -48,16 +48,19 @@ type ModalInput struct {
 }
 
 type BackgroundTask struct {
-	RequestID          string   `json:"request_id,omitempty"`
-	GuildID            string   `json:"guild_id"`
-	UserID             string   `json:"user_id"`
-	ChannelID          string   `json:"channel_id"`
-	Command            string   `json:"command"`
-	Input              string   `json:"input"`
-	Tone               string   `json:"tone,omitempty"`
-	Language           string   `json:"language,omitempty"`
-	Detail             string   `json:"detail,omitempty"`
-	AllowedPermissions []string `json:"allowed_permissions,omitempty"`
+	RequestID                    string   `json:"request_id,omitempty"`
+	GuildID                      string   `json:"guild_id"`
+	UserID                       string   `json:"user_id"`
+	ChannelID                    string   `json:"channel_id"`
+	Command                      string   `json:"command"`
+	Input                        string   `json:"input"`
+	Tone                         string   `json:"tone,omitempty"`
+	Language                     string   `json:"language,omitempty"`
+	Detail                       string   `json:"detail,omitempty"`
+	AllowedPermissions           []string `json:"allowed_permissions,omitempty"`
+	AllowedTools                 []string `json:"allowed_tools,omitempty"`
+	RestrictedTools              []string `json:"restricted_tools,omitempty"`
+	RequireExplicitComposedTools bool     `json:"require_explicit_composed_tools,omitempty"`
 }
 
 type ThreadRequest struct {

@@ -41,6 +41,7 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 		return nil, err
 	}
 
+	guilds := repository.NewGuildRepository(dataStore.DB)
 	guildConfigs := repository.NewGuildConfigRepository(dataStore.DB)
 	usage := repository.NewUsageRepository(dataStore.DB)
 	audit := repository.NewAuditRepository(dataStore.DB)
@@ -70,7 +71,8 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 		return err
 	})
 	opsService := ops.NewService(cfg, dataStore, guildConfigs, jobs, worker)
-	adminService := admin.NewService(guildConfigs, usage, audit, memoryService, access, budgets, openRouter, cfg.OpenRouterModel, members)
+	adminService := admin.NewService(guildConfigs, usage, audit, memoryService, access, budgets, openRouter, cfg.OpenRouterModel, members).
+		WithGuildRepository(guilds)
 	toolRegistry, err := tools.NewDefaultRegistry()
 	if err != nil {
 		_ = dataStore.Close()
@@ -108,6 +110,7 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 		toolExecutor.WithDiscordToolProvider(provider)
 		composedService.WithDiscordResolver(provider)
 	}
+	installService := discordbot.NewInstallService(guilds, audit, discord)
 	worker.Register(discordbot.InteractionJobKind, discord.HandleInteractionJob)
 	worker.Register(composed.EventJobKind, composedService.HandleEventJob)
 	worker.Register(composed.RunJobKind, composedService.HandleRunJob)
@@ -116,7 +119,7 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 		cfg:        cfg,
 		logger:     logger,
 		store:      dataStore,
-		httpServer: pandahttp.New(cfg, dataStore),
+		httpServer: pandahttp.New(cfg, dataStore).WithDiscordWebhookHandler(installService),
 		discord:    discord,
 		worker:     worker,
 	}, nil

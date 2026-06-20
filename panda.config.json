@@ -1,12 +1,13 @@
 {
   "discord": {
-    "application_id": "",
+    "application_id": "1517922349956075570",
     "guild_id": "",
+    "public_key": "7afc0efe59e435bd77545f4e64130bd2ee3042c0bc64b7c409f093b5614dcb9c",
     "owner_user_ids": []
   },
   "openrouter": {
     "base_url": "https://openrouter.ai/api/v1",
-    "default_model": "openrouter/auto",
+    "default_model": "x-ai/grok-4.3",
     "fallback_models": [],
     "embedding_model": "",
     "app_url": "",

@@ -13,18 +13,19 @@ The default test run covers the SQLite fallback search path. The tagged run cove
 ## Fly.io Deployment
 
 1. Create one Fly volume mounted at `/data`.
-2. Set `discord.application_id` and `discord.owner_user_ids` in `panda.config.json`, or provide `DISCORD_APPLICATION_ID` and `OWNER_USER_IDS` as environment overrides.
+2. Set `discord.application_id`, `discord.public_key`, and `discord.owner_user_ids` in `panda.config.json`, or provide `DISCORD_APPLICATION_ID`, `DISCORD_PUBLIC_KEY`, and `OWNER_USER_IDS` as environment overrides.
 3. Set secrets with `fly secrets set`:
    - `DISCORD_BOT_TOKEN`
    - `OPENROUTER_API_KEY`
 4. Deploy with `fly deploy`.
-5. Check rollout status with `fly status`, `fly releases`, and `fly logs`.
+5. In the Discord Developer Portal Webhooks page, set the endpoint to `https://<app-host>/discord/webhook-events`, enable events, and subscribe to `APPLICATION_AUTHORIZED`.
+6. Check rollout status with `fly status`, `fly releases`, and `fly logs`.
 
 Keep SQLite on a single primary Machine for v1. Do not scale writers horizontally until the storage plan changes.
 
 ## Health Checks
 
-- `GET /healthz` reports configuration, Fiber, Discord, OpenRouter, SQLite, and local storage.
+- `GET /healthz` reports configuration, Fiber, Discord gateway credentials, Discord webhook public key, OpenRouter, SQLite, and local storage.
 - `GET /readyz` returns unavailable when SQLite is not ready.
 - `GET /metrics` emits Prometheus-style gauges for SQLite, configured integrations, schema version, queue depth, and usage totals.
 - `/ops health` gives bot owners a Discord-side operational summary, including shard status. V1 reports `single-gateway-v1` when Discord credentials are configured and `disabled` when the gateway is not running.

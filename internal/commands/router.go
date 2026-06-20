@@ -21,6 +21,7 @@ import (
 	"github.com/sn0w/panda2/internal/security"
 	"github.com/sn0w/panda2/internal/store"
 	"github.com/sn0w/panda2/internal/textutil"
+	toolsvc "github.com/sn0w/panda2/internal/tools"
 )
 
 type Router struct {
@@ -41,6 +42,30 @@ type ThreadManager interface {
 type AttachmentReader interface {
 	Get(ctx context.Context, guildID string, id uint) (store.Attachment, error)
 }
+
+type helpAccess struct {
+	config     bool
+	soul       bool
+	moderation bool
+	tools      bool
+}
+
+func (access helpAccess) elevated() bool {
+	return access.config || access.soul || access.moderation || access.tools
+}
+
+const baseHelpMessage = "### Panda Help\n\n" +
+	"**Chat naturally**\n" +
+	"- Mention `Panda` in a normal message: `Panda is this true?`\n" +
+	"- Panda checks intent before replying, so casual mentions do not always trigger it.\n\n" +
+	"**Message actions**\n" +
+	"- Use **Explain with Panda** or **Summarize with Panda** from a message's **Apps** menu."
+
+const regularHelpMessage = baseHelpMessage + "\n\n" +
+	"**Good things to ask**\n" +
+	"- Questions about the conversation\n" +
+	"- Summaries, rewrites, and explanations\n" +
+	"- Help thinking through an idea or decision"
 
 func NewRouter(adminService *admin.Service, assistantService *assistant.Service, opsService *ops.Service, limiter *ratelimit.Limiter) *Router {
 	return &Router{admin: adminService, assistant: assistantService, ops: opsService, rateLimit: limiter}
@@ -71,7 +96,7 @@ func (r *Router) Handle(ctx context.Context, request Request) Response {
 	case "ping":
 		return Response{Content: "pong", Ephemeral: true}
 	case "help":
-		return Response{Content: "Talk naturally in Discord with the word `Panda`, like `Panda is this true?`; Panda uses the model to decide whether to answer. Message context menus can explain or summarize. Admins can use `/admin setup`, `/admin model`, `/admin prompt`, `/admin soul`, `/admin audit`, `/admin enable`, and `/admin disable`; usage, limits, server knowledge, role/channel access, memory consent, and moderation guidance are handled through Panda chat/tools.", Ephemeral: true}
+		return r.handleHelp(ctx, request)
 	case "admin":
 		return r.handleAdmin(ctx, request)
 	case "ops":
@@ -87,6 +112,97 @@ func (r *Router) Handle(ctx context.Context, request Request) Response {
 	default:
 		return Response{Content: "Unknown command.", Ephemeral: true}
 	}
+}
+
+func (r *Router) handleHelp(ctx context.Context, request Request) Response {
+	return Response{Content: r.helpMessage(ctx, request), Ephemeral: true}
+}
+
+func (r *Router) helpMessage(ctx context.Context, request Request) string {
+	access := r.helpAccess(ctx, request)
+	if !access.elevated() {
+		return regularHelpMessage
+	}
+	return elevatedHelpMessage(access)
+}
+
+func (r *Router) helpAccess(ctx context.Context, request Request) helpAccess {
+	if r.admin == nil {
+		return helpAccess{}
+	}
+	accessRequest := assistantAccessRequest(request)
+	allowed := func(check func(context.Context, admin.AssistantAccessRequest) (bool, error)) bool {
+		ok, err := check(ctx, accessRequest)
+		return err == nil && ok
+	}
+	return helpAccess{
+		config:     allowed(r.admin.CanWriteConfig),
+		soul:       allowed(r.admin.CanWriteSoul),
+		moderation: allowed(r.admin.CanUseModeration),
+		tools: allowed(r.admin.CanDraftComposedTool) ||
+			allowed(r.admin.CanApproveComposedTool) ||
+			allowed(r.admin.CanInvokeComposedTool) ||
+			allowed(r.admin.CanAuditComposedTool),
+	}
+}
+
+func elevatedHelpMessage(access helpAccess) string {
+	var builder strings.Builder
+	builder.WriteString(baseHelpMessage)
+
+	if access.moderation {
+		builder.WriteString("\n\n**Moderator tools**\n")
+		builder.WriteString("- Ask Panda for moderation guidance, review help, and action drafts in chat.\n")
+	}
+
+	if access.config || access.soul {
+		builder.WriteString("\n\n**Admin commands**\n")
+		if access.config {
+			builder.WriteString("- `/admin badge role:@Role` - treat that Discord role as Panda admins.\n")
+			builder.WriteString("- `/admin tool action:list` - show role-specific native and composed tool grants.\n")
+			builder.WriteString("- `/admin tool action:add tool_name:<tool> role:@Role` - allow a role to use a specific tool.\n")
+			builder.WriteString("- `/admin tool action:remove tool_name:<tool> role:@Role` - remove that tool grant.\n")
+			builder.WriteString("- `/admin model model:<slug> fallback_models:<slug,slug> temperature:<0-2> max_response_tokens:<64-4000> tool_policy:<policy> dry_run:<true|false>` - update model routing and the server-wide tool ceiling.\n")
+			builder.WriteString("- Tool policy choices: `off`, `read_only`, `assistive`, `admin_only`, `moderator`, `write_confirmed`, `owner_ops`.\n")
+			builder.WriteString("- `/admin prompt prompt:<text> dry_run:<true|false>` - set server instructions; omit `prompt` to open the modal.\n")
+			builder.WriteString("- `/admin audit` - show recent privileged changes.\n")
+			builder.WriteString("- `/admin enable dry_run:<true|false>` - allow Panda to answer again.\n")
+			builder.WriteString("- `/admin disable confirm:<confirmation> dry_run:<true|false>` - pause Panda after confirmation.\n")
+		}
+		if access.soul {
+			builder.WriteString("- `/admin soul soul:<text> dry_run:<true|false>` - set Panda's personality and tone; omit `soul` to open the modal.\n")
+		}
+	}
+
+	if access.tools {
+		builder.WriteString("\n\n**Composed tools**\n")
+		builder.WriteString("- `/tool draft request:<description> dry_run:<true|false>` - draft a composed tool from natural language.\n")
+		builder.WriteString("- `/tool draft spec_json:<json> dry_run:<true|false>` - draft from a complete composed-tool spec.\n")
+		builder.WriteString("- Draft helpers: `role_id`, `role_name`, `channel_id`, `channel_name`, `welcome_text`, `model`.\n")
+		builder.WriteString("- `/tool approve tool:<name> version:<n> confirm:<confirmation>` - approve and enable a version.\n")
+		builder.WriteString("- `/tool list` - list composed tools for this server.\n")
+		builder.WriteString("- `/tool show tool:<name>` - inspect versions and recent runs.\n")
+		builder.WriteString("- `/tool pause|resume|disable|archive tool:<name> dry_run:<true|false>` - change tool status.\n")
+		builder.WriteString("- `/tool run tool:<name> input_json:<object>` - run an approved composed tool.\n")
+		builder.WriteString("- `/tool simulate tool:<name> input_json:<object>` - run with dry-run writes.\n")
+		builder.WriteString("- `/tool export tool:<name>` - export the approved spec JSON.\n")
+		builder.WriteString("- `/tool rollback tool:<name> version:<n> confirm:<confirmation>` - roll back to an approved version.\n")
+	}
+
+	if access.config || access.moderation {
+		builder.WriteString("\n\n**Also available through Panda chat/tools**\n")
+		if access.config {
+			builder.WriteString("- Usage and limits\n")
+			builder.WriteString("- Server knowledge\n")
+			builder.WriteString("- Role/channel access\n")
+			builder.WriteString("- Memory consent\n")
+		}
+		if access.moderation {
+			builder.WriteString("- Moderation guidance\n")
+		}
+	}
+
+	return strings.TrimRight(builder.String(), "\n")
 }
 
 func (r *Router) HandleNaturalMessage(ctx context.Context, request Request) Response {
@@ -175,20 +291,30 @@ func (r *Router) handleAdmin(ctx context.Context, request Request) Response {
 	subcommand := strings.ToLower(request.Subcommand)
 	if !request.IsGuildAdmin && !request.IsOwner {
 		if subcommand != "soul" {
-			return Response{Content: "Only a server administrator can use admin commands.", Ephemeral: true}
+			allowed, err := r.admin.CanWriteConfig(ctx, assistantAccessRequest(request))
+			if err != nil {
+				return Response{Content: "Permission lookup failed. Please try again later.", Ephemeral: true}
+			}
+			if !allowed {
+				return Response{Content: "Only the installing server owner, a server administrator, or a delegated config role can use admin commands.", Ephemeral: true}
+			}
 		}
-		allowed, err := r.admin.CanWriteSoul(ctx, assistantAccessRequest(request))
-		if err != nil {
-			return Response{Content: "Permission lookup failed. Please try again later.", Ephemeral: true}
-		}
-		if !allowed {
-			return Response{Content: "Only a server administrator, moderator, or creator can update Panda's soul.", Ephemeral: true}
+		if subcommand == "soul" {
+			allowed, err := r.admin.CanWriteSoul(ctx, assistantAccessRequest(request))
+			if err != nil {
+				return Response{Content: "Permission lookup failed. Please try again later.", Ephemeral: true}
+			}
+			if !allowed {
+				return Response{Content: "Only the installing server owner, a server administrator, moderator, creator, or delegated soul writer can update Panda's soul.", Ephemeral: true}
+			}
 		}
 	}
 
 	switch subcommand {
-	case "setup":
-		return r.handleAdminSetup(ctx, request)
+	case "badge":
+		return r.handleAdminBadge(ctx, request)
+	case "tool":
+		return r.handleAdminToolAccess(ctx, request)
 	case "model":
 		return r.handleAdminModel(ctx, request)
 	case "prompt":
@@ -206,15 +332,67 @@ func (r *Router) handleAdmin(ctx context.Context, request Request) Response {
 	}
 }
 
-func (r *Router) handleAdminSetup(ctx context.Context, request Request) Response {
-	config, err := r.admin.SetupGuild(ctx, request.GuildID, request.UserID)
-	if err != nil {
-		return Response{Content: "Setup failed. Please check the bot logs.", Ephemeral: true}
+func (r *Router) handleAdminBadge(ctx context.Context, request Request) Response {
+	roleID := strings.TrimSpace(firstNonEmpty(request.Options["badge_role_id"], firstNonEmpty(request.Options["role_id"], request.Options["role"])))
+	if roleID == "" {
+		return Response{Content: "Choose a role for `/admin badge`.", Ephemeral: true}
 	}
-	if config.AssistantEnabled {
-		return Response{Content: fmt.Sprintf("Setup complete. Default model: `%s`.", config.DefaultModel), Ephemeral: true}
+	if _, err := r.admin.SetAdminBadge(ctx, request.GuildID, request.UserID, roleID); err != nil {
+		return Response{Content: "Admin badge could not be saved.", Ephemeral: true}
 	}
-	return Response{Content: "Setup complete. Assistant responses are currently disabled.", Ephemeral: true}
+	return Response{Content: fmt.Sprintf("Admin badge set to %s.", adminBadgeMention(roleID, firstNonEmpty(request.Options["badge_role_name"], request.Options["role_name"]))), Ephemeral: true}
+}
+
+func adminBadgeMention(roleID, roleName string) string {
+	roleID = strings.TrimSpace(roleID)
+	roleName = strings.TrimSpace(roleName)
+	if roleName == "" {
+		return fmt.Sprintf("`%s`", roleID)
+	}
+	return fmt.Sprintf("`%s` (`%s`)", roleName, roleID)
+}
+
+func (r *Router) handleAdminToolAccess(ctx context.Context, request Request) Response {
+	action := strings.ToLower(strings.TrimSpace(firstNonEmpty(request.Options["action"], "list")))
+	toolName := strings.ToLower(strings.TrimSpace(firstNonEmpty(request.Options["tool_name"], request.Options["tool"])))
+	roleID := strings.TrimSpace(firstNonEmpty(request.Options["role_id"], request.Options["role"]))
+	switch action {
+	case "list", "":
+		roles, err := r.admin.ListToolRoles(ctx, request.GuildID)
+		if err != nil {
+			return Response{Content: "Tool access lookup failed.", Ephemeral: true}
+		}
+		if len(roles) == 0 {
+			return Response{Content: "No role-specific tool access rules are configured. Native tools use their normal permission policy; composed tools are admin-only until a role is allowed.", Ephemeral: true}
+		}
+		lines := []string{"Tool access rules:"}
+		for _, role := range roles {
+			lines = append(lines, fmt.Sprintf("- `%s` -> `%s`", role.ToolName, role.RoleID))
+		}
+		return Response{Content: strings.Join(lines, "\n"), Ephemeral: true}
+	case "add", "allow":
+		if toolName == "" || roleID == "" {
+			return Response{Content: "Provide `tool_name` and `role` to allow a role to use a tool.", Ephemeral: true}
+		}
+		toolRole, err := r.admin.AddToolRole(ctx, request.GuildID, request.UserID, toolName, roleID)
+		if err != nil {
+			return Response{Content: "Tool access could not be saved.", Ephemeral: true}
+		}
+		return Response{Content: fmt.Sprintf("Allowed %s to use `%s`.", adminBadgeMention(toolRole.RoleID, request.Options["role_name"]), toolRole.ToolName), Ephemeral: true}
+	case "remove", "deny":
+		if toolName == "" || roleID == "" {
+			return Response{Content: "Provide `tool_name` and `role` to remove tool access.", Ephemeral: true}
+		}
+		if err := r.admin.RemoveToolRole(ctx, request.GuildID, request.UserID, toolName, roleID); err != nil {
+			if errors.Is(err, repository.ErrNotFound) {
+				return Response{Content: "That tool access rule was not found.", Ephemeral: true}
+			}
+			return Response{Content: "Tool access could not be removed.", Ephemeral: true}
+		}
+		return Response{Content: fmt.Sprintf("Removed %s from `%s`.", adminBadgeMention(roleID, request.Options["role_name"]), toolName), Ephemeral: true}
+	default:
+		return Response{Content: "`action` must be `list`, `add`, or `remove`.", Ephemeral: true}
+	}
 }
 
 func (r *Router) handleAdminModel(ctx context.Context, request Request) Response {
@@ -227,9 +405,6 @@ func (r *Router) handleAdminModel(ctx context.Context, request Request) Response
 	}
 	config, err := r.admin.ConfigureModel(ctx, request.GuildID, request.UserID, settings)
 	if err != nil {
-		if errors.Is(err, repository.ErrNotFound) {
-			return Response{Content: "Run `/admin setup` before changing the model.", Ephemeral: true}
-		}
 		return Response{Content: "Model update failed.", Ephemeral: true}
 	}
 	return Response{Content: fmt.Sprintf("Model settings updated. Default `%s`, %d fallback model(s), temperature %.2f, max response %d tokens, tool policy `%s`.", config.DefaultModel, fallbackModelCount(config.FallbackModels), config.Temperature, config.MaxResponseTokens, config.ToolPolicy), Ephemeral: true}
@@ -245,9 +420,6 @@ func (r *Router) handleAdminPrompt(ctx context.Context, request Request) Respons
 	}
 	config, err := r.admin.SetPrompt(ctx, request.GuildID, request.UserID, prompt)
 	if err != nil {
-		if errors.Is(err, repository.ErrNotFound) {
-			return Response{Content: "Run `/admin setup` before changing the prompt.", Ephemeral: true}
-		}
 		return Response{Content: "Prompt update failed.", Ephemeral: true}
 	}
 	return Response{Content: fmt.Sprintf("Server prompt updated (%d characters).", len(config.SystemPromptOverlay)), Ephemeral: true}
@@ -263,9 +435,6 @@ func (r *Router) handleAdminSoul(ctx context.Context, request Request) Response 
 	}
 	config, err := r.admin.SetSoul(ctx, request.GuildID, request.UserID, soul)
 	if err != nil {
-		if errors.Is(err, repository.ErrNotFound) {
-			return Response{Content: "Run `/admin setup` before changing the soul.", Ephemeral: true}
-		}
 		return Response{Content: "Soul update failed.", Ephemeral: true}
 	}
 	return Response{Content: fmt.Sprintf("Agent soul updated (%d characters).", len(config.AgentSoul)), Ephemeral: true}
@@ -286,9 +455,6 @@ func (r *Router) handleAdminToggle(ctx context.Context, request Request, enabled
 	}
 	_, err := r.admin.SetAssistantEnabled(ctx, request.GuildID, request.UserID, enabled)
 	if err != nil {
-		if errors.Is(err, repository.ErrNotFound) {
-			return Response{Content: "Run `/admin setup` before changing assistant status.", Ephemeral: true}
-		}
 		return Response{Content: "Assistant status update failed.", Ephemeral: true}
 	}
 	if enabled {
@@ -323,13 +489,17 @@ func (r *Router) handleAsk(ctx context.Context, request Request, command string)
 		return denied
 	}
 
+	toolFilter := r.toolFilter(ctx, request)
 	answer, err := r.assistant.Ask(ctx, assistant.AskRequest{
-		RequestID:          request.RequestID,
-		GuildID:            request.GuildID,
-		UserID:             request.UserID,
-		ChannelID:          request.ChannelID,
-		Question:           question,
-		AllowedPermissions: r.allowedToolPermissions(ctx, request),
+		RequestID:                    request.RequestID,
+		GuildID:                      request.GuildID,
+		UserID:                       request.UserID,
+		ChannelID:                    request.ChannelID,
+		Question:                     question,
+		AllowedPermissions:           r.allowedToolPermissions(ctx, request),
+		AllowedTools:                 toolFilter.allowed,
+		RestrictedTools:              toolFilter.restricted,
+		RequireExplicitComposedTools: toolFilter.requireExplicitComposed,
 	})
 	if err != nil {
 		return assistantError(err)
@@ -382,14 +552,18 @@ func (r *Router) handleChatMode(ctx context.Context, request Request, threaded b
 		threadName = thread.Name
 	}
 
+	toolFilter := r.toolFilter(ctx, request)
 	answer, err := r.assistant.Chat(ctx, assistant.AskRequest{
-		RequestID:          request.RequestID,
-		GuildID:            request.GuildID,
-		UserID:             request.UserID,
-		ChannelID:          chatChannelID,
-		ThreadID:           threadID,
-		Question:           question,
-		AllowedPermissions: r.allowedToolPermissions(ctx, request),
+		RequestID:                    request.RequestID,
+		GuildID:                      request.GuildID,
+		UserID:                       request.UserID,
+		ChannelID:                    chatChannelID,
+		ThreadID:                     threadID,
+		Question:                     question,
+		AllowedPermissions:           r.allowedToolPermissions(ctx, request),
+		AllowedTools:                 toolFilter.allowed,
+		RestrictedTools:              toolFilter.restricted,
+		RequireExplicitComposedTools: toolFilter.requireExplicitComposed,
 	})
 	if err != nil {
 		return assistantError(err)
@@ -412,17 +586,21 @@ func (r *Router) handleTask(ctx context.Context, request Request) Response {
 		return denied
 	}
 
+	toolFilter := r.toolFilter(ctx, request)
 	task := BackgroundTask{
-		RequestID:          request.RequestID,
-		GuildID:            request.GuildID,
-		UserID:             request.UserID,
-		ChannelID:          request.ChannelID,
-		Command:            request.Command,
-		Input:              input,
-		Tone:               request.Options["tone"],
-		Language:           request.Options["language"],
-		Detail:             request.Options["detail"],
-		AllowedPermissions: permissionNames(r.allowedToolPermissions(ctx, request)),
+		RequestID:                    request.RequestID,
+		GuildID:                      request.GuildID,
+		UserID:                       request.UserID,
+		ChannelID:                    request.ChannelID,
+		Command:                      request.Command,
+		Input:                        input,
+		Tone:                         request.Options["tone"],
+		Language:                     request.Options["language"],
+		Detail:                       request.Options["detail"],
+		AllowedPermissions:           permissionNames(r.allowedToolPermissions(ctx, request)),
+		AllowedTools:                 permissionNames(toolFilter.allowed),
+		RestrictedTools:              permissionNames(toolFilter.restricted),
+		RequireExplicitComposedTools: toolFilter.requireExplicitComposed,
 	}
 	if shouldBackgroundTask(request, input) {
 		return Response{Content: "Queued long summary. The result will replace this response when it is ready.", Background: &task}
@@ -432,16 +610,19 @@ func (r *Router) handleTask(ctx context.Context, request Request) Response {
 
 func (r *Router) HandleBackgroundTask(ctx context.Context, task BackgroundTask) Response {
 	answer, err := r.assistant.CompleteTask(ctx, assistant.TaskRequest{
-		RequestID:          task.RequestID,
-		GuildID:            task.GuildID,
-		UserID:             task.UserID,
-		ChannelID:          task.ChannelID,
-		Command:            task.Command,
-		Input:              task.Input,
-		Tone:               task.Tone,
-		Language:           task.Language,
-		Detail:             task.Detail,
-		AllowedPermissions: permissionsFromNames(task.AllowedPermissions),
+		RequestID:                    task.RequestID,
+		GuildID:                      task.GuildID,
+		UserID:                       task.UserID,
+		ChannelID:                    task.ChannelID,
+		Command:                      task.Command,
+		Input:                        task.Input,
+		Tone:                         task.Tone,
+		Language:                     task.Language,
+		Detail:                       task.Detail,
+		AllowedPermissions:           permissionsFromNames(task.AllowedPermissions),
+		AllowedTools:                 permissionsFromNames(task.AllowedTools),
+		RestrictedTools:              permissionsFromNames(task.RestrictedTools),
+		RequireExplicitComposedTools: task.RequireExplicitComposedTools,
 	})
 	if err != nil {
 		return assistantError(err)
@@ -638,9 +819,47 @@ func assistantAccessRequest(request Request) admin.AssistantAccessRequest {
 	return admin.AssistantAccessRequest{
 		GuildID:      request.GuildID,
 		ChannelID:    request.ChannelID,
+		UserID:       request.UserID,
 		RoleIDs:      request.RoleIDs,
 		IsGuildAdmin: request.IsGuildAdmin,
 		IsOwner:      request.IsOwner,
+	}
+}
+
+type toolFilter struct {
+	allowed                 map[string]struct{}
+	restricted              map[string]struct{}
+	requireExplicitComposed bool
+}
+
+func (r *Router) toolFilter(ctx context.Context, request Request) toolFilter {
+	if r.admin == nil || request.GuildID == "" {
+		return toolFilter{}
+	}
+	accessRequest := assistantAccessRequest(request)
+	hasControl, err := r.admin.HasGuildControl(ctx, accessRequest)
+	if err != nil || hasControl {
+		return toolFilter{}
+	}
+	roles, err := r.admin.ToolRoleAccess(ctx, request.GuildID, request.RoleIDs)
+	if err != nil {
+		return toolFilter{allowed: map[string]struct{}{}, restricted: map[string]struct{}{}, requireExplicitComposed: true}
+	}
+	return toolFilter{
+		allowed:                 namesToSet(roles.AllowedTools),
+		restricted:              namesToSet(roles.RestrictedTools),
+		requireExplicitComposed: true,
+	}
+}
+
+func (r *Router) toolAccess(ctx context.Context, request Request, policy string) toolsvc.ToolAccess {
+	filter := r.toolFilter(ctx, request)
+	return toolsvc.ToolAccess{
+		Policy:                       policy,
+		Permissions:                  r.allowedToolPermissions(ctx, request),
+		AllowedTools:                 filter.allowed,
+		RestrictedTools:              filter.restricted,
+		RequireExplicitComposedTools: filter.requireExplicitComposed,
 	}
 }
 
@@ -662,7 +881,24 @@ func (r *Router) allowedToolPermissions(ctx context.Context, request Request) ma
 	r.addPermissionIfAllowed(ctx, request, permissions, admin.PermissionToolComposeInvoke, r.admin.CanInvokeComposedTool)
 	r.addPermissionIfAllowed(ctx, request, permissions, admin.PermissionToolComposeAudit, r.admin.CanAuditComposedTool)
 	r.addPermissionIfAllowed(ctx, request, permissions, admin.PermissionOwnerOps, r.admin.CanUseOwnerOps)
+	if _, ok := permissions[admin.PermissionToolComposeInvoke]; !ok {
+		filter := r.toolFilter(ctx, request)
+		if filter.requireExplicitComposed && len(filter.allowed) > 0 {
+			permissions[admin.PermissionToolComposeInvoke] = struct{}{}
+		}
+	}
 	return permissions
+}
+
+func namesToSet(names []string) map[string]struct{} {
+	values := map[string]struct{}{}
+	for _, name := range names {
+		name = strings.ToLower(strings.TrimSpace(name))
+		if name != "" {
+			values[name] = struct{}{}
+		}
+	}
+	return values
 }
 
 func (r *Router) addPermissionIfAllowed(ctx context.Context, request Request, permissions map[string]struct{}, permission string, check func(context.Context, admin.AssistantAccessRequest) (bool, error)) {

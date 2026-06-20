@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
 
@@ -17,6 +18,7 @@ import (
 	disgoDiscord "github.com/disgoorg/disgo/discord"
 	"github.com/disgoorg/disgo/events"
 	"github.com/disgoorg/disgo/gateway"
+	"github.com/disgoorg/disgo/rest"
 	"github.com/disgoorg/snowflake/v2"
 	"github.com/sn0w/panda2/internal/attachments"
 	"github.com/sn0w/panda2/internal/commands"
@@ -35,6 +37,7 @@ type Bot struct {
 	attachments AttachmentRecorder
 	events      DiscordEventRecorder
 	httpClient  *http.Client
+	closeOnce   sync.Once
 }
 
 type AttachmentRecorder interface {
@@ -47,6 +50,11 @@ type DiscordEventRecorder interface {
 
 type InteractionJobQueue interface {
 	Enqueue(ctx context.Context, job store.Job) (store.Job, error)
+}
+
+type commandSyncer interface {
+	SetGlobalCommands(applicationID snowflake.ID, commands []disgoDiscord.ApplicationCommandCreate, opts ...rest.RequestOpt) ([]disgoDiscord.ApplicationCommand, error)
+	SetGuildCommands(applicationID snowflake.ID, guildID snowflake.ID, commands []disgoDiscord.ApplicationCommandCreate, opts ...rest.RequestOpt) ([]disgoDiscord.ApplicationCommand, error)
 }
 
 const maxAttachmentExtractBytes = 1 << 20
@@ -149,7 +157,15 @@ func (b *Bot) Start(ctx context.Context) error {
 		return nil
 	}
 	if err := b.registerCommands(); err != nil {
-		return err
+		if !b.canContinueAfterCommandRegistrationError(err) {
+			return err
+		}
+		b.logger.Warn("discord command registration skipped",
+			slog.String("err", err.Error()),
+			slog.String("environment", b.cfg.Environment),
+			slog.String("guild_id", b.cfg.DiscordGuildID),
+			slog.String("hint", "install the app in this guild or clear DISCORD_GUILD_ID to skip guild-scoped command sync"),
+		)
 	}
 	if err := b.client.OpenGateway(ctx); err != nil {
 		return err
@@ -159,23 +175,75 @@ func (b *Bot) Start(ctx context.Context) error {
 }
 
 func (b *Bot) Close(ctx context.Context) {
-	if b.client != nil {
-		b.client.Close(ctx)
+	b.closeOnce.Do(func() {
+		if b.client != nil {
+			b.client.Close(ctx)
+		}
+	})
+}
+
+func (b *Bot) LeaveGuild(ctx context.Context, guildID string) error {
+	if b.client == nil {
+		return errors.New("discord client is not configured")
 	}
+	id, err := snowflake.Parse(strings.TrimSpace(guildID))
+	if err != nil {
+		return fmt.Errorf("parse guild id: %w", err)
+	}
+	return b.client.Rest.LeaveGuild(id)
 }
 
 func (b *Bot) registerCommands() error {
-	commands := applicationCommands()
-	if b.cfg.DiscordGuildID != "" {
-		guildID, err := snowflake.Parse(b.cfg.DiscordGuildID)
+	return syncApplicationCommands(b.client.Rest, b.client.ApplicationID, b.cfg.DiscordGuildID, applicationCommands())
+}
+
+func syncApplicationCommands(syncer commandSyncer, applicationID snowflake.ID, guildIDValue string, commands []disgoDiscord.ApplicationCommandCreate) error {
+	guildIDValue = strings.TrimSpace(guildIDValue)
+	if guildIDValue == "" {
+		_, err := syncer.SetGlobalCommands(applicationID, commands)
 		if err != nil {
-			return fmt.Errorf("parse DISCORD_GUILD_ID: %w", err)
+			return fmt.Errorf("set global commands: %w", err)
 		}
-		_, err = b.client.Rest.SetGuildCommands(b.client.ApplicationID, guildID, commands)
-		return err
+		return nil
 	}
-	_, err := b.client.Rest.SetGlobalCommands(b.client.ApplicationID, commands)
-	return err
+
+	guildID, err := snowflake.Parse(guildIDValue)
+	if err != nil {
+		return fmt.Errorf("parse DISCORD_GUILD_ID: %w", err)
+	}
+	if _, err := syncer.SetGlobalCommands(applicationID, []disgoDiscord.ApplicationCommandCreate{}); err != nil {
+		return fmt.Errorf("clear global commands before guild sync: %w", err)
+	}
+	if _, err := syncer.SetGuildCommands(applicationID, guildID, commands); err != nil {
+		return fmt.Errorf("set guild commands: %w", err)
+	}
+	return nil
+}
+
+func (b *Bot) canContinueAfterCommandRegistrationError(err error) bool {
+	if strings.EqualFold(b.cfg.Environment, "production") {
+		return false
+	}
+	if b.cfg.DiscordGuildID == "" {
+		return false
+	}
+	return isRecoverableCommandRegistrationError(err)
+}
+
+func isRecoverableCommandRegistrationError(err error) bool {
+	var restErr *rest.Error
+	if !errors.As(err, &restErr) {
+		return false
+	}
+	switch restErr.Code {
+	case rest.JSONErrorCodeMissingAccess,
+		rest.JSONErrorCodeLackPermissionsToPerformAction,
+		rest.JSONErrorCodeMissingRequiredOAuth2Scope,
+		rest.JSONErrorCodeUnknownGuild:
+		return true
+	default:
+		return false
+	}
 }
 
 func applicationCommands() []disgoDiscord.ApplicationCommandCreate {
@@ -253,8 +321,42 @@ func applicationCommands() []disgoDiscord.ApplicationCommandCreate {
 			Description: "Admin commands",
 			Options: []disgoDiscord.ApplicationCommandOption{
 				disgoDiscord.ApplicationCommandOptionSubCommand{
-					Name:        "setup",
-					Description: "Initialize Panda for this server",
+					Name:        "badge",
+					Description: "Delegate Panda admin access to a role",
+					Options: []disgoDiscord.ApplicationCommandOption{
+						disgoDiscord.ApplicationCommandOptionRole{
+							Name:        "role",
+							Description: "Role Panda should treat as admin",
+							Required:    true,
+						},
+					},
+				},
+				disgoDiscord.ApplicationCommandOptionSubCommand{
+					Name:        "tool",
+					Description: "Allow a role to use a specific Panda tool",
+					Options: []disgoDiscord.ApplicationCommandOption{
+						disgoDiscord.ApplicationCommandOptionString{
+							Name:        "action",
+							Description: "Tool access action",
+							Required:    true,
+							Choices: []disgoDiscord.ApplicationCommandOptionChoiceString{
+								{Name: "List", Value: "list"},
+								{Name: "Add", Value: "add"},
+								{Name: "Remove", Value: "remove"},
+							},
+						},
+						disgoDiscord.ApplicationCommandOptionString{
+							Name:        "tool_name",
+							Description: "Native or composed tool name, such as web.search or welcome_builder",
+							Required:    false,
+							MaxLength:   &maxConfirmLength,
+						},
+						disgoDiscord.ApplicationCommandOptionRole{
+							Name:        "role",
+							Description: "Role to allow or remove",
+							Required:    false,
+						},
+					},
 				},
 				disgoDiscord.ApplicationCommandOptionSubCommand{
 					Name:        "model",
@@ -466,10 +568,14 @@ func (b *Bot) handleSlashCommand(event *events.ApplicationCommandInteractionCrea
 	if question, ok := data.OptString("question"); ok {
 		request.Options["question"] = question
 	}
-	for _, name := range []string{"model", "fallback_models", "temperature", "max_response_tokens", "max_tokens", "tool_policy", "prompt", "soul", "action", "confirm", "request", "description", "spec_json", "role_id", "role_name", "channel_id", "channel_name", "welcome_text", "tool", "name", "version", "input_json"} {
+	for _, name := range []string{"model", "fallback_models", "temperature", "max_response_tokens", "max_tokens", "tool_policy", "prompt", "soul", "action", "confirm", "request", "description", "spec_json", "role_id", "role_name", "channel_id", "channel_name", "welcome_text", "tool", "tool_name", "name", "version", "input_json"} {
 		if value, ok := data.OptString(name); ok {
 			request.Options[name] = value
 		}
+	}
+	if role, ok := data.OptRole("role"); ok {
+		request.Options["role_id"] = role.ID.String()
+		request.Options["role_name"] = role.Name
 	}
 	if dryRun, ok := data.OptBool("dry_run"); ok && dryRun {
 		request.Options["dry_run"] = "true"
@@ -731,7 +837,7 @@ func (b *Bot) requestFromComponentEvent(event *events.ComponentInteractionCreate
 		Options:      map[string]string{},
 		UserID:       event.User().ID.String(),
 		IsOwner:      b.cfg.IsOwner(event.User().ID.String()),
-		IsGuildAdmin: memberIsGuildAdmin(event.Member()),
+		IsGuildAdmin: b.isComponentGuildAdmin(event),
 		ChannelID:    event.Channel().ID().String(),
 	}
 	if member := event.Member(); member != nil {
@@ -770,7 +876,7 @@ func (b *Bot) requestFromModalEvent(event *events.ModalSubmitInteractionCreate) 
 		Options:      map[string]string{},
 		UserID:       event.User().ID.String(),
 		IsOwner:      b.cfg.IsOwner(event.User().ID.String()),
-		IsGuildAdmin: memberIsGuildAdmin(event.Member()),
+		IsGuildAdmin: b.isModalGuildAdmin(event),
 		ChannelID:    event.Channel().ID().String(),
 	}
 	if member := event.Member(); member != nil {
@@ -923,13 +1029,14 @@ func (b *Bot) onMessageCreate(event *events.MessageCreate) {
 		}
 	}
 	response := b.router.HandleNaturalMessage(context.Background(), commands.Request{
-		RequestID: event.Message.ID.String(),
-		Options:   options,
-		GuildID:   guildID,
-		ChannelID: event.ChannelID.String(),
-		UserID:    event.Message.Author.ID.String(),
-		RoleIDs:   messageRoleIDs(event.Message.Member),
-		IsOwner:   b.cfg.IsOwner(event.Message.Author.ID.String()),
+		RequestID:    event.Message.ID.String(),
+		Options:      options,
+		GuildID:      guildID,
+		ChannelID:    event.ChannelID.String(),
+		UserID:       event.Message.Author.ID.String(),
+		RoleIDs:      messageRoleIDs(event.Message.Member),
+		IsOwner:      b.cfg.IsOwner(event.Message.Author.ID.String()),
+		IsGuildAdmin: b.isMessageGuildOwner(event, event.Message.Author.ID),
 	})
 	if response.Content == "" {
 		return
@@ -1026,7 +1133,36 @@ func attachmentContentType(attachment disgoDiscord.Attachment) string {
 }
 
 func (b *Bot) isGuildAdmin(event *events.ApplicationCommandInteractionCreate) bool {
-	return memberIsGuildAdmin(event.Member())
+	if memberIsGuildAdmin(event.Member()) {
+		return true
+	}
+	guild, ok := event.Guild()
+	return userOwnsGuild(event.User().ID, guild, ok)
+}
+
+func (b *Bot) isComponentGuildAdmin(event *events.ComponentInteractionCreate) bool {
+	if memberIsGuildAdmin(event.Member()) {
+		return true
+	}
+	guild, ok := event.Guild()
+	return userOwnsGuild(event.User().ID, guild, ok)
+}
+
+func (b *Bot) isModalGuildAdmin(event *events.ModalSubmitInteractionCreate) bool {
+	if memberIsGuildAdmin(event.Member()) {
+		return true
+	}
+	guild, ok := event.Guild()
+	return userOwnsGuild(event.User().ID, guild, ok)
+}
+
+func (b *Bot) isMessageGuildOwner(event *events.MessageCreate, userID snowflake.ID) bool {
+	guild, ok := event.Guild()
+	return userOwnsGuild(userID, guild, ok)
+}
+
+func userOwnsGuild(userID snowflake.ID, guild disgoDiscord.Guild, ok bool) bool {
+	return ok && guild.OwnerID == userID
 }
 
 func memberIsGuildAdmin(member *disgoDiscord.ResolvedMember) bool {

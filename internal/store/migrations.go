@@ -436,6 +436,35 @@ var migrations = []Migration{
 			`ALTER TABLE guild_configs ADD COLUMN agent_soul TEXT NOT NULL DEFAULT ''`,
 		},
 	},
+	{
+		Version: 10,
+		Name:    "guild_install_owner_metadata",
+		SQL: []string{
+			`ALTER TABLE guilds ADD COLUMN owner_user_id TEXT NOT NULL DEFAULT ''`,
+			`ALTER TABLE guilds ADD COLUMN installed_by_user_id TEXT NOT NULL DEFAULT ''`,
+			`CREATE INDEX IF NOT EXISTS idx_guilds_owner_user_id ON guilds(owner_user_id)`,
+			`CREATE INDEX IF NOT EXISTS idx_guilds_installed_by_user_id ON guilds(installed_by_user_id)`,
+			`CREATE INDEX IF NOT EXISTS idx_guilds_install_status ON guilds(install_status)`,
+		},
+	},
+	{
+		Version: 11,
+		Name:    "guild_tool_role_access",
+		SQL: []string{
+			`CREATE TABLE IF NOT EXISTS guild_tool_roles (
+				id INTEGER PRIMARY KEY AUTOINCREMENT,
+				guild_id TEXT NOT NULL,
+				tool_name TEXT NOT NULL,
+				role_id TEXT NOT NULL,
+				created_at DATETIME NOT NULL,
+				updated_at DATETIME NOT NULL,
+				UNIQUE(guild_id, tool_name, role_id)
+			)`,
+			`CREATE INDEX IF NOT EXISTS idx_guild_tool_roles_guild_id ON guild_tool_roles(guild_id)`,
+			`CREATE INDEX IF NOT EXISTS idx_guild_tool_roles_tool_name ON guild_tool_roles(tool_name)`,
+			`CREATE INDEX IF NOT EXISTS idx_guild_tool_roles_role_id ON guild_tool_roles(role_id)`,
+		},
+	},
 }
 
 func RunMigrations(db *gorm.DB) error {

@@ -2,6 +2,7 @@ package config
 
 import (
 	"bytes"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,7 +14,9 @@ import (
 
 const (
 	configPathEnv      = "PANDA_CONFIG"
+	envFilePathEnv     = "PANDA_ENV_FILE"
 	defaultConfigPath  = "panda.config.json"
+	defaultEnvFilePath = ".env"
 	defaultDevDataDir  = "data"
 	defaultProdDataDir = "/data"
 )
@@ -22,6 +25,7 @@ type Config struct {
 	DiscordBotToken                          string
 	DiscordApplicationID                     string
 	DiscordGuildID                           string
+	DiscordPublicKey                         string
 	OpenRouterAPIKey                         string
 	OpenRouterBaseURL                        string
 	OpenRouterModel                          string
@@ -54,6 +58,7 @@ type fileConfig struct {
 type fileDiscordConfig struct {
 	ApplicationID string   `json:"application_id"`
 	GuildID       string   `json:"guild_id"`
+	PublicKey     string   `json:"public_key"`
 	OwnerUserIDs  []string `json:"owner_user_ids"`
 }
 
@@ -94,6 +99,9 @@ func Load() (Config, []string, error) {
 	if err := applyConfigFile(&cfg); err != nil {
 		return cfg, nil, err
 	}
+	if err := applyEnvFile(&cfg); err != nil {
+		return cfg, nil, err
+	}
 	applyEnv(&cfg)
 	finalize(&cfg)
 
@@ -121,6 +129,12 @@ func (c Config) Validate() ([]string, error) {
 	if c.BraveSearchBaseURL == "" {
 		return nil, errors.New("brave_search.base_url (BRAVE_SEARCH_BASE_URL) must not be empty")
 	}
+	if c.DiscordPublicKey != "" {
+		decoded, err := hex.DecodeString(c.DiscordPublicKey)
+		if err != nil || len(decoded) != 32 {
+			return nil, errors.New("discord.public_key (DISCORD_PUBLIC_KEY) must be a 32-byte hex-encoded Ed25519 public key")
+		}
+	}
 	if c.OpenRouterCircuitBreakerFailureThreshold < 0 {
 		return nil, errors.New("openrouter.circuit_breaker.failure_threshold (OPENROUTER_CIRCUIT_FAILURE_THRESHOLD) must not be negative")
 	}
@@ -136,6 +150,12 @@ func (c Config) Validate() ([]string, error) {
 
 	if !c.DiscordConfigured() {
 		warnings = append(warnings, "Discord credentials are not fully configured; gateway and command registration will be skipped")
+	}
+	if c.DiscordPublicKey == "" {
+		warnings = append(warnings, "DISCORD_PUBLIC_KEY is not configured; Discord owner-only install webhooks are disabled")
+	}
+	if c.DiscordPublicKey != "" && c.DiscordBotToken == "" {
+		warnings = append(warnings, "DISCORD_PUBLIC_KEY is configured but DISCORD_BOT_TOKEN is missing; denied installs cannot be removed from guilds")
 	}
 	if !c.OpenRouterConfigured() {
 		warnings = append(warnings, "OPENROUTER_API_KEY is not configured; natural-language assistant responses are disabled")
@@ -155,6 +175,10 @@ func (c Config) Validate() ([]string, error) {
 
 func (c Config) DiscordConfigured() bool {
 	return c.DiscordBotToken != "" && c.DiscordApplicationID != ""
+}
+
+func (c Config) DiscordWebhookConfigured() bool {
+	return c.DiscordPublicKey != ""
 }
 
 func (c Config) OpenRouterConfigured() bool {
@@ -219,12 +243,202 @@ func configFilePath() (string, bool) {
 	return defaultConfigPath, false
 }
 
+func applyEnvFile(cfg *Config) error {
+	path, required, enabled := envFilePath()
+	if !enabled {
+		return nil
+	}
+	data, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		if required {
+			return fmt.Errorf("read %s %q: %w", envFilePathEnv, path, err)
+		}
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("read env file %q: %w", path, err)
+	}
+	values, err := parseEnvFile(data)
+	if err != nil {
+		return fmt.Errorf("parse env file %q: %w", path, err)
+	}
+	applyEnvValues(cfg, func(name string) (string, bool) {
+		value, ok := values[name]
+		return value, ok
+	})
+	return nil
+}
+
+func envFilePath() (string, bool, bool) {
+	if value, ok := os.LookupEnv(envFilePathEnv); ok {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			return "", false, false
+		}
+		return value, true, true
+	}
+	return defaultEnvFilePath, false, true
+}
+
+func parseEnvFile(data []byte) (map[string]string, error) {
+	values := map[string]string{}
+	for index, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSuffix(line, "\r")
+		key, value, ok, err := parseEnvLine(line)
+		if err != nil {
+			return nil, fmt.Errorf("line %d: %w", index+1, err)
+		}
+		if !ok {
+			continue
+		}
+		values[key] = value
+	}
+	return values, nil
+}
+
+func parseEnvLine(line string) (string, string, bool, error) {
+	line = strings.TrimSpace(line)
+	if line == "" || strings.HasPrefix(line, "#") {
+		return "", "", false, nil
+	}
+	line = stripEnvExport(line)
+
+	index := strings.Index(line, "=")
+	if index < 0 {
+		return "", "", false, errors.New("expected KEY=value")
+	}
+	key := strings.TrimSpace(line[:index])
+	if !isEnvKey(key) {
+		return "", "", false, fmt.Errorf("invalid key %q", key)
+	}
+	value, err := parseEnvValue(strings.TrimSpace(line[index+1:]))
+	if err != nil {
+		return "", "", false, err
+	}
+	return key, value, true, nil
+}
+
+func stripEnvExport(line string) string {
+	if len(line) <= len("export") || !strings.HasPrefix(line, "export") {
+		return line
+	}
+	if !isEnvSpace(line[len("export")]) {
+		return line
+	}
+	return strings.TrimSpace(line[len("export"):])
+}
+
+func parseEnvValue(value string) (string, error) {
+	if value == "" {
+		return "", nil
+	}
+	switch value[0] {
+	case '\'':
+		return parseSingleQuotedEnvValue(value)
+	case '"':
+		return parseDoubleQuotedEnvValue(value)
+	default:
+		return parseUnquotedEnvValue(value), nil
+	}
+}
+
+func parseSingleQuotedEnvValue(value string) (string, error) {
+	for index := 1; index < len(value); index++ {
+		if value[index] != '\'' {
+			continue
+		}
+		if err := validateEnvValueSuffix(value[index+1:]); err != nil {
+			return "", err
+		}
+		return value[1:index], nil
+	}
+	return "", errors.New("unterminated single-quoted value")
+}
+
+func parseDoubleQuotedEnvValue(value string) (string, error) {
+	var result strings.Builder
+	for index := 1; index < len(value); index++ {
+		switch value[index] {
+		case '"':
+			if err := validateEnvValueSuffix(value[index+1:]); err != nil {
+				return "", err
+			}
+			return result.String(), nil
+		case '\\':
+			if index+1 >= len(value) {
+				return "", errors.New("unfinished escape sequence")
+			}
+			index++
+			switch value[index] {
+			case 'n':
+				result.WriteByte('\n')
+			case 'r':
+				result.WriteByte('\r')
+			case 't':
+				result.WriteByte('\t')
+			case '"', '\\', '#':
+				result.WriteByte(value[index])
+			default:
+				result.WriteByte('\\')
+				result.WriteByte(value[index])
+			}
+		default:
+			result.WriteByte(value[index])
+		}
+	}
+	return "", errors.New("unterminated double-quoted value")
+}
+
+func parseUnquotedEnvValue(value string) string {
+	for index := range value {
+		if value[index] == '#' && (index == 0 || isEnvSpace(value[index-1])) {
+			return strings.TrimSpace(value[:index])
+		}
+	}
+	return strings.TrimSpace(value)
+}
+
+func validateEnvValueSuffix(value string) error {
+	value = strings.TrimSpace(value)
+	if value == "" || strings.HasPrefix(value, "#") {
+		return nil
+	}
+	return fmt.Errorf("unexpected trailing content %q", value)
+}
+
+func isEnvKey(value string) bool {
+	if value == "" {
+		return false
+	}
+	for index := 0; index < len(value); index++ {
+		character := value[index]
+		if index == 0 {
+			if (character >= 'A' && character <= 'Z') || (character >= 'a' && character <= 'z') || character == '_' {
+				continue
+			}
+			return false
+		}
+		if (character >= 'A' && character <= 'Z') || (character >= 'a' && character <= 'z') || (character >= '0' && character <= '9') || character == '_' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func isEnvSpace(character byte) bool {
+	return character == ' ' || character == '\t'
+}
+
 func applyFileConfig(cfg *Config, file fileConfig) error {
 	if value := strings.TrimSpace(file.Discord.ApplicationID); value != "" {
 		cfg.DiscordApplicationID = value
 	}
 	if value := strings.TrimSpace(file.Discord.GuildID); value != "" {
 		cfg.DiscordGuildID = value
+	}
+	if value := strings.TrimSpace(file.Discord.PublicKey); value != "" {
+		cfg.DiscordPublicKey = value
 	}
 	if file.Discord.OwnerUserIDs != nil {
 		cfg.OwnerUserIDs = listToSet(file.Discord.OwnerUserIDs)
@@ -293,32 +507,37 @@ func applyFileConfig(cfg *Config, file fileConfig) error {
 }
 
 func applyEnv(cfg *Config) {
-	cfg.DiscordBotToken = stringFromEnv("DISCORD_BOT_TOKEN", cfg.DiscordBotToken)
-	cfg.DiscordApplicationID = nonEmptyStringFromEnv("DISCORD_APPLICATION_ID", cfg.DiscordApplicationID)
-	cfg.DiscordGuildID = nonEmptyStringFromEnv("DISCORD_GUILD_ID", cfg.DiscordGuildID)
-	cfg.OpenRouterAPIKey = stringFromEnv("OPENROUTER_API_KEY", cfg.OpenRouterAPIKey)
-	cfg.OpenRouterBaseURL = nonEmptyStringFromEnv("OPENROUTER_BASE_URL", cfg.OpenRouterBaseURL)
-	cfg.OpenRouterModel = nonEmptyStringFromEnv("OPENROUTER_DEFAULT_MODEL", cfg.OpenRouterModel)
-	if value, ok := csvListFromEnv("OPENROUTER_FALLBACK_MODELS"); ok {
+	applyEnvValues(cfg, os.LookupEnv)
+}
+
+func applyEnvValues(cfg *Config, lookup func(string) (string, bool)) {
+	cfg.DiscordBotToken = stringFromLookup(lookup, "DISCORD_BOT_TOKEN", cfg.DiscordBotToken)
+	cfg.DiscordApplicationID = nonEmptyStringFromLookup(lookup, "DISCORD_APPLICATION_ID", cfg.DiscordApplicationID)
+	cfg.DiscordGuildID = nonEmptyStringFromLookup(lookup, "DISCORD_GUILD_ID", cfg.DiscordGuildID)
+	cfg.DiscordPublicKey = nonEmptyStringFromLookup(lookup, "DISCORD_PUBLIC_KEY", cfg.DiscordPublicKey)
+	cfg.OpenRouterAPIKey = stringFromLookup(lookup, "OPENROUTER_API_KEY", cfg.OpenRouterAPIKey)
+	cfg.OpenRouterBaseURL = nonEmptyStringFromLookup(lookup, "OPENROUTER_BASE_URL", cfg.OpenRouterBaseURL)
+	cfg.OpenRouterModel = nonEmptyStringFromLookup(lookup, "OPENROUTER_DEFAULT_MODEL", cfg.OpenRouterModel)
+	if value, ok := csvListFromLookup(lookup, "OPENROUTER_FALLBACK_MODELS"); ok {
 		cfg.OpenRouterFallbackModels = value
 	}
-	cfg.OpenRouterEmbeddingModel = nonEmptyStringFromEnv("OPENROUTER_EMBEDDING_MODEL", cfg.OpenRouterEmbeddingModel)
-	cfg.OpenRouterAppURL = nonEmptyStringFromEnv("OPENROUTER_APP_URL", cfg.OpenRouterAppURL)
-	cfg.OpenRouterAppTitle = nonEmptyStringFromEnv("OPENROUTER_APP_TITLE", cfg.OpenRouterAppTitle)
-	cfg.OpenRouterCircuitBreakerFailureThreshold = intFromEnv("OPENROUTER_CIRCUIT_FAILURE_THRESHOLD", cfg.OpenRouterCircuitBreakerFailureThreshold)
-	cfg.OpenRouterCircuitBreakerCooldown = durationFromEnv("OPENROUTER_CIRCUIT_COOLDOWN", cfg.OpenRouterCircuitBreakerCooldown)
-	cfg.BraveSearchAPIKey = stringFromEnv("BRAVE_SEARCH_API_KEY", cfg.BraveSearchAPIKey)
-	cfg.BraveSearchBaseURL = nonEmptyStringFromEnv("BRAVE_SEARCH_BASE_URL", cfg.BraveSearchBaseURL)
-	cfg.Port = nonEmptyStringFromEnv("PORT", cfg.Port)
-	cfg.Environment = nonEmptyStringFromEnv("ENVIRONMENT", cfg.Environment)
-	cfg.LogLevel = nonEmptyStringFromEnv("LOG_LEVEL", cfg.LogLevel)
-	if value, ok := csvSetFromEnv("OWNER_USER_IDS"); ok {
+	cfg.OpenRouterEmbeddingModel = nonEmptyStringFromLookup(lookup, "OPENROUTER_EMBEDDING_MODEL", cfg.OpenRouterEmbeddingModel)
+	cfg.OpenRouterAppURL = nonEmptyStringFromLookup(lookup, "OPENROUTER_APP_URL", cfg.OpenRouterAppURL)
+	cfg.OpenRouterAppTitle = nonEmptyStringFromLookup(lookup, "OPENROUTER_APP_TITLE", cfg.OpenRouterAppTitle)
+	cfg.OpenRouterCircuitBreakerFailureThreshold = intFromLookup(lookup, "OPENROUTER_CIRCUIT_FAILURE_THRESHOLD", cfg.OpenRouterCircuitBreakerFailureThreshold)
+	cfg.OpenRouterCircuitBreakerCooldown = durationFromLookup(lookup, "OPENROUTER_CIRCUIT_COOLDOWN", cfg.OpenRouterCircuitBreakerCooldown)
+	cfg.BraveSearchAPIKey = stringFromLookup(lookup, "BRAVE_SEARCH_API_KEY", cfg.BraveSearchAPIKey)
+	cfg.BraveSearchBaseURL = nonEmptyStringFromLookup(lookup, "BRAVE_SEARCH_BASE_URL", cfg.BraveSearchBaseURL)
+	cfg.Port = nonEmptyStringFromLookup(lookup, "PORT", cfg.Port)
+	cfg.Environment = nonEmptyStringFromLookup(lookup, "ENVIRONMENT", cfg.Environment)
+	cfg.LogLevel = nonEmptyStringFromLookup(lookup, "LOG_LEVEL", cfg.LogLevel)
+	if value, ok := csvSetFromLookup(lookup, "OWNER_USER_IDS"); ok {
 		cfg.OwnerUserIDs = value
 	}
-	cfg.UserRateLimit = intFromEnv("USER_RATE_LIMIT", cfg.UserRateLimit)
-	cfg.UserRateLimitWindow = durationFromEnv("USER_RATE_LIMIT_WINDOW", cfg.UserRateLimitWindow)
-	cfg.DataDir = stringFromEnv("DATA_DIR", cfg.DataDir)
-	cfg.SQLitePath = stringFromEnv("SQLITE_PATH", cfg.SQLitePath)
+	cfg.UserRateLimit = intFromLookup(lookup, "USER_RATE_LIMIT", cfg.UserRateLimit)
+	cfg.UserRateLimitWindow = durationFromLookup(lookup, "USER_RATE_LIMIT_WINDOW", cfg.UserRateLimitWindow)
+	cfg.DataDir = stringFromLookup(lookup, "DATA_DIR", cfg.DataDir)
+	cfg.SQLitePath = stringFromLookup(lookup, "SQLITE_PATH", cfg.SQLitePath)
 }
 
 func finalize(cfg *Config) {
@@ -344,40 +563,40 @@ func defaultDataDir(environment string) string {
 	return defaultDevDataDir
 }
 
-func stringFromEnv(name string, current string) string {
-	value, ok := os.LookupEnv(name)
+func stringFromLookup(lookup func(string) (string, bool), name string, current string) string {
+	value, ok := lookup(name)
 	if !ok {
 		return current
 	}
 	return strings.TrimSpace(value)
 }
 
-func nonEmptyStringFromEnv(name string, current string) string {
-	value := stringFromEnv(name, current)
+func nonEmptyStringFromLookup(lookup func(string) (string, bool), name string, current string) string {
+	value := stringFromLookup(lookup, name, current)
 	if value == "" {
 		return current
 	}
 	return value
 }
 
-func csvSetFromEnv(name string) (map[string]struct{}, bool) {
-	value, ok := os.LookupEnv(name)
+func csvSetFromLookup(lookup func(string) (string, bool), name string) (map[string]struct{}, bool) {
+	value, ok := lookup(name)
 	if !ok {
 		return nil, false
 	}
 	return parseCSVSet(value), true
 }
 
-func csvListFromEnv(name string) ([]string, bool) {
-	value, ok := os.LookupEnv(name)
+func csvListFromLookup(lookup func(string) (string, bool), name string) ([]string, bool) {
+	value, ok := lookup(name)
 	if !ok {
 		return nil, false
 	}
 	return parseCSVList(value), true
 }
 
-func intFromEnv(name string, fallback int) int {
-	value, ok := os.LookupEnv(name)
+func intFromLookup(lookup func(string) (string, bool), name string, fallback int) int {
+	value, ok := lookup(name)
 	if !ok {
 		return fallback
 	}
@@ -392,8 +611,8 @@ func intFromEnv(name string, fallback int) int {
 	return parsed
 }
 
-func durationFromEnv(name string, fallback time.Duration) time.Duration {
-	value, ok := os.LookupEnv(name)
+func durationFromLookup(lookup func(string) (string, bool), name string, fallback time.Duration) time.Duration {
+	value, ok := lookup(name)
 	if !ok {
 		return fallback
 	}
