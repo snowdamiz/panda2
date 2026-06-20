@@ -1,0 +1,39 @@
+app = "panda-assistant"
+primary_region = "sjc"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  PORT = "8080"
+  DATA_DIR = "/data"
+  SQLITE_PATH = "/data/panda.db"
+  ENVIRONMENT = "production"
+  OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+  OPENROUTER_DEFAULT_MODEL = "openrouter/auto"
+  OPENROUTER_FALLBACK_MODELS = ""
+  OPENROUTER_APP_TITLE = "Panda Assistant"
+  OPENROUTER_CIRCUIT_FAILURE_THRESHOLD = "5"
+  OPENROUTER_CIRCUIT_COOLDOWN = "30s"
+  ATTACHMENT_CACHE_TTL = "24h"
+  USER_RATE_LIMIT = "5"
+  USER_RATE_LIMIT_WINDOW = "1m"
+
+[[mounts]]
+  source = "data"
+  destination = "/data"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = "stop"
+  auto_start_machines = true
+  min_machines_running = 1
+  processes = ["app"]
+
+  [[http_service.checks]]
+    interval = "15s"
+    timeout = "2s"
+    grace_period = "10s"
+    method = "GET"
+    path = "/healthz"

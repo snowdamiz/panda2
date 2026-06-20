@@ -1,0 +1,12 @@
+.git
+.env
+.env.*
+data
+tmp
+bin
+coverage.out
+*.db
+*.db-*
+Dockerfile
+README.md
+

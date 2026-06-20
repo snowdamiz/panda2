@@ -1,0 +1,10 @@
+.env
+.env.*
+!.env.example
+/data/
+/tmp/
+/bin/
+*.db
+*.db-*
+coverage.out
+

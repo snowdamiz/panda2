@@ -1,0 +1,296 @@
+package repository
+
+import (
+	"context"
+	"testing"
+	"time"
+
+	"github.com/sn0w/panda2/internal/store"
+)
+
+func TestGuildConfigEnsureDefaultIsIdempotent(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(ctx, "file::memory:?cache=shared")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer db.Close()
+
+	repo := NewGuildConfigRepository(db.DB)
+	config, err := repo.EnsureDefault(ctx, "guild-1", "openrouter/auto")
+	if err != nil {
+		t.Fatalf("EnsureDefault: %v", err)
+	}
+	if config.DefaultModel != "openrouter/auto" {
+		t.Fatalf("unexpected model %q", config.DefaultModel)
+	}
+
+	again, err := repo.EnsureDefault(ctx, "guild-1", "different/model")
+	if err != nil {
+		t.Fatalf("EnsureDefault again: %v", err)
+	}
+	if again.DefaultModel != "openrouter/auto" {
+		t.Fatalf("expected existing model to remain, got %q", again.DefaultModel)
+	}
+}
+
+func TestUsageRecord(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(ctx, "file::memory:?cache=shared")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer db.Close()
+
+	repo := NewUsageRepository(db.DB)
+	if err := repo.Record(ctx, store.UsageEvent{UserID: "user-1", Command: "ask", Success: true}); err != nil {
+		t.Fatalf("Record: %v", err)
+	}
+	count, err := repo.CountByUser(ctx, "user-1")
+	if err != nil {
+		t.Fatalf("CountByUser: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("expected one usage event, got %d", count)
+	}
+}
+
+func TestUsageBreakdownByModel(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(ctx, "file::memory:?cache=shared")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer db.Close()
+
+	repo := NewUsageRepository(db.DB)
+	events := []store.UsageEvent{
+		{GuildID: "guild-1", UserID: "user-1", ChannelID: "channel-1", Command: "ask", Model: "model-a", TotalTokens: 10, Success: true},
+		{GuildID: "guild-1", UserID: "user-2", ChannelID: "channel-1", Command: "chat", Model: "model-a", TotalTokens: 20, Success: false},
+		{GuildID: "guild-1", UserID: "user-2", ChannelID: "channel-2", Command: "ask", Model: "model-b", TotalTokens: 5, Success: true},
+	}
+	for _, event := range events {
+		if err := repo.Record(ctx, event); err != nil {
+			t.Fatalf("Record: %v", err)
+		}
+	}
+	rows, err := repo.BreakdownByGuild(ctx, "guild-1", time.Time{}, "model", 5)
+	if err != nil {
+		t.Fatalf("BreakdownByGuild: %v", err)
+	}
+	if len(rows) != 2 || rows[0].Label != "model-a" || rows[0].TotalRequests != 2 || rows[0].Failed != 1 || rows[0].TotalTokens != 30 {
+		t.Fatalf("unexpected breakdown rows: %+v", rows)
+	}
+	if _, err := repo.BreakdownByGuild(ctx, "guild-1", time.Time{}, "model; drop table usage_events", 5); err == nil {
+		t.Fatal("expected unsupported dimension to fail")
+	}
+}
+
+func TestMemberMemoryConsentDefaultsFalseAndUpdates(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(ctx, "file::memory:?cache=shared")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer db.Close()
+
+	repo := NewMemberRepository(db.DB)
+	consent, err := repo.MemoryConsent(ctx, "guild-1", "user-1")
+	if err != nil {
+		t.Fatalf("MemoryConsent: %v", err)
+	}
+	if consent {
+		t.Fatal("memory consent should default to false")
+	}
+
+	member, err := repo.SetMemoryConsent(ctx, "guild-1", "user-1", true)
+	if err != nil {
+		t.Fatalf("SetMemoryConsent true: %v", err)
+	}
+	if !member.MemoryConsent || !member.AssistantAllowed {
+		t.Fatalf("unexpected member after enabling consent: %+v", member)
+	}
+	consent, err = repo.MemoryConsent(ctx, "guild-1", "user-1")
+	if err != nil || !consent {
+		t.Fatalf("expected enabled consent, got %t err=%v", consent, err)
+	}
+
+	member, err = repo.SetMemoryConsent(ctx, "guild-1", "user-1", false)
+	if err != nil {
+		t.Fatalf("SetMemoryConsent false: %v", err)
+	}
+	if member.MemoryConsent {
+		t.Fatalf("expected disabled consent, got %+v", member)
+	}
+}
+
+func TestKnowledgeSearchUsesLocalIndex(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(ctx, "file::memory:?cache=shared")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer db.Close()
+
+	repo := NewKnowledgeRepository(db.DB)
+	document, err := repo.AddDocument(ctx, store.KnowledgeDocument{
+		GuildID:   "guild-1",
+		Title:     "Refund policy",
+		CreatedBy: "admin",
+	}, "Refunds are available within 14 days when a receipt is provided.")
+	if err != nil {
+		t.Fatalf("AddDocument: %v", err)
+	}
+
+	results, err := repo.Search(ctx, "guild-1", "receipt refunds", 5)
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("expected one result, got %d", len(results))
+	}
+	if results[0].DocumentID != document.ID || results[0].Title != "Refund policy" {
+		t.Fatalf("unexpected result: %+v", results[0])
+	}
+}
+
+func TestAttachmentGetByGuild(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(ctx, "file::memory:?cache=shared")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer db.Close()
+
+	repo := NewAttachmentRepository(db.DB)
+	attachment, err := repo.Record(ctx, store.Attachment{
+		GuildID:       "guild-1",
+		ChannelID:     "channel-1",
+		MessageID:     "message-1",
+		Filename:      "notes.md",
+		ExtractedText: "Deploy after review.",
+	})
+	if err != nil {
+		t.Fatalf("Record: %v", err)
+	}
+	found, err := repo.Get(ctx, "guild-1", attachment.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if found.Filename != "notes.md" || found.ExtractedText == "" {
+		t.Fatalf("unexpected attachment: %+v", found)
+	}
+	if _, err := repo.Get(ctx, "other-guild", attachment.ID); err != ErrNotFound {
+		t.Fatalf("expected ErrNotFound for other guild, got %v", err)
+	}
+}
+
+func TestConversationRecentMessagesStayChronological(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(ctx, "file::memory:?cache=shared")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer db.Close()
+
+	repo := NewConversationRepository(db.DB)
+	conversation, err := repo.GetOrCreateActive(ctx, ConversationKey{
+		GuildID:     "guild-1",
+		ChannelID:   "channel-1",
+		OwnerUserID: "user-1",
+		Title:       "question",
+	})
+	if err != nil {
+		t.Fatalf("GetOrCreateActive: %v", err)
+	}
+	for _, content := range []string{"one", "two", "three"} {
+		if err := repo.AppendMessage(ctx, store.AssistantMessage{
+			ConversationID: conversation.ID,
+			GuildID:        "guild-1",
+			ChannelID:      "channel-1",
+			UserID:         "user-1",
+			Role:           "user",
+			ContentPreview: content,
+		}); err != nil {
+			t.Fatalf("AppendMessage: %v", err)
+		}
+	}
+
+	messages, err := repo.RecentMessages(ctx, conversation.ID, 2)
+	if err != nil {
+		t.Fatalf("RecentMessages: %v", err)
+	}
+	if got := []string{messages[0].ContentPreview, messages[1].ContentPreview}; got[0] != "two" || got[1] != "three" {
+		t.Fatalf("unexpected recent messages: %v", got)
+	}
+}
+
+func TestJobClaimAndRetry(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(ctx, "file::memory:?cache=shared")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer db.Close()
+
+	repo := NewJobRepository(db.DB)
+	now := time.Now().UTC().Add(time.Hour)
+	job, err := repo.Enqueue(ctx, store.Job{Kind: "summarize", GuildID: "guild-1", Payload: "{}"})
+	if err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+
+	claimed, ok, err := repo.ClaimNext(ctx, "summarize", "worker-1", time.Minute, now)
+	if err != nil {
+		t.Fatalf("ClaimNext: %v", err)
+	}
+	if !ok || claimed.ID != job.ID || claimed.Attempts != 1 || claimed.LockOwner != "worker-1" {
+		t.Fatalf("unexpected claimed job: ok=%v job=%+v", ok, claimed)
+	}
+	if err := repo.Fail(ctx, claimed.ID, "temporary", 5*time.Minute, now); err != nil {
+		t.Fatalf("Fail: %v", err)
+	}
+	depth, err := repo.QueueDepth(ctx, "summarize")
+	if err != nil {
+		t.Fatalf("QueueDepth: %v", err)
+	}
+	if depth != 1 {
+		t.Fatalf("expected retried job in queue, got depth %d", depth)
+	}
+}
+
+func TestBudgetCheckAndConsumeUsesDurableWindow(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(ctx, "file::memory:?cache=shared")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer db.Close()
+
+	repo := NewBudgetRepository(db.DB)
+	if _, err := repo.SetLimit(ctx, store.BudgetLimit{
+		GuildID:       "guild-1",
+		Scope:         BudgetScopeUser,
+		SubjectID:     "user-1",
+		Limit:         1,
+		WindowSeconds: 3600,
+	}); err != nil {
+		t.Fatalf("SetLimit: %v", err)
+	}
+
+	now := time.Date(2026, 6, 19, 12, 30, 0, 0, time.UTC)
+	request := BudgetCheckRequest{GuildID: "guild-1", UserID: "user-1", ChannelID: "channel-1", Now: now}
+	if _, denied, err := repo.CheckAndConsume(ctx, request); err != nil || denied {
+		t.Fatalf("first CheckAndConsume denied=%v err=%v", denied, err)
+	}
+	denial, denied, err := repo.CheckAndConsume(ctx, request)
+	if err != nil {
+		t.Fatalf("second CheckAndConsume: %v", err)
+	}
+	if !denied || denial.Scope != BudgetScopeUser {
+		t.Fatalf("expected user budget denial, got denied=%v denial=%+v", denied, denial)
+	}
+	if denial.RetryAfter != 30*time.Minute {
+		t.Fatalf("expected 30m retry, got %s", denial.RetryAfter)
+	}
+}
