@@ -40,7 +40,6 @@ This plan is for the engineer who will build the first production-ready version 
 - Natural-language messages are the primary user surface.
 - Only messages containing the word `Panda` reach the LLM trigger; the trigger then decides whether Panda should respond.
 - Natural requests can ask questions, continue chat, summarize, explain, rewrite, translate, or search remembered context without user-facing slash commands.
-- `/search-memory` remains as a precise fallback for saved server knowledge when enabled.
 - Reply support lets users ask follow-up questions against a specific message.
 - Thread mode keeps long assistant sessions out of busy channels.
 - Ephemeral responses are used for private or sensitive answers.
@@ -50,15 +49,11 @@ This plan is for the engineer who will build the first production-ready version 
 
 - `/admin setup` walks an admin through first-time configuration.
 - `/admin model` sets default model, temperature, max response size, and tool policy.
-- `/admin channels` controls where the bot may answer.
-- `/admin roles` maps Discord roles to bot permissions.
-- `/admin usage` shows usage by guild, user, channel, command, and model.
-- `/admin limits` configures per-user and per-channel budgets.
 - `/admin prompt` manages server-level system instructions.
-- `/admin memory` enables, disables, exports, or wipes guild memory.
 - `/admin audit` shows recent privileged actions.
 - `/admin disable` pauses assistant responses without kicking the bot.
-- Moderator actions include message cleanup helpers, slow-mode recommendations, abuse triage summaries, and configurable escalation notes.
+- Panda chat/tools handle channel rules, role permissions, usage reports, request budgets, guild memory, memory consent, and moderation guidance.
+- LLM-triggered Discord components handle reviewed interactive flows such as destructive-action confirmations.
 
 ### Owner And Operator Tools
 
@@ -188,7 +183,6 @@ internal/llm
 internal/tools
 internal/context
 internal/admin
-internal/moderation
 internal/memory
 internal/store
 internal/repository
@@ -428,10 +422,10 @@ Exit criteria:
 
 ### Milestone 4: Admin Controls
 
-- Implement model, channel, role, usage, limit, prompt, memory, audit, and disable commands.
-- Add confirmation components for dangerous operations.
+- Implement thin setup/model/prompt/audit/enable/disable commands plus LLM-driven channel, role, usage, limit, memory, and moderation tool flows.
+- Add confirmation components for dangerous operations, including model-triggered tool actions.
 - Add audit events for all config changes.
-- Add permission mapping UI through slash commands and selects.
+- Add permission mapping through reviewed chat/tool flows with Discord buttons or modals where confirmation or structured input is needed.
 
 Exit criteria:
 
@@ -459,7 +453,7 @@ Exit criteria:
 
 - Add admin-managed knowledge documents.
 - Add chunking, SQLite FTS5 indexing, and optional OpenRouter embedding pipeline.
-- Add retrieval for natural chat and `/search-memory`.
+- Add retrieval for natural chat and assistant tool calls.
 - Add export and delete flows.
 - Add memory consent checks.
 

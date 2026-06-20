@@ -37,12 +37,7 @@ Panda listens to normal Discord messages that contain the word `Panda`, then use
 - `/help`
 - `/admin setup`
 - `/admin model`
-- `/admin usage`
-- `/admin limits`
 - `/admin prompt`
-- `/admin memory`
-- `/admin roles`
-- `/admin channels`
 - `/admin audit`
 - `/admin enable`
 - `/admin disable`
@@ -52,21 +47,16 @@ Panda listens to normal Discord messages that contain the word `Panda`, then use
 - `/ops drain`
 - `/ops resume`
 - `/ops incident`
-- `/mod triage`
-- `/mod note`
-- `/mod slowmode`
-- `/mod cleanup`
-- `/mod history subject_id:<user_id>` with optional `recent_limit:<n>` and moderator note text
-- `/search-memory query:<text>`
-- `/memory-consent action:<status|enable|disable>`
 - Message context menu: `Explain with Panda`
 - Message context menu: `Summarize with Panda`
 
 Role mappings are enforced when at least one `assistant.use` role is configured. Channel rules support explicit allow lists and deny rules; owners and guild administrators bypass assistant-use policy checks.
 
-Moderator helpers are suggestion-only and require guild administrator, owner, or `moderation.use` role permission. Durable request budgets can be configured with `/admin limits`.
+Usage reports, request budgets, server knowledge, role permissions, channel rules, memory consent, and moderation guidance are available through Panda chat/tools instead of direct slash commands.
 
-Server knowledge is opt-in through `/admin memory enable`. User-specific memory consent is separate and defaults off; users can inspect or change it with `/memory-consent`.
+When a chat-triggered tool prepares a destructive admin removal, Panda renders a Discord confirmation button tied to the requesting user. Clicking it executes the reviewed server-side action only after fresh permission checks.
+
+Server knowledge is opt-in. User-specific memory consent is separate and defaults off.
 
 Large summarize requests from Discord are queued as durable background jobs after permission, context, rate-limit, and budget checks. Panda updates the deferred Discord response when the job finishes; `/metrics` and `/ops health` expose queue depth for operators.
 

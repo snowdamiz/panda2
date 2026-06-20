@@ -212,6 +212,7 @@ func (d Definition) AvailableTo(access ToolAccess) bool {
 		return d.ToolClass == ToolClassDiscordRead ||
 			d.ToolClass == ToolClassMemory ||
 			d.ToolClass == ToolClassWorkflow ||
+			d.ToolClass == ToolClassAdminWrite ||
 			d.ToolClass == ToolClassDiscordWrite ||
 			d.ToolClass == ToolClassModerationWrite
 	case ToolPolicyOwnerOps:
@@ -367,6 +368,86 @@ func DefaultDefinitions() []Definition {
 			IncludeInModelContext: true,
 		},
 		{
+			Name:                  "manage_memory_consent",
+			Description:           "Read or update the current user's memory consent for this guild.",
+			RequiredPermission:    admin.PermissionAssistantUse,
+			ToolClass:             ToolClassWorkflow,
+			InputSchema:           actionSchema([]string{"action"}, "action", "dry_run"),
+			OutputSchema:          objectSchema("result"),
+			Timeout:               time.Second,
+			Redaction:             RedactSecrets,
+			Audit:                 AuditOnUse,
+			IncludeInModelContext: true,
+		},
+		{
+			Name:                  "panda.usage_report",
+			Description:           "Read Panda usage totals and top usage breakdowns for the current guild.",
+			RequiredPermission:    admin.PermissionAdminUsageRead,
+			ToolClass:             ToolClassAdminRead,
+			InputSchema:           actionSchema(nil, "window", "by", "limit"),
+			OutputSchema:          objectSchema("summary", "breakdown"),
+			Timeout:               2 * time.Second,
+			Redaction:             RedactSecrets,
+			Audit:                 AuditOnUse,
+			IncludeInModelContext: true,
+		},
+		{
+			Name:                  "panda.manage_budget_limit",
+			Description:           "List, set, or prepare removal of Panda request budget windows.",
+			RequiredPermission:    admin.PermissionAdminConfigWrite,
+			ToolClass:             ToolClassAdminWrite,
+			InputSchema:           actionSchema([]string{"action"}, "action", "scope", "subject_id", "limit", "window", "dry_run"),
+			OutputSchema:          objectSchema("result"),
+			Timeout:               2 * time.Second,
+			Redaction:             RedactSecrets,
+			Audit:                 AuditOnUse,
+			IncludeInModelContext: true,
+			RequiresConfirmation:  true,
+			SupportsDryRun:        true,
+		},
+		{
+			Name:                  "panda.manage_knowledge",
+			Description:           "Enable, disable, add, search, list, export, or prepare deletion of Panda server knowledge.",
+			RequiredPermission:    admin.PermissionAdminMemoryManage,
+			ToolClass:             ToolClassAdminWrite,
+			InputSchema:           actionSchema([]string{"action"}, "action", "title", "content", "query", "document_id", "limit", "dry_run"),
+			OutputSchema:          objectSchema("result"),
+			Timeout:               4 * time.Second,
+			Redaction:             RedactContent,
+			Audit:                 AuditOnUse,
+			IncludeInModelContext: true,
+			RequiresConfirmation:  true,
+			SupportsDryRun:        true,
+		},
+		{
+			Name:                  "panda.manage_role_permission",
+			Description:           "List, add, or prepare removal of Panda role permissions.",
+			RequiredPermission:    admin.PermissionAdminConfigWrite,
+			ToolClass:             ToolClassAdminWrite,
+			InputSchema:           actionSchema([]string{"action"}, "action", "role_id", "permission", "dry_run"),
+			OutputSchema:          objectSchema("result"),
+			Timeout:               2 * time.Second,
+			Redaction:             RedactSecrets,
+			Audit:                 AuditOnUse,
+			IncludeInModelContext: true,
+			RequiresConfirmation:  true,
+			SupportsDryRun:        true,
+		},
+		{
+			Name:                  "panda.manage_channel_rule",
+			Description:           "List, allow, deny, or prepare removal of Panda channel allow/deny rules.",
+			RequiredPermission:    admin.PermissionAdminConfigWrite,
+			ToolClass:             ToolClassAdminWrite,
+			InputSchema:           actionSchema([]string{"action"}, "action", "channel_id", "dry_run"),
+			OutputSchema:          objectSchema("result"),
+			Timeout:               2 * time.Second,
+			Redaction:             RedactSecrets,
+			Audit:                 AuditOnUse,
+			IncludeInModelContext: true,
+			RequiresConfirmation:  true,
+			SupportsDryRun:        true,
+		},
+		{
 			Name:                  "generate_workflow_json",
 			Description:           "Generate structured JSON for command workflows without taking action.",
 			RequiredPermission:    admin.PermissionAssistantUse,
@@ -380,6 +461,21 @@ func DefaultDefinitions() []Definition {
 		},
 	}
 	return definitions
+}
+
+func actionSchema(required []string, names ...string) json.RawMessage {
+	properties := map[string]any{}
+	for _, name := range names {
+		switch name {
+		case "dry_run":
+			properties[name] = map[string]string{"type": "boolean"}
+		case "limit":
+			properties[name] = map[string]any{"type": "integer", "minimum": 1}
+		default:
+			properties[name] = map[string]string{"type": "string"}
+		}
+	}
+	return schemaWithProperties(required, properties)
 }
 
 func objectSchema(required ...string) json.RawMessage {

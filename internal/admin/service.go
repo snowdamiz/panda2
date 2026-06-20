@@ -472,6 +472,10 @@ func (s *Service) SetBudgetLimit(ctx context.Context, guildID, actorID string, l
 }
 
 func (s *Service) RemoveBudgetLimit(ctx context.Context, guildID, actorID, scope, subjectID string) error {
+	if scope == repository.BudgetScopeGlobal {
+		guildID = ""
+		subjectID = ""
+	}
 	if scope == repository.BudgetScopeGuild && subjectID == "" {
 		subjectID = guildID
 	}
@@ -561,6 +565,16 @@ func (s *Service) CanWriteConfig(ctx context.Context, request AssistantAccessReq
 	return s.canUsePermission(ctx, request.GuildID, request.RoleIDs, PermissionAdminConfigWrite, false)
 }
 
+func (s *Service) CanReadUsage(ctx context.Context, request AssistantAccessRequest) (bool, error) {
+	if request.IsOwner || request.IsGuildAdmin {
+		return true, nil
+	}
+	if request.GuildID == "" {
+		return false, nil
+	}
+	return s.canUsePermission(ctx, request.GuildID, request.RoleIDs, PermissionAdminUsageRead, false)
+}
+
 func (s *Service) CanReadAudit(ctx context.Context, request AssistantAccessRequest) (bool, error) {
 	if request.IsOwner || request.IsGuildAdmin {
 		return true, nil
@@ -569,6 +583,16 @@ func (s *Service) CanReadAudit(ctx context.Context, request AssistantAccessReque
 		return false, nil
 	}
 	return s.canUsePermission(ctx, request.GuildID, request.RoleIDs, PermissionAdminAuditRead, false)
+}
+
+func (s *Service) CanManageMemory(ctx context.Context, request AssistantAccessRequest) (bool, error) {
+	if request.IsOwner || request.IsGuildAdmin {
+		return true, nil
+	}
+	if request.GuildID == "" {
+		return false, nil
+	}
+	return s.canUsePermission(ctx, request.GuildID, request.RoleIDs, PermissionAdminMemoryManage, false)
 }
 
 func (s *Service) CanUseOwnerOps(_ context.Context, request AssistantAccessRequest) (bool, error) {

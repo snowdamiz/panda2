@@ -18,7 +18,6 @@ import (
 	"github.com/disgoorg/disgo/events"
 	"github.com/disgoorg/disgo/gateway"
 	"github.com/disgoorg/snowflake/v2"
-	"github.com/sn0w/panda2/internal/admin"
 	"github.com/sn0w/panda2/internal/attachments"
 	"github.com/sn0w/panda2/internal/commands"
 	"github.com/sn0w/panda2/internal/config"
@@ -204,35 +203,6 @@ func applicationCommands() []disgoDiscord.ApplicationCommandCreate {
 			Description: "Show Panda commands",
 		},
 		disgoDiscord.SlashCommandCreate{
-			Name:        "search-memory",
-			Description: "Search saved server knowledge",
-			Options: []disgoDiscord.ApplicationCommandOption{
-				disgoDiscord.ApplicationCommandOptionString{
-					Name:        "query",
-					Description: "Search query",
-					Required:    true,
-					MinLength:   &minQuestionLength,
-					MaxLength:   &maxQuestionLength,
-				},
-			},
-		},
-		disgoDiscord.SlashCommandCreate{
-			Name:        "memory-consent",
-			Description: "Manage user-specific memory consent",
-			Options: []disgoDiscord.ApplicationCommandOption{
-				disgoDiscord.ApplicationCommandOptionString{
-					Name:        "action",
-					Description: "Consent action",
-					Required:    false,
-					Choices: []disgoDiscord.ApplicationCommandOptionChoiceString{
-						{Name: "Status", Value: "status"},
-						{Name: "Enable", Value: "enable"},
-						{Name: "Disable", Value: "disable"},
-					},
-				},
-			},
-		},
-		disgoDiscord.SlashCommandCreate{
 			Name:        "ops",
 			Description: "Owner operations",
 			Options: []disgoDiscord.ApplicationCommandOption{
@@ -272,17 +242,6 @@ func applicationCommands() []disgoDiscord.ApplicationCommandCreate {
 						},
 					},
 				},
-			},
-		},
-		disgoDiscord.SlashCommandCreate{
-			Name:        "mod",
-			Description: "Moderator helper suggestions",
-			Options: []disgoDiscord.ApplicationCommandOption{
-				moderationSubcommand("triage", "Summarize an abuse or conflict report", maxTextLength),
-				moderationSubcommand("note", "Draft a moderator note", maxTextLength),
-				moderationSubcommand("slowmode", "Recommend slow-mode settings", maxTextLength),
-				moderationSubcommand("cleanup", "Recommend message cleanup steps", maxTextLength),
-				moderationHistorySubcommand(maxTextLength),
 			},
 		},
 		disgoDiscord.MessageCommandCreate{Name: "Explain with Panda"},
@@ -342,80 +301,6 @@ func applicationCommands() []disgoDiscord.ApplicationCommandCreate {
 					},
 				},
 				disgoDiscord.ApplicationCommandOptionSubCommand{
-					Name:        "usage",
-					Description: "Show recent usage",
-					Options: []disgoDiscord.ApplicationCommandOption{
-						disgoDiscord.ApplicationCommandOptionString{
-							Name:        "window",
-							Description: "Usage window",
-							Required:    false,
-							Choices: []disgoDiscord.ApplicationCommandOptionChoiceString{
-								{Name: "Day", Value: "day"},
-								{Name: "Week", Value: "week"},
-								{Name: "All", Value: "all"},
-							},
-						},
-						disgoDiscord.ApplicationCommandOptionString{
-							Name:        "by",
-							Description: "Break usage down by this field",
-							Required:    false,
-							Choices: []disgoDiscord.ApplicationCommandOptionChoiceString{
-								{Name: "Command", Value: "command"},
-								{Name: "Model", Value: "model"},
-								{Name: "User", Value: "user"},
-								{Name: "Channel", Value: "channel"},
-							},
-						},
-					},
-				},
-				disgoDiscord.ApplicationCommandOptionSubCommand{
-					Name:        "limits",
-					Description: "Configure request budget windows",
-					Options: []disgoDiscord.ApplicationCommandOption{
-						disgoDiscord.ApplicationCommandOptionString{
-							Name:        "action",
-							Description: "Limit action",
-							Required:    true,
-							Choices: []disgoDiscord.ApplicationCommandOptionChoiceString{
-								{Name: "Set", Value: "set"},
-								{Name: "Remove", Value: "remove"},
-								{Name: "List", Value: "list"},
-							},
-						},
-						disgoDiscord.ApplicationCommandOptionString{
-							Name:        "scope",
-							Description: "Limit scope",
-							Required:    true,
-							Choices: []disgoDiscord.ApplicationCommandOptionChoiceString{
-								{Name: "Guild", Value: "guild"},
-								{Name: "User", Value: "user"},
-								{Name: "Channel", Value: "channel"},
-								{Name: "Global", Value: "global"},
-							},
-						},
-						disgoDiscord.ApplicationCommandOptionString{
-							Name:        "subject_id",
-							Description: "User, channel, or guild id",
-							Required:    false,
-							MaxLength:   &maxQuestionLength,
-						},
-						disgoDiscord.ApplicationCommandOptionString{
-							Name:        "limit",
-							Description: "Allowed requests per window",
-							Required:    false,
-							MaxLength:   &maxQuestionLength,
-						},
-						disgoDiscord.ApplicationCommandOptionString{
-							Name:        "window",
-							Description: "Window duration, like 1h or 24h",
-							Required:    false,
-							MaxLength:   &maxQuestionLength,
-						},
-						confirmOption,
-						dryRunOption,
-					},
-				},
-				disgoDiscord.ApplicationCommandOptionSubCommand{
 					Name:        "prompt",
 					Description: "Set server-level assistant instructions",
 					Options: []disgoDiscord.ApplicationCommandOption{
@@ -425,120 +310,6 @@ func applicationCommands() []disgoDiscord.ApplicationCommandCreate {
 							Required:    false,
 							MaxLength:   &maxTextLength,
 						},
-						dryRunOption,
-					},
-				},
-				disgoDiscord.ApplicationCommandOptionSubCommand{
-					Name:        "memory",
-					Description: "Manage server knowledge",
-					Options: []disgoDiscord.ApplicationCommandOption{
-						disgoDiscord.ApplicationCommandOptionString{
-							Name:        "action",
-							Description: "Memory action",
-							Required:    true,
-							Choices: []disgoDiscord.ApplicationCommandOptionChoiceString{
-								{Name: "Enable", Value: "enable"},
-								{Name: "Disable", Value: "disable"},
-								{Name: "Add", Value: "add"},
-								{Name: "Search", Value: "search"},
-								{Name: "List", Value: "list"},
-								{Name: "Export", Value: "export"},
-								{Name: "Delete", Value: "delete"},
-							},
-						},
-						disgoDiscord.ApplicationCommandOptionString{
-							Name:        "title",
-							Description: "Knowledge document title",
-							Required:    false,
-							MaxLength:   &maxQuestionLength,
-						},
-						disgoDiscord.ApplicationCommandOptionString{
-							Name:        "content",
-							Description: "Knowledge document content",
-							Required:    false,
-							MaxLength:   &maxTextLength,
-						},
-						disgoDiscord.ApplicationCommandOptionString{
-							Name:        "query",
-							Description: "Search query",
-							Required:    false,
-							MaxLength:   &maxQuestionLength,
-						},
-						disgoDiscord.ApplicationCommandOptionString{
-							Name:        "document_id",
-							Description: "Knowledge document id",
-							Required:    false,
-							MaxLength:   &maxQuestionLength,
-						},
-						confirmOption,
-						dryRunOption,
-					},
-				},
-				disgoDiscord.ApplicationCommandOptionSubCommand{
-					Name:        "roles",
-					Description: "Manage role permissions",
-					Options: []disgoDiscord.ApplicationCommandOption{
-						disgoDiscord.ApplicationCommandOptionString{
-							Name:        "action",
-							Description: "Role action",
-							Required:    true,
-							Choices: []disgoDiscord.ApplicationCommandOptionChoiceString{
-								{Name: "Add", Value: "add"},
-								{Name: "Choose Permission", Value: "choose"},
-								{Name: "Remove", Value: "remove"},
-								{Name: "List", Value: "list"},
-							},
-						},
-						disgoDiscord.ApplicationCommandOptionString{
-							Name:        "role_id",
-							Description: "Discord role id",
-							Required:    false,
-							MaxLength:   &maxQuestionLength,
-						},
-						disgoDiscord.ApplicationCommandOptionString{
-							Name:        "permission",
-							Description: "Permission name",
-							Required:    false,
-							Choices: []disgoDiscord.ApplicationCommandOptionChoiceString{
-								{Name: "Assistant Use", Value: admin.PermissionAssistantUse},
-								{Name: "Thread Mode", Value: admin.PermissionAssistantUseThreads},
-								{Name: "Attachments", Value: admin.PermissionAssistantAttachments},
-								{Name: "Memory Read", Value: admin.PermissionAssistantMemoryRead},
-								{Name: "Memory Write", Value: admin.PermissionAssistantMemoryWrite},
-								{Name: "Moderation Use", Value: admin.PermissionModerationUse},
-								{Name: "Config Read", Value: admin.PermissionAdminConfigRead},
-								{Name: "Config Write", Value: admin.PermissionAdminConfigWrite},
-								{Name: "Usage Read", Value: admin.PermissionAdminUsageRead},
-								{Name: "Audit Read", Value: admin.PermissionAdminAuditRead},
-								{Name: "Memory Manage", Value: admin.PermissionAdminMemoryManage},
-							},
-						},
-						confirmOption,
-						dryRunOption,
-					},
-				},
-				disgoDiscord.ApplicationCommandOptionSubCommand{
-					Name:        "channels",
-					Description: "Manage channel allow and deny rules",
-					Options: []disgoDiscord.ApplicationCommandOption{
-						disgoDiscord.ApplicationCommandOptionString{
-							Name:        "action",
-							Description: "Channel action",
-							Required:    true,
-							Choices: []disgoDiscord.ApplicationCommandOptionChoiceString{
-								{Name: "Allow", Value: "allow"},
-								{Name: "Deny", Value: "deny"},
-								{Name: "Remove", Value: "remove"},
-								{Name: "List", Value: "list"},
-							},
-						},
-						disgoDiscord.ApplicationCommandOptionString{
-							Name:        "channel_id",
-							Description: "Discord channel id",
-							Required:    false,
-							MaxLength:   &maxQuestionLength,
-						},
-						confirmOption,
 						dryRunOption,
 					},
 				},
@@ -561,62 +332,6 @@ func applicationCommands() []disgoDiscord.ApplicationCommandCreate {
 						dryRunOption,
 					},
 				},
-			},
-		},
-	}
-}
-
-func moderationSubcommand(name, description string, maxTextLength int) disgoDiscord.ApplicationCommandOptionSubCommand {
-	maxQuestionLength := 1800
-	return disgoDiscord.ApplicationCommandOptionSubCommand{
-		Name:        name,
-		Description: description,
-		Options: []disgoDiscord.ApplicationCommandOption{
-			disgoDiscord.ApplicationCommandOptionString{
-				Name:        "text",
-				Description: "Moderation context text",
-				Required:    true,
-				MaxLength:   &maxTextLength,
-			},
-			disgoDiscord.ApplicationCommandOptionString{
-				Name:        "subject_id",
-				Description: "Optional subject user id",
-				Required:    false,
-				MaxLength:   &maxQuestionLength,
-			},
-			disgoDiscord.ApplicationCommandOptionString{
-				Name:        "tone",
-				Description: "Optional note tone",
-				Required:    false,
-				MaxLength:   &maxQuestionLength,
-			},
-		},
-	}
-}
-
-func moderationHistorySubcommand(maxTextLength int) disgoDiscord.ApplicationCommandOptionSubCommand {
-	maxQuestionLength := 1800
-	return disgoDiscord.ApplicationCommandOptionSubCommand{
-		Name:        "history",
-		Description: "Summarize a user's recent visible channel history",
-		Options: []disgoDiscord.ApplicationCommandOption{
-			disgoDiscord.ApplicationCommandOptionString{
-				Name:        "subject_id",
-				Description: "Subject user id",
-				Required:    true,
-				MaxLength:   &maxQuestionLength,
-			},
-			disgoDiscord.ApplicationCommandOptionString{
-				Name:        "recent_limit",
-				Description: "Recent message fetch limit",
-				Required:    false,
-				MaxLength:   &maxQuestionLength,
-			},
-			disgoDiscord.ApplicationCommandOptionString{
-				Name:        "text",
-				Description: "Optional moderator context note",
-				Required:    false,
-				MaxLength:   &maxTextLength,
 			},
 		},
 	}
@@ -655,7 +370,7 @@ func (b *Bot) handleSlashCommand(event *events.ApplicationCommandInteractionCrea
 	if question, ok := data.OptString("question"); ok {
 		request.Options["question"] = question
 	}
-	for _, name := range []string{"text", "tone", "language", "detail", "message_id", "attachment_id", "recent_limit", "model", "fallback_models", "temperature", "max_response_tokens", "max_tokens", "tool_policy", "window", "by", "prompt", "action", "title", "content", "query", "document_id", "role_id", "permission", "channel_id", "scope", "subject_id", "limit", "confirm"} {
+	for _, name := range []string{"model", "fallback_models", "temperature", "max_response_tokens", "max_tokens", "tool_policy", "prompt", "action", "confirm"} {
 		if value, ok := data.OptString(name); ok {
 			request.Options[name] = value
 		}
@@ -790,8 +505,6 @@ func deferredProgressContent(command string, count int) string {
 		action = "Rewriting"
 	case "translate":
 		action = "Translating"
-	case "mod":
-		action = "Preparing moderator helper output"
 	case "chat":
 		action = "Continuing chat"
 	case "ask":
@@ -879,8 +592,6 @@ func (b *Bot) onComponentInteraction(event *events.ComponentInteractionCreate) {
 	switch data.Type() {
 	case disgoDiscord.ComponentTypeButton:
 		b.onButtonInteraction(event)
-	case disgoDiscord.ComponentTypeStringSelectMenu:
-		b.onStringSelectInteraction(event)
 	default:
 		return
 	}
@@ -895,7 +606,16 @@ func (b *Bot) onButtonInteraction(event *events.ComponentInteractionCreate) {
 		return
 	}
 
-	confirmedRequest, ok := commands.RequestFromConfirmationID(customID, b.requestFromComponentEvent(event))
+	baseRequest := b.requestFromComponentEvent(event)
+	if confirmedToolRequest, ok := commands.RequestFromToolConfirmationID(customID, baseRequest); ok {
+		response := b.router.HandleToolConfirmation(context.Background(), confirmedToolRequest)
+		if err := event.UpdateMessage(messageUpdateFromResponse(response)); err != nil {
+			b.logger.Warn("failed to update tool confirmation response", slog.Any("err", err))
+		}
+		return
+	}
+
+	confirmedRequest, ok := commands.RequestFromConfirmationID(customID, baseRequest)
 	if !ok {
 		if err := event.CreateMessage(disgoDiscord.NewMessageCreate().WithContent("That confirmation is no longer valid for this user.").WithEphemeral(true)); err != nil {
 			b.logger.Warn("failed to reject confirmation", slog.Any("err", err))
@@ -906,22 +626,6 @@ func (b *Bot) onButtonInteraction(event *events.ComponentInteractionCreate) {
 	response := b.router.Handle(context.Background(), confirmedRequest)
 	if err := event.UpdateMessage(messageUpdateFromResponse(response)); err != nil {
 		b.logger.Warn("failed to update confirmation response", slog.Any("err", err))
-	}
-}
-
-func (b *Bot) onStringSelectInteraction(event *events.ComponentInteractionCreate) {
-	data := event.StringSelectMenuInteractionData()
-	request, ok := commands.RequestFromSelectID(data.CustomID(), data.Values, b.requestFromComponentEvent(event))
-	if !ok {
-		if err := event.CreateMessage(disgoDiscord.NewMessageCreate().WithContent("That selection is no longer valid for this user.").WithEphemeral(true)); err != nil {
-			b.logger.Warn("failed to reject select interaction", slog.Any("err", err))
-		}
-		return
-	}
-
-	response := b.router.Handle(context.Background(), request)
-	if err := event.UpdateMessage(messageUpdateFromResponse(response)); err != nil {
-		b.logger.Warn("failed to update select response", slog.Any("err", err))
 	}
 }
 
@@ -990,6 +694,14 @@ func messageCreateFromResponse(response commands.Response) disgoDiscord.MessageC
 	return message
 }
 
+func channelMessageCreateFromResponse(response commands.Response) disgoDiscord.MessageCreate {
+	message := disgoDiscord.NewMessageCreate().WithContent(response.Content)
+	if components := componentsFromResponse(response); len(components) > 0 {
+		message = message.WithComponents(components...)
+	}
+	return message
+}
+
 func modalCreateFromResponse(response *commands.Modal) disgoDiscord.ModalCreate {
 	modal := disgoDiscord.NewModalCreate(response.ID, response.Title)
 	for _, input := range response.Inputs {
@@ -1040,22 +752,7 @@ func componentsFromResponse(response commands.Response) []disgoDiscord.LayoutCom
 			disgoDiscord.NewSecondaryButton(cancelLabel, cancelID),
 		))
 	}
-	if response.Select != nil && strings.TrimSpace(response.Select.ID) != "" && len(response.Select.Options) > 0 {
-		components = append(components, disgoDiscord.NewActionRow(selectMenuFromResponse(response.Select)))
-	}
 	return components
-}
-
-func selectMenuFromResponse(selectMenu *commands.Select) disgoDiscord.StringSelectMenuComponent {
-	options := make([]disgoDiscord.StringSelectMenuOption, 0, len(selectMenu.Options))
-	for _, option := range selectMenu.Options {
-		item := disgoDiscord.NewStringSelectMenuOption(option.Label, option.Value)
-		if strings.TrimSpace(option.Description) != "" {
-			item = item.WithDescription(option.Description)
-		}
-		options = append(options, item)
-	}
-	return disgoDiscord.NewStringSelectMenu(selectMenu.ID, selectMenu.Placeholder, options...).WithMinValues(1).WithMaxValues(1)
 }
 
 func firstNonEmptyText(values ...string) string {
@@ -1072,7 +769,7 @@ func (b *Bot) postThreadResponse(response commands.Response) bool {
 	if err != nil {
 		return false
 	}
-	if _, err := b.client.Rest.CreateMessage(threadID, disgoDiscord.NewMessageCreate().WithContent(response.Content)); err != nil {
+	if _, err := b.client.Rest.CreateMessage(threadID, channelMessageCreateFromResponse(response)); err != nil {
 		b.logger.Warn("failed to post chat response in thread", slog.Any("err", err), slog.String("thread_id", response.ThreadID))
 		return false
 	}
@@ -1089,7 +786,7 @@ func threadNotice(response commands.Response) string {
 
 func shouldDefer(command string) bool {
 	switch command {
-	case "ask", "chat", "summarize", "explain", "rewrite", "translate", "mod":
+	case "ask", "chat", "summarize", "explain", "rewrite", "translate":
 		return true
 	default:
 		return false
@@ -1097,7 +794,7 @@ func shouldDefer(command string) bool {
 }
 
 func shouldDeferEphemeral(request commands.Request) bool {
-	return strings.ToLower(strings.TrimSpace(request.Command)) == "mod"
+	return false
 }
 
 func (b *Bot) onMessageCreate(event *events.MessageCreate) {
@@ -1141,7 +838,7 @@ func (b *Bot) onMessageCreate(event *events.MessageCreate) {
 	if response.Content == "" {
 		return
 	}
-	_, err := event.Client().Rest.CreateMessage(event.ChannelID, disgoDiscord.NewMessageCreate().WithContent(response.Content))
+	_, err := event.Client().Rest.CreateMessage(event.ChannelID, channelMessageCreateFromResponse(response))
 	if err != nil {
 		b.logger.Warn("failed to reply to natural message", slog.Any("err", err))
 	}

@@ -19,7 +19,6 @@ type Response struct {
 	ThreadID     string
 	ThreadName   string
 	Confirmation *Confirmation
-	Select       *Select
 	Modal        *Modal
 	Background   *BackgroundTask
 }
@@ -30,18 +29,6 @@ type Confirmation struct {
 	CancelID     string
 	CancelLabel  string
 	Danger       bool
-}
-
-type Select struct {
-	ID          string
-	Placeholder string
-	Options     []SelectOption
-}
-
-type SelectOption struct {
-	Label       string
-	Value       string
-	Description string
 }
 
 type Modal struct {

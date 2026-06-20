@@ -11,6 +11,7 @@ import (
 	"github.com/sn0w/panda2/internal/admin"
 	contextsvc "github.com/sn0w/panda2/internal/context"
 	"github.com/sn0w/panda2/internal/llm"
+	"github.com/sn0w/panda2/internal/memory"
 	"github.com/sn0w/panda2/internal/repository"
 	"github.com/sn0w/panda2/internal/store"
 )
@@ -21,7 +22,7 @@ func TestDefaultRegistryDefinitionsAreValid(t *testing.T) {
 		t.Fatalf("NewDefaultRegistry: %v", err)
 	}
 	definitions := registry.Definitions()
-	if len(definitions) != 70 {
+	if len(definitions) != 76 {
 		t.Fatalf("expected full Discord tool surface plus assistant tools, got %d", len(definitions))
 	}
 	for _, definition := range definitions {
@@ -149,6 +150,25 @@ func (f *fakeDiscordProvider) ExecuteDiscordTool(context.Context, DiscordToolReq
 	return map[string]any{"executed": true}, nil
 }
 
+func newToolAdminService(t *testing.T) *admin.Service {
+	t.Helper()
+	ctx := context.Background()
+	dataStore, err := store.Open(ctx, "file::memory:?cache=shared")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = dataStore.Close() })
+
+	configs := repository.NewGuildConfigRepository(dataStore.DB)
+	usage := repository.NewUsageRepository(dataStore.DB)
+	audit := repository.NewAuditRepository(dataStore.DB)
+	memoryService := memory.NewService(repository.NewKnowledgeRepository(dataStore.DB))
+	access := repository.NewAccessRepository(dataStore.DB)
+	budgets := repository.NewBudgetRepository(dataStore.DB)
+	members := repository.NewMemberRepository(dataStore.DB)
+	return admin.NewService(configs, usage, audit, memoryService, access, budgets, nil, "openrouter/auto", members)
+}
+
 type fakeAuditRecorder struct {
 	events []store.AuditEvent
 }
@@ -164,7 +184,7 @@ func TestExecutorRunsKnowledgeSearchTool(t *testing.T) {
 		t.Fatalf("NewDefaultRegistry: %v", err)
 	}
 	executor := NewExecutor(registry, fakeKnowledgeSearch{}, fakeConfigReader{})
-	message, err := executor.Execute(context.Background(), ExecutionRequest{
+	result, err := executor.Execute(context.Background(), ExecutionRequest{
 		GuildID: "guild-1",
 		Access:  testAccess(ToolPolicyReadOnly, admin.PermissionAssistantMemoryRead),
 		Call: llm.ToolCall{
@@ -179,6 +199,7 @@ func TestExecutorRunsKnowledgeSearchTool(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
+	message := result.Message
 	if message.Role != "tool" || message.ToolCallID != "call-1" || !strings.Contains(message.Content, "Deploy notes") {
 		t.Fatalf("unexpected tool message: %+v", message)
 	}
@@ -190,7 +211,7 @@ func TestExecutorRunsFetchMessageTool(t *testing.T) {
 		t.Fatalf("NewDefaultRegistry: %v", err)
 	}
 	executor := NewExecutor(registry, nil, nil).WithContextReader(fakeToolContextReader{})
-	message, err := executor.Execute(context.Background(), ExecutionRequest{
+	result, err := executor.Execute(context.Background(), ExecutionRequest{
 		GuildID: "guild-1",
 		Access:  testAccess(ToolPolicyReadOnly, admin.PermissionAssistantUse),
 		Call: llm.ToolCall{
@@ -205,6 +226,7 @@ func TestExecutorRunsFetchMessageTool(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
+	message := result.Message
 	if message.Role != "tool" || !strings.Contains(message.Content, "Deploy window moved") || !strings.Contains(message.Content, "message-1") {
 		t.Fatalf("unexpected fetch message result: %+v", message)
 	}
@@ -256,7 +278,7 @@ func TestExecutorRunsAttachmentSummaryTool(t *testing.T) {
 		t.Fatalf("NewDefaultRegistry: %v", err)
 	}
 	executor := NewExecutor(registry, nil, nil).WithAttachmentReader(fakeToolAttachmentReader{})
-	message, err := executor.Execute(context.Background(), ExecutionRequest{
+	result, err := executor.Execute(context.Background(), ExecutionRequest{
 		GuildID: "guild-1",
 		Access:  testAccess(ToolPolicyReadOnly, admin.PermissionAssistantAttachments),
 		Call: llm.ToolCall{
@@ -271,6 +293,7 @@ func TestExecutorRunsAttachmentSummaryTool(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
+	message := result.Message
 	if message.Role != "tool" || !strings.Contains(message.Content, "notes.txt") || !strings.Contains(message.Content, "Deploy after review") || strings.Contains(message.Content, "sk-123456789012") {
 		t.Fatalf("unexpected attachment summary result: %+v", message)
 	}
@@ -284,7 +307,7 @@ func TestExecutorWriteToolRequiresDryRunOrConfirmation(t *testing.T) {
 	provider := &fakeDiscordProvider{}
 	executor := NewExecutor(registry, nil, nil).WithDiscordToolProvider(provider)
 	access := testAccess(ToolPolicyWriteConfirmed, admin.PermissionAssistantUse)
-	message, err := executor.Execute(context.Background(), ExecutionRequest{
+	result, err := executor.Execute(context.Background(), ExecutionRequest{
 		GuildID: "guild-1",
 		Access:  access,
 		Call: llm.ToolCall{
@@ -299,11 +322,12 @@ func TestExecutorWriteToolRequiresDryRunOrConfirmation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Execute dry run: %v", err)
 	}
+	message := result.Message
 	if !strings.Contains(message.Content, `"dry_run":true`) || provider.calls != 0 {
 		t.Fatalf("dry run should preview without provider execution: message=%+v calls=%d", message, provider.calls)
 	}
 
-	message, err = executor.Execute(context.Background(), ExecutionRequest{
+	result, err = executor.Execute(context.Background(), ExecutionRequest{
 		GuildID: "guild-1",
 		Access:  access,
 		Call: llm.ToolCall{
@@ -318,8 +342,112 @@ func TestExecutorWriteToolRequiresDryRunOrConfirmation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Execute confirmation request: %v", err)
 	}
+	message = result.Message
 	if !strings.Contains(message.Content, `"confirmation_required":true`) || provider.calls != 0 {
 		t.Fatalf("write should require confirmation without provider execution: message=%+v calls=%d", message, provider.calls)
+	}
+}
+
+func TestExecutorRunsAdminServiceTools(t *testing.T) {
+	registry, err := NewDefaultRegistry()
+	if err != nil {
+		t.Fatalf("NewDefaultRegistry: %v", err)
+	}
+	adminOps := newToolAdminService(t)
+	if _, err := adminOps.SetupGuild(context.Background(), "guild-1", "admin"); err != nil {
+		t.Fatalf("setup guild: %v", err)
+	}
+	executor := NewExecutor(registry, nil, nil).WithAdminOperations(adminOps)
+
+	consent, err := executor.Execute(context.Background(), ExecutionRequest{
+		GuildID: "guild-1",
+		ActorID: "user-1",
+		Access:  testAccess(ToolPolicyAssistive, admin.PermissionAssistantUse),
+		Call: llm.ToolCall{
+			ID:   "call-consent",
+			Type: "function",
+			Function: llm.ToolCallFunction{
+				Name:      "manage_memory_consent",
+				Arguments: `{"action":"enable"}`,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Execute consent: %v", err)
+	}
+	if !strings.Contains(consent.Message.Content, `"enabled":true`) {
+		t.Fatalf("unexpected consent result: %+v", consent)
+	}
+
+	added, err := executor.Execute(context.Background(), ExecutionRequest{
+		GuildID: "guild-1",
+		ActorID: "admin",
+		Access:  testAccess(ToolPolicyWriteConfirmed, admin.PermissionAdminMemoryManage),
+		Call: llm.ToolCall{
+			ID:   "call-knowledge-add",
+			Type: "function",
+			Function: llm.ToolCallFunction{
+				Name:      "panda_manage_knowledge",
+				Arguments: `{"action":"add","title":"Deploy notes","content":"Deploys happen Friday after review."}`,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Execute knowledge add: %v", err)
+	}
+	if !strings.Contains(added.Message.Content, "Deploy notes") {
+		t.Fatalf("unexpected knowledge add result: %+v", added)
+	}
+
+	search, err := executor.Execute(context.Background(), ExecutionRequest{
+		GuildID: "guild-1",
+		ActorID: "admin",
+		Access:  testAccess(ToolPolicyWriteConfirmed, admin.PermissionAdminMemoryManage),
+		Call: llm.ToolCall{
+			ID:   "call-knowledge-search",
+			Type: "function",
+			Function: llm.ToolCallFunction{
+				Name:      "panda_manage_knowledge",
+				Arguments: `{"action":"search","query":"Friday deploys"}`,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Execute knowledge search: %v", err)
+	}
+	if !strings.Contains(search.Message.Content, "Deploy notes") {
+		t.Fatalf("unexpected knowledge search result: %+v", search)
+	}
+}
+
+func TestExecutorAdminRemovalToolsRequireConfirmation(t *testing.T) {
+	registry, err := NewDefaultRegistry()
+	if err != nil {
+		t.Fatalf("NewDefaultRegistry: %v", err)
+	}
+	executor := NewExecutor(registry, nil, nil).WithAdminOperations(newToolAdminService(t))
+	result, err := executor.Execute(context.Background(), ExecutionRequest{
+		GuildID: "guild-1",
+		ActorID: "admin",
+		Access:  testAccess(ToolPolicyWriteConfirmed, admin.PermissionAdminConfigWrite),
+		Call: llm.ToolCall{
+			ID:   "call-channel-remove",
+			Type: "function",
+			Function: llm.ToolCallFunction{
+				Name:      "panda_manage_channel_rule",
+				Arguments: `{"action":"remove","channel_id":"channel-1"}`,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Execute channel remove: %v", err)
+	}
+	message := result.Message
+	if !strings.Contains(message.Content, `"confirmation_required":true`) || !strings.Contains(message.Content, "channel-1") {
+		t.Fatalf("expected confirmation preview, got %+v", message)
+	}
+	if result.Confirmation == nil || result.Confirmation.Action != "channel_rule.remove" || result.Confirmation.Arguments["channel_id"] != "channel-1" {
+		t.Fatalf("expected channel-rule confirmation artifact, got %+v", result.Confirmation)
 	}
 }
 
@@ -329,7 +457,7 @@ func TestExecutorRunsWorkflowJSONTool(t *testing.T) {
 		t.Fatalf("NewDefaultRegistry: %v", err)
 	}
 	executor := NewExecutor(registry, nil, nil)
-	message, err := executor.Execute(context.Background(), ExecutionRequest{
+	result, err := executor.Execute(context.Background(), ExecutionRequest{
 		GuildID: "guild-1",
 		Access:  testAccess(ToolPolicyAssistive, admin.PermissionAssistantUse),
 		Call: llm.ToolCall{
@@ -344,6 +472,7 @@ func TestExecutorRunsWorkflowJSONTool(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
+	message := result.Message
 	if message.Role != "tool" || message.ToolCallID != "call-workflow" || !strings.Contains(message.Content, `"workflow":"summarize"`) || !strings.Contains(message.Content, `"dry_run":true`) {
 		t.Fatalf("unexpected workflow tool message: %+v", message)
 	}
@@ -355,7 +484,7 @@ func TestExecutorRunsModeratorNoteTool(t *testing.T) {
 		t.Fatalf("NewDefaultRegistry: %v", err)
 	}
 	executor := NewExecutor(registry, nil, nil)
-	message, err := executor.Execute(context.Background(), ExecutionRequest{
+	result, err := executor.Execute(context.Background(), ExecutionRequest{
 		GuildID: "guild-1",
 		Access:  testAccess(ToolPolicyModerator, admin.PermissionModerationUse),
 		Call: llm.ToolCall{
@@ -370,6 +499,7 @@ func TestExecutorRunsModeratorNoteTool(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
+	message := result.Message
 	if message.Role != "tool" || !strings.Contains(message.Content, "human review") || !strings.Contains(message.Content, "calm tone") {
 		t.Fatalf("unexpected moderator note message: %+v", message)
 	}

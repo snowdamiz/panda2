@@ -9,7 +9,7 @@ Panda uses `github.com/disgoorg/disgo` and currently connects to Discord with `G
 Current Discord/user surfaces:
 
 - Natural message handling for bot-directed chat.
-- Slash commands: `/ping`, `/help`, `/search-memory`, `/memory-consent`, `/admin ...`, `/ops ...`, and `/mod ...`.
+- Slash commands: `/ping`, `/help`, `/admin setup`, `/admin model`, `/admin prompt`, `/admin audit`, `/admin enable`, `/admin disable`, and `/ops ...`.
 - Message context menu commands: `Explain with Panda` and `Summarize with Panda`.
 - Thread creation for chat continuation.
 - Attachment capture and safe text extraction.
@@ -17,15 +17,47 @@ Current Discord/user surfaces:
 
 Registered LLM tool definitions:
 
-- `fetch_recent_messages`
-- `fetch_message`
+- The registry contains 76 reviewed definitions across Discord reads, Discord writes, moderation writes, admin writes, workflow helpers, and Panda admin/memory helpers.
+- Executable tools are filtered per request by tool policy, configured providers, and Panda permissions.
+- Native executors are currently wired for:
+  - `discord.fetch_message`
+  - `discord.fetch_messages`
+  - `search_knowledge`
+  - `summarize_text_file`
+  - `draft_moderator_note`
+  - `read_config`
+  - `manage_memory_consent`
+  - `panda.usage_report`
+  - `panda.manage_budget_limit`
+  - `panda.manage_knowledge`
+  - `panda.manage_role_permission`
+  - `panda.manage_channel_rule`
+  - `generate_workflow_json`
+
+LLM-triggered interaction support:
+
+- Destructive Panda admin removal tools return a typed confirmation artifact from the tool loop.
+- The command router renders that artifact as a Discord confirmation button scoped to the requesting user.
+- Button clicks perform fresh permission checks and execute only allowlisted server-side operations.
+
+Remaining executor gaps:
+
+- Most Discord REST write definitions still return dry-run or confirmation-required previews until typed adapters are implemented.
+- Broad metadata read definitions are registered but need Discord adapter implementations before they become executable.
+
+Core helper tools:
+
 - `search_knowledge`
 - `summarize_text_file`
 - `draft_moderator_note`
 - `read_config`
+- `manage_memory_consent`
+- `panda.usage_report`
+- `panda.manage_budget_limit`
+- `panda.manage_knowledge`
+- `panda.manage_role_permission`
+- `panda.manage_channel_rule`
 - `generate_workflow_json`
-
-Important current gap: the registry defines seven tools, but assistant tool exposure is currently much narrower than the registry. `toolPermissions` only grants memory read when guild memory is enabled and config read under `admin_only`; it does not yet pass request-level permissions such as `assistant.use`, `assistant.attachments`, or `moderation.use` into the assistant tool executor. Fixing that permission propagation is the first missing-tool milestone.
 
 ## Design Boundaries
 
@@ -38,9 +70,9 @@ Important current gap: the registry defines seven tools, but assistant tool expo
 - Use idempotency keys for write tools that can be retried.
 - Suppress mass mentions and unsafe link spam in generated message content.
 
-## Tool Policy Upgrade
+## Tool Policy
 
-Before adding more tools, replace the current coarse `tool_policy` behavior with a capability-aware policy:
+The current `tool_policy` behavior is capability-aware:
 
 - `off`: no LLM tools.
 - `read_only`: safe read-only tools for users who pass `assistant.use` and channel rules.
@@ -52,12 +84,9 @@ Before adding more tools, replace the current coarse `tool_policy` behavior with
 
 Implementation tasks:
 
-- Pass per-request allowed Panda permissions from `commands.Router` into `assistant.Service`.
 - Add Discord permission checks in the Discord adapter for every tool execution.
-- Add `ToolClass` to tool definitions: `discord_read`, `discord_write`, `moderation_write`, `admin_read`, `admin_write`, `memory`, `workflow`.
-- Add `RequiresConfirmation`, `SupportsDryRun`, `MaxLimit`, and `DiscordPermissions` fields to tool definitions.
-- Record tool call audit events with request ID, actor ID, guild ID, channel ID, target IDs, dry-run flag, and redacted arguments.
 - Add tests proving unavailable tools are not advertised to the model.
+- Continue adding adapter implementations for registered Discord metadata and write definitions.
 
 ## Phase 1: Read Previous Chats And Context
 
@@ -300,14 +329,13 @@ Guardrails:
 
 ## Suggested Build Order
 
-1. Fix per-request tool permission propagation and tool definition metadata.
-2. Expand message read tools for previous chat access.
-3. Add guild/channel/thread/role/member read tools.
-4. Add audit, rate-limit, dry-run, and confirmation infrastructure for write tools.
-5. Add safe message/thread write tools.
-6. Add moderation/admin action tools behind opt-in feature flags.
-7. Add gateway event cache and recent activity tools.
-8. Add self-extension manifest tools.
+1. Expand message read tools for previous chat access.
+2. Add guild/channel/thread/role/member read tool executors.
+3. Continue hardening audit, rate-limit, dry-run, and confirmation infrastructure for write tools.
+4. Add safe message/thread write tools.
+5. Add moderation/admin action tools behind opt-in feature flags.
+6. Add gateway event cache and recent activity tools.
+7. Add self-extension manifest tools.
 
 ## Reference Links
 

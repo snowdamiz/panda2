@@ -14,8 +14,6 @@ import (
 	"github.com/sn0w/panda2/internal/assistant"
 	contextsvc "github.com/sn0w/panda2/internal/context"
 	"github.com/sn0w/panda2/internal/llm"
-	"github.com/sn0w/panda2/internal/memory"
-	"github.com/sn0w/panda2/internal/moderation"
 	"github.com/sn0w/panda2/internal/ops"
 	"github.com/sn0w/panda2/internal/ratelimit"
 	"github.com/sn0w/panda2/internal/repository"
@@ -26,7 +24,6 @@ import (
 type Router struct {
 	admin       *admin.Service
 	assistant   *assistant.Service
-	moderation  *moderation.Service
 	context     *contextsvc.Service
 	threads     ThreadManager
 	attachments AttachmentReader
@@ -42,8 +39,8 @@ type AttachmentReader interface {
 	Get(ctx context.Context, guildID string, id uint) (store.Attachment, error)
 }
 
-func NewRouter(adminService *admin.Service, assistantService *assistant.Service, moderationService *moderation.Service, opsService *ops.Service, limiter *ratelimit.Limiter) *Router {
-	return &Router{admin: adminService, assistant: assistantService, moderation: moderationService, ops: opsService, rateLimit: limiter}
+func NewRouter(adminService *admin.Service, assistantService *assistant.Service, opsService *ops.Service, limiter *ratelimit.Limiter) *Router {
+	return &Router{admin: adminService, assistant: assistantService, ops: opsService, rateLimit: limiter}
 }
 
 func (r *Router) WithContextService(contextService *contextsvc.Service) *Router {
@@ -66,23 +63,17 @@ func (r *Router) Handle(ctx context.Context, request Request) Response {
 	case "ping":
 		return Response{Content: "pong", Ephemeral: true}
 	case "help":
-		return Response{Content: "Talk naturally in Discord with the word `Panda`, like `Panda is this true?`; Panda uses the model to decide whether to answer. Fallbacks: `/search-memory`, `/memory-consent`, and message context menus for explain/summarize. Admins can use `/admin setup`, `/admin model`, `/admin usage`, `/admin limits`, `/admin prompt`, `/admin memory`, `/admin roles`, `/admin channels`, `/admin audit`, `/admin enable`, and `/admin disable`.", Ephemeral: true}
+		return Response{Content: "Talk naturally in Discord with the word `Panda`, like `Panda is this true?`; Panda uses the model to decide whether to answer. Message context menus can explain or summarize. Admins can use `/admin setup`, `/admin model`, `/admin prompt`, `/admin audit`, `/admin enable`, and `/admin disable`; usage, limits, server knowledge, role/channel access, memory consent, and moderation guidance are handled through Panda chat/tools.", Ephemeral: true}
 	case "admin":
 		return r.handleAdmin(ctx, request)
 	case "ops":
 		return r.handleOps(ctx, request)
-	case "mod":
-		return r.handleMod(ctx, request)
-	case "memory-consent":
-		return r.handleMemoryConsent(ctx, request)
 	case "ask":
 		return r.handleAsk(ctx, request, "ask")
 	case "chat":
 		return r.handleChat(ctx, request)
 	case "summarize", "explain", "rewrite", "translate":
 		return r.handleTask(ctx, request)
-	case "search-memory":
-		return r.handleSearchMemory(ctx, request)
 	default:
 		return Response{Content: "Unknown command.", Ephemeral: true}
 	}
@@ -115,133 +106,6 @@ func (r *Router) HandleNaturalMessage(ctx context.Context, request Request) Resp
 	}
 	request.Options["question"] = decision.Prompt
 	return r.handleChatMode(ctx, request, false)
-}
-
-func (r *Router) handleMod(ctx context.Context, request Request) Response {
-	if request.GuildID == "" {
-		return Response{Content: "Moderator helpers must be used inside a Discord server.", Ephemeral: true}
-	}
-	allowed, err := r.admin.CanUseModeration(ctx, admin.AssistantAccessRequest{
-		GuildID:      request.GuildID,
-		ChannelID:    request.ChannelID,
-		RoleIDs:      request.RoleIDs,
-		IsGuildAdmin: request.IsGuildAdmin,
-		IsOwner:      request.IsOwner,
-	})
-	if err != nil {
-		return Response{Content: "Permission lookup failed. Please try again later.", Ephemeral: true}
-	}
-	if !allowed {
-		return Response{Content: "You do not have permission to use moderator helpers.", Ephemeral: true}
-	}
-
-	subcommand := strings.ToLower(request.Subcommand)
-	contextText := strings.TrimSpace(request.Options["text"])
-	if subcommand == "history" {
-		var response Response
-		contextText, response = r.moderationHistoryContext(ctx, request, contextText)
-		if response.Content != "" {
-			return response
-		}
-	} else if contextText == "" {
-		return Response{Content: "Please include moderation context text.", Ephemeral: true}
-	}
-	if limited := r.allowUser(request.UserID); limited.Content != "" {
-		return limited
-	}
-	if denied := r.ensureBudgetAvailable(ctx, request); denied.Content != "" {
-		return denied
-	}
-
-	modRequest := moderation.Request{
-		GuildID:   request.GuildID,
-		UserID:    request.UserID,
-		ChannelID: request.ChannelID,
-		Context:   contextText,
-		SubjectID: request.Options["subject_id"],
-		Tone:      request.Options["tone"],
-	}
-	var answer assistant.AskResponse
-	switch subcommand {
-	case "triage":
-		answer, err = r.moderation.Triage(ctx, modRequest)
-	case "note":
-		answer, err = r.moderation.DraftNote(ctx, modRequest)
-	case "slowmode":
-		answer, err = r.moderation.RecommendSlowmode(ctx, modRequest)
-	case "cleanup":
-		answer, err = r.moderation.RecommendCleanup(ctx, modRequest)
-	case "history":
-		answer, err = r.moderation.SummarizeUserHistory(ctx, modRequest)
-	default:
-		return Response{Content: "Unknown moderator helper.", Ephemeral: true}
-	}
-	if err != nil {
-		return assistantError(err)
-	}
-	r.admin.RecordModerationAudit(ctx, request.GuildID, request.UserID, "moderation."+strings.ToLower(request.Subcommand), request.Options["subject_id"])
-	return Response{Content: answer.Content, Ephemeral: true}
-}
-
-func (r *Router) moderationHistoryContext(ctx context.Context, request Request, note string) (string, Response) {
-	subjectID := strings.TrimSpace(request.Options["subject_id"])
-	if subjectID == "" {
-		return "", Response{Content: "Please include a `subject_id` for history summaries.", Ephemeral: true}
-	}
-	if r.context == nil {
-		return "", Response{Content: "Discord context fetching is not configured for this runtime.", Ephemeral: true}
-	}
-	packed, err := r.context.RecentUserMessagesContext(ctx, contextsvc.ChannelRef{
-		GuildID:   request.GuildID,
-		ChannelID: request.ChannelID,
-	}, subjectID, intOption(request.Options["recent_limit"], 50))
-	if err != nil {
-		return "", Response{Content: "Discord context could not be fetched.", Ephemeral: true}
-	}
-	if len(packed.Citations) == 0 {
-		return "", Response{Content: "No recent visible messages were found for that subject in this channel.", Ephemeral: true}
-	}
-	r.admin.RecordSensitiveReadAudit(ctx, request.GuildID, request.UserID, "moderation_user_history", subjectID, map[string]string{
-		"command":      "mod.history",
-		"source_count": strconv.Itoa(len(packed.Citations)),
-	})
-	if strings.TrimSpace(note) != "" {
-		return "Moderator-provided context:\n" + note + "\n\nRecent subject history:\n" + packed.Text, Response{}
-	}
-	return packed.Text, Response{}
-}
-
-func (r *Router) handleMemoryConsent(ctx context.Context, request Request) Response {
-	if request.GuildID == "" {
-		return Response{Content: "Memory consent must be managed inside a Discord server.", Ephemeral: true}
-	}
-	action := strings.ToLower(strings.TrimSpace(request.Options["action"]))
-	if action == "" {
-		action = "status"
-	}
-	switch action {
-	case "enable":
-		if _, err := r.admin.SetMemoryConsent(ctx, request.GuildID, request.UserID, true); err != nil {
-			return Response{Content: "Memory consent could not be updated.", Ephemeral: true}
-		}
-		return Response{Content: "User-specific memory consent is enabled. Panda may use future user-memory features for you in this server.", Ephemeral: true}
-	case "disable":
-		if _, err := r.admin.SetMemoryConsent(ctx, request.GuildID, request.UserID, false); err != nil {
-			return Response{Content: "Memory consent could not be updated.", Ephemeral: true}
-		}
-		return Response{Content: "User-specific memory consent is disabled. Panda will not use user-memory features for you in this server.", Ephemeral: true}
-	case "status":
-		consent, err := r.admin.MemoryConsent(ctx, request.GuildID, request.UserID)
-		if err != nil {
-			return Response{Content: "Memory consent could not be read.", Ephemeral: true}
-		}
-		if consent {
-			return Response{Content: "User-specific memory consent is enabled for this server.", Ephemeral: true}
-		}
-		return Response{Content: "User-specific memory consent is disabled for this server.", Ephemeral: true}
-	default:
-		return Response{Content: "Use memory consent action `status`, `enable`, or `disable`.", Ephemeral: true}
-	}
 }
 
 func (r *Router) handleOps(ctx context.Context, request Request) Response {
@@ -306,18 +170,8 @@ func (r *Router) handleAdmin(ctx context.Context, request Request) Response {
 		return r.handleAdminSetup(ctx, request)
 	case "model":
 		return r.handleAdminModel(ctx, request)
-	case "usage":
-		return r.handleAdminUsage(ctx, request)
 	case "prompt":
 		return r.handleAdminPrompt(ctx, request)
-	case "memory":
-		return r.handleAdminMemory(ctx, request)
-	case "roles":
-		return r.handleAdminRoles(ctx, request)
-	case "channels":
-		return r.handleAdminChannels(ctx, request)
-	case "limits":
-		return r.handleAdminLimits(ctx, request)
 	case "audit":
 		return r.handleAdminAudit(ctx, request)
 	case "enable":
@@ -356,14 +210,6 @@ func (r *Router) handleAdminModel(ctx context.Context, request Request) Response
 		return Response{Content: "Model update failed.", Ephemeral: true}
 	}
 	return Response{Content: fmt.Sprintf("Model settings updated. Default `%s`, %d fallback model(s), temperature %.2f, max response %d tokens, tool policy `%s`.", config.DefaultModel, fallbackModelCount(config.FallbackModels), config.Temperature, config.MaxResponseTokens, config.ToolPolicy), Ephemeral: true}
-}
-
-func (r *Router) handleAdminUsage(ctx context.Context, request Request) Response {
-	report, err := r.admin.UsageReport(ctx, request.GuildID, usageWindow(request.Options["window"]), request.Options["by"], 5)
-	if err != nil {
-		return Response{Content: "Usage lookup failed.", Ephemeral: true}
-	}
-	return Response{Content: renderUsageReport(report), Ephemeral: true}
 }
 
 func (r *Router) handleAdminPrompt(ctx context.Context, request Request) Response {
@@ -421,258 +267,6 @@ func (r *Router) handleAdminAudit(ctx context.Context, request Request) Response
 	return Response{Content: renderAudit(events), Ephemeral: true}
 }
 
-func (r *Router) handleAdminMemory(ctx context.Context, request Request) Response {
-	action := strings.ToLower(strings.TrimSpace(request.Options["action"]))
-	switch action {
-	case "enable":
-		if dryRunRequested(request) {
-			return dryRunResponse("server knowledge retrieval would be enabled.")
-		}
-		_, err := r.admin.SetMemoryEnabled(ctx, request.GuildID, request.UserID, true)
-		if err != nil {
-			return adminMemoryError(err)
-		}
-		return Response{Content: "Server knowledge retrieval is enabled.", Ephemeral: true}
-	case "disable":
-		if dryRunRequested(request) {
-			return dryRunResponse("server knowledge retrieval would be disabled.")
-		}
-		_, err := r.admin.SetMemoryEnabled(ctx, request.GuildID, request.UserID, false)
-		if err != nil {
-			return adminMemoryError(err)
-		}
-		return Response{Content: "Server knowledge retrieval is disabled.", Ephemeral: true}
-	case "add":
-		if dryRunRequested(request) {
-			if strings.TrimSpace(request.Options["title"]) == "" || strings.TrimSpace(request.Options["content"]) == "" {
-				return Response{Content: "Knowledge document could not be saved.", Ephemeral: true}
-			}
-			return dryRunResponse("knowledge document `%s` would be saved.", strings.TrimSpace(request.Options["title"]))
-		}
-		document, err := r.admin.AddMemoryDocument(ctx, memory.AddDocumentRequest{
-			GuildID:   request.GuildID,
-			Title:     request.Options["title"],
-			Content:   request.Options["content"],
-			CreatedBy: request.UserID,
-			Source:    "admin",
-		})
-		if err != nil {
-			return Response{Content: "Knowledge document could not be saved.", Ephemeral: true}
-		}
-		return Response{Content: fmt.Sprintf("Knowledge document `%s` saved with id `%d`.", document.Title, document.ID), Ephemeral: true}
-	case "search":
-		if strings.TrimSpace(request.Options["query"]) != "" {
-			r.admin.RecordSensitiveReadAudit(ctx, request.GuildID, request.UserID, "knowledge_search", request.GuildID, map[string]string{
-				"command": "admin.memory.search",
-			})
-		}
-		return renderMemorySearch(ctx, r.admin.SearchMemory, request)
-	case "list", "export":
-		documents, err := r.admin.ListMemoryDocuments(ctx, request.GuildID, 10)
-		if err != nil {
-			return Response{Content: "Knowledge documents could not be listed.", Ephemeral: true}
-		}
-		return Response{Content: renderDocuments(documents), Ephemeral: true}
-	case "delete":
-		id, err := strconv.ParseUint(strings.TrimSpace(request.Options["document_id"]), 10, 64)
-		if err != nil || id == 0 {
-			return Response{Content: "Provide a numeric `document_id` to delete.", Ephemeral: true}
-		}
-		if dryRunRequested(request) {
-			return dryRunResponse("knowledge document `%d` would be deleted and removed from server search.", id)
-		}
-		confirmationID := memoryDeleteConfirmationID(request.UserID, strconv.FormatUint(id, 10))
-		if !confirmed(request, confirmationID) {
-			return destructiveConfirmation(confirmationID, "Delete document", fmt.Sprintf("This will permanently delete knowledge document `%d` and remove it from server search.", id))
-		}
-		if err := r.admin.DeleteMemoryDocument(ctx, request.GuildID, request.UserID, uint(id)); err != nil {
-			if errors.Is(err, repository.ErrNotFound) {
-				return Response{Content: "No matching knowledge document was found.", Ephemeral: true}
-			}
-			return Response{Content: "Knowledge document could not be deleted.", Ephemeral: true}
-		}
-		return Response{Content: fmt.Sprintf("Knowledge document `%d` deleted.", id), Ephemeral: true}
-	default:
-		return Response{Content: "Use memory action `enable`, `disable`, `add`, `search`, `list`, `export`, or `delete`.", Ephemeral: true}
-	}
-}
-
-func (r *Router) handleAdminRoles(ctx context.Context, request Request) Response {
-	action := strings.ToLower(strings.TrimSpace(request.Options["action"]))
-	permission := firstNonEmpty(request.Options["permission"], admin.PermissionAssistantUse)
-	switch action {
-	case "choose":
-		roleID := strings.TrimSpace(request.Options["role_id"])
-		if roleID == "" {
-			return Response{Content: "Provide a `role_id` to configure.", Ephemeral: true}
-		}
-		return rolePermissionSelectResponse(request.UserID, roleID)
-	case "add":
-		roleID := strings.TrimSpace(request.Options["role_id"])
-		if roleID == "" {
-			return Response{Content: "Provide a `role_id` to add.", Ephemeral: true}
-		}
-		if !admin.IsPermissionNameAllowed(permission) {
-			return Response{Content: "Role permission could not be saved.", Ephemeral: true}
-		}
-		if dryRunRequested(request) {
-			return dryRunResponse("role `%s` would be granted `%s`.", roleID, permission)
-		}
-		role, err := r.admin.AddRolePermission(ctx, request.GuildID, request.UserID, roleID, permission)
-		if err != nil {
-			return Response{Content: "Role permission could not be saved.", Ephemeral: true}
-		}
-		return Response{Content: fmt.Sprintf("Role `%s` can now use `%s`.", role.RoleID, role.Permission), Ephemeral: true}
-	case "remove":
-		roleID := strings.TrimSpace(request.Options["role_id"])
-		if roleID == "" {
-			return Response{Content: "Provide a `role_id` to remove.", Ephemeral: true}
-		}
-		if !admin.IsPermissionNameAllowed(permission) {
-			return Response{Content: "Role permission could not be removed.", Ephemeral: true}
-		}
-		if dryRunRequested(request) {
-			return dryRunResponse("`%s` would be removed from role `%s`.", permission, roleID)
-		}
-		confirmationID := roleRemoveConfirmationID(request.UserID, roleID, permission)
-		if !confirmed(request, confirmationID) {
-			return destructiveConfirmation(confirmationID, "Remove role access", fmt.Sprintf("This will remove `%s` from role `%s`.", permission, roleID))
-		}
-		if err := r.admin.RemoveRolePermission(ctx, request.GuildID, request.UserID, roleID, permission); err != nil {
-			if errors.Is(err, repository.ErrNotFound) {
-				return Response{Content: "No matching role permission was found.", Ephemeral: true}
-			}
-			return Response{Content: "Role permission could not be removed.", Ephemeral: true}
-		}
-		return Response{Content: fmt.Sprintf("Role `%s` no longer has `%s`.", roleID, permission), Ephemeral: true}
-	case "list":
-		roles, err := r.admin.ListRolePermissions(ctx, request.GuildID)
-		if err != nil {
-			return Response{Content: "Role permissions could not be listed.", Ephemeral: true}
-		}
-		return Response{Content: renderRoles(roles), Ephemeral: true}
-	default:
-		return Response{Content: "Use role action `add`, `choose`, `remove`, or `list`.", Ephemeral: true}
-	}
-}
-
-func (r *Router) handleAdminChannels(ctx context.Context, request Request) Response {
-	action := strings.ToLower(strings.TrimSpace(request.Options["action"]))
-	switch action {
-	case "allow", "deny":
-		channelID := strings.TrimSpace(request.Options["channel_id"])
-		if channelID == "" {
-			return Response{Content: "Provide a `channel_id` to configure.", Ephemeral: true}
-		}
-		if dryRunRequested(request) {
-			return dryRunResponse("channel `%s` would be set to `%s`.", channelID, action)
-		}
-		rule, err := r.admin.SetChannelRule(ctx, request.GuildID, request.UserID, channelID, action)
-		if err != nil {
-			return Response{Content: "Channel rule could not be saved.", Ephemeral: true}
-		}
-		return Response{Content: fmt.Sprintf("Channel `%s` is now `%s`.", rule.ChannelID, rule.Rule), Ephemeral: true}
-	case "remove":
-		channelID := strings.TrimSpace(request.Options["channel_id"])
-		if channelID == "" {
-			return Response{Content: "Provide a `channel_id` to remove.", Ephemeral: true}
-		}
-		if dryRunRequested(request) {
-			return dryRunResponse("the allow/deny rule for channel `%s` would be removed.", channelID)
-		}
-		confirmationID := channelRemoveConfirmationID(request.UserID, channelID)
-		if !confirmed(request, confirmationID) {
-			return destructiveConfirmation(confirmationID, "Remove channel rule", fmt.Sprintf("This will remove the allow/deny rule for channel `%s`.", channelID))
-		}
-		if err := r.admin.RemoveChannelRule(ctx, request.GuildID, request.UserID, channelID); err != nil {
-			if errors.Is(err, repository.ErrNotFound) {
-				return Response{Content: "No matching channel rule was found.", Ephemeral: true}
-			}
-			return Response{Content: "Channel rule could not be removed.", Ephemeral: true}
-		}
-		return Response{Content: fmt.Sprintf("Channel `%s` rule removed.", channelID), Ephemeral: true}
-	case "list":
-		rules, err := r.admin.ListChannelRules(ctx, request.GuildID)
-		if err != nil {
-			return Response{Content: "Channel rules could not be listed.", Ephemeral: true}
-		}
-		return Response{Content: renderChannelRules(rules), Ephemeral: true}
-	default:
-		return Response{Content: "Use channel action `allow`, `deny`, `remove`, or `list`.", Ephemeral: true}
-	}
-}
-
-func (r *Router) handleAdminLimits(ctx context.Context, request Request) Response {
-	action := strings.ToLower(strings.TrimSpace(request.Options["action"]))
-	scope := strings.ToLower(strings.TrimSpace(request.Options["scope"]))
-	subjectID := strings.TrimSpace(request.Options["subject_id"])
-	switch action {
-	case "set":
-		limitCount, err := strconv.Atoi(strings.TrimSpace(request.Options["limit"]))
-		if err != nil || limitCount <= 0 {
-			return Response{Content: "Provide a positive numeric `limit`.", Ephemeral: true}
-		}
-		window, err := time.ParseDuration(firstNonEmpty(request.Options["window"], "1h"))
-		if err != nil || window <= 0 {
-			return Response{Content: "Provide a valid positive `window`, such as `1h` or `24h`.", Ephemeral: true}
-		}
-		if scope == repository.BudgetScopeGlobal && !request.IsOwner {
-			return Response{Content: "Only a bot owner can set global limits.", Ephemeral: true}
-		}
-		if scope == repository.BudgetScopeGuild && subjectID == "" {
-			subjectID = request.GuildID
-		}
-		if !validBudgetScope(scope) {
-			return Response{Content: "Budget limit could not be saved.", Ephemeral: true}
-		}
-		if dryRunRequested(request) {
-			return dryRunResponse("limit would be set: `%s` `%s` = %d requests per %s.", scope, subjectID, limitCount, window.String())
-		}
-		saved, err := r.admin.SetBudgetLimit(ctx, request.GuildID, request.UserID, store.BudgetLimit{
-			Scope:         scope,
-			SubjectID:     subjectID,
-			Limit:         limitCount,
-			WindowSeconds: int(window.Seconds()),
-		})
-		if err != nil {
-			return Response{Content: "Budget limit could not be saved.", Ephemeral: true}
-		}
-		return Response{Content: fmt.Sprintf("Limit set: `%s` `%s` = %d requests per %s.", saved.Scope, saved.SubjectID, saved.Limit, (time.Duration(saved.WindowSeconds) * time.Second).String()), Ephemeral: true}
-	case "remove":
-		if scope == repository.BudgetScopeGuild && subjectID == "" {
-			subjectID = request.GuildID
-		}
-		if scope == repository.BudgetScopeGlobal && !request.IsOwner {
-			return Response{Content: "Only a bot owner can remove global limits.", Ephemeral: true}
-		}
-		if !validBudgetScope(scope) {
-			return Response{Content: "Budget limit could not be removed.", Ephemeral: true}
-		}
-		if dryRunRequested(request) {
-			return dryRunResponse("the `%s` budget limit for `%s` would be removed.", scope, subjectID)
-		}
-		confirmationID := limitRemoveConfirmationID(request.UserID, scope, subjectID)
-		if !confirmed(request, confirmationID) {
-			return destructiveConfirmation(confirmationID, "Remove limit", fmt.Sprintf("This will remove the `%s` budget limit for `%s`.", scope, subjectID))
-		}
-		if err := r.admin.RemoveBudgetLimit(ctx, request.GuildID, request.UserID, scope, subjectID); err != nil {
-			if errors.Is(err, repository.ErrNotFound) {
-				return Response{Content: "No matching budget limit was found.", Ephemeral: true}
-			}
-			return Response{Content: "Budget limit could not be removed.", Ephemeral: true}
-		}
-		return Response{Content: fmt.Sprintf("Limit removed: `%s` `%s`.", scope, subjectID), Ephemeral: true}
-	case "list":
-		limits, err := r.admin.ListBudgetLimits(ctx, request.GuildID)
-		if err != nil {
-			return Response{Content: "Budget limits could not be listed.", Ephemeral: true}
-		}
-		return Response{Content: renderBudgetLimits(limits), Ephemeral: true}
-	default:
-		return Response{Content: "Use limit action `set`, `remove`, or `list`.", Ephemeral: true}
-	}
-}
-
 func (r *Router) handleAsk(ctx context.Context, request Request, command string) Response {
 	question := strings.TrimSpace(request.Options["question"])
 	if question == "" {
@@ -702,7 +296,7 @@ func (r *Router) handleAsk(ctx context.Context, request Request, command string)
 	if strings.TrimSpace(answer.Content) == "" {
 		return Response{Content: "The model returned an empty response.", Ephemeral: true}
 	}
-	return Response{Content: answer.Content}
+	return responseFromAssistantAnswer(request.UserID, answer, "", "")
 }
 
 func (r *Router) handleChat(ctx context.Context, request Request) Response {
@@ -759,7 +353,7 @@ func (r *Router) handleChatMode(ctx context.Context, request Request, threaded b
 	if err != nil {
 		return assistantError(err)
 	}
-	return Response{Content: answer.Content, ThreadID: threadID, ThreadName: threadName}
+	return responseFromAssistantAnswer(request.UserID, answer, threadID, threadName)
 }
 
 func (r *Router) handleTask(ctx context.Context, request Request) Response {
@@ -811,7 +405,74 @@ func (r *Router) HandleBackgroundTask(ctx context.Context, task BackgroundTask) 
 	if err != nil {
 		return assistantError(err)
 	}
-	return Response{Content: answer.Content}
+	return responseFromAssistantAnswer(task.UserID, answer, "", "")
+}
+
+func (r *Router) HandleToolConfirmation(ctx context.Context, request ToolConfirmationRequest) Response {
+	if request.Request.GuildID == "" {
+		return Response{Content: "This confirmation must be used inside a Discord server.", Ephemeral: true}
+	}
+	switch request.Action {
+	case toolActionKnowledgeDelete:
+		if denied := r.ensureToolConfirmationPermission(ctx, request.Request, r.admin.CanManageMemory, "You do not have permission to manage server knowledge."); denied.Content != "" {
+			return denied
+		}
+		documentID, err := strconv.ParseUint(strings.TrimSpace(request.Options["document_id"]), 10, 64)
+		if err != nil || documentID == 0 {
+			return Response{Content: "That knowledge deletion confirmation is invalid.", Ephemeral: true}
+		}
+		if err := r.admin.DeleteMemoryDocument(ctx, request.Request.GuildID, request.Request.UserID, uint(documentID)); err != nil {
+			return toolConfirmationError(err, "Knowledge document could not be deleted.", "That knowledge document was not found.")
+		}
+		return Response{Content: fmt.Sprintf("Deleted knowledge document `%d`.", documentID), Ephemeral: true}
+	case toolActionBudgetLimitRemove:
+		scope := strings.ToLower(strings.TrimSpace(request.Options["scope"]))
+		if !validBudgetScope(scope) {
+			return Response{Content: "That budget-limit confirmation is invalid.", Ephemeral: true}
+		}
+		if scope == repository.BudgetScopeGlobal {
+			if !request.Request.IsOwner {
+				return Response{Content: "Only a bot owner can remove global limits.", Ephemeral: true}
+			}
+		} else if denied := r.ensureToolConfirmationPermission(ctx, request.Request, r.admin.CanWriteConfig, "You do not have permission to manage limits."); denied.Content != "" {
+			return denied
+		}
+		subjectID := strings.TrimSpace(request.Options["subject_id"])
+		if scope == repository.BudgetScopeGuild && subjectID == "" {
+			subjectID = request.Request.GuildID
+		}
+		if err := r.admin.RemoveBudgetLimit(ctx, request.Request.GuildID, request.Request.UserID, scope, subjectID); err != nil {
+			return toolConfirmationError(err, "Budget limit could not be removed.", "That budget limit was not found.")
+		}
+		return Response{Content: fmt.Sprintf("Removed `%s` budget limit for `%s`.", scope, firstNonEmpty(subjectID, "global")), Ephemeral: true}
+	case toolActionRolePermissionRemove:
+		if denied := r.ensureToolConfirmationPermission(ctx, request.Request, r.admin.CanWriteConfig, "You do not have permission to manage role permissions."); denied.Content != "" {
+			return denied
+		}
+		roleID := strings.TrimSpace(request.Options["role_id"])
+		permission := strings.TrimSpace(request.Options["permission"])
+		if roleID == "" || !admin.IsPermissionNameAllowed(permission) {
+			return Response{Content: "That role-permission confirmation is invalid.", Ephemeral: true}
+		}
+		if err := r.admin.RemoveRolePermission(ctx, request.Request.GuildID, request.Request.UserID, roleID, permission); err != nil {
+			return toolConfirmationError(err, "Role permission could not be removed.", "That role permission was not found.")
+		}
+		return Response{Content: fmt.Sprintf("Removed `%s` from role `%s`.", permission, roleID), Ephemeral: true}
+	case toolActionChannelRuleRemove:
+		if denied := r.ensureToolConfirmationPermission(ctx, request.Request, r.admin.CanWriteConfig, "You do not have permission to manage channel rules."); denied.Content != "" {
+			return denied
+		}
+		channelID := strings.TrimSpace(request.Options["channel_id"])
+		if channelID == "" {
+			return Response{Content: "That channel-rule confirmation is invalid.", Ephemeral: true}
+		}
+		if err := r.admin.RemoveChannelRule(ctx, request.Request.GuildID, request.Request.UserID, channelID); err != nil {
+			return toolConfirmationError(err, "Channel rule could not be removed.", "That channel rule was not found.")
+		}
+		return Response{Content: fmt.Sprintf("Removed channel access rule for `%s`.", channelID), Ephemeral: true}
+	default:
+		return Response{Content: "That confirmation is no longer supported.", Ephemeral: true}
+	}
 }
 
 func (r *Router) taskInput(ctx context.Context, request Request) (string, Response) {
@@ -888,28 +549,6 @@ func (r *Router) attachmentInput(ctx context.Context, request Request, rawID str
 	return fmt.Sprintf("Extracted attachment `%s` (id %d):\n\n%s", attachment.Filename, attachment.ID, attachment.ExtractedText), Response{}
 }
 
-func (r *Router) handleSearchMemory(ctx context.Context, request Request) Response {
-	if denied := r.ensureAssistantAllowed(ctx, request); denied.Content != "" {
-		return denied
-	}
-	enabled, err := r.admin.MemoryEnabled(ctx, request.GuildID)
-	if err != nil {
-		return Response{Content: "Memory setting lookup failed.", Ephemeral: true}
-	}
-	if !enabled {
-		return Response{Content: "Server knowledge retrieval is disabled.", Ephemeral: true}
-	}
-	if denied := r.ensureMemoryReadAllowed(ctx, request); denied.Content != "" {
-		return denied
-	}
-	if strings.TrimSpace(request.Options["query"]) != "" {
-		r.admin.RecordSensitiveReadAudit(ctx, request.GuildID, request.UserID, "knowledge_search", request.GuildID, map[string]string{
-			"command": "search-memory",
-		})
-	}
-	return renderMemorySearch(ctx, r.admin.SearchMemory, request)
-}
-
 func (r *Router) ensureAssistantAllowed(ctx context.Context, request Request) Response {
 	allowed, err := r.admin.CanUseAssistant(ctx, assistantAccessRequest(request))
 	if err != nil {
@@ -972,7 +611,9 @@ func (r *Router) allowedToolPermissions(ctx context.Context, request Request) ma
 	r.addPermissionIfAllowed(ctx, request, permissions, admin.PermissionModerationUse, r.admin.CanUseModeration)
 	r.addPermissionIfAllowed(ctx, request, permissions, admin.PermissionAdminConfigRead, r.admin.CanReadConfig)
 	r.addPermissionIfAllowed(ctx, request, permissions, admin.PermissionAdminConfigWrite, r.admin.CanWriteConfig)
+	r.addPermissionIfAllowed(ctx, request, permissions, admin.PermissionAdminUsageRead, r.admin.CanReadUsage)
 	r.addPermissionIfAllowed(ctx, request, permissions, admin.PermissionAdminAuditRead, r.admin.CanReadAudit)
+	r.addPermissionIfAllowed(ctx, request, permissions, admin.PermissionAdminMemoryManage, r.admin.CanManageMemory)
 	r.addPermissionIfAllowed(ctx, request, permissions, admin.PermissionOwnerOps, r.admin.CanUseOwnerOps)
 	return permissions
 }
@@ -1041,44 +682,46 @@ func assistantError(err error) Response {
 	}
 }
 
-func adminMemoryError(err error) Response {
-	if errors.Is(err, repository.ErrNotFound) {
-		return Response{Content: "Run `/admin setup` before changing memory settings.", Ephemeral: true}
+func responseFromAssistantAnswer(userID string, answer assistant.AskResponse, threadID, threadName string) Response {
+	response := Response{Content: answer.Content, ThreadID: threadID, ThreadName: threadName}
+	if confirmation := ToolConfirmationFromAssistant(userID, answer.Confirmation); confirmation != nil {
+		response.Confirmation = confirmation
+		response.Content = appendConfirmationNotice(response.Content, answer.Confirmation.Summary)
 	}
-	return Response{Content: "Memory setting update failed.", Ephemeral: true}
+	return response
 }
 
-func renderMemorySearch(ctx context.Context, search func(context.Context, string, string, int) ([]repository.KnowledgeSearchResult, error), request Request) Response {
-	query := strings.TrimSpace(request.Options["query"])
-	if query == "" {
-		return Response{Content: "Please include a search query.", Ephemeral: true}
+func appendConfirmationNotice(content, summary string) string {
+	content = strings.TrimSpace(content)
+	summary = strings.TrimSpace(summary)
+	if summary != "" && !strings.Contains(content, summary) {
+		if content != "" {
+			content += "\n\n"
+		}
+		content += summary
 	}
-	results, err := search(ctx, request.GuildID, query, 5)
+	if content != "" {
+		content += "\n\n"
+	}
+	return content + "Press the confirmation button to continue."
+}
+
+func (r *Router) ensureToolConfirmationPermission(ctx context.Context, request Request, check func(context.Context, admin.AssistantAccessRequest) (bool, error), denial string) Response {
+	allowed, err := check(ctx, assistantAccessRequest(request))
 	if err != nil {
-		return Response{Content: "Memory search failed.", Ephemeral: true}
+		return Response{Content: "Permission lookup failed. Please try again later.", Ephemeral: true}
 	}
-	if len(results) == 0 {
-		return Response{Content: "No matching server knowledge found.", Ephemeral: true}
+	if !allowed {
+		return Response{Content: denial, Ephemeral: true}
 	}
-
-	var builder strings.Builder
-	builder.WriteString("Server knowledge matches:\n")
-	for _, result := range results {
-		fmt.Fprintf(&builder, "- `%d` %s: %s\n", result.DocumentID, result.Title, strings.TrimSpace(result.Snippet))
-	}
-	return Response{Content: security.SafeDiscordContent(builder.String()), Ephemeral: true}
+	return Response{}
 }
 
-func renderDocuments(documents []store.KnowledgeDocument) string {
-	if len(documents) == 0 {
-		return "No knowledge documents saved yet."
+func toolConfirmationError(err error, fallback, notFound string) Response {
+	if errors.Is(err, repository.ErrNotFound) {
+		return Response{Content: notFound, Ephemeral: true}
 	}
-	var builder strings.Builder
-	builder.WriteString("Knowledge documents:\n")
-	for _, document := range documents {
-		fmt.Fprintf(&builder, "- `%d` %s\n", document.ID, document.Title)
-	}
-	return security.SafeDiscordContent(builder.String())
+	return Response{Content: fallback, Ephemeral: true}
 }
 
 func renderAudit(events []store.AuditEvent) string {
@@ -1086,60 +729,6 @@ func renderAudit(events []store.AuditEvent) string {
 	builder.WriteString("Recent audit events:\n")
 	for _, event := range events {
 		fmt.Fprintf(&builder, "- %s by `%s` at %s\n", event.Action, event.ActorID, event.CreatedAt.UTC().Format(time.RFC3339))
-	}
-	return security.SafeDiscordContent(builder.String())
-}
-
-func renderUsageReport(report admin.UsageReport) string {
-	var builder strings.Builder
-	fmt.Fprintf(&builder, "Usage: %d requests (%d succeeded, %d failed), %d total tokens.",
-		report.Summary.TotalRequests,
-		report.Summary.Successful,
-		report.Summary.Failed,
-		report.Summary.TotalTokens,
-	)
-	if len(report.Breakdown) == 0 {
-		return builder.String()
-	}
-	fmt.Fprintf(&builder, "\nTop %s usage:\n", report.Dimension)
-	for _, row := range report.Breakdown {
-		fmt.Fprintf(&builder, "- `%s`: %d requests, %d tokens, %d failed\n", row.Label, row.TotalRequests, row.TotalTokens, row.Failed)
-	}
-	return security.SafeDiscordContent(builder.String())
-}
-
-func renderRoles(roles []store.GuildRole) string {
-	if len(roles) == 0 {
-		return "No role permissions configured."
-	}
-	var builder strings.Builder
-	builder.WriteString("Role permissions:\n")
-	for _, role := range roles {
-		fmt.Fprintf(&builder, "- `%s`: %s\n", role.RoleID, role.Permission)
-	}
-	return security.SafeDiscordContent(builder.String())
-}
-
-func renderChannelRules(rules []store.GuildChannelRule) string {
-	if len(rules) == 0 {
-		return "No channel rules configured."
-	}
-	var builder strings.Builder
-	builder.WriteString("Channel rules:\n")
-	for _, rule := range rules {
-		fmt.Fprintf(&builder, "- `%s`: %s\n", rule.ChannelID, rule.Rule)
-	}
-	return security.SafeDiscordContent(builder.String())
-}
-
-func renderBudgetLimits(limits []store.BudgetLimit) string {
-	if len(limits) == 0 {
-		return "No budget limits configured."
-	}
-	var builder strings.Builder
-	builder.WriteString("Budget limits:\n")
-	for _, limit := range limits {
-		fmt.Fprintf(&builder, "- `%s` `%s`: %d requests per %s\n", limit.Scope, limit.SubjectID, limit.Limit, (time.Duration(limit.WindowSeconds) * time.Second).String())
 	}
 	return security.SafeDiscordContent(builder.String())
 }
@@ -1282,17 +871,6 @@ func chatThreadTitle(question string) string {
 		title = strings.TrimSpace(title[:72])
 	}
 	return "Panda: " + title
-}
-
-func usageWindow(value string) time.Duration {
-	switch strings.ToLower(strings.TrimSpace(value)) {
-	case "all":
-		return 0
-	case "week", "7d":
-		return 7 * 24 * time.Hour
-	default:
-		return 24 * time.Hour
-	}
 }
 
 func firstNonEmpty(value, fallback string) string {

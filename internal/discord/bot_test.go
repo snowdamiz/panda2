@@ -40,12 +40,12 @@ func TestApplicationCommandsIncludeContextMenus(t *testing.T) {
 	for _, command := range commands {
 		names[command.CommandName()] = true
 	}
-	for _, name := range []string{"Explain with Panda", "Summarize with Panda", "memory-consent", "search-memory", "admin", "ops", "mod", "help"} {
+	for _, name := range []string{"Explain with Panda", "Summarize with Panda", "admin", "ops", "help", "ping"} {
 		if !names[name] {
 			t.Fatalf("expected command %q to be registered", name)
 		}
 	}
-	for _, name := range []string{"ask", "chat", "summarize", "explain", "rewrite", "translate"} {
+	for _, name := range []string{"ask", "chat", "summarize", "explain", "rewrite", "translate", "memory-consent", "search-memory", "mod"} {
 		if names[name] {
 			t.Fatalf("expected natural-language command %q not to be registered as a slash command", name)
 		}
@@ -166,15 +166,6 @@ func TestDeferredProgressContentUsesCommandAction(t *testing.T) {
 	}
 }
 
-func TestModeratorHelpersDeferEphemerally(t *testing.T) {
-	if !shouldDeferEphemeral(commands.Request{Command: "mod"}) {
-		t.Fatal("moderator helpers should defer ephemerally")
-	}
-	if shouldDeferEphemeral(commands.Request{Command: "summarize"}) {
-		t.Fatal("summarize should not defer ephemerally by default")
-	}
-}
-
 func TestAdminModelCommandIncludesRuntimeOptions(t *testing.T) {
 	var modelCommand *disgoDiscord.ApplicationCommandOptionSubCommand
 	for _, command := range applicationCommands() {
@@ -211,15 +202,13 @@ func TestAdminModelCommandIncludesRuntimeOptions(t *testing.T) {
 	}
 }
 
-func TestAdminDestructiveCommandsIncludeConfirmOption(t *testing.T) {
+func TestAdminToggleCommandsIncludeSafetyOptions(t *testing.T) {
 	adminCommand := adminSlashCommand(t)
-	for _, subcommandName := range []string{"limits", "memory", "roles", "channels", "disable"} {
-		subcommand := adminSubcommand(t, adminCommand, subcommandName)
-		if !subcommandHasStringOption(subcommand, "confirm") {
-			t.Fatalf("expected /admin %s to include confirm option", subcommandName)
-		}
+	disable := adminSubcommand(t, adminCommand, "disable")
+	if !subcommandHasStringOption(disable, "confirm") {
+		t.Fatal("expected /admin disable to include confirm option")
 	}
-	for _, subcommandName := range []string{"model", "limits", "prompt", "memory", "roles", "channels", "enable", "disable"} {
+	for _, subcommandName := range []string{"model", "prompt", "enable", "disable"} {
 		subcommand := adminSubcommand(t, adminCommand, subcommandName)
 		if !subcommandHasBoolOption(subcommand, "dry_run") {
 			t.Fatalf("expected /admin %s to include dry_run option", subcommandName)
@@ -258,33 +247,6 @@ func TestConfirmationResponseRendersButtons(t *testing.T) {
 	}
 }
 
-func TestSelectResponseRendersStringSelect(t *testing.T) {
-	response := commands.Response{
-		Content:   "Choose.",
-		Ephemeral: true,
-		Select: &commands.Select{
-			ID:          "p2s:rp:admin:role-1",
-			Placeholder: "Choose permission",
-			Options: []commands.SelectOption{
-				{Label: "Moderation Use", Value: "moderation.use", Description: "Use moderation helpers"},
-			},
-		},
-	}
-
-	message := messageCreateFromResponse(response)
-	if len(message.Components) != 1 {
-		t.Fatalf("expected one action row, got %+v", message.Components)
-	}
-	row, ok := message.Components[0].(disgoDiscord.ActionRowComponent)
-	if !ok || len(row.Components) != 1 {
-		t.Fatalf("expected action row with select, got %+v", message.Components[0])
-	}
-	selectMenu, ok := row.Components[0].(disgoDiscord.StringSelectMenuComponent)
-	if !ok || selectMenu.CustomID != response.Select.ID || len(selectMenu.Options) != 1 || selectMenu.Options[0].Value != "moderation.use" {
-		t.Fatalf("unexpected select menu: %+v", row.Components[0])
-	}
-}
-
 func TestModalResponseRendersModal(t *testing.T) {
 	response := &commands.Modal{
 		ID:    "p2m:prompt:admin",
@@ -315,37 +277,11 @@ func TestModalResponseRendersModal(t *testing.T) {
 	}
 }
 
-func TestAdminRolesCommandIncludesChooseAction(t *testing.T) {
-	roles := adminSubcommand(t, adminSlashCommand(t), "roles")
-	action := subcommandStringOption(t, roles, "action")
-	for _, choice := range action.Choices {
-		if choice.Value == "choose" {
-			return
-		}
-	}
-	t.Fatalf("expected /admin roles action choices to include choose, got %+v", action.Choices)
-}
-
 func TestAdminPromptCommandCanOpenModal(t *testing.T) {
 	prompt := adminSubcommand(t, adminSlashCommand(t), "prompt")
 	option := subcommandStringOption(t, prompt, "prompt")
 	if option.Required {
 		t.Fatal("prompt option should be optional so the modal flow can open")
-	}
-}
-
-func TestModHistoryCommandUsesFetchedContextOptions(t *testing.T) {
-	history := commandSubcommand(t, slashCommand(t, "mod"), "history")
-	subject := subcommandStringOption(t, history, "subject_id")
-	if !subject.Required {
-		t.Fatal("subject_id option should be required for history summaries")
-	}
-	text := subcommandStringOption(t, history, "text")
-	if text.Required {
-		t.Fatal("history text option should be optional so fetched context can be used")
-	}
-	if !subcommandHasStringOption(history, "recent_limit") {
-		t.Fatal("history command should include recent_limit")
 	}
 }
 

@@ -13,12 +13,12 @@ import (
 	contextsvc "github.com/sn0w/panda2/internal/context"
 	"github.com/sn0w/panda2/internal/llm"
 	"github.com/sn0w/panda2/internal/memory"
-	"github.com/sn0w/panda2/internal/moderation"
 	"github.com/sn0w/panda2/internal/ops"
 	"github.com/sn0w/panda2/internal/queue"
 	"github.com/sn0w/panda2/internal/ratelimit"
 	"github.com/sn0w/panda2/internal/repository"
 	"github.com/sn0w/panda2/internal/store"
+	"github.com/sn0w/panda2/internal/tools"
 )
 
 type fakeLLM struct {
@@ -123,10 +123,15 @@ func newTestRouter(t *testing.T, client *fakeLLM, limit int) *Router {
 	worker := queue.NewWorker(jobs, "test-worker")
 	opsService := ops.NewService(config.Config{DataDir: t.TempDir()}, db, configs, jobs, worker)
 	assistantService := assistant.NewService(client, usage, configs, memoryService, conversations, "openrouter/auto", nil)
+	adminService := admin.NewService(configs, usage, audit, memoryService, access, budgets, nil, "openrouter/auto", members)
+	registry, err := tools.NewDefaultRegistry()
+	if err != nil {
+		t.Fatalf("tool registry: %v", err)
+	}
+	assistantService.WithToolExecutor(tools.NewExecutor(registry, memoryService, configs).WithAdminOperations(adminService))
 	return NewRouter(
-		admin.NewService(configs, usage, audit, memoryService, access, budgets, nil, "openrouter/auto", members),
+		adminService,
 		assistantService,
-		moderation.NewService(assistantService),
 		opsService,
 		ratelimit.New(limit, time.Minute),
 	)
@@ -272,266 +277,6 @@ func TestAdminModelSetsRuntimeOptions(t *testing.T) {
 	}
 }
 
-func TestAdminUsageBreaksDownByModel(t *testing.T) {
-	client := &fakeLLM{response: llm.ChatResponse{Model: "fixture/model", Content: "ok", Usage: llm.Usage{TotalTokens: 12}}}
-	router := newTestRouter(t, client, 10)
-
-	for i := 0; i < 2; i++ {
-		response := router.Handle(context.Background(), Request{
-			Command:   "ask",
-			UserID:    "user-1",
-			GuildID:   "guild-1",
-			ChannelID: "channel-1",
-			Options:   map[string]string{"question": "hi"},
-		})
-		if response.Content != "ok" {
-			t.Fatalf("unexpected ask response: %+v", response)
-		}
-	}
-	usage := router.Handle(context.Background(), Request{
-		Command:      "admin",
-		Subcommand:   "usage",
-		GuildID:      "guild-1",
-		UserID:       "admin",
-		IsGuildAdmin: true,
-		Options:      map[string]string{"by": "model", "window": "all"},
-	})
-	if !usage.Ephemeral || !strings.Contains(usage.Content, "Top model usage") || !strings.Contains(usage.Content, "fixture/model") || !strings.Contains(usage.Content, "24 total tokens") {
-		t.Fatalf("unexpected usage response: %+v", usage)
-	}
-}
-
-func TestAdminMemoryDeleteRequiresConfirmation(t *testing.T) {
-	router := newTestRouter(t, &fakeLLM{}, 5)
-	_ = router.Handle(context.Background(), Request{Command: "admin", Subcommand: "setup", GuildID: "guild-1", UserID: "admin", IsGuildAdmin: true})
-	_ = router.Handle(context.Background(), Request{
-		Command:      "admin",
-		Subcommand:   "memory",
-		GuildID:      "guild-1",
-		UserID:       "admin",
-		IsGuildAdmin: true,
-		Options: map[string]string{
-			"action":  "add",
-			"title":   "Deploy notes",
-			"content": "Production deploys happen on Fridays after review.",
-		},
-	})
-
-	request := Request{
-		Command:      "admin",
-		Subcommand:   "memory",
-		GuildID:      "guild-1",
-		UserID:       "admin",
-		IsGuildAdmin: true,
-		Options:      map[string]string{"action": "delete", "document_id": "1"},
-	}
-	pending := router.Handle(context.Background(), request)
-	confirmationID := requireConfirmation(t, pending)
-	list := router.Handle(context.Background(), Request{
-		Command:      "admin",
-		Subcommand:   "memory",
-		GuildID:      "guild-1",
-		UserID:       "admin",
-		IsGuildAdmin: true,
-		Options:      map[string]string{"action": "list"},
-	})
-	if !strings.Contains(list.Content, "Deploy notes") {
-		t.Fatalf("unconfirmed delete should leave document in place, got %+v", list)
-	}
-
-	request.Options["confirm"] = confirmationID
-	deleted := router.Handle(context.Background(), request)
-	if !strings.Contains(deleted.Content, "deleted") {
-		t.Fatalf("expected confirmed delete, got %+v", deleted)
-	}
-	list = router.Handle(context.Background(), Request{
-		Command:      "admin",
-		Subcommand:   "memory",
-		GuildID:      "guild-1",
-		UserID:       "admin",
-		IsGuildAdmin: true,
-		Options:      map[string]string{"action": "list"},
-	})
-	if !strings.Contains(list.Content, "No knowledge documents") {
-		t.Fatalf("confirmed delete should remove document, got %+v", list)
-	}
-}
-
-func TestAdminRemovalsRequireConfirmation(t *testing.T) {
-	t.Run("role", func(t *testing.T) {
-		router := newTestRouter(t, &fakeLLM{response: llm.ChatResponse{Content: "ok"}}, 20)
-		_ = router.Handle(context.Background(), Request{
-			Command:      "admin",
-			Subcommand:   "roles",
-			GuildID:      "guild-1",
-			UserID:       "admin",
-			IsGuildAdmin: true,
-			Options:      map[string]string{"action": "add", "role_id": "role-allowed"},
-		})
-		_ = router.Handle(context.Background(), Request{
-			Command:      "admin",
-			Subcommand:   "roles",
-			GuildID:      "guild-1",
-			UserID:       "admin",
-			IsGuildAdmin: true,
-			Options:      map[string]string{"action": "add", "role_id": "role-other"},
-		})
-
-		request := Request{
-			Command:      "admin",
-			Subcommand:   "roles",
-			GuildID:      "guild-1",
-			UserID:       "admin",
-			IsGuildAdmin: true,
-			Options:      map[string]string{"action": "remove", "role_id": "role-allowed"},
-		}
-		pending := router.Handle(context.Background(), request)
-		confirmationID := requireConfirmation(t, pending)
-		allowed := router.Handle(context.Background(), Request{
-			Command:   "ask",
-			GuildID:   "guild-1",
-			ChannelID: "channel-1",
-			UserID:    "user-1",
-			RoleIDs:   []string{"role-allowed"},
-			Options:   map[string]string{"question": "hi"},
-		})
-		if allowed.Content != "ok" {
-			t.Fatalf("unconfirmed role removal should leave access in place, got %+v", allowed)
-		}
-
-		request.Options["confirm"] = confirmationID
-		removed := router.Handle(context.Background(), request)
-		if !strings.Contains(removed.Content, "no longer has") {
-			t.Fatalf("expected confirmed role removal, got %+v", removed)
-		}
-		denied := router.Handle(context.Background(), Request{
-			Command:   "ask",
-			GuildID:   "guild-1",
-			ChannelID: "channel-1",
-			UserID:    "user-1",
-			RoleIDs:   []string{"role-allowed"},
-			Options:   map[string]string{"question": "hi"},
-		})
-		if !denied.Ephemeral || !strings.Contains(denied.Content, "permission") {
-			t.Fatalf("confirmed role removal should remove access, got %+v", denied)
-		}
-	})
-
-	t.Run("channel", func(t *testing.T) {
-		router := newTestRouter(t, &fakeLLM{response: llm.ChatResponse{Content: "ok"}}, 20)
-		_ = router.Handle(context.Background(), Request{
-			Command:      "admin",
-			Subcommand:   "channels",
-			GuildID:      "guild-1",
-			UserID:       "admin",
-			IsGuildAdmin: true,
-			Options:      map[string]string{"action": "deny", "channel_id": "channel-1"},
-		})
-
-		request := Request{
-			Command:      "admin",
-			Subcommand:   "channels",
-			GuildID:      "guild-1",
-			UserID:       "admin",
-			IsGuildAdmin: true,
-			Options:      map[string]string{"action": "remove", "channel_id": "channel-1"},
-		}
-		pending := router.Handle(context.Background(), request)
-		confirmationID := requireConfirmation(t, pending)
-		denied := router.Handle(context.Background(), Request{
-			Command:   "ask",
-			GuildID:   "guild-1",
-			ChannelID: "channel-1",
-			UserID:    "user-1",
-			Options:   map[string]string{"question": "hi"},
-		})
-		if !denied.Ephemeral || !strings.Contains(denied.Content, "permission") {
-			t.Fatalf("unconfirmed channel removal should leave deny in place, got %+v", denied)
-		}
-
-		request.Options["confirm"] = confirmationID
-		removed := router.Handle(context.Background(), request)
-		if !strings.Contains(removed.Content, "rule removed") {
-			t.Fatalf("expected confirmed channel removal, got %+v", removed)
-		}
-		allowed := router.Handle(context.Background(), Request{
-			Command:   "ask",
-			GuildID:   "guild-1",
-			ChannelID: "channel-1",
-			UserID:    "user-1",
-			Options:   map[string]string{"question": "hi"},
-		})
-		if allowed.Content != "ok" {
-			t.Fatalf("confirmed channel removal should allow requests, got %+v", allowed)
-		}
-	})
-
-	t.Run("limit", func(t *testing.T) {
-		router := newTestRouter(t, &fakeLLM{response: llm.ChatResponse{Content: "ok"}}, 20)
-		_ = router.Handle(context.Background(), Request{
-			Command:      "admin",
-			Subcommand:   "limits",
-			GuildID:      "guild-1",
-			UserID:       "admin",
-			IsGuildAdmin: true,
-			Options: map[string]string{
-				"action":     "set",
-				"scope":      "user",
-				"subject_id": "user-1",
-				"limit":      "1",
-				"window":     "1h",
-			},
-		})
-
-		request := Request{
-			Command:      "admin",
-			Subcommand:   "limits",
-			GuildID:      "guild-1",
-			UserID:       "admin",
-			IsGuildAdmin: true,
-			Options:      map[string]string{"action": "remove", "scope": "user", "subject_id": "user-1"},
-		}
-		pending := router.Handle(context.Background(), request)
-		confirmationID := requireConfirmation(t, pending)
-		first := router.Handle(context.Background(), Request{
-			Command:   "ask",
-			GuildID:   "guild-1",
-			ChannelID: "channel-1",
-			UserID:    "user-1",
-			Options:   map[string]string{"question": "hi"},
-		})
-		if first.Content != "ok" {
-			t.Fatalf("expected first request to pass, got %+v", first)
-		}
-		blocked := router.Handle(context.Background(), Request{
-			Command:   "ask",
-			GuildID:   "guild-1",
-			ChannelID: "channel-1",
-			UserID:    "user-1",
-			Options:   map[string]string{"question": "hi"},
-		})
-		if !blocked.Ephemeral || !strings.Contains(blocked.Content, "budget is exhausted") {
-			t.Fatalf("unconfirmed limit removal should leave budget in place, got %+v", blocked)
-		}
-
-		request.Options["confirm"] = confirmationID
-		removed := router.Handle(context.Background(), request)
-		if !strings.Contains(removed.Content, "Limit removed") {
-			t.Fatalf("expected confirmed limit removal, got %+v", removed)
-		}
-		allowed := router.Handle(context.Background(), Request{
-			Command:   "ask",
-			GuildID:   "guild-1",
-			ChannelID: "channel-1",
-			UserID:    "user-1",
-			Options:   map[string]string{"question": "hi"},
-		})
-		if allowed.Content != "ok" {
-			t.Fatalf("confirmed limit removal should restore requests, got %+v", allowed)
-		}
-	})
-}
-
 func TestAdminDisableRequiresConfirmation(t *testing.T) {
 	router := newTestRouter(t, &fakeLLM{response: llm.ChatResponse{Content: "ok"}}, 20)
 	_ = router.Handle(context.Background(), Request{Command: "admin", Subcommand: "setup", GuildID: "guild-1", UserID: "admin", IsGuildAdmin: true})
@@ -616,187 +361,6 @@ func TestAdminDryRunDoesNotMutateState(t *testing.T) {
 		t.Fatalf("dry-run disable should leave assistant enabled, got %+v", ask)
 	}
 
-	role := router.Handle(context.Background(), Request{
-		Command:      "admin",
-		Subcommand:   "roles",
-		GuildID:      "guild-1",
-		UserID:       "admin",
-		IsGuildAdmin: true,
-		Options:      map[string]string{"action": "add", "role_id": "role-dry", "dry_run": "true"},
-	})
-	if !strings.Contains(role.Content, "Dry run") {
-		t.Fatalf("expected role dry run response, got %+v", role)
-	}
-	roles := router.Handle(context.Background(), Request{
-		Command:      "admin",
-		Subcommand:   "roles",
-		GuildID:      "guild-1",
-		UserID:       "admin",
-		IsGuildAdmin: true,
-		Options:      map[string]string{"action": "list"},
-	})
-	if strings.Contains(roles.Content, "role-dry") {
-		t.Fatalf("dry-run role add should not persist role, got %+v", roles)
-	}
-
-	channel := router.Handle(context.Background(), Request{
-		Command:      "admin",
-		Subcommand:   "channels",
-		GuildID:      "guild-1",
-		UserID:       "admin",
-		IsGuildAdmin: true,
-		Options:      map[string]string{"action": "deny", "channel_id": "channel-1", "dry_run": "true"},
-	})
-	if !strings.Contains(channel.Content, "Dry run") {
-		t.Fatalf("expected channel dry run response, got %+v", channel)
-	}
-	ask = router.Handle(context.Background(), Request{
-		Command:   "ask",
-		GuildID:   "guild-1",
-		ChannelID: "channel-1",
-		UserID:    "user-1",
-		Options:   map[string]string{"question": "hi"},
-	})
-	if ask.Content != "ok" {
-		t.Fatalf("dry-run channel deny should not block assistant, got %+v", ask)
-	}
-
-	limit := router.Handle(context.Background(), Request{
-		Command:      "admin",
-		Subcommand:   "limits",
-		GuildID:      "guild-1",
-		UserID:       "admin",
-		IsGuildAdmin: true,
-		Options: map[string]string{
-			"action":     "set",
-			"scope":      "user",
-			"subject_id": "user-1",
-			"limit":      "1",
-			"window":     "1h",
-			"dry_run":    "true",
-		},
-	})
-	if !strings.Contains(limit.Content, "Dry run") {
-		t.Fatalf("expected limit dry run response, got %+v", limit)
-	}
-	for i := 0; i < 2; i++ {
-		ask = router.Handle(context.Background(), Request{
-			Command:   "ask",
-			GuildID:   "guild-1",
-			ChannelID: "channel-1",
-			UserID:    "user-1",
-			Options:   map[string]string{"question": "hi"},
-		})
-		if ask.Content != "ok" {
-			t.Fatalf("dry-run limit set should not create budget, got %+v", ask)
-		}
-	}
-
-	memory := router.Handle(context.Background(), Request{
-		Command:      "admin",
-		Subcommand:   "memory",
-		GuildID:      "guild-1",
-		UserID:       "admin",
-		IsGuildAdmin: true,
-		Options:      map[string]string{"action": "add", "title": "Dry document", "content": "preview", "dry_run": "true"},
-	})
-	if !strings.Contains(memory.Content, "Dry run") {
-		t.Fatalf("expected memory dry run response, got %+v", memory)
-	}
-	documents := router.Handle(context.Background(), Request{
-		Command:      "admin",
-		Subcommand:   "memory",
-		GuildID:      "guild-1",
-		UserID:       "admin",
-		IsGuildAdmin: true,
-		Options:      map[string]string{"action": "list"},
-	})
-	if strings.Contains(documents.Content, "Dry document") {
-		t.Fatalf("dry-run memory add should not persist document, got %+v", documents)
-	}
-}
-
-func TestGlobalLimitRemoveRequiresOwner(t *testing.T) {
-	router := newTestRouter(t, &fakeLLM{}, 20)
-	set := router.Handle(context.Background(), Request{
-		Command:      "admin",
-		Subcommand:   "limits",
-		GuildID:      "guild-1",
-		UserID:       "owner",
-		IsGuildAdmin: true,
-		IsOwner:      true,
-		Options: map[string]string{
-			"action":  "set",
-			"scope":   "global",
-			"limit":   "1",
-			"window":  "1h",
-			"confirm": "unused",
-		},
-	})
-	if !strings.Contains(set.Content, "Limit set") {
-		t.Fatalf("expected owner to set global limit, got %+v", set)
-	}
-
-	remove := router.Handle(context.Background(), Request{
-		Command:      "admin",
-		Subcommand:   "limits",
-		GuildID:      "guild-1",
-		UserID:       "admin",
-		IsGuildAdmin: true,
-		Options:      map[string]string{"action": "remove", "scope": "global"},
-	})
-	if !remove.Ephemeral || !strings.Contains(remove.Content, "Only a bot owner") {
-		t.Fatalf("expected global limit remove owner denial, got %+v", remove)
-	}
-}
-
-func TestAdminRoleChooseUsesPermissionSelect(t *testing.T) {
-	router := newTestRouter(t, &fakeLLM{}, 20)
-	choose := router.Handle(context.Background(), Request{
-		Command:      "admin",
-		Subcommand:   "roles",
-		GuildID:      "guild-1",
-		UserID:       "admin",
-		IsGuildAdmin: true,
-		Options:      map[string]string{"action": "choose", "role_id": "mod-role"},
-	})
-	if !choose.Ephemeral || choose.Select == nil || choose.Select.ID == "" || len(choose.Select.Options) == 0 {
-		t.Fatalf("expected permission select response, got %+v", choose)
-	}
-
-	request, ok := RequestFromSelectID(choose.Select.ID, []string{admin.PermissionModerationUse}, Request{
-		GuildID:      "guild-1",
-		ChannelID:    "channel-1",
-		UserID:       "admin",
-		IsGuildAdmin: true,
-	})
-	if !ok {
-		t.Fatal("expected role permission select to parse")
-	}
-	added := router.Handle(context.Background(), request)
-	if !strings.Contains(added.Content, admin.PermissionModerationUse) {
-		t.Fatalf("expected selected permission to be saved, got %+v", added)
-	}
-	roles := router.Handle(context.Background(), Request{
-		Command:      "admin",
-		Subcommand:   "roles",
-		GuildID:      "guild-1",
-		UserID:       "admin",
-		IsGuildAdmin: true,
-		Options:      map[string]string{"action": "list"},
-	})
-	if !strings.Contains(roles.Content, "mod-role") || !strings.Contains(roles.Content, admin.PermissionModerationUse) {
-		t.Fatalf("expected selected role permission in list, got %+v", roles)
-	}
-
-	_, ok = RequestFromSelectID(choose.Select.ID, []string{admin.PermissionModerationUse}, Request{UserID: "other-admin"})
-	if ok {
-		t.Fatal("role permission select should be scoped to the original user")
-	}
-	_, ok = RequestFromSelectID(choose.Select.ID, []string{"not.allowed"}, Request{UserID: "admin"})
-	if ok {
-		t.Fatal("role permission select should reject unsupported permissions")
-	}
 }
 
 func TestAdminPromptWithoutTextUsesModal(t *testing.T) {
@@ -846,18 +410,125 @@ func TestConfirmationIDRestoresCommandRequest(t *testing.T) {
 		UserID:       "admin",
 		IsGuildAdmin: true,
 	}
-	id := roleRemoveConfirmationID("admin", "role-1", admin.PermissionModerationUse)
+	id := adminDisableConfirmationID("admin")
 	request, ok := RequestFromConfirmationID(id, base)
 	if !ok {
 		t.Fatal("expected confirmation id to parse")
 	}
-	if request.Command != "admin" || request.Subcommand != "roles" || request.Options["action"] != "remove" || request.Options["role_id"] != "role-1" || request.Options["permission"] != admin.PermissionModerationUse || request.Options["confirm"] != id {
+	if request.Command != "admin" || request.Subcommand != "disable" || request.Options["confirm"] != id {
 		t.Fatalf("unexpected request from confirmation id: %+v", request)
 	}
 
 	base.UserID = "other-admin"
 	if _, ok := RequestFromConfirmationID(id, base); ok {
 		t.Fatal("confirmation id should be scoped to the original user")
+	}
+}
+
+func TestToolConfirmationIDRestoresScopedRequest(t *testing.T) {
+	confirmation := ToolConfirmationFromAssistant("admin", &assistant.InteractionConfirmation{
+		Action:       toolActionChannelRuleRemove,
+		Arguments:    map[string]string{"channel_id": "channel-1"},
+		ConfirmLabel: "Remove rule",
+		Danger:       true,
+	})
+	if confirmation == nil || confirmation.ID == "" {
+		t.Fatalf("expected tool confirmation id, got %+v", confirmation)
+	}
+
+	request, ok := RequestFromToolConfirmationID(confirmation.ID, Request{
+		GuildID:      "guild-1",
+		ChannelID:    "channel-1",
+		UserID:       "admin",
+		IsGuildAdmin: true,
+	})
+	if !ok {
+		t.Fatal("expected tool confirmation id to parse")
+	}
+	if request.Action != toolActionChannelRuleRemove || request.Options["channel_id"] != "channel-1" {
+		t.Fatalf("unexpected request from tool confirmation id: %+v", request)
+	}
+	if _, ok := RequestFromToolConfirmationID(confirmation.ID, Request{UserID: "other-admin"}); ok {
+		t.Fatal("tool confirmation id should be scoped to the original user")
+	}
+}
+
+func TestHandleToolConfirmationRemovesChannelRule(t *testing.T) {
+	router := newTestRouter(t, &fakeLLM{}, 20)
+	_ = router.Handle(context.Background(), Request{Command: "admin", Subcommand: "setup", GuildID: "guild-1", UserID: "admin", IsGuildAdmin: true})
+	if _, err := router.admin.SetChannelRule(context.Background(), "guild-1", "admin", "channel-1", "deny"); err != nil {
+		t.Fatalf("seed channel rule: %v", err)
+	}
+
+	response := router.HandleToolConfirmation(context.Background(), ToolConfirmationRequest{
+		Request: Request{
+			GuildID:      "guild-1",
+			ChannelID:    "channel-1",
+			UserID:       "admin",
+			IsGuildAdmin: true,
+		},
+		Action:  toolActionChannelRuleRemove,
+		Options: map[string]string{"channel_id": "channel-1"},
+	})
+	if !response.Ephemeral || !strings.Contains(response.Content, "Removed channel access rule") || response.Confirmation != nil {
+		t.Fatalf("unexpected tool confirmation response: %+v", response)
+	}
+	rules, err := router.admin.ListChannelRules(context.Background(), "guild-1")
+	if err != nil {
+		t.Fatalf("list channel rules: %v", err)
+	}
+	if len(rules) != 0 {
+		t.Fatalf("expected channel rule to be removed, got %+v", rules)
+	}
+}
+
+func TestLLMToolConfirmationRendersButton(t *testing.T) {
+	client := &fakeLLM{responses: []llm.ChatResponse{
+		{
+			Model:   "fixture/model",
+			Content: "",
+			ToolCalls: []llm.ToolCall{{
+				ID:   "call-remove-channel",
+				Type: "function",
+				Function: llm.ToolCallFunction{
+					Name:      "panda_manage_channel_rule",
+					Arguments: `{"action":"remove","channel_id":"channel-1"}`,
+				},
+			}},
+		},
+		{Model: "fixture/model", Content: "I found the channel rule and prepared the removal."},
+	}}
+	router := newTestRouter(t, client, 20)
+	_ = router.Handle(context.Background(), Request{Command: "admin", Subcommand: "setup", GuildID: "guild-1", UserID: "admin", IsGuildAdmin: true})
+	model := router.Handle(context.Background(), Request{
+		Command:      "admin",
+		Subcommand:   "model",
+		GuildID:      "guild-1",
+		UserID:       "admin",
+		IsGuildAdmin: true,
+		Options:      map[string]string{"tool_policy": "write_confirmed"},
+	})
+	if !strings.Contains(model.Content, "write_confirmed") {
+		t.Fatalf("expected tool policy update, got %+v", model)
+	}
+
+	response := router.Handle(context.Background(), Request{
+		Command:      "chat",
+		GuildID:      "guild-1",
+		ChannelID:    "channel-1",
+		UserID:       "admin",
+		IsGuildAdmin: true,
+		Options:      map[string]string{"question": "Panda remove the channel rule for channel-1"},
+	})
+	if response.Confirmation == nil || !response.Confirmation.Danger || !strings.Contains(response.Content, "confirmation button") {
+		t.Fatalf("expected LLM-triggered confirmation response, got %+v", response)
+	}
+	request, ok := RequestFromToolConfirmationID(response.Confirmation.ID, Request{UserID: "admin"})
+	if !ok || request.Action != toolActionChannelRuleRemove || request.Options["channel_id"] != "channel-1" {
+		t.Fatalf("unexpected rendered confirmation id: request=%+v ok=%t", request, ok)
+	}
+	if len(client.requests) != 2 || len(client.requests[0].Tools) == 0 {
+		t.Fatalf("expected tool-enabled first model request, got %+v", client.requests)
 	}
 }
 
@@ -870,171 +541,6 @@ func requireConfirmation(t *testing.T, response Response) string {
 		t.Fatalf("expected confirmation copy, got %+v", response)
 	}
 	return response.Confirmation.ID
-}
-
-func TestMemoryAddAndSearch(t *testing.T) {
-	router := newTestRouter(t, &fakeLLM{}, 5)
-	_ = router.Handle(context.Background(), Request{Command: "admin", Subcommand: "setup", GuildID: "guild-1", UserID: "admin", IsGuildAdmin: true})
-
-	add := router.Handle(context.Background(), Request{
-		Command:      "admin",
-		Subcommand:   "memory",
-		GuildID:      "guild-1",
-		UserID:       "admin",
-		IsGuildAdmin: true,
-		Options: map[string]string{
-			"action":  "add",
-			"title":   "Deploy notes",
-			"content": "Production deploys happen on Fridays after review.",
-		},
-	})
-	if !strings.Contains(add.Content, "Deploy notes") {
-		t.Fatalf("unexpected add response: %+v", add)
-	}
-	_ = router.Handle(context.Background(), Request{
-		Command:      "admin",
-		Subcommand:   "memory",
-		GuildID:      "guild-1",
-		UserID:       "admin",
-		IsGuildAdmin: true,
-		Options:      map[string]string{"action": "enable"},
-	})
-
-	search := router.Handle(context.Background(), Request{
-		Command: "search-memory",
-		GuildID: "guild-1",
-		UserID:  "user-1",
-		Options: map[string]string{"query": "Friday deploys"},
-	})
-	if !search.Ephemeral || !strings.Contains(search.Content, "Deploy notes") {
-		t.Fatalf("unexpected search response: %+v", search)
-	}
-}
-
-func TestMemoryReadPermissionGatesSearchMemory(t *testing.T) {
-	router := newTestRouter(t, &fakeLLM{}, 5)
-	_ = router.Handle(context.Background(), Request{Command: "admin", Subcommand: "setup", GuildID: "guild-1", UserID: "admin", IsGuildAdmin: true})
-	_ = router.Handle(context.Background(), Request{
-		Command:      "admin",
-		Subcommand:   "memory",
-		GuildID:      "guild-1",
-		UserID:       "admin",
-		IsGuildAdmin: true,
-		Options: map[string]string{
-			"action":  "add",
-			"title":   "Deploy notes",
-			"content": "Production deploys happen on Fridays after review.",
-		},
-	})
-	_ = router.Handle(context.Background(), Request{
-		Command:      "admin",
-		Subcommand:   "memory",
-		GuildID:      "guild-1",
-		UserID:       "admin",
-		IsGuildAdmin: true,
-		Options:      map[string]string{"action": "enable"},
-	})
-	_ = router.Handle(context.Background(), Request{
-		Command:      "admin",
-		Subcommand:   "roles",
-		GuildID:      "guild-1",
-		UserID:       "admin",
-		IsGuildAdmin: true,
-		Options: map[string]string{
-			"action":     "add",
-			"role_id":    "memory-role",
-			"permission": admin.PermissionAssistantMemoryRead,
-		},
-	})
-
-	denied := router.Handle(context.Background(), Request{
-		Command: "search-memory",
-		GuildID: "guild-1",
-		UserID:  "user-1",
-		RoleIDs: []string{"other-role"},
-		Options: map[string]string{"query": "Friday deploys"},
-	})
-	if !denied.Ephemeral || !strings.Contains(denied.Content, "server knowledge") {
-		t.Fatalf("expected memory permission denial, got %+v", denied)
-	}
-
-	allowed := router.Handle(context.Background(), Request{
-		Command: "search-memory",
-		GuildID: "guild-1",
-		UserID:  "user-1",
-		RoleIDs: []string{"memory-role"},
-		Options: map[string]string{"query": "Friday deploys"},
-	})
-	if !allowed.Ephemeral || !strings.Contains(allowed.Content, "Deploy notes") {
-		t.Fatalf("expected memory search result, got %+v", allowed)
-	}
-}
-
-func TestSearchMemoryRequiresEnabledMemory(t *testing.T) {
-	router := newTestRouter(t, &fakeLLM{}, 5)
-	_ = router.Handle(context.Background(), Request{Command: "admin", Subcommand: "setup", GuildID: "guild-1", UserID: "admin", IsGuildAdmin: true})
-
-	response := router.Handle(context.Background(), Request{
-		Command: "search-memory",
-		GuildID: "guild-1",
-		UserID:  "user-1",
-		Options: map[string]string{"query": "deploys"},
-	})
-	if !response.Ephemeral || !strings.Contains(response.Content, "disabled") {
-		t.Fatalf("expected disabled memory response, got %+v", response)
-	}
-}
-
-func TestMemoryConsentCommandManagesUserConsent(t *testing.T) {
-	router := newTestRouter(t, &fakeLLM{}, 5)
-
-	dm := router.Handle(context.Background(), Request{
-		Command: "memory-consent",
-		UserID:  "user-1",
-		Options: map[string]string{"action": "status"},
-	})
-	if !dm.Ephemeral || !strings.Contains(dm.Content, "inside a Discord server") {
-		t.Fatalf("expected guild-only response, got %+v", dm)
-	}
-
-	status := router.Handle(context.Background(), Request{
-		Command: "memory-consent",
-		GuildID: "guild-1",
-		UserID:  "user-1",
-		Options: map[string]string{"action": "status"},
-	})
-	if !status.Ephemeral || !strings.Contains(status.Content, "disabled") {
-		t.Fatalf("expected disabled default consent, got %+v", status)
-	}
-
-	enabled := router.Handle(context.Background(), Request{
-		Command: "memory-consent",
-		GuildID: "guild-1",
-		UserID:  "user-1",
-		Options: map[string]string{"action": "enable"},
-	})
-	if !strings.Contains(enabled.Content, "enabled") {
-		t.Fatalf("expected enabled consent response, got %+v", enabled)
-	}
-	status = router.Handle(context.Background(), Request{
-		Command: "memory-consent",
-		GuildID: "guild-1",
-		UserID:  "user-1",
-		Options: map[string]string{"action": "status"},
-	})
-	if !strings.Contains(status.Content, "enabled") {
-		t.Fatalf("expected enabled status, got %+v", status)
-	}
-
-	disabled := router.Handle(context.Background(), Request{
-		Command: "memory-consent",
-		GuildID: "guild-1",
-		UserID:  "user-1",
-		Options: map[string]string{"action": "disable"},
-	})
-	if !strings.Contains(disabled.Content, "disabled") {
-		t.Fatalf("expected disabled consent response, got %+v", disabled)
-	}
 }
 
 func TestChatUsesAssistantService(t *testing.T) {
@@ -1146,20 +652,8 @@ func TestThreadPermissionGatesThreadMode(t *testing.T) {
 	client := &fakeLLM{response: llm.ChatResponse{Content: "chat fixture"}}
 	threadManager := &fakeThreadManager{thread: Thread{ID: "thread-1", Name: "Panda chat", Created: true}}
 	router := newTestRouter(t, client, 5).WithThreadManager(threadManager)
-	add := router.Handle(context.Background(), Request{
-		Command:      "admin",
-		Subcommand:   "roles",
-		GuildID:      "guild-1",
-		UserID:       "admin",
-		IsGuildAdmin: true,
-		Options: map[string]string{
-			"action":     "add",
-			"role_id":    "thread-role",
-			"permission": admin.PermissionAssistantUseThreads,
-		},
-	})
-	if !strings.Contains(add.Content, "thread-role") {
-		t.Fatalf("unexpected role response: %+v", add)
+	if _, err := router.admin.AddRolePermission(context.Background(), "guild-1", "admin", "thread-role", admin.PermissionAssistantUseThreads); err != nil {
+		t.Fatalf("add thread role permission: %v", err)
 	}
 
 	denied := router.Handle(context.Background(), Request{
@@ -1272,18 +766,9 @@ func TestAttachmentPermissionGatesExtractedAttachmentContext(t *testing.T) {
 		Filename:      "notes.md",
 		ExtractedText: "Deploy after review.",
 	}})
-	_ = router.Handle(context.Background(), Request{
-		Command:      "admin",
-		Subcommand:   "roles",
-		GuildID:      "guild-1",
-		UserID:       "admin",
-		IsGuildAdmin: true,
-		Options: map[string]string{
-			"action":     "add",
-			"role_id":    "attachment-role",
-			"permission": admin.PermissionAssistantAttachments,
-		},
-	})
+	if _, err := router.admin.AddRolePermission(context.Background(), "guild-1", "admin", "attachment-role", admin.PermissionAssistantAttachments); err != nil {
+		t.Fatalf("add attachment role permission: %v", err)
+	}
 
 	denied := router.Handle(context.Background(), Request{
 		Command:   "summarize",
@@ -1356,16 +841,8 @@ func TestLongSummarizeCanPrepareBackgroundTask(t *testing.T) {
 
 func TestRolePermissionGatesAssistantUse(t *testing.T) {
 	router := newTestRouter(t, &fakeLLM{response: llm.ChatResponse{Content: "ok"}}, 5)
-	add := router.Handle(context.Background(), Request{
-		Command:      "admin",
-		Subcommand:   "roles",
-		GuildID:      "guild-1",
-		UserID:       "admin",
-		IsGuildAdmin: true,
-		Options:      map[string]string{"action": "add", "role_id": "role-allowed"},
-	})
-	if !strings.Contains(add.Content, "role-allowed") {
-		t.Fatalf("unexpected role add response: %+v", add)
+	if _, err := router.admin.AddRolePermission(context.Background(), "guild-1", "admin", "role-allowed", admin.PermissionAssistantUse); err != nil {
+		t.Fatalf("add assistant role permission: %v", err)
 	}
 
 	denied := router.Handle(context.Background(), Request{
@@ -1395,16 +872,8 @@ func TestRolePermissionGatesAssistantUse(t *testing.T) {
 
 func TestChannelDenyGatesAssistantUse(t *testing.T) {
 	router := newTestRouter(t, &fakeLLM{response: llm.ChatResponse{Content: "ok"}}, 5)
-	deny := router.Handle(context.Background(), Request{
-		Command:      "admin",
-		Subcommand:   "channels",
-		GuildID:      "guild-1",
-		UserID:       "admin",
-		IsGuildAdmin: true,
-		Options:      map[string]string{"action": "deny", "channel_id": "channel-1"},
-	})
-	if !strings.Contains(deny.Content, "deny") {
-		t.Fatalf("unexpected channel deny response: %+v", deny)
+	if _, err := router.admin.SetChannelRule(context.Background(), "guild-1", "admin", "channel-1", "deny"); err != nil {
+		t.Fatalf("set channel deny rule: %v", err)
 	}
 
 	response := router.Handle(context.Background(), Request{
@@ -1458,22 +927,13 @@ func TestAdminLimitDeniesSecondAsk(t *testing.T) {
 	client := &fakeLLM{response: llm.ChatResponse{Content: "ok"}}
 	router := newTestRouter(t, client, 10)
 
-	set := router.Handle(context.Background(), Request{
-		Command:      "admin",
-		Subcommand:   "limits",
-		GuildID:      "guild-1",
-		UserID:       "admin",
-		IsGuildAdmin: true,
-		Options: map[string]string{
-			"action":     "set",
-			"scope":      "user",
-			"subject_id": "user-1",
-			"limit":      "1",
-			"window":     "1h",
-		},
-	})
-	if !strings.Contains(set.Content, "Limit set") {
-		t.Fatalf("unexpected set response: %+v", set)
+	if _, err := router.admin.SetBudgetLimit(context.Background(), "guild-1", "admin", store.BudgetLimit{
+		Scope:         repository.BudgetScopeUser,
+		SubjectID:     "user-1",
+		Limit:         1,
+		WindowSeconds: int(time.Hour.Seconds()),
+	}); err != nil {
+		t.Fatalf("set budget limit: %v", err)
 	}
 
 	request := Request{
@@ -1493,159 +953,6 @@ func TestAdminLimitDeniesSecondAsk(t *testing.T) {
 	}
 	if len(client.requests) != 1 {
 		t.Fatalf("expected only one LLM request, got %d", len(client.requests))
-	}
-}
-
-func TestModHelperRequiresPermission(t *testing.T) {
-	router := newTestRouter(t, &fakeLLM{response: llm.ChatResponse{Content: "mod ok"}}, 5)
-	response := router.Handle(context.Background(), Request{
-		Command:    "mod",
-		Subcommand: "triage",
-		GuildID:    "guild-1",
-		ChannelID:  "channel-1",
-		UserID:     "user-1",
-		Options:    map[string]string{"text": "heated argument in general"},
-	})
-	if !response.Ephemeral || !strings.Contains(response.Content, "permission") {
-		t.Fatalf("expected moderation permission denial, got %+v", response)
-	}
-}
-
-func TestModHelperAllowsAdminAndAudits(t *testing.T) {
-	client := &fakeLLM{response: llm.ChatResponse{Content: "suggestion only"}}
-	router := newTestRouter(t, client, 5)
-	response := router.Handle(context.Background(), Request{
-		Command:      "mod",
-		Subcommand:   "note",
-		GuildID:      "guild-1",
-		ChannelID:    "channel-1",
-		UserID:       "admin",
-		IsGuildAdmin: true,
-		Options: map[string]string{
-			"text":       "user cooled down after warning",
-			"subject_id": "user-1",
-		},
-	})
-	if !response.Ephemeral || response.Content != "suggestion only" {
-		t.Fatalf("unexpected moderation response: %+v", response)
-	}
-	if len(client.requests) != 1 || client.requests[0].Messages[len(client.requests[0].Messages)-1].Content == "" {
-		t.Fatalf("expected moderation LLM request, got %+v", client.requests)
-	}
-}
-
-func TestModHelperAllowsMappedRole(t *testing.T) {
-	router := newTestRouter(t, &fakeLLM{response: llm.ChatResponse{Content: "slowmode suggestion"}}, 5)
-	add := router.Handle(context.Background(), Request{
-		Command:      "admin",
-		Subcommand:   "roles",
-		GuildID:      "guild-1",
-		UserID:       "admin",
-		IsGuildAdmin: true,
-		Options: map[string]string{
-			"action":     "add",
-			"role_id":    "mod-role",
-			"permission": "moderation.use",
-		},
-	})
-	if !strings.Contains(add.Content, "mod-role") {
-		t.Fatalf("unexpected role response: %+v", add)
-	}
-
-	response := router.Handle(context.Background(), Request{
-		Command:    "mod",
-		Subcommand: "slowmode",
-		GuildID:    "guild-1",
-		ChannelID:  "channel-1",
-		UserID:     "moderator",
-		RoleIDs:    []string{"mod-role"},
-		Options:    map[string]string{"text": "many users are posting too quickly"},
-	})
-	if response.Content != "slowmode suggestion" {
-		t.Fatalf("expected mapped role moderation response, got %+v", response)
-	}
-}
-
-func TestModHistorySummarizesOnlySubjectMessages(t *testing.T) {
-	client := &fakeLLM{response: llm.ChatResponse{Content: "history summary"}}
-	router := newTestRouter(t, client, 5).WithContextService(contextsvc.NewService(fakeContextProvider{messages: []contextsvc.Message{
-		{GuildID: "guild-1", ChannelID: "channel-1", MessageID: "message-1", AuthorID: "subject-1", Content: "visible subject message"},
-		{GuildID: "guild-1", ChannelID: "channel-1", MessageID: "message-2", AuthorID: "user-2", Content: "other user noise"},
-		{GuildID: "guild-1", ChannelID: "channel-1", MessageID: "message-3", AuthorID: "subject-1", Content: "second subject message"},
-	}}))
-
-	response := router.Handle(context.Background(), Request{
-		Command:      "mod",
-		Subcommand:   "history",
-		GuildID:      "guild-1",
-		ChannelID:    "channel-1",
-		UserID:       "admin",
-		IsGuildAdmin: true,
-		Options: map[string]string{
-			"subject_id":   "subject-1",
-			"recent_limit": "5",
-			"text":         "check for repeated escalation",
-		},
-	})
-	if response.Content != "history summary" {
-		t.Fatalf("unexpected history response: %+v", response)
-	}
-	if len(client.requests) != 1 {
-		t.Fatalf("expected one LLM request, got %+v", client.requests)
-	}
-	joined := joinLLMMessages(client.requests[0].Messages)
-	if !strings.Contains(joined, "Subject user id: subject-1") || !strings.Contains(joined, "visible subject message") || !strings.Contains(joined, "second subject message") {
-		t.Fatalf("expected subject history in LLM request, got %s", joined)
-	}
-	if !strings.Contains(joined, "Moderator-provided context") || !strings.Contains(joined, "check for repeated escalation") {
-		t.Fatalf("expected moderator note in LLM request, got %s", joined)
-	}
-	if strings.Contains(joined, "other user noise") {
-		t.Fatalf("non-subject message leaked into LLM request: %s", joined)
-	}
-}
-
-func TestModHistoryRequiresSubjectID(t *testing.T) {
-	client := &fakeLLM{response: llm.ChatResponse{Content: "history summary"}}
-	router := newTestRouter(t, client, 5).WithContextService(contextsvc.NewService(fakeContextProvider{}))
-
-	response := router.Handle(context.Background(), Request{
-		Command:      "mod",
-		Subcommand:   "history",
-		GuildID:      "guild-1",
-		ChannelID:    "channel-1",
-		UserID:       "admin",
-		IsGuildAdmin: true,
-		Options:      map[string]string{"recent_limit": "5"},
-	})
-	if !response.Ephemeral || !strings.Contains(response.Content, "subject_id") {
-		t.Fatalf("expected subject_id validation, got %+v", response)
-	}
-	if len(client.requests) != 0 {
-		t.Fatalf("history validation should not call LLM, got %+v", client.requests)
-	}
-}
-
-func TestModHistoryReportsNoVisibleMessages(t *testing.T) {
-	client := &fakeLLM{response: llm.ChatResponse{Content: "history summary"}}
-	router := newTestRouter(t, client, 5).WithContextService(contextsvc.NewService(fakeContextProvider{messages: []contextsvc.Message{
-		{GuildID: "guild-1", ChannelID: "channel-1", MessageID: "message-1", AuthorID: "user-2", Content: "other user noise"},
-	}}))
-
-	response := router.Handle(context.Background(), Request{
-		Command:      "mod",
-		Subcommand:   "history",
-		GuildID:      "guild-1",
-		ChannelID:    "channel-1",
-		UserID:       "admin",
-		IsGuildAdmin: true,
-		Options:      map[string]string{"subject_id": "subject-1"},
-	})
-	if !response.Ephemeral || !strings.Contains(response.Content, "No recent visible messages") {
-		t.Fatalf("expected empty history response, got %+v", response)
-	}
-	if len(client.requests) != 0 {
-		t.Fatalf("empty history should not call LLM, got %+v", client.requests)
 	}
 }
 

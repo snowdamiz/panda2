@@ -16,7 +16,6 @@ import (
 	"github.com/sn0w/panda2/internal/llm"
 	"github.com/sn0w/panda2/internal/maintenance"
 	"github.com/sn0w/panda2/internal/memory"
-	"github.com/sn0w/panda2/internal/moderation"
 	"github.com/sn0w/panda2/internal/ops"
 	"github.com/sn0w/panda2/internal/queue"
 	"github.com/sn0w/panda2/internal/ratelimit"
@@ -76,11 +75,11 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 	}
 	toolExecutor := tools.NewExecutor(toolRegistry, memoryService, guildConfigs).
 		WithAttachmentReader(attachments).
-		WithAuditRecorder(audit)
+		WithAuditRecorder(audit).
+		WithAdminOperations(adminService)
 	assistantService := assistant.NewService(openRouter, usage, guildConfigs, memoryService, conversations, cfg.OpenRouterModel, cfg.OpenRouterFallbackModels).
 		WithToolExecutor(toolExecutor)
-	moderationService := moderation.NewService(assistantService)
-	router := commands.NewRouter(adminService, assistantService, moderationService, opsService, ratelimit.New(cfg.UserRateLimit, cfg.UserRateLimitWindow)).
+	router := commands.NewRouter(adminService, assistantService, opsService, ratelimit.New(cfg.UserRateLimit, cfg.UserRateLimitWindow)).
 		WithAttachmentReader(attachments)
 
 	discord, err := discordbot.New(cfg, router, logger)
