@@ -66,6 +66,7 @@ type Definition struct {
 	WireName              string
 	Description           string
 	RequiredPermission    string
+	AlternatePermissions  []string
 	ToolClass             ToolClass
 	InputSchema           json.RawMessage
 	OutputSchema          json.RawMessage
@@ -75,6 +76,7 @@ type Definition struct {
 	IncludeInModelContext bool
 	RequiresConfirmation  bool
 	SupportsDryRun        bool
+	BypassToolPolicy      bool
 	MaxLimit              int
 	DiscordPermissions    []string
 }
@@ -193,11 +195,14 @@ func (d Definition) OpenRouterTool() llm.Tool {
 }
 
 func (d Definition) AvailableTo(access ToolAccess) bool {
-	if _, ok := access.Permissions[d.RequiredPermission]; !ok {
+	if !access.HasAnyPermission(append([]string{d.RequiredPermission}, d.AlternatePermissions...)...) {
 		return false
 	}
 	if !access.AllowsDefinition(d) {
 		return false
+	}
+	if d.BypassToolPolicy {
+		return true
 	}
 	switch normalizeToolPolicy(access.Policy) {
 	case ToolPolicyOff:
@@ -251,6 +256,19 @@ func (access ToolAccess) AllowsDefinition(definition Definition) bool {
 
 func (access ToolAccess) AllowsComposedTool(names ...string) bool {
 	return access.allowsTool(access.RequireExplicitComposedTools, names...)
+}
+
+func (access ToolAccess) HasAnyPermission(permissions ...string) bool {
+	for _, permission := range permissions {
+		permission = strings.TrimSpace(permission)
+		if permission == "" {
+			continue
+		}
+		if _, ok := access.Permissions[permission]; ok {
+			return true
+		}
+	}
+	return false
 }
 
 func (access ToolAccess) allowsTool(requireExplicit bool, names ...string) bool {
@@ -427,6 +445,7 @@ func DefaultDefinitions() []Definition {
 			Redaction:             RedactSecrets,
 			Audit:                 AuditOnUse,
 			IncludeInModelContext: true,
+			BypassToolPolicy:      true,
 		},
 		{
 			Name:                  "manage_memory_consent",
@@ -451,6 +470,7 @@ func DefaultDefinitions() []Definition {
 			Redaction:             RedactSecrets,
 			Audit:                 AuditOnUse,
 			IncludeInModelContext: true,
+			BypassToolPolicy:      true,
 		},
 		{
 			Name:                  "panda.manage_soul",
@@ -464,6 +484,7 @@ func DefaultDefinitions() []Definition {
 			Audit:                 AuditOnUse,
 			IncludeInModelContext: true,
 			SupportsDryRun:        true,
+			BypassToolPolicy:      true,
 		},
 		{
 			Name:                  "panda.manage_budget_limit",
@@ -478,6 +499,7 @@ func DefaultDefinitions() []Definition {
 			IncludeInModelContext: true,
 			RequiresConfirmation:  true,
 			SupportsDryRun:        true,
+			BypassToolPolicy:      true,
 		},
 		{
 			Name:                  "panda.manage_knowledge",
@@ -492,6 +514,7 @@ func DefaultDefinitions() []Definition {
 			IncludeInModelContext: true,
 			RequiresConfirmation:  true,
 			SupportsDryRun:        true,
+			BypassToolPolicy:      true,
 		},
 		{
 			Name:                  "panda.manage_role_permission",
@@ -506,6 +529,7 @@ func DefaultDefinitions() []Definition {
 			IncludeInModelContext: true,
 			RequiresConfirmation:  true,
 			SupportsDryRun:        true,
+			BypassToolPolicy:      true,
 		},
 		{
 			Name:                  "panda.manage_tool_access",
@@ -519,6 +543,23 @@ func DefaultDefinitions() []Definition {
 			Audit:                 AuditOnUse,
 			IncludeInModelContext: true,
 			SupportsDryRun:        true,
+			BypassToolPolicy:      true,
+		},
+		{
+			Name:                  "panda.manage_composed_tool",
+			Description:           "Draft, preview, inspect, approve, pause, resume, disable, archive, run, simulate, export, or roll back composed tools through natural-language admin requests.",
+			RequiredPermission:    admin.PermissionToolComposeDraft,
+			AlternatePermissions:  []string{admin.PermissionToolComposeApprove, admin.PermissionToolComposeAudit},
+			ToolClass:             ToolClassAdminWrite,
+			InputSchema:           composedToolManagementSchema(),
+			OutputSchema:          objectSchema("result"),
+			Timeout:               12 * time.Second,
+			Redaction:             RedactContent,
+			Audit:                 AuditOnUse,
+			IncludeInModelContext: true,
+			RequiresConfirmation:  true,
+			SupportsDryRun:        true,
+			BypassToolPolicy:      true,
 		},
 		{
 			Name:                  "panda.manage_channel_rule",
@@ -533,10 +574,11 @@ func DefaultDefinitions() []Definition {
 			IncludeInModelContext: true,
 			RequiresConfirmation:  true,
 			SupportsDryRun:        true,
+			BypassToolPolicy:      true,
 		},
 		{
 			Name:                  "panda.list_tools",
-			Description:           "List Panda tools callable in the current guild and channel context, including built-in native tools and enabled composed tools.",
+			Description:           "Call this before answering questions about what tools or capabilities Panda has. It lists callable tools in the current guild and channel context, including built-in native tools and enabled composed tools.",
 			RequiredPermission:    admin.PermissionAssistantUse,
 			ToolClass:             ToolClassMetadata,
 			InputSchema:           toolListSchema(),
@@ -545,6 +587,7 @@ func DefaultDefinitions() []Definition {
 			Redaction:             RedactNone,
 			Audit:                 AuditNone,
 			IncludeInModelContext: true,
+			BypassToolPolicy:      true,
 		},
 		{
 			Name:                  "generate_workflow_json",
@@ -589,6 +632,30 @@ func toolListSchema() json.RawMessage {
 	return schemaWithProperties(nil, map[string]any{
 		"kind":            map[string]string{"type": "string", "description": "Optional filter: native, composed, or all."},
 		"include_schemas": map[string]string{"type": "boolean", "description": "Include input schemas in the listing."},
+	})
+}
+
+func composedToolManagementSchema() json.RawMessage {
+	return schemaWithProperties([]string{"action"}, map[string]any{
+		"action": map[string]any{
+			"type":        "string",
+			"description": "Action: preview, draft, list, show, approve, pause, resume, disable, archive, run, simulate, export, or rollback.",
+		},
+		"tool_name":    map[string]string{"type": "string", "description": "Composed tool name."},
+		"tool":         map[string]string{"type": "string", "description": "Alias for tool_name."},
+		"version":      map[string]any{"type": "integer", "minimum": 1},
+		"request":      map[string]string{"type": "string", "description": "Natural-language composed-tool request for draft/preview."},
+		"description":  map[string]string{"type": "string", "description": "Alias for request."},
+		"spec_json":    map[string]string{"type": "string", "description": "Complete composed-tool spec JSON for draft/preview."},
+		"role_id":      map[string]string{"type": "string"},
+		"role_name":    map[string]string{"type": "string"},
+		"channel_id":   map[string]string{"type": "string"},
+		"channel_name": map[string]string{"type": "string"},
+		"welcome_text": map[string]string{"type": "string"},
+		"model":        map[string]string{"type": "string"},
+		"input":        map[string]string{"type": "object", "description": "Input object for run/simulate."},
+		"input_json":   map[string]string{"type": "string", "description": "JSON object input for run/simulate."},
+		"dry_run":      map[string]string{"type": "boolean"},
 	})
 }
 
@@ -646,6 +713,9 @@ func toolInputProperty(name string) any {
 }
 
 func schemaWithProperties(required []string, properties map[string]any) json.RawMessage {
+	if required == nil {
+		required = []string{}
+	}
 	schema := map[string]any{
 		"type":                 "object",
 		"additionalProperties": false,

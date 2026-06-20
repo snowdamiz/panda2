@@ -78,9 +78,9 @@ Guild config is created automatically the first time an admin changes Panda sett
 
 Tool access has two layers: `tool_policy` sets the server-wide ceiling for tool classes, and `/admin tool` can restrict individual native or composed tools to specific roles. Native tools keep their underlying permissions, so allowing a role to use an admin tool does not grant admin access. Composed tools are admin-only for regular members until a role is explicitly allowed for that composed tool; composed tools that wrap native admin tools remain admin-only.
 
-Usage reports, request budgets, server knowledge, role permissions, channel rules, memory consent, and moderation guidance are available through Panda chat/tools instead of direct slash commands.
+Usage reports, request budgets, server knowledge, role permissions, channel rules, memory consent, moderation guidance, and composed-tool management are available through Panda chat/tools instead of direct slash commands.
 
-When a chat-triggered tool prepares a destructive admin removal, Panda renders a Discord confirmation button tied to the requesting user. Clicking it executes the reviewed server-side action only after fresh permission checks.
+When a chat-triggered tool prepares a destructive admin removal or a composed-tool approval/rollback, Panda renders a Discord confirmation button tied to the requesting user. Clicking it executes the reviewed server-side action only after fresh permission checks.
 
 Server knowledge is opt-in. User-specific memory consent is separate and defaults off.
 

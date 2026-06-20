@@ -2,6 +2,7 @@ package composed
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -41,6 +42,11 @@ func newComposedTestService(t *testing.T) (*Service, *fakeDiscordToolProvider) {
 	executor := tools.NewExecutor(registry, nil, nil).WithDiscordToolProvider(provider)
 	service := NewService(repository.NewComposedToolRepository(db.DB), registry, executor, nil, "openrouter/auto")
 	return service, provider
+}
+
+func toolsPayloadString(value any) string {
+	data, _ := json.Marshal(value)
+	return string(data)
 }
 
 func TestBuilderWelcomeDraftApprovalAdvertiseAndRun(t *testing.T) {
@@ -131,6 +137,63 @@ func TestBuilderWelcomeDraftApprovalAdvertiseAndRun(t *testing.T) {
 	call := provider.calls[0]
 	if call.ToolName != "discord.send_message" || call.Arguments["channel_id"] != "channel-general" || !strings.Contains(call.Arguments["content"].(string), "<@user-1>") {
 		t.Fatalf("unexpected Discord call: %+v", call)
+	}
+}
+
+func TestManageComposedToolDraftAndApprovalConfirmation(t *testing.T) {
+	ctx := context.Background()
+	service, _ := newComposedTestService(t)
+
+	preview, err := service.ManageComposedTool(ctx, tools.ComposedToolManagementRequest{
+		GuildID:   "guild-1",
+		ActorID:   "admin-1",
+		Action:    "preview",
+		Text:      "Create a builder welcome tool",
+		RoleID:    "role-builder",
+		ChannelID: "channel-general",
+		DryRun:    true,
+	})
+	if err != nil {
+		t.Fatalf("preview: %v", err)
+	}
+	if !strings.Contains(toolsPayloadString(preview), `"preview":true`) || !strings.Contains(toolsPayloadString(preview), "builder_welcome") {
+		t.Fatalf("unexpected preview payload: %+v", preview)
+	}
+	list, err := service.List(ctx, "guild-1")
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(list) != 0 {
+		t.Fatalf("preview should not persist a draft, got %+v", list)
+	}
+
+	draft, err := service.ManageComposedTool(ctx, tools.ComposedToolManagementRequest{
+		GuildID:   "guild-1",
+		ActorID:   "admin-1",
+		Action:    "draft",
+		Text:      "Create a builder welcome tool",
+		RoleID:    "role-builder",
+		ChannelID: "channel-general",
+	})
+	if err != nil {
+		t.Fatalf("draft: %v", err)
+	}
+	if !strings.Contains(toolsPayloadString(draft), `"preview":false`) || !strings.Contains(toolsPayloadString(draft), `"version":1`) {
+		t.Fatalf("unexpected draft payload: %+v", draft)
+	}
+
+	approval, err := service.ManageComposedTool(ctx, tools.ComposedToolManagementRequest{
+		GuildID:  "guild-1",
+		ActorID:  "admin-1",
+		Action:   "approve",
+		ToolName: "builder_welcome",
+		Version:  1,
+	})
+	if err != nil {
+		t.Fatalf("approve confirmation: %v", err)
+	}
+	if !strings.Contains(toolsPayloadString(approval), `"confirmation_required":true`) || !strings.Contains(toolsPayloadString(approval), "composed_tool.approve") {
+		t.Fatalf("approval should require confirmation, got %+v", approval)
 	}
 }
 

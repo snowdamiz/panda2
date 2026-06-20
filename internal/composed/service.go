@@ -240,6 +240,142 @@ func (s *Service) ExportSpec(ctx context.Context, guildID, name string) (Spec, b
 	return spec, err == nil, err
 }
 
+func (s *Service) ManageComposedTool(ctx context.Context, request tools.ComposedToolManagementRequest) (any, error) {
+	action := strings.ToLower(strings.TrimSpace(request.Action))
+	switch action {
+	case "preview", "draft":
+		draftRequest := DraftRequest{
+			GuildID:      request.GuildID,
+			ActorID:      request.ActorID,
+			Text:         request.Text,
+			SpecJSON:     request.SpecJSON,
+			RoleID:       request.RoleID,
+			RoleName:     request.RoleName,
+			ChannelID:    request.ChannelID,
+			ChannelName:  request.ChannelName,
+			WelcomeText:  request.WelcomeText,
+			DefaultModel: request.DefaultModel,
+		}
+		var result DraftResult
+		var err error
+		if action == "preview" || request.DryRun {
+			result, err = s.PreviewDraft(ctx, draftRequest)
+		} else {
+			result, err = s.Draft(ctx, draftRequest)
+		}
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{"result": draftResultPayload(result, action == "preview" || request.DryRun)}, nil
+	case "list":
+		records, err := s.List(ctx, request.GuildID)
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{"result": map[string]any{"tools": composedToolPayloads(records)}}, nil
+	case "show":
+		name := strings.TrimSpace(request.ToolName)
+		if name == "" {
+			return nil, fmt.Errorf("tool_name is required")
+		}
+		record, versions, runs, ok, err := s.Show(ctx, request.GuildID, name)
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			return nil, tools.ErrUnknownTool
+		}
+		return map[string]any{"result": map[string]any{
+			"tool":     composedToolPayload(record.Tool),
+			"version":  composedVersionPayload(record.Version),
+			"versions": composedVersionPayloads(versions),
+			"runs":     composedRunPayloads(runs),
+		}}, nil
+	case "approve":
+		name := strings.TrimSpace(request.ToolName)
+		version := request.Version
+		if version <= 0 {
+			version = 1
+		}
+		if name == "" {
+			return nil, fmt.Errorf("tool_name is required")
+		}
+		preview := map[string]any{"tool_name": name, "version": strconv.Itoa(version)}
+		if request.DryRun {
+			return composedDryRunResult("composed_tool.approve", preview), nil
+		}
+		return composedConfirmationRequired("composed_tool.approve", preview), nil
+	case "pause", "resume", "disable", "archive":
+		name := strings.TrimSpace(request.ToolName)
+		if name == "" {
+			return nil, fmt.Errorf("tool_name is required")
+		}
+		status := action
+		if status == "resume" {
+			status = StatusEnabled
+		}
+		preview := map[string]any{"tool_name": name, "status": status}
+		if request.DryRun {
+			return composedDryRunResult("composed_tool."+status, preview), nil
+		}
+		tool, err := s.SetStatus(ctx, request.GuildID, name, status, request.ActorID)
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{"result": composedToolPayload(tool)}, nil
+	case "run", "simulate":
+		name := strings.TrimSpace(request.ToolName)
+		if name == "" {
+			return nil, fmt.Errorf("tool_name is required")
+		}
+		allowed, err := s.CanInvoke(ctx, request.GuildID, name, request.Access, InvocationManual)
+		if err != nil || !allowed {
+			if err != nil {
+				return nil, err
+			}
+			return nil, fmt.Errorf("missing permission for composed tool %s", name)
+		}
+		result, err := s.Run(ctx, RunRequest{
+			GuildID:        request.GuildID,
+			ToolName:       name,
+			InvocationType: InvocationManual,
+			InvokingUserID: request.ActorID,
+			Input:          request.Input,
+			DryRun:         request.DryRun || action == "simulate",
+		})
+		payload := map[string]any{"run_id": result.RunID, "status": result.Status, "output": result.Output, "error": result.Error}
+		if err != nil {
+			payload["error"] = err.Error()
+		}
+		return map[string]any{"result": payload}, nil
+	case "export":
+		name := strings.TrimSpace(request.ToolName)
+		if name == "" {
+			return nil, fmt.Errorf("tool_name is required")
+		}
+		spec, ok, err := s.ExportSpec(ctx, request.GuildID, name)
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			return nil, tools.ErrUnknownTool
+		}
+		return map[string]any{"result": map[string]any{"spec": spec}}, nil
+	case "rollback":
+		name := strings.TrimSpace(request.ToolName)
+		if name == "" || request.Version <= 0 {
+			return nil, fmt.Errorf("tool_name and version are required")
+		}
+		preview := map[string]any{"tool_name": name, "version": strconv.Itoa(request.Version)}
+		if request.DryRun {
+			return composedDryRunResult("composed_tool.rollback", preview), nil
+		}
+		return composedConfirmationRequired("composed_tool.rollback", preview), nil
+	default:
+		return nil, fmt.Errorf("unsupported composed tool action %q", action)
+	}
+}
+
 func (s *Service) OpenRouterTools(ctx context.Context, request tools.DynamicToolListRequest) ([]llm.Tool, error) {
 	if s == nil || s.repo == nil || strings.TrimSpace(request.GuildID) == "" {
 		return nil, nil
@@ -1149,6 +1285,94 @@ func mergeOutput(output map[string]any, key string, result map[string]any) {
 	}
 	if messageID, ok := result["message_id"]; ok {
 		output["message_id"] = messageID
+	}
+}
+
+func draftResultPayload(result DraftResult, preview bool) map[string]any {
+	return map[string]any{
+		"preview":    preview,
+		"tool_name":  result.Tool,
+		"version":    result.Version,
+		"spec":       result.Spec,
+		"validation": result.Validation,
+	}
+}
+
+func composedToolPayload(tool store.ComposedTool) map[string]any {
+	return map[string]any{
+		"tool_name":          tool.Name,
+		"tool_id":            tool.ToolID,
+		"status":             tool.Status,
+		"visibility":         tool.Visibility,
+		"current_version_id": tool.CurrentVersionID,
+		"created_by":         tool.CreatedBy,
+		"approved_by":        tool.ApprovedBy,
+	}
+}
+
+func composedToolPayloads(tools []store.ComposedTool) []map[string]any {
+	payloads := make([]map[string]any, 0, len(tools))
+	for _, tool := range tools {
+		payloads = append(payloads, composedToolPayload(tool))
+	}
+	return payloads
+}
+
+func composedVersionPayload(version store.ComposedToolVersion) map[string]any {
+	if version.ID == 0 {
+		return map[string]any{}
+	}
+	return map[string]any{
+		"id":              version.ID,
+		"version":         version.VersionNumber,
+		"created_by":      version.CreatedBy,
+		"approved_by":     version.ApprovedBy,
+		"approved_at":     version.ApprovedAt,
+		"validation_json": version.ValidationJSON,
+	}
+}
+
+func composedVersionPayloads(versions []store.ComposedToolVersion) []map[string]any {
+	payloads := make([]map[string]any, 0, len(versions))
+	for _, version := range versions {
+		payloads = append(payloads, composedVersionPayload(version))
+	}
+	return payloads
+}
+
+func composedRunPayloads(runs []store.ComposedToolRun) []map[string]any {
+	payloads := make([]map[string]any, 0, len(runs))
+	for _, run := range runs {
+		payloads = append(payloads, map[string]any{
+			"run_id":          run.ID,
+			"status":          run.Status,
+			"invocation_type": run.InvocationType,
+			"created_at":      run.CreatedAt,
+			"finished_at":     run.FinishedAt,
+			"error":           run.Error,
+		})
+	}
+	return payloads
+}
+
+func composedDryRunResult(action string, preview map[string]any) map[string]any {
+	return map[string]any{
+		"result": map[string]any{
+			"dry_run": true,
+			"action":  action,
+			"preview": preview,
+		},
+	}
+}
+
+func composedConfirmationRequired(action string, preview map[string]any) map[string]any {
+	return map[string]any{
+		"result": map[string]any{
+			"confirmation_required": true,
+			"action":                action,
+			"message":               "This composed-tool change needs explicit confirmation before it is applied.",
+			"preview":               preview,
+		},
 	}
 }
 

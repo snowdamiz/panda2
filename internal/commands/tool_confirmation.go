@@ -13,11 +13,15 @@ const (
 	toolConfirmationOpBudgetLimitRemove    = "br"
 	toolConfirmationOpRolePermissionRemove = "rr"
 	toolConfirmationOpChannelRuleRemove    = "cr"
+	toolConfirmationOpComposedToolApprove  = "ca"
+	toolConfirmationOpComposedToolRollback = "cb"
 	toolConfirmationEmptyValue             = "_"
 	toolActionKnowledgeDelete              = "knowledge.delete"
 	toolActionBudgetLimitRemove            = "budget_limit.remove"
 	toolActionRolePermissionRemove         = "role_permission.remove"
 	toolActionChannelRuleRemove            = "channel_rule.remove"
+	toolActionComposedToolApprove          = "composed_tool.approve"
+	toolActionComposedToolRollback         = "composed_tool.rollback"
 )
 
 type ToolConfirmationRequest struct {
@@ -83,6 +87,20 @@ func RequestFromToolConfirmationID(id string, base Request) (ToolConfirmationReq
 		}
 		request.Action = toolActionChannelRuleRemove
 		request.Options["channel_id"] = decodeToolConfirmationPart(parts[3])
+	case toolConfirmationOpComposedToolApprove:
+		if len(parts) != 5 {
+			return ToolConfirmationRequest{}, false
+		}
+		request.Action = toolActionComposedToolApprove
+		request.Options["tool_name"] = decodeToolConfirmationPart(parts[3])
+		request.Options["version"] = decodeToolConfirmationPart(parts[4])
+	case toolConfirmationOpComposedToolRollback:
+		if len(parts) != 5 {
+			return ToolConfirmationRequest{}, false
+		}
+		request.Action = toolActionComposedToolRollback
+		request.Options["tool_name"] = decodeToolConfirmationPart(parts[3])
+		request.Options["version"] = decodeToolConfirmationPart(parts[4])
 	default:
 		return ToolConfirmationRequest{}, false
 	}
@@ -116,6 +134,18 @@ func toolConfirmationID(userID, action string, arguments map[string]string) stri
 		}
 		prefix[1] = toolConfirmationOpChannelRuleRemove
 		return strings.Join(append(prefix, encodeToolConfirmationPart(arguments["channel_id"])), ":")
+	case toolActionComposedToolApprove:
+		if strings.TrimSpace(arguments["tool_name"]) == "" || strings.TrimSpace(arguments["version"]) == "" {
+			return ""
+		}
+		prefix[1] = toolConfirmationOpComposedToolApprove
+		return strings.Join(append(prefix, encodeToolConfirmationPart(arguments["tool_name"]), encodeToolConfirmationPart(arguments["version"])), ":")
+	case toolActionComposedToolRollback:
+		if strings.TrimSpace(arguments["tool_name"]) == "" || strings.TrimSpace(arguments["version"]) == "" {
+			return ""
+		}
+		prefix[1] = toolConfirmationOpComposedToolRollback
+		return strings.Join(append(prefix, encodeToolConfirmationPart(arguments["tool_name"]), encodeToolConfirmationPart(arguments["version"])), ":")
 	default:
 		return ""
 	}

@@ -53,7 +53,7 @@ This plan is for the engineer who will build the first production-ready version 
 - `/admin prompt` manages server-level system instructions.
 - `/admin audit` shows recent privileged actions.
 - `/admin disable` pauses assistant responses without kicking the bot.
-- Panda chat/tools handle channel rules, role permissions, usage reports, request budgets, guild memory, memory consent, and moderation guidance.
+- Panda chat/tools handle composed-tool management, channel rules, role permissions, usage reports, request budgets, guild memory, memory consent, and moderation guidance.
 - LLM-triggered Discord components handle reviewed interactive flows such as destructive-action confirmations.
 
 ### Owner And Operator Tools
@@ -418,7 +418,7 @@ Exit criteria:
 
 ### Milestone 4: Admin Controls
 
-- Implement thin admin model/prompt/audit/enable/disable commands plus LLM-driven channel, role, usage, limit, memory, and moderation tool flows.
+- Implement thin admin model/prompt/audit/enable/disable commands plus LLM-driven composed-tool, channel, role, usage, limit, memory, and moderation tool flows.
 - Add confirmation components for dangerous operations, including model-triggered tool actions.
 - Add audit events for all config changes.
 - Add permission mapping through reviewed chat/tool flows with Discord buttons or modals where confirmation or structured input is needed.

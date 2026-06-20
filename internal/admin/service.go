@@ -57,6 +57,27 @@ const (
 	defaultModelToolPolicy = "off"
 )
 
+var allPermissionNames = []string{
+	PermissionAssistantUse,
+	PermissionAssistantUseThreads,
+	PermissionAssistantAttachments,
+	PermissionAssistantMemoryRead,
+	PermissionAssistantMemoryWrite,
+	PermissionAssistantWebSearch,
+	PermissionAssistantSoulWrite,
+	PermissionModerationUse,
+	PermissionAdminConfigRead,
+	PermissionAdminConfigWrite,
+	PermissionAdminUsageRead,
+	PermissionAdminAuditRead,
+	PermissionAdminMemoryManage,
+	PermissionToolComposeDraft,
+	PermissionToolComposeApprove,
+	PermissionToolComposeInvoke,
+	PermissionToolComposeAudit,
+	PermissionOwnerOps,
+}
+
 type AssistantAccessRequest struct {
 	GuildID      string
 	ChannelID    string
@@ -861,7 +882,7 @@ func (s *Service) hasGuildControl(ctx context.Context, request AssistantAccessRe
 	if err != nil || !ok || guild.InstallStatus != repository.GuildInstallStatusActive {
 		return false, err
 	}
-	return guild.InstalledByUserID == request.UserID, nil
+	return guild.OwnerUserID == request.UserID || guild.InstalledByUserID == request.UserID, nil
 }
 
 func (s *Service) canUsePermission(ctx context.Context, guildID string, roleIDs []string, permission string, allowWhenUnmapped bool) (bool, error) {
@@ -912,29 +933,17 @@ func normalizeToolName(value string) string {
 }
 
 func IsPermissionNameAllowed(permission string) bool {
-	switch strings.TrimSpace(permission) {
-	case PermissionAssistantUse,
-		PermissionAssistantUseThreads,
-		PermissionAssistantAttachments,
-		PermissionAssistantMemoryRead,
-		PermissionAssistantMemoryWrite,
-		PermissionAssistantWebSearch,
-		PermissionAssistantSoulWrite,
-		PermissionModerationUse,
-		PermissionAdminConfigRead,
-		PermissionAdminConfigWrite,
-		PermissionAdminUsageRead,
-		PermissionAdminAuditRead,
-		PermissionAdminMemoryManage,
-		PermissionToolComposeDraft,
-		PermissionToolComposeApprove,
-		PermissionToolComposeInvoke,
-		PermissionToolComposeAudit,
-		PermissionOwnerOps:
-		return true
-	default:
-		return false
+	permission = strings.TrimSpace(permission)
+	for _, allowed := range allPermissionNames {
+		if permission == allowed {
+			return true
+		}
 	}
+	return false
+}
+
+func AllPermissionNames() []string {
+	return append([]string{}, allPermissionNames...)
 }
 
 func cleanInstruction(value, field string) (string, error) {

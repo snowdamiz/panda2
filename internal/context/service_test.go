@@ -84,6 +84,26 @@ func TestRecentMessagesContextClampsLimit(t *testing.T) {
 	}
 }
 
+func TestRecentMessagesSinceContextFiltersByCreatedAt(t *testing.T) {
+	now := time.Date(2026, 6, 20, 13, 45, 0, 0, time.UTC)
+	service := NewService(fakeProvider{messages: []Message{
+		{GuildID: "guild-1", ChannelID: "channel-1", MessageID: "old", Content: "old chatter", CreatedAt: now.Add(-3 * time.Minute)},
+		{GuildID: "guild-1", ChannelID: "channel-1", MessageID: "recent", Content: "recent relevant context", CreatedAt: now.Add(-90 * time.Second)},
+		{GuildID: "guild-1", ChannelID: "channel-1", MessageID: "current", Content: "current question", CreatedAt: now},
+	}})
+
+	packed, err := service.RecentMessagesSinceContext(context.Background(), ChannelRef{GuildID: "guild-1", ChannelID: "channel-1"}, 50, now.Add(-2*time.Minute))
+	if err != nil {
+		t.Fatalf("RecentMessagesSinceContext: %v", err)
+	}
+	if strings.Contains(packed.Text, "old chatter") || !strings.Contains(packed.Text, "recent relevant context") || !strings.Contains(packed.Text, "current question") {
+		t.Fatalf("unexpected time-window context: %s", packed.Text)
+	}
+	if len(packed.Citations) != 2 {
+		t.Fatalf("expected two citations, got %+v", packed.Citations)
+	}
+}
+
 func TestRecentUserMessagesContextFiltersAuthor(t *testing.T) {
 	service := NewService(fakeProvider{messages: []Message{
 		{GuildID: "guild-1", ChannelID: "channel-1", MessageID: "message-1", AuthorID: "user-1", Content: "keep this"},

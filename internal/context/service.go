@@ -96,6 +96,28 @@ func (s *Service) RecentMessagesContext(ctx context.Context, ref ChannelRef, lim
 	return s.pack(messages), nil
 }
 
+func (s *Service) RecentMessagesSinceContext(ctx context.Context, ref ChannelRef, limit int, since time.Time) (PackedContext, error) {
+	if s.provider == nil {
+		return PackedContext{}, ErrProviderUnavailable
+	}
+	limit = clamp(limit, 1, s.maxMessages)
+	messages, err := s.provider.FetchRecentMessages(ctx, ref, s.maxMessages)
+	if err != nil {
+		return PackedContext{}, err
+	}
+	filtered := make([]Message, 0, len(messages))
+	for _, message := range messages {
+		if !since.IsZero() && !message.CreatedAt.IsZero() && message.CreatedAt.Before(since) {
+			continue
+		}
+		filtered = append(filtered, message)
+	}
+	if len(filtered) > limit {
+		filtered = filtered[len(filtered)-limit:]
+	}
+	return s.pack(filtered), nil
+}
+
 func (s *Service) RecentUserMessagesContext(ctx context.Context, ref ChannelRef, userID string, limit int) (PackedContext, error) {
 	if s.provider == nil {
 		return PackedContext{}, ErrProviderUnavailable

@@ -52,6 +52,10 @@ type InteractionJobQueue interface {
 	Enqueue(ctx context.Context, job store.Job) (store.Job, error)
 }
 
+type typingSender interface {
+	SendTyping(channelID snowflake.ID, opts ...rest.RequestOpt) error
+}
+
 type commandSyncer interface {
 	SetGlobalCommands(applicationID snowflake.ID, commands []disgoDiscord.ApplicationCommandCreate, opts ...rest.RequestOpt) ([]disgoDiscord.ApplicationCommand, error)
 	SetGuildCommands(applicationID snowflake.ID, guildID snowflake.ID, commands []disgoDiscord.ApplicationCommandCreate, opts ...rest.RequestOpt) ([]disgoDiscord.ApplicationCommand, error)
@@ -60,6 +64,8 @@ type commandSyncer interface {
 const maxAttachmentExtractBytes = 1 << 20
 const InteractionJobKind = "discord.interaction"
 const deferredProgressInterval = 8 * time.Second
+const typingRefreshInterval = 5 * time.Second
+const discordContentLimit = 2000
 
 type interactionJobPayload struct {
 	ApplicationID string                  `json:"application_id"`
@@ -451,87 +457,6 @@ func applicationCommands() []disgoDiscord.ApplicationCommandCreate {
 				},
 			},
 		},
-		disgoDiscord.SlashCommandCreate{
-			Name:        "tool",
-			Description: "Manage moderator-created composed tools",
-			Options: []disgoDiscord.ApplicationCommandOption{
-				disgoDiscord.ApplicationCommandOptionSubCommand{
-					Name:        "draft",
-					Description: "Draft or preview a composed tool",
-					Options: []disgoDiscord.ApplicationCommandOption{
-						disgoDiscord.ApplicationCommandOptionString{Name: "request", Description: "Natural-language tool request", Required: false, MaxLength: &maxTextLength},
-						disgoDiscord.ApplicationCommandOptionString{Name: "spec_json", Description: "Complete composed-tool spec JSON", Required: false, MaxLength: &maxTextLength},
-						disgoDiscord.ApplicationCommandOptionString{Name: "role_id", Description: "Stable Discord role ID", Required: false, MaxLength: &maxConfirmLength},
-						disgoDiscord.ApplicationCommandOptionString{Name: "role_name", Description: "Role name to resolve", Required: false, MaxLength: &maxConfirmLength},
-						disgoDiscord.ApplicationCommandOptionString{Name: "channel_id", Description: "Stable Discord channel ID", Required: false, MaxLength: &maxConfirmLength},
-						disgoDiscord.ApplicationCommandOptionString{Name: "channel_name", Description: "Channel name to resolve", Required: false, MaxLength: &maxConfirmLength},
-						disgoDiscord.ApplicationCommandOptionString{Name: "welcome_text", Description: "Welcome message template", Required: false, MaxLength: &maxTextLength},
-						dryRunOption,
-					},
-				},
-				disgoDiscord.ApplicationCommandOptionSubCommand{
-					Name:        "approve",
-					Description: "Approve and enable a composed tool version",
-					Options: []disgoDiscord.ApplicationCommandOption{
-						disgoDiscord.ApplicationCommandOptionString{Name: "tool", Description: "Tool name", Required: true, MaxLength: &maxConfirmLength},
-						disgoDiscord.ApplicationCommandOptionString{Name: "version", Description: "Version number", Required: false, MaxLength: &maxConfirmLength},
-						confirmOption,
-					},
-				},
-				disgoDiscord.ApplicationCommandOptionSubCommand{Name: "list", Description: "List composed tools"},
-				disgoDiscord.ApplicationCommandOptionSubCommand{
-					Name:        "show",
-					Description: "Show composed tool details",
-					Options: []disgoDiscord.ApplicationCommandOption{
-						disgoDiscord.ApplicationCommandOptionString{Name: "tool", Description: "Tool name", Required: true, MaxLength: &maxConfirmLength},
-					},
-				},
-				toolStatusSubcommand("pause", "Pause a composed tool", maxConfirmLength, dryRunOption),
-				toolStatusSubcommand("resume", "Resume a composed tool", maxConfirmLength, dryRunOption),
-				toolStatusSubcommand("disable", "Disable a composed tool", maxConfirmLength, dryRunOption),
-				toolStatusSubcommand("archive", "Archive a composed tool", maxConfirmLength, dryRunOption),
-				toolRunSubcommand("run", "Run a composed tool manually", maxConfirmLength, maxTextLength),
-				toolRunSubcommand("simulate", "Simulate a composed tool with dry-run writes", maxConfirmLength, maxTextLength),
-				disgoDiscord.ApplicationCommandOptionSubCommand{
-					Name:        "export",
-					Description: "Export the approved composed-tool spec",
-					Options: []disgoDiscord.ApplicationCommandOption{
-						disgoDiscord.ApplicationCommandOptionString{Name: "tool", Description: "Tool name", Required: true, MaxLength: &maxConfirmLength},
-					},
-				},
-				disgoDiscord.ApplicationCommandOptionSubCommand{
-					Name:        "rollback",
-					Description: "Roll back to an approved version",
-					Options: []disgoDiscord.ApplicationCommandOption{
-						disgoDiscord.ApplicationCommandOptionString{Name: "tool", Description: "Tool name", Required: true, MaxLength: &maxConfirmLength},
-						disgoDiscord.ApplicationCommandOptionString{Name: "version", Description: "Approved version number", Required: true, MaxLength: &maxConfirmLength},
-						confirmOption,
-					},
-				},
-			},
-		},
-	}
-}
-
-func toolStatusSubcommand(name, description string, maxLength int, dryRunOption disgoDiscord.ApplicationCommandOptionBool) disgoDiscord.ApplicationCommandOptionSubCommand {
-	return disgoDiscord.ApplicationCommandOptionSubCommand{
-		Name:        name,
-		Description: description,
-		Options: []disgoDiscord.ApplicationCommandOption{
-			disgoDiscord.ApplicationCommandOptionString{Name: "tool", Description: "Tool name", Required: true, MaxLength: &maxLength},
-			dryRunOption,
-		},
-	}
-}
-
-func toolRunSubcommand(name, description string, maxToolLength, maxInputLength int) disgoDiscord.ApplicationCommandOptionSubCommand {
-	return disgoDiscord.ApplicationCommandOptionSubCommand{
-		Name:        name,
-		Description: description,
-		Options: []disgoDiscord.ApplicationCommandOption{
-			disgoDiscord.ApplicationCommandOptionString{Name: "tool", Description: "Tool name", Required: true, MaxLength: &maxToolLength},
-			disgoDiscord.ApplicationCommandOptionString{Name: "input_json", Description: "Input JSON object", Required: false, MaxLength: &maxInputLength},
-		},
 	}
 }
 
@@ -568,7 +493,7 @@ func (b *Bot) handleSlashCommand(event *events.ApplicationCommandInteractionCrea
 	if question, ok := data.OptString("question"); ok {
 		request.Options["question"] = question
 	}
-	for _, name := range []string{"model", "fallback_models", "temperature", "max_response_tokens", "max_tokens", "tool_policy", "prompt", "soul", "action", "confirm", "request", "description", "spec_json", "role_id", "role_name", "channel_id", "channel_name", "welcome_text", "tool", "tool_name", "name", "version", "input_json"} {
+	for _, name := range []string{"model", "fallback_models", "temperature", "max_response_tokens", "max_tokens", "tool_policy", "prompt", "soul", "action", "confirm", "tool_name"} {
 		if value, ok := data.OptString(name); ok {
 			request.Options[name] = value
 		}
@@ -621,11 +546,7 @@ func (b *Bot) respondToInteraction(event *events.ApplicationCommandInteractionCr
 		response := b.runDeferredInteraction(context.Background(), b.client.ApplicationID, event.Token(), requestID, request)
 		if response.Background != nil {
 			response = b.queueBackgroundInteraction(context.Background(), b.client.ApplicationID, event.Token(), request.GuildID, *response.Background)
-			_, err := b.client.Rest.UpdateInteractionResponse(
-				b.client.ApplicationID,
-				event.Token(),
-				webhookMessageUpdateFromResponse(response),
-			)
+			err := b.updateInteractionResponse(b.client.ApplicationID, event.Token(), response)
 			if err != nil {
 				b.logger.Warn("failed to update queued interaction response", slog.Any("err", err), slog.String("request_id", requestID), slog.String("command", request.Command))
 			}
@@ -644,11 +565,7 @@ func (b *Bot) respondToInteraction(event *events.ApplicationCommandInteractionCr
 				return
 			}
 		}
-		_, err := b.client.Rest.UpdateInteractionResponse(
-			b.client.ApplicationID,
-			event.Token(),
-			webhookMessageUpdateFromResponse(response),
-		)
+		err := b.updateInteractionResponse(b.client.ApplicationID, event.Token(), response)
 		if err != nil {
 			b.logger.Warn("failed to update interaction response", slog.Any("err", err), slog.String("request_id", requestID), slog.String("command", request.Command))
 		}
@@ -662,8 +579,13 @@ func (b *Bot) respondToInteraction(event *events.ApplicationCommandInteractionCr
 		}
 		return
 	}
-	if err := event.CreateMessage(messageCreateFromResponse(response)); err != nil {
+	chunks := splitDiscordContent(response.Content)
+	if err := event.CreateMessage(messageCreateFromResponsePart(response, chunks[0], len(chunks) == 1)); err != nil {
 		b.logger.Warn("failed to respond to command", slog.Any("err", err), slog.String("request_id", requestID), slog.String("command", request.Command))
+		return
+	}
+	if err := b.createInteractionFollowups(b.client.ApplicationID, event.Token(), response, chunks, 1); err != nil {
+		b.logger.Warn("failed to send command followup", slog.Any("err", err), slog.String("request_id", requestID), slog.String("command", request.Command))
 	}
 }
 
@@ -771,11 +693,7 @@ func (b *Bot) HandleInteractionJob(ctx context.Context, job store.Job) error {
 		disgoDiscord.NewMessageUpdate().WithContent(fmt.Sprintf("Running long summary job #%d...", job.ID)),
 	)
 	response := b.router.HandleBackgroundTask(ctx, payload.Task)
-	_, err = b.client.Rest.UpdateInteractionResponse(
-		applicationID,
-		payload.Token,
-		webhookMessageUpdateFromResponse(response),
-	)
+	err = b.updateInteractionResponse(applicationID, payload.Token, response)
 	if err != nil {
 		b.logger.Warn("failed to update background interaction response", slog.Any("err", err), slog.Uint64("job_id", uint64(job.ID)), slog.String("command", payload.Task.Command))
 	}
@@ -889,19 +807,35 @@ func (b *Bot) requestFromModalEvent(event *events.ModalSubmitInteractionCreate) 
 }
 
 func messageCreateFromResponse(response commands.Response) disgoDiscord.MessageCreate {
-	message := disgoDiscord.NewMessageCreate().WithContent(response.Content).WithEphemeral(response.Ephemeral)
-	if components := componentsFromResponse(response); len(components) > 0 {
-		message = message.WithComponents(components...)
+	return messageCreateFromResponsePart(response, firstDiscordContentChunk(response.Content), true)
+}
+
+func messageCreateFromResponsePart(response commands.Response, content string, includeComponents bool) disgoDiscord.MessageCreate {
+	message := disgoDiscord.NewMessageCreate().WithContent(content).WithEphemeral(response.Ephemeral)
+	if includeComponents {
+		message = message.WithComponents(componentsFromResponse(response)...)
 	}
 	return message
 }
 
 func channelMessageCreateFromResponse(response commands.Response) disgoDiscord.MessageCreate {
-	message := disgoDiscord.NewMessageCreate().WithContent(response.Content)
-	if components := componentsFromResponse(response); len(components) > 0 {
-		message = message.WithComponents(components...)
+	return channelMessageCreateFromResponsePart(response, firstDiscordContentChunk(response.Content), true)
+}
+
+func channelMessageCreateFromResponsePart(response commands.Response, content string, includeComponents bool) disgoDiscord.MessageCreate {
+	message := disgoDiscord.NewMessageCreate().WithContent(content)
+	if includeComponents {
+		message = message.WithComponents(componentsFromResponse(response)...)
 	}
 	return message
+}
+
+func firstDiscordContentChunk(content string) string {
+	chunks := splitDiscordContent(content)
+	if len(chunks) == 0 {
+		return ""
+	}
+	return chunks[0]
 }
 
 func modalCreateFromResponse(response *commands.Modal) disgoDiscord.ModalCreate {
@@ -927,15 +861,96 @@ func modalCreateFromResponse(response *commands.Modal) disgoDiscord.ModalCreate 
 }
 
 func webhookMessageUpdateFromResponse(response commands.Response) disgoDiscord.MessageUpdate {
-	message := disgoDiscord.NewMessageUpdate().WithContent(response.Content)
-	if components := componentsFromResponse(response); len(components) > 0 {
-		message = message.WithComponents(components...)
+	return webhookMessageUpdateFromResponsePart(response, firstDiscordContentChunk(response.Content), true)
+}
+
+func webhookMessageUpdateFromResponsePart(response commands.Response, content string, includeComponents bool) disgoDiscord.MessageUpdate {
+	message := disgoDiscord.NewMessageUpdate().WithContent(content)
+	if includeComponents {
+		message = message.WithComponents(componentsFromResponse(response)...)
 	}
 	return message
 }
 
 func messageUpdateFromResponse(response commands.Response) disgoDiscord.MessageUpdate {
-	return disgoDiscord.NewMessageUpdate().WithContent(response.Content).WithComponents(componentsFromResponse(response)...)
+	return disgoDiscord.NewMessageUpdate().WithContent(firstDiscordContentChunk(response.Content)).WithComponents(componentsFromResponse(response)...)
+}
+
+func (b *Bot) updateInteractionResponse(applicationID snowflake.ID, token string, response commands.Response) error {
+	chunks := splitDiscordContent(response.Content)
+	_, err := b.client.Rest.UpdateInteractionResponse(
+		applicationID,
+		token,
+		webhookMessageUpdateFromResponsePart(response, chunks[0], len(chunks) == 1),
+	)
+	if err != nil {
+		return err
+	}
+	return b.createInteractionFollowups(applicationID, token, response, chunks, 1)
+}
+
+func (b *Bot) createInteractionFollowups(applicationID snowflake.ID, token string, response commands.Response, chunks []string, start int) error {
+	for index := start; index < len(chunks); index++ {
+		_, err := b.client.Rest.CreateFollowupMessage(
+			applicationID,
+			token,
+			messageCreateFromResponsePart(response, chunks[index], index == len(chunks)-1),
+		)
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (b *Bot) sendChannelResponse(channelID snowflake.ID, response commands.Response) error {
+	chunks := splitDiscordContent(response.Content)
+	for index, chunk := range chunks {
+		if _, err := b.client.Rest.CreateMessage(channelID, channelMessageCreateFromResponsePart(response, chunk, index == len(chunks)-1)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func splitDiscordContent(content string) []string {
+	if content == "" {
+		return []string{""}
+	}
+	runes := []rune(content)
+	chunks := make([]string, 0, len(runes)/discordContentLimit+1)
+	for len(runes) > discordContentLimit {
+		splitAt := discordSplitIndex(runes, discordContentLimit)
+		chunk := strings.TrimRightFunc(string(runes[:splitAt]), unicode.IsSpace)
+		if chunk == "" {
+			chunk = string(runes[:discordContentLimit])
+			splitAt = discordContentLimit
+		}
+		chunks = append(chunks, chunk)
+		runes = []rune(strings.TrimLeftFunc(string(runes[splitAt:]), unicode.IsSpace))
+	}
+	if len(runes) > 0 || len(chunks) == 0 {
+		chunks = append(chunks, string(runes))
+	}
+	return chunks
+}
+
+func discordSplitIndex(runes []rune, limit int) int {
+	if len(runes) <= limit {
+		return len(runes)
+	}
+	minSplit := limit / 2
+	for index := limit - 1; index >= minSplit; index-- {
+		if runes[index] == '\n' {
+			return index + 1
+		}
+	}
+	for index := limit - 1; index >= minSplit; index-- {
+		if unicode.IsSpace(runes[index]) {
+			return index + 1
+		}
+	}
+	return limit
 }
 
 func componentsFromResponse(response commands.Response) []disgoDiscord.LayoutComponent {
@@ -971,7 +986,7 @@ func (b *Bot) postThreadResponse(response commands.Response) bool {
 	if err != nil {
 		return false
 	}
-	if _, err := b.client.Rest.CreateMessage(threadID, channelMessageCreateFromResponse(response)); err != nil {
+	if err := b.sendChannelResponse(threadID, response); err != nil {
 		b.logger.Warn("failed to post chat response in thread", slog.Any("err", err), slog.String("thread_id", response.ThreadID))
 		return false
 	}
@@ -1009,7 +1024,7 @@ func (b *Bot) onMessageCreate(event *events.MessageCreate) {
 	}
 	b.captureAttachments(context.Background(), event.Message)
 	content := strings.TrimSpace(event.Message.Content)
-	if content == "" || !containsPandaWord(content) {
+	if content == "" {
 		return
 	}
 
@@ -1021,13 +1036,12 @@ func (b *Bot) onMessageCreate(event *events.MessageCreate) {
 	if messageMentionsUser(event.Message, b.client.ID().String()) {
 		options["bot_mentioned"] = "true"
 	}
-	if referenced := event.Message.ReferencedMessage; referenced != nil {
-		options["reply_text"] = referenced.Content
-		options["reply_message_id"] = referenced.ID.String()
-		if referenced.Author.ID == b.client.ID() {
-			options["reply_author_is_bot"] = "true"
-		}
+	b.addReplyContextOptions(context.Background(), options, event.Message)
+	if !shouldHandleNaturalMessage(content, options) {
+		return
 	}
+	stopTyping := startTypingIndicator(context.Background(), event.Client().Rest, b.logger, event.ChannelID, event.Message.ID.String(), typingRefreshInterval)
+	defer stopTyping()
 	response := b.router.HandleNaturalMessage(context.Background(), commands.Request{
 		RequestID:    event.Message.ID.String(),
 		Options:      options,
@@ -1041,9 +1055,88 @@ func (b *Bot) onMessageCreate(event *events.MessageCreate) {
 	if response.Content == "" {
 		return
 	}
-	_, err := event.Client().Rest.CreateMessage(event.ChannelID, channelMessageCreateFromResponse(response))
-	if err != nil {
+	if err := b.sendChannelResponse(event.ChannelID, response); err != nil {
 		b.logger.Warn("failed to reply to natural message", slog.Any("err", err))
+	}
+}
+
+func startTypingIndicator(ctx context.Context, sender typingSender, logger *slog.Logger, channelID snowflake.ID, requestID string, interval time.Duration) func() {
+	if sender == nil || channelID == 0 {
+		return func() {}
+	}
+	if logger == nil {
+		logger = slog.Default()
+	}
+	if interval <= 0 {
+		interval = typingRefreshInterval
+	}
+	typingCtx, cancel := context.WithCancel(ctx)
+	send := func() {
+		if err := sender.SendTyping(channelID, rest.WithCtx(typingCtx)); err != nil {
+			logger.Debug("failed to send typing indicator", slog.Any("err", err), slog.String("request_id", requestID), slog.String("channel_id", channelID.String()))
+		}
+	}
+	send()
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				send()
+			case <-typingCtx.Done():
+				return
+			}
+		}
+	}()
+	return cancel
+}
+
+func (b *Bot) addReplyContextOptions(ctx context.Context, options map[string]string, message disgoDiscord.Message) {
+	if referenced := message.ReferencedMessage; referenced != nil {
+		b.setReplyContextOptions(options, *referenced)
+		return
+	}
+	if message.MessageReference == nil || message.MessageReference.MessageID == nil {
+		return
+	}
+	options["reply_message_id"] = message.MessageReference.MessageID.String()
+	if b.client == nil {
+		return
+	}
+	channelID := message.ChannelID
+	if message.MessageReference.ChannelID != nil {
+		channelID = *message.MessageReference.ChannelID
+	}
+	referenced, err := b.client.Rest.GetMessage(channelID, *message.MessageReference.MessageID)
+	if err != nil {
+		if b.logger != nil {
+			b.logger.Warn("failed to fetch referenced message for natural reply", slog.Any("err", err), slog.String("channel_id", channelID.String()), slog.String("message_id", message.MessageReference.MessageID.String()))
+		}
+		return
+	}
+	b.setReplyContextOptions(options, *referenced)
+}
+
+func (b *Bot) setReplyContextOptions(options map[string]string, referenced disgoDiscord.Message) {
+	options["reply_text"] = referenced.Content
+	options["reply_message_id"] = referenced.ID.String()
+	if b.client != nil && referenced.Author.ID == b.client.ID() {
+		options["reply_author_is_bot"] = "true"
+	}
+}
+
+func shouldHandleNaturalMessage(content string, options map[string]string) bool {
+	return strings.TrimSpace(content) != "" &&
+		(containsPandaWord(content) || truthyDiscordOption(options["bot_mentioned"]) || truthyDiscordOption(options["reply_author_is_bot"]))
+}
+
+func truthyDiscordOption(value string) bool {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "1", "true", "yes", "y":
+		return true
+	default:
+		return false
 	}
 }
 

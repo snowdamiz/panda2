@@ -23,7 +23,7 @@ func TestDefaultRegistryDefinitionsAreValid(t *testing.T) {
 		t.Fatalf("NewDefaultRegistry: %v", err)
 	}
 	definitions := registry.Definitions()
-	if len(definitions) != 80 {
+	if len(definitions) != 81 {
 		t.Fatalf("expected full Discord tool surface plus assistant tools, got %d", len(definitions))
 	}
 	for _, definition := range definitions {
@@ -36,6 +36,27 @@ func TestDefaultRegistryDefinitionsAreValid(t *testing.T) {
 		if definition.ToolClass == "" {
 			t.Fatalf("tool %s missing class", definition.Name)
 		}
+		assertSchemaRequiredIsArray(t, definition.Name, "input", definition.InputSchema)
+		assertSchemaRequiredIsArray(t, definition.Name, "output", definition.OutputSchema)
+	}
+}
+
+func assertSchemaRequiredIsArray(t *testing.T, toolName, schemaName string, schema json.RawMessage) {
+	t.Helper()
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(schema, &fields); err != nil {
+		t.Fatalf("tool %s %s schema is invalid JSON: %v", toolName, schemaName, err)
+	}
+	required, ok := fields["required"]
+	if !ok {
+		t.Fatalf("tool %s %s schema missing required array", toolName, schemaName)
+	}
+	if string(required) == "null" {
+		t.Fatalf("tool %s %s schema required must be an array, got null", toolName, schemaName)
+	}
+	var requiredFields []string
+	if err := json.Unmarshal(required, &requiredFields); err != nil {
+		t.Fatalf("tool %s %s schema required must be an array: %v", toolName, schemaName, err)
 	}
 }
 
@@ -77,6 +98,51 @@ func TestOpenRouterToolsFiltersByPermission(t *testing.T) {
 		}
 		if strings.Contains(tool.Function.Name, ".") {
 			t.Fatalf("wire tool name should be provider-safe: %s", tool.Function.Name)
+		}
+	}
+}
+
+func TestOpenRouterToolsKeepsMetadataAvailableWhenPolicyOff(t *testing.T) {
+	registry, err := NewDefaultRegistry()
+	if err != nil {
+		t.Fatalf("NewDefaultRegistry: %v", err)
+	}
+	tools := registry.OpenRouterToolsForAccess(ToolAccess{
+		Policy:      ToolPolicyOff,
+		Permissions: map[string]struct{}{admin.PermissionAssistantUse: {}},
+	})
+	names := toolNames(tools)
+	if !names["panda_list_tools"] {
+		t.Fatalf("expected metadata list tool under off policy, got %+v", names)
+	}
+	if names["discord_fetch_message"] || names["generate_workflow_json"] {
+		t.Fatalf("off policy should still hide action tools, got %+v", names)
+	}
+}
+
+func TestOpenRouterToolsKeepsBotAdminManagementAvailableWhenPolicyOff(t *testing.T) {
+	registry, err := NewDefaultRegistry()
+	if err != nil {
+		t.Fatalf("NewDefaultRegistry: %v", err)
+	}
+	tools := registry.OpenRouterToolsForAccess(ToolAccess{
+		Policy: ToolPolicyOff,
+		Permissions: map[string]struct{}{
+			admin.PermissionAssistantUse:     {},
+			admin.PermissionAdminConfigRead:  {},
+			admin.PermissionAdminConfigWrite: {},
+			admin.PermissionAdminUsageRead:   {},
+		},
+	})
+	names := toolNames(tools)
+	for _, want := range []string{"panda_list_tools", "read_config", "panda_manage_tool_access", "panda_manage_channel_rule", "panda_usage_report"} {
+		if !names[want] {
+			t.Fatalf("expected %s under off policy for admins, got %+v", want, names)
+		}
+	}
+	for _, hidden := range []string{"generate_workflow_json", "discord_modify_channel_permissions", "discord_send_message"} {
+		if names[hidden] {
+			t.Fatalf("expected %s to stay hidden under off policy, got %+v", hidden, names)
 		}
 	}
 }
@@ -204,7 +270,9 @@ func (f *fakeDiscordProvider) ExecuteDiscordTool(context.Context, DiscordToolReq
 }
 
 type fakeDynamicProvider struct {
-	tools []llm.Tool
+	tools  []llm.Tool
+	result ExecutionResult
+	err    error
 }
 
 func (f fakeDynamicProvider) OpenRouterTools(context.Context, DynamicToolListRequest) ([]llm.Tool, error) {
@@ -212,7 +280,26 @@ func (f fakeDynamicProvider) OpenRouterTools(context.Context, DynamicToolListReq
 }
 
 func (f fakeDynamicProvider) ExecuteDynamicTool(context.Context, DynamicExecutionRequest) (ExecutionResult, error) {
+	if f.result.Message.Role != "" || f.err != nil {
+		return f.result, f.err
+	}
 	return ExecutionResult{}, ErrUnknownTool
+}
+
+type fakeComposedManager struct {
+	requests []ComposedToolManagementRequest
+}
+
+func (f *fakeComposedManager) ManageComposedTool(_ context.Context, request ComposedToolManagementRequest) (any, error) {
+	f.requests = append(f.requests, request)
+	return map[string]any{
+		"result": map[string]any{
+			"action":    request.Action,
+			"tool_name": request.ToolName,
+			"text":      request.Text,
+			"dry_run":   request.DryRun,
+		},
+	}, nil
 }
 
 func newToolAdminService(t *testing.T) *admin.Service {
@@ -241,6 +328,117 @@ type fakeAuditRecorder struct {
 func (f *fakeAuditRecorder) Record(_ context.Context, event store.AuditEvent) error {
 	f.events = append(f.events, event)
 	return nil
+}
+
+func TestExecutorRunsComposedToolManager(t *testing.T) {
+	registry, err := NewDefaultRegistry()
+	if err != nil {
+		t.Fatalf("NewDefaultRegistry: %v", err)
+	}
+	manager := &fakeComposedManager{}
+	executor := NewExecutor(registry, nil, nil).WithComposedToolManager(manager)
+	result, err := executor.Execute(context.Background(), ExecutionRequest{
+		GuildID: "guild-1",
+		ActorID: "admin",
+		Access:  testAccess(ToolPolicyWriteConfirmed, admin.PermissionToolComposeDraft),
+		Call: llm.ToolCall{
+			ID:   "call-composed-manager",
+			Type: "function",
+			Function: llm.ToolCallFunction{
+				Name:      "panda_manage_composed_tool",
+				Arguments: `{"action":"draft","request":"Create a welcome tool","dry_run":true}`,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if len(manager.requests) != 1 {
+		t.Fatalf("expected composed manager request, got %d", len(manager.requests))
+	}
+	request := manager.requests[0]
+	if request.Action != "draft" || request.Text != "Create a welcome tool" || !request.DryRun {
+		t.Fatalf("unexpected composed manager request: %+v", request)
+	}
+	if !strings.Contains(result.Message.Content, `"action":"draft"`) || !strings.Contains(result.Message.Content, `"dry_run":true`) {
+		t.Fatalf("unexpected composed manager result: %+v", result)
+	}
+}
+
+func TestExecutorRedactsDynamicToolResults(t *testing.T) {
+	registry, err := NewDefaultRegistry()
+	if err != nil {
+		t.Fatalf("NewDefaultRegistry: %v", err)
+	}
+	secret := "sk-abcdefghijklmnopqrstuvwxyz123456"
+	executor := NewExecutor(registry, nil, nil).WithDynamicToolProvider(fakeDynamicProvider{
+		result: ExecutionResult{Message: llm.Message{
+			Role:       "tool",
+			ToolCallID: "call-dynamic",
+			Content:    `{"secret":"` + secret + `"}`,
+		}},
+	})
+	result, err := executor.Execute(context.Background(), ExecutionRequest{
+		GuildID: "guild-1",
+		Access:  testAccess(ToolPolicyReadOnly, admin.PermissionToolComposeInvoke),
+		Call: llm.ToolCall{
+			ID:   "call-dynamic",
+			Type: "function",
+			Function: llm.ToolCallFunction{
+				Name:      "custom_dynamic_tool",
+				Arguments: `{}`,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if strings.Contains(result.Message.Content, secret) || !strings.Contains(result.Message.Content, "[redacted]") {
+		t.Fatalf("dynamic tool result was not redacted: %+v", result)
+	}
+}
+
+func TestExecutorComposedManagerChecksActionPermission(t *testing.T) {
+	registry, err := NewDefaultRegistry()
+	if err != nil {
+		t.Fatalf("NewDefaultRegistry: %v", err)
+	}
+	manager := &fakeComposedManager{}
+	executor := NewExecutor(registry, nil, nil).WithComposedToolManager(manager)
+	result, err := executor.Execute(context.Background(), ExecutionRequest{
+		GuildID: "guild-1",
+		ActorID: "admin",
+		Access:  testAccess(ToolPolicyWriteConfirmed, admin.PermissionToolComposeDraft),
+		Call: llm.ToolCall{
+			ID:   "call-composed-approve",
+			Type: "function",
+			Function: llm.ToolCallFunction{
+				Name:      "panda_manage_composed_tool",
+				Arguments: `{"action":"approve","tool_name":"welcome","version":1}`,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if len(manager.requests) != 0 {
+		t.Fatalf("approval should not reach manager without approve permission: %+v", manager.requests)
+	}
+	if !strings.Contains(result.Message.Content, "missing permission") || !strings.Contains(result.Message.Content, admin.PermissionToolComposeApprove) {
+		t.Fatalf("unexpected permission error result: %+v", result)
+	}
+}
+
+func TestExecutorHidesComposedManagerFromInvokeOnlyAccess(t *testing.T) {
+	registry, err := NewDefaultRegistry()
+	if err != nil {
+		t.Fatalf("NewDefaultRegistry: %v", err)
+	}
+	executor := NewExecutor(registry, nil, nil).WithComposedToolManager(&fakeComposedManager{})
+	tools := executor.OpenRouterTools(testAccess(ToolPolicyWriteConfirmed, admin.PermissionToolComposeInvoke))
+	if toolNames(tools)["panda_manage_composed_tool"] {
+		t.Fatalf("invoke-only access should use approved composed tools directly, got %+v", toolNames(tools))
+	}
 }
 
 func TestExecutorRunsKnowledgeSearchTool(t *testing.T) {
@@ -641,6 +839,7 @@ func TestExecutorListsNativeAndComposedTools(t *testing.T) {
 	}
 	executor := NewExecutor(registry, nil, nil).
 		WithContextReader(fakeToolContextReader{}).
+		WithDiscordToolProvider(&fakeDiscordProvider{}).
 		WithDynamicToolProvider(fakeDynamicProvider{tools: []llm.Tool{{
 			Type: "function",
 			Function: llm.ToolFunction{
@@ -667,10 +866,13 @@ func TestExecutorListsNativeAndComposedTools(t *testing.T) {
 		t.Fatalf("Execute: %v", err)
 	}
 	content := result.Message.Content
-	for _, want := range []string{`"native_name":"discord.fetch_message"`, `"name":"panda_list_tools"`, `"kind":"composed"`, `"name":"builder_welcome"`, `"input_schema"`} {
+	for _, want := range []string{`"native_name":"discord.fetch_message"`, `"name":"discord_channel_activity_summary"`, `"name":"panda_list_tools"`, `"kind":"composed"`, `"name":"builder_welcome"`, `"input_schema"`} {
 		if !strings.Contains(content, want) {
 			t.Fatalf("expected tool listing to contain %s, got %s", want, content)
 		}
+	}
+	if strings.Contains(content, "[redacted]") {
+		t.Fatalf("tool names should not be redacted in list_tools output: %s", content)
 	}
 }
 

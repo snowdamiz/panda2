@@ -54,6 +54,7 @@ type BackgroundTask struct {
 	ChannelID                    string   `json:"channel_id"`
 	Command                      string   `json:"command"`
 	Input                        string   `json:"input"`
+	InvocationContext            string   `json:"invocation_context,omitempty"`
 	Tone                         string   `json:"tone,omitempty"`
 	Language                     string   `json:"language,omitempty"`
 	Detail                       string   `json:"detail,omitempty"`

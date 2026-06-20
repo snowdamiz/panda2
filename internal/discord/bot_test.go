@@ -7,7 +7,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 	"unicode/utf8"
 
 	disgoDiscord "github.com/disgoorg/disgo/discord"
@@ -24,6 +26,12 @@ type fakeAttachmentRecorder struct {
 
 type fakeInteractionJobQueue struct {
 	jobs []store.Job
+}
+
+type fakeTypingSender struct {
+	mu    sync.Mutex
+	calls []snowflake.ID
+	err   error
 }
 
 type syncedGuildCommands struct {
@@ -52,6 +60,19 @@ func (f *fakeInteractionJobQueue) Enqueue(_ context.Context, job store.Job) (sto
 	return job, nil
 }
 
+func (f *fakeTypingSender) SendTyping(channelID snowflake.ID, _ ...rest.RequestOpt) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls = append(f.calls, channelID)
+	return f.err
+}
+
+func (f *fakeTypingSender) count() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.calls)
+}
+
 func (f *fakeCommandSyncer) SetGlobalCommands(applicationID snowflake.ID, commands []disgoDiscord.ApplicationCommandCreate, _ ...rest.RequestOpt) ([]disgoDiscord.ApplicationCommand, error) {
 	f.globalApplicationIDs = append(f.globalApplicationIDs, applicationID)
 	f.globalCommands = append(f.globalCommands, append([]disgoDiscord.ApplicationCommandCreate(nil), commands...))
@@ -78,7 +99,7 @@ func TestApplicationCommandsIncludeContextMenus(t *testing.T) {
 			t.Fatalf("expected command %q to be registered", name)
 		}
 	}
-	for _, name := range []string{"ask", "chat", "summarize", "explain", "rewrite", "translate", "memory-consent", "search-memory", "mod"} {
+	for _, name := range []string{"ask", "chat", "summarize", "explain", "rewrite", "translate", "memory-consent", "search-memory", "mod", "tool"} {
 		if names[name] {
 			t.Fatalf("expected natural-language command %q not to be registered as a slash command", name)
 		}
@@ -191,6 +212,39 @@ func TestContainsPandaWordUsesStandaloneWord(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestShouldHandleNaturalMessageAllowsRepliesToPandaWithoutWakeWord(t *testing.T) {
+	if !shouldHandleNaturalMessage("can you list those by tool name", map[string]string{"reply_author_is_bot": "true"}) {
+		t.Fatal("expected reply to Panda to be handled without wake word")
+	}
+	if !shouldHandleNaturalMessage("can you help", map[string]string{"bot_mentioned": "true"}) {
+		t.Fatal("expected direct mention to be handled without wake word")
+	}
+	if shouldHandleNaturalMessage("can you list those by tool name", nil) {
+		t.Fatal("expected ambient message without wake word, mention, or Panda reply to be ignored")
+	}
+}
+
+func TestTypingIndicatorSendsImmediatelyAndRefreshes(t *testing.T) {
+	sender := &fakeTypingSender{}
+	channelID := snowflake.MustParse("100000000000000002")
+
+	stop := startTypingIndicator(context.Background(), sender, nil, channelID, "message-1", 5*time.Millisecond)
+	defer stop()
+
+	deadline := time.Now().Add(100 * time.Millisecond)
+	for sender.count() < 2 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if sender.count() < 2 {
+		t.Fatalf("expected immediate and refreshed typing calls, got %d", sender.count())
+	}
+}
+
+func TestTypingIndicatorNoopsWithoutSender(t *testing.T) {
+	stop := startTypingIndicator(context.Background(), nil, nil, snowflake.MustParse("100000000000000002"), "message-1", time.Millisecond)
+	stop()
 }
 
 func TestCaptureAttachmentsRecordsSafeExtractedText(t *testing.T) {
@@ -392,6 +446,57 @@ func TestConfirmationResponseRendersButtons(t *testing.T) {
 	cancel, ok := row.Components[1].(disgoDiscord.ButtonComponent)
 	if !ok || cancel.CustomID != commands.ConfirmationCancelID || cancel.Style != disgoDiscord.ButtonStyleSecondary {
 		t.Fatalf("unexpected cancel button: %+v", row.Components[1])
+	}
+}
+
+func TestSplitDiscordContentKeepsChunksWithinLimit(t *testing.T) {
+	content := strings.Repeat("- `discord_fetch_message`\n", 120)
+	chunks := splitDiscordContent(content)
+	if len(chunks) < 2 {
+		t.Fatalf("expected multiple chunks, got %d", len(chunks))
+	}
+	for _, chunk := range chunks {
+		if utf8.RuneCountInString(chunk) > discordContentLimit {
+			t.Fatalf("chunk exceeds Discord limit: %d\n%s", utf8.RuneCountInString(chunk), chunk)
+		}
+	}
+	joined := strings.Join(chunks, "\n")
+	if !strings.Contains(joined, "discord_fetch_message") {
+		t.Fatalf("split lost content: %q", joined)
+	}
+}
+
+func TestSplitDiscordContentSplitsLongUnbrokenText(t *testing.T) {
+	content := strings.Repeat("x", discordContentLimit+25)
+	chunks := splitDiscordContent(content)
+	if len(chunks) != 2 {
+		t.Fatalf("expected two chunks, got %d", len(chunks))
+	}
+	for _, chunk := range chunks {
+		if utf8.RuneCountInString(chunk) > discordContentLimit {
+			t.Fatalf("chunk exceeds Discord limit: %d", utf8.RuneCountInString(chunk))
+		}
+	}
+}
+
+func TestResponsePartOnlyRendersComponentsWhenRequested(t *testing.T) {
+	response := commands.Response{
+		Content: "Confirm this.",
+		Confirmation: &commands.Confirmation{
+			ID:           "p2c:md:admin:1",
+			ConfirmLabel: "Approve",
+			CancelID:     commands.ConfirmationCancelID,
+			CancelLabel:  "Cancel",
+		},
+	}
+
+	withoutComponents := channelMessageCreateFromResponsePart(response, "part one", false)
+	if len(withoutComponents.Components) != 0 {
+		t.Fatalf("expected no components on non-final chunk, got %+v", withoutComponents.Components)
+	}
+	withComponents := channelMessageCreateFromResponsePart(response, "part two", true)
+	if len(withComponents.Components) != 1 {
+		t.Fatalf("expected components on final chunk, got %+v", withComponents.Components)
 	}
 }
 

@@ -51,6 +51,10 @@ type DynamicToolProvider interface {
 	ExecuteDynamicTool(ctx context.Context, request DynamicExecutionRequest) (ExecutionResult, error)
 }
 
+type ComposedToolManager interface {
+	ManageComposedTool(ctx context.Context, request ComposedToolManagementRequest) (any, error)
+}
+
 type AuditRecorder interface {
 	Record(ctx context.Context, event store.AuditEvent) error
 }
@@ -102,6 +106,7 @@ type Executor struct {
 	audit       AuditRecorder
 	adminOps    AdminOperations
 	dynamic     DynamicToolProvider
+	composed    ComposedToolManager
 }
 
 type ExecutionRequest struct {
@@ -137,6 +142,28 @@ type DynamicExecutionRequest struct {
 	InvocationType string
 	Call           llm.ToolCall
 	NestedDepth    int
+}
+
+type ComposedToolManagementRequest struct {
+	GuildID         string
+	SourceChannelID string
+	ActorID         string
+	RequestID       string
+	InvocationType  string
+	Access          ToolAccess
+	Action          string
+	ToolName        string
+	Version         int
+	Text            string
+	SpecJSON        string
+	RoleID          string
+	RoleName        string
+	ChannelID       string
+	ChannelName     string
+	WelcomeText     string
+	DefaultModel    string
+	Input           map[string]any
+	DryRun          bool
 }
 
 type InteractionConfirmation struct {
@@ -186,6 +213,11 @@ func (e *Executor) WithDynamicToolProvider(provider DynamicToolProvider) *Execut
 	return e
 }
 
+func (e *Executor) WithComposedToolManager(manager ComposedToolManager) *Executor {
+	e.composed = manager
+	return e
+}
+
 func (e *Executor) OpenRouterTools(access ToolAccess) []llm.Tool {
 	if e == nil || e.registry == nil {
 		return nil
@@ -222,7 +254,7 @@ func (e *Executor) Execute(ctx context.Context, request ExecutionRequest) (Execu
 	definition, err := e.registry.MustGet(request.Call.Function.Name)
 	if err != nil {
 		if errors.Is(err, ErrUnknownTool) && e.dynamic != nil {
-			return e.dynamic.ExecuteDynamicTool(ctx, DynamicExecutionRequest{
+			result, err := e.dynamic.ExecuteDynamicTool(ctx, DynamicExecutionRequest{
 				GuildID:        request.GuildID,
 				ChannelID:      request.ChannelID,
 				ActorID:        request.ActorID,
@@ -231,6 +263,7 @@ func (e *Executor) Execute(ctx context.Context, request ExecutionRequest) (Execu
 				InvocationType: request.InvocationType,
 				Call:           request.Call,
 			})
+			return redactExecutionResult(result), err
 		}
 		return ExecutionResult{}, err
 	}
@@ -287,6 +320,8 @@ func (e *Executor) Execute(ctx context.Context, request ExecutionRequest) (Execu
 		payload, err = e.manageRolePermission(toolCtx, request, arguments)
 	case "panda.manage_tool_access":
 		payload, err = e.manageToolAccess(toolCtx, request, arguments)
+	case "panda.manage_composed_tool":
+		payload, err = e.manageComposedTool(toolCtx, request, arguments)
 	case "panda.manage_channel_rule":
 		payload, err = e.manageChannelRule(toolCtx, request, arguments)
 	case "panda.list_tools":
@@ -318,6 +353,21 @@ func (e *Executor) Execute(ctx context.Context, request ExecutionRequest) (Execu
 		},
 		Confirmation: confirmation,
 	}, nil
+}
+
+func redactExecutionResult(result ExecutionResult) ExecutionResult {
+	result.Message.Content = security.RedactSecrets(strings.TrimSpace(result.Message.Content))
+	result.Message.ToolCalls = append([]llm.ToolCall(nil), result.Message.ToolCalls...)
+	for index := range result.Message.ToolCalls {
+		result.Message.ToolCalls[index].Function.Arguments = security.RedactSecrets(result.Message.ToolCalls[index].Function.Arguments)
+	}
+	if result.Confirmation != nil {
+		result.Confirmation.Summary = security.RedactSecrets(strings.TrimSpace(result.Confirmation.Summary))
+		for key, value := range result.Confirmation.Arguments {
+			result.Confirmation.Arguments[key] = security.RedactSecrets(value)
+		}
+	}
+	return result
 }
 
 func (e *Executor) executeDiscordTool(ctx context.Context, definition Definition, request ExecutionRequest, rawArguments string) (any, error) {
@@ -894,6 +944,50 @@ func (e *Executor) manageToolAccess(ctx context.Context, request ExecutionReques
 	}
 }
 
+func (e *Executor) manageComposedTool(ctx context.Context, request ExecutionRequest, arguments string) (any, error) {
+	if e.composed == nil {
+		return nil, fmt.Errorf("composed tool manager is not configured")
+	}
+	args, err := parseArguments(arguments)
+	if err != nil {
+		return nil, err
+	}
+	action := normalizeComposedManagementAction(stringArgument(args, "action"))
+	if action == "" {
+		return nil, fmt.Errorf("action is required")
+	}
+	if permission := composedManagementPermission(action); permission == "" {
+		return nil, fmt.Errorf("unsupported composed tool action %q", action)
+	} else if !hasPermission(request.Access, permission) {
+		return nil, fmt.Errorf("missing permission %s for composed tool action %s", permission, action)
+	}
+	input, err := composedManagementInput(args)
+	if err != nil {
+		return nil, err
+	}
+	return e.composed.ManageComposedTool(ctx, ComposedToolManagementRequest{
+		GuildID:         request.GuildID,
+		SourceChannelID: request.ChannelID,
+		ActorID:         request.ActorID,
+		RequestID:       request.RequestID,
+		InvocationType:  request.InvocationType,
+		Access:          request.Access,
+		Action:          action,
+		ToolName:        firstNonEmpty(stringArgument(args, "tool_name"), stringArgument(args, "tool")),
+		Version:         intArgument(args, "version", 0),
+		Text:            firstNonEmpty(stringArgument(args, "request"), stringArgument(args, "description")),
+		SpecJSON:        stringArgument(args, "spec_json"),
+		RoleID:          stringArgument(args, "role_id"),
+		RoleName:        stringArgument(args, "role_name"),
+		ChannelID:       stringArgument(args, "channel_id"),
+		ChannelName:     stringArgument(args, "channel_name"),
+		WelcomeText:     stringArgument(args, "welcome_text"),
+		DefaultModel:    stringArgument(args, "model"),
+		Input:           input,
+		DryRun:          boolArgument(args, "dry_run") || action == "preview" || action == "simulate",
+	})
+}
+
 func (e *Executor) manageChannelRule(ctx context.Context, request ExecutionRequest, arguments string) (any, error) {
 	if e.adminOps == nil {
 		return nil, fmt.Errorf("admin operations are not configured")
@@ -1067,6 +1161,7 @@ func (e *Executor) listAvailableTools(ctx context.Context, request ExecutionRequ
 		"kind":            kind,
 		"policy":          normalizeToolPolicy(request.Access.Policy),
 		"invocation_type": firstNonEmpty(request.InvocationType, "chat_tool"),
+		"note":            "This list is already filtered by guild tool policy, role tool access, user permissions, and configured integrations. Tools not returned here are not callable in this context.",
 	}, nil
 }
 
@@ -1084,6 +1179,8 @@ func (e *Executor) canExecute(name string) bool {
 		return e.configs != nil
 	case "manage_memory_consent", "panda.usage_report", "panda.manage_soul", "panda.manage_budget_limit", "panda.manage_knowledge", "panda.manage_role_permission", "panda.manage_tool_access", "panda.manage_channel_rule":
 		return e.adminOps != nil
+	case "panda.manage_composed_tool":
+		return e.composed != nil
 	case "draft_moderator_note", "generate_workflow_json", "panda.list_tools":
 		return true
 	default:
@@ -1106,7 +1203,7 @@ func confirmationRequired(action string, preview map[string]any) map[string]any 
 		"result": map[string]any{
 			"confirmation_required": true,
 			"action":                action,
-			"message":               "This removal is prepared as a dry-run only from the model tool loop. Use an explicit confirmation flow before execution.",
+			"message":               "This change is prepared as a dry-run only from the model tool loop. Use an explicit confirmation flow before execution.",
 			"preview":               preview,
 		},
 	}
@@ -1150,6 +1247,8 @@ func confirmationArguments(action string, preview map[string]any) map[string]str
 		return stringArguments(preview, "role_id", "permission")
 	case "channel_rule.remove":
 		return stringArguments(preview, "channel_id")
+	case "composed_tool.approve", "composed_tool.rollback":
+		return stringArguments(preview, "tool_name", "version")
 	default:
 		return nil
 	}
@@ -1165,6 +1264,10 @@ func confirmationCopy(action string, arguments map[string]string) (string, strin
 		return fmt.Sprintf("Panda prepared removal of `%s` from role `%s`.", arguments["permission"], arguments["role_id"]), "Remove permission"
 	case "channel_rule.remove":
 		return fmt.Sprintf("Panda prepared removal of the channel access rule for `%s`.", arguments["channel_id"]), "Remove rule"
+	case "composed_tool.approve":
+		return fmt.Sprintf("Panda prepared approval of `%s` version `%s`.", arguments["tool_name"], arguments["version"]), "Approve tool"
+	case "composed_tool.rollback":
+		return fmt.Sprintf("Panda prepared rollback of `%s` to version `%s`.", arguments["tool_name"], arguments["version"]), "Roll back tool"
 	default:
 		return "", ""
 	}
@@ -1228,6 +1331,57 @@ func validBudgetScope(scope string) bool {
 func hasPermission(access ToolAccess, permission string) bool {
 	_, ok := access.Permissions[permission]
 	return ok
+}
+
+func normalizeComposedManagementAction(action string) string {
+	switch strings.ToLower(strings.TrimSpace(action)) {
+	case "preview", "dry_run", "dry-run":
+		return "preview"
+	case "draft", "create":
+		return "draft"
+	case "list", "show", "approve", "pause", "resume", "disable", "archive", "run", "simulate", "export", "rollback":
+		return strings.ToLower(strings.TrimSpace(action))
+	case "enable":
+		return "resume"
+	default:
+		return ""
+	}
+}
+
+func composedManagementPermission(action string) string {
+	switch action {
+	case "preview", "draft":
+		return admin.PermissionToolComposeDraft
+	case "list", "show", "export":
+		return admin.PermissionToolComposeAudit
+	case "approve", "pause", "resume", "disable", "archive", "rollback":
+		return admin.PermissionToolComposeApprove
+	case "run", "simulate":
+		return admin.PermissionToolComposeInvoke
+	default:
+		return ""
+	}
+}
+
+func composedManagementInput(args map[string]any) (map[string]any, error) {
+	if raw, ok := args["input"]; ok && raw != nil {
+		if input, ok := raw.(map[string]any); ok {
+			return input, nil
+		}
+		return nil, fmt.Errorf("input must be an object")
+	}
+	rawJSON := strings.TrimSpace(stringArgument(args, "input_json"))
+	if rawJSON == "" {
+		return map[string]any{}, nil
+	}
+	input := map[string]any{}
+	if err := json.Unmarshal([]byte(rawJSON), &input); err != nil {
+		return nil, fmt.Errorf("input_json must be a JSON object")
+	}
+	if input == nil {
+		input = map[string]any{}
+	}
+	return input, nil
 }
 
 func stringArgument(arguments map[string]any, name string) string {

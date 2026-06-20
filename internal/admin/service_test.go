@@ -279,7 +279,7 @@ func TestInstalledGuildOwnerHasConfigAccess(t *testing.T) {
 	if _, err := guilds.RecordAuthorizedInstall(ctx, repository.GuildInstall{
 		GuildID:           "guild-1",
 		OwnerUserID:       "owner-1",
-		InstalledByUserID: "owner-1",
+		InstalledByUserID: "installer-1",
 	}); err != nil {
 		t.Fatalf("RecordAuthorizedInstall: %v", err)
 	}
@@ -296,7 +296,11 @@ func TestInstalledGuildOwnerHasConfigAccess(t *testing.T) {
 
 	allowed, err := service.CanWriteConfig(ctx, AssistantAccessRequest{GuildID: "guild-1", UserID: "owner-1"})
 	if err != nil || !allowed {
-		t.Fatalf("expected installed owner config access, allowed=%t err=%v", allowed, err)
+		t.Fatalf("expected guild owner config access, allowed=%t err=%v", allowed, err)
+	}
+	allowed, err = service.CanWriteConfig(ctx, AssistantAccessRequest{GuildID: "guild-1", UserID: "installer-1"})
+	if err != nil || !allowed {
+		t.Fatalf("expected installing user config access, allowed=%t err=%v", allowed, err)
 	}
 	allowed, err = service.CanWriteConfig(ctx, AssistantAccessRequest{GuildID: "guild-1", UserID: "user-1"})
 	if err != nil || allowed {

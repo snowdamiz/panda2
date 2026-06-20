@@ -32,6 +32,9 @@ func TestOpenRouterChatSendsExpectedRequest(t *testing.T) {
 		if len(payload.Tools) != 1 || payload.Tools[0].Function.Name != "fixture_tool" {
 			t.Fatalf("unexpected tools payload: %+v", payload.Tools)
 		}
+		if payload.Provider == nil || !payload.Provider.RequireParameters || payload.Provider.AllowFallbacks == nil || *payload.Provider.AllowFallbacks {
+			t.Fatalf("tool requests should require provider parameter support and disable provider fallback: %+v", payload.Provider)
+		}
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"id":    "gen-1",
 			"model": "provider/model",

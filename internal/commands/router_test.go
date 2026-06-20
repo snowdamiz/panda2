@@ -101,6 +101,14 @@ func joinRequestMessages(request llm.ChatRequest) string {
 	return builder.String()
 }
 
+func requestToolNames(request llm.ChatRequest) map[string]bool {
+	names := map[string]bool{}
+	for _, tool := range request.Tools {
+		names[tool.Function.Name] = true
+	}
+	return names
+}
+
 func newTestRouter(t *testing.T, client *fakeLLM, limit int) *Router {
 	t.Helper()
 	ctx := context.Background()
@@ -187,35 +195,31 @@ func TestRouterHelpShowsAdminGuidanceToGuildAdmins(t *testing.T) {
 	}
 	for _, want := range []string{
 		"**Admin commands**",
-		"- `/admin badge role:@Role` - treat that Discord role as Panda admins.",
-		"- `/admin tool action:list` - show role-specific native and composed tool grants.",
-		"- `/admin tool action:add tool_name:<tool> role:@Role` - allow a role to use a specific tool.",
-		"- `/admin tool action:remove tool_name:<tool> role:@Role` - remove that tool grant.",
-		"- `/admin model model:<slug> fallback_models:<slug,slug> temperature:<0-2> max_response_tokens:<64-4000> tool_policy:<policy> dry_run:<true|false>` - update model routing and the server-wide tool ceiling.",
-		"- Tool policy choices: `off`, `read_only`, `assistive`, `admin_only`, `moderator`, `write_confirmed`, `owner_ops`.",
-		"- `/admin prompt prompt:<text> dry_run:<true|false>` - set server instructions; omit `prompt` to open the modal.",
-		"- `/admin audit` - show recent privileged changes.",
-		"- `/admin enable dry_run:<true|false>` - allow Panda to answer again.",
-		"- `/admin disable confirm:<confirmation> dry_run:<true|false>` - pause Panda after confirmation.",
-		"- `/admin soul soul:<text> dry_run:<true|false>` - set Panda's personality and tone; omit `soul` to open the modal.",
+		"- `/admin badge role:@Role` - delegated admin badge",
+		"- `/admin tool action:list|add|remove tool_name:<tool> role:@Role` - role tool grants",
+		"- `/admin model model:<slug> fallback_models:<csv> temperature:<0-2> max_response_tokens:<64-4000> tool_policy:<policy> dry_run:<bool>`",
+		"- Policies: `off`, `read_only`, `assistive`, `admin_only`, `moderator`, `write_confirmed`, `owner_ops`",
+		"- `/admin prompt prompt:<text> dry_run:<bool>` - server instructions; omit `prompt` for modal",
+		"- `/admin audit` - recent privileged changes",
+		"- `/admin enable dry_run:<bool>` / `/admin disable confirm:<token> dry_run:<bool>`",
+		"- `/admin soul soul:<text> dry_run:<bool>` - personality/tone; omit `soul` for modal",
 		"**Moderator tools**",
 		"**Composed tools**",
-		"- `/tool draft request:<description> dry_run:<true|false>` - draft a composed tool from natural language.",
-		"- `/tool draft spec_json:<json> dry_run:<true|false>` - draft from a complete composed-tool spec.",
-		"- Draft helpers: `role_id`, `role_name`, `channel_id`, `channel_name`, `welcome_text`, `model`.",
-		"- `/tool approve tool:<name> version:<n> confirm:<confirmation>` - approve and enable a version.",
-		"- `/tool list` - list composed tools for this server.",
-		"- `/tool show tool:<name>` - inspect versions and recent runs.",
-		"- `/tool pause|resume|disable|archive tool:<name> dry_run:<true|false>` - change tool status.",
-		"- `/tool run tool:<name> input_json:<object>` - run an approved composed tool.",
-		"- `/tool simulate tool:<name> input_json:<object>` - run with dry-run writes.",
-		"- `/tool export tool:<name>` - export the approved spec JSON.",
-		"- `/tool rollback tool:<name> version:<n> confirm:<confirmation>` - roll back to an approved version.",
+		"- Ask Panda to draft or preview new server tools.",
+		"- Ask Panda to list/show tools or export approved spec JSON.",
+		"- Ask Panda to approve, pause, resume, disable, archive, or roll back tools. Approval/rollback use buttons.",
+		"- Ask Panda to run or simulate approved composed tools.",
 		"Moderation guidance",
 	} {
 		if !strings.Contains(response.Content, want) {
 			t.Fatalf("admin help response missing %q:\n%s", want, response.Content)
 		}
+	}
+	if strings.Contains(response.Content, "`/tool") {
+		t.Fatalf("admin help should describe composed tools as natural-language requests, got:\n%s", response.Content)
+	}
+	if len(response.Content) > discordMessageContentLimit {
+		t.Fatalf("admin help must fit Discord content limit: %d > %d\n%s", len(response.Content), discordMessageContentLimit, response.Content)
 	}
 }
 
@@ -232,7 +236,7 @@ func TestRouterHelpShowsOnlyAllowedElevatedGuidanceToModerators(t *testing.T) {
 	}
 	for _, want := range []string{
 		"**Moderator tools**",
-		"- `/admin soul soul:<text> dry_run:<true|false>` - set Panda's personality and tone; omit `soul` to open the modal.",
+		"- `/admin soul soul:<text> dry_run:<bool>` - personality/tone; omit `soul` for modal",
 		"Moderation guidance",
 	} {
 		if !strings.Contains(response.Content, want) {
@@ -248,6 +252,37 @@ func TestRouterHelpShowsOnlyAllowedElevatedGuidanceToModerators(t *testing.T) {
 	} {
 		if strings.Contains(response.Content, hidden) {
 			t.Fatalf("moderator help should not include %q:\n%s", hidden, response.Content)
+		}
+	}
+}
+
+func TestRouterHelpShowsOnlyAllowedComposedToolGuidance(t *testing.T) {
+	ctx := context.Background()
+	router := newTestRouter(t, &fakeLLM{}, 5)
+	if _, err := router.admin.AddRolePermission(ctx, "guild-1", "admin", "role-runner", admin.PermissionToolComposeInvoke); err != nil {
+		t.Fatalf("AddRolePermission: %v", err)
+	}
+
+	response := router.Handle(ctx, Request{Command: "help", GuildID: "guild-1", UserID: "runner", RoleIDs: []string{"role-runner"}})
+	if !response.Ephemeral {
+		t.Fatalf("expected help response to be ephemeral: %+v", response)
+	}
+	for _, want := range []string{
+		"**Composed tools**",
+		"- Ask Panda to run or simulate approved composed tools.",
+	} {
+		if !strings.Contains(response.Content, want) {
+			t.Fatalf("composed invoke help missing %q:\n%s", want, response.Content)
+		}
+	}
+	for _, hidden := range []string{
+		"draft or preview",
+		"approve, pause, resume",
+		"export the approved spec",
+		"`/tool",
+	} {
+		if strings.Contains(response.Content, hidden) {
+			t.Fatalf("invoke-only help should not include %q:\n%s", hidden, response.Content)
 		}
 	}
 }
@@ -700,6 +735,20 @@ func TestToolConfirmationIDRestoresScopedRequest(t *testing.T) {
 	if _, ok := RequestFromToolConfirmationID(confirmation.ID, Request{UserID: "other-admin"}); ok {
 		t.Fatal("tool confirmation id should be scoped to the original user")
 	}
+
+	approve := ToolConfirmationFromAssistant("admin", &assistant.InteractionConfirmation{
+		Action:       toolActionComposedToolApprove,
+		Arguments:    map[string]string{"tool_name": "builder_welcome", "version": "2"},
+		ConfirmLabel: "Approve tool",
+		Danger:       true,
+	})
+	if approve == nil || approve.ID == "" {
+		t.Fatalf("expected composed tool confirmation id, got %+v", approve)
+	}
+	request, ok = RequestFromToolConfirmationID(approve.ID, Request{UserID: "admin"})
+	if !ok || request.Action != toolActionComposedToolApprove || request.Options["tool_name"] != "builder_welcome" || request.Options["version"] != "2" {
+		t.Fatalf("unexpected composed confirmation request: request=%+v ok=%t", request, ok)
+	}
 }
 
 func TestHandleToolConfirmationRemovesChannelRule(t *testing.T) {
@@ -804,6 +853,35 @@ func TestChatUsesAssistantService(t *testing.T) {
 	}
 }
 
+func TestChatAddsRecentInvocationContext(t *testing.T) {
+	client := &fakeLLM{response: llm.ChatResponse{Content: "chat fixture"}}
+	router := newTestRouter(t, client, 5).WithContextService(contextsvc.NewService(fakeContextProvider{messages: []contextsvc.Message{
+		{GuildID: "guild-1", ChannelID: "channel-1", MessageID: "old", AuthorID: "user-old", Content: "old unrelated chatter", CreatedAt: time.Now().UTC().Add(-3 * time.Minute)},
+		{GuildID: "guild-1", ChannelID: "channel-1", MessageID: "recent", AuthorID: "user-2", Content: "recent deploy context", CreatedAt: time.Now().UTC().Add(-90 * time.Second)},
+	}}))
+
+	response := router.Handle(context.Background(), Request{
+		Command:   "chat",
+		UserID:    "user-1",
+		GuildID:   "guild-1",
+		ChannelID: "channel-1",
+		Options:   map[string]string{"question": "what changed?"},
+	})
+	if response.Content != "chat fixture" {
+		t.Fatalf("unexpected chat response: %+v", response)
+	}
+	if len(client.requests) != 1 {
+		t.Fatalf("expected one LLM request, got %d", len(client.requests))
+	}
+	joined := joinRequestMessages(client.requests[0])
+	if !strings.Contains(joined, "recent deploy context") || strings.Contains(joined, "old unrelated chatter") {
+		t.Fatalf("expected recent invocation context only, got:\n%s", joined)
+	}
+	if !strings.Contains(joined, "ignore messages that are unrelated") {
+		t.Fatalf("expected relevance instruction in invocation context, got:\n%s", joined)
+	}
+}
+
 func TestChatUsesThreadManagerWhenAvailable(t *testing.T) {
 	client := &fakeLLM{response: llm.ChatResponse{Content: "chat fixture"}}
 	threadManager := &fakeThreadManager{thread: Thread{ID: "thread-1", Name: "Panda: continue", Created: true}}
@@ -858,6 +936,70 @@ func TestNaturalMessageUsesInlineChat(t *testing.T) {
 	}
 }
 
+func TestNaturalMessagePassesReplyContextToChat(t *testing.T) {
+	client := &fakeLLM{responses: []llm.ChatResponse{
+		{Content: `{"respond":true,"prompt":"give me the full list by tool name"}`},
+		{Content: "chat fixture"},
+	}}
+	router := newTestRouter(t, client, 5)
+
+	response := router.HandleNaturalMessage(context.Background(), Request{
+		UserID:    "user-1",
+		GuildID:   "guild-1",
+		ChannelID: "channel-1",
+		RequestID: "message-current",
+		Options: map[string]string{
+			"message":             "can you give me a full list of these tools by tool name",
+			"reply_text":          "Here's what I can do in this server: Reading / Info; Writing / Actions.",
+			"reply_message_id":    "message-replied-to",
+			"reply_author_is_bot": "true",
+		},
+	})
+	if response.Content != "chat fixture" {
+		t.Fatalf("unexpected natural message response: %+v", response)
+	}
+	if len(client.requests) != 2 {
+		t.Fatalf("expected trigger and chat LLM requests, got %d", len(client.requests))
+	}
+	chatMessages := joinRequestMessages(client.requests[1])
+	for _, want := range []string{"message-current", "message-replied-to", "Reading / Info", "Writing / Actions"} {
+		if !strings.Contains(chatMessages, want) {
+			t.Fatalf("expected chat request to preserve reply context %q, got:\n%s", want, chatMessages)
+		}
+	}
+}
+
+func TestNaturalMessageAdminGetsManagementToolsWhenPolicyOff(t *testing.T) {
+	client := &fakeLLM{responses: []llm.ChatResponse{
+		{Content: `{"respond":true,"prompt":"what can you do"}`},
+		{Content: "chat fixture"},
+	}}
+	router := newTestRouter(t, client, 5)
+
+	response := router.HandleNaturalMessage(context.Background(), Request{
+		UserID:       "admin",
+		GuildID:      "guild-1",
+		ChannelID:    "channel-1",
+		IsGuildAdmin: true,
+		Options:      map[string]string{"message": "Panda what can you do?", "bot_mentioned": "true"},
+	})
+	if response.Content != "chat fixture" {
+		t.Fatalf("unexpected natural message response: %+v", response)
+	}
+	if len(client.requests) != 2 {
+		t.Fatalf("expected trigger and chat LLM requests, got %d", len(client.requests))
+	}
+	names := requestToolNames(client.requests[1])
+	for _, want := range []string{"panda_list_tools", "read_config", "panda_manage_tool_access", "panda_manage_channel_rule", "generate_workflow_json"} {
+		if !names[want] {
+			t.Fatalf("expected %s in admin natural-message tools, got %+v", want, names)
+		}
+	}
+	if names["discord_send_message"] {
+		t.Fatalf("discord_send_message should need Discord provider runtime wiring, got %+v", names)
+	}
+}
+
 func TestNaturalMessageDoesNotRespondWhenTriggerDeclines(t *testing.T) {
 	client := &fakeLLM{response: llm.ChatResponse{Content: `{"respond":false,"prompt":""}`}}
 	router := newTestRouter(t, client, 5)
@@ -867,6 +1009,64 @@ func TestNaturalMessageDoesNotRespondWhenTriggerDeclines(t *testing.T) {
 		GuildID:   "guild-1",
 		ChannelID: "channel-1",
 		Options:   map[string]string{"message": "ambient channel chatter"},
+	})
+	if response.Content != "" {
+		t.Fatalf("expected no response, got %+v", response)
+	}
+	if len(client.requests) != 1 {
+		t.Fatalf("expected only trigger LLM request, got %d", len(client.requests))
+	}
+}
+
+func TestNaturalMessageFallsBackToChatWhenTriggerParsingFailsForDirectAddress(t *testing.T) {
+	client := &fakeLLM{responses: []llm.ChatResponse{
+		{Content: `**Decision** yes, respond`},
+		{Content: "chat fixture"},
+	}}
+	router := newTestRouter(t, client, 5)
+
+	response := router.HandleNaturalMessage(context.Background(), Request{
+		UserID:    "user-1",
+		GuildID:   "guild-1",
+		ChannelID: "channel-1",
+		Options:   map[string]string{"message": "hey panda what can you do?"},
+	})
+	if response.Content != "chat fixture" {
+		t.Fatalf("expected fallback chat response, got %+v", response)
+	}
+	if len(client.requests) != 2 {
+		t.Fatalf("expected trigger request and fallback chat request, got %d", len(client.requests))
+	}
+	if !strings.Contains(joinRequestMessages(client.requests[1]), "what can you do?") {
+		t.Fatalf("fallback chat request should strip wake phrase, got %+v", client.requests[1])
+	}
+}
+
+func TestNaturalMessageStaysSilentWhenTriggerParsingFailsForAmbientMessage(t *testing.T) {
+	client := &fakeLLM{response: llm.ChatResponse{Content: `**Decision** yes, respond`}}
+	router := newTestRouter(t, client, 5)
+
+	response := router.HandleNaturalMessage(context.Background(), Request{
+		UserID:    "user-1",
+		GuildID:   "guild-1",
+		ChannelID: "channel-1",
+		Options:   map[string]string{"message": "ambient channel chatter"},
+	})
+	if response.Content == "" {
+		return
+	}
+	t.Fatalf("expected no response, got %+v", response)
+}
+
+func TestNaturalMessageFallbackIgnoresNonAddressedPandaTopic(t *testing.T) {
+	client := &fakeLLM{response: llm.ChatResponse{Content: `**Decision** yes, respond`}}
+	router := newTestRouter(t, client, 5)
+
+	response := router.HandleNaturalMessage(context.Background(), Request{
+		UserID:    "user-1",
+		GuildID:   "guild-1",
+		ChannelID: "channel-1",
+		Options:   map[string]string{"message": "red-panda facts are neat"},
 	})
 	if response.Content != "" {
 		t.Fatalf("expected no response, got %+v", response)
@@ -991,6 +1191,32 @@ func TestSummarizeCanUseExtractedAttachment(t *testing.T) {
 	}
 }
 
+func TestTaskAddsRecentInvocationContext(t *testing.T) {
+	client := &fakeLLM{response: llm.ChatResponse{Content: "rewritten"}}
+	router := newTestRouter(t, client, 5).WithContextService(contextsvc.NewService(fakeContextProvider{messages: []contextsvc.Message{
+		{GuildID: "guild-1", ChannelID: "channel-1", MessageID: "old", AuthorID: "user-old", Content: "old unrelated chatter", CreatedAt: time.Now().UTC().Add(-3 * time.Minute)},
+		{GuildID: "guild-1", ChannelID: "channel-1", MessageID: "recent", AuthorID: "user-2", Content: "recent release note context", CreatedAt: time.Now().UTC().Add(-90 * time.Second)},
+	}}))
+
+	response := router.Handle(context.Background(), Request{
+		Command:   "rewrite",
+		GuildID:   "guild-1",
+		ChannelID: "channel-1",
+		UserID:    "user-1",
+		Options:   map[string]string{"text": "make this clearer"},
+	})
+	if response.Content != "rewritten" {
+		t.Fatalf("unexpected rewrite response: %+v", response)
+	}
+	if len(client.requests) != 1 {
+		t.Fatalf("expected one LLM request, got %d", len(client.requests))
+	}
+	joined := joinLLMMessages(client.requests[0].Messages)
+	if !strings.Contains(joined, "recent release note context") || strings.Contains(joined, "old unrelated chatter") {
+		t.Fatalf("expected recent invocation context only, got:\n%s", joined)
+	}
+}
+
 func TestSummarizeAttachmentRequiresConfiguredReader(t *testing.T) {
 	router := newTestRouter(t, &fakeLLM{}, 5)
 	response := router.Handle(context.Background(), Request{
@@ -1058,7 +1284,9 @@ func TestSummarizeWithoutTextReportsMissingContextProvider(t *testing.T) {
 
 func TestLongSummarizeCanPrepareBackgroundTask(t *testing.T) {
 	client := &fakeLLM{response: llm.ChatResponse{Content: "background summary"}}
-	router := newTestRouter(t, client, 5)
+	router := newTestRouter(t, client, 5).WithContextService(contextsvc.NewService(fakeContextProvider{messages: []contextsvc.Message{
+		{GuildID: "guild-1", ChannelID: "channel-1", MessageID: "recent", AuthorID: "user-2", Content: "recent async context", CreatedAt: time.Now().UTC().Add(-30 * time.Second)},
+	}}))
 
 	response := router.Handle(context.Background(), Request{
 		Command:   "summarize",
@@ -1076,6 +1304,9 @@ func TestLongSummarizeCanPrepareBackgroundTask(t *testing.T) {
 	if len(client.requests) != 0 {
 		t.Fatalf("preparing background task should not call LLM, got %+v", client.requests)
 	}
+	if !strings.Contains(response.Background.InvocationContext, "recent async context") {
+		t.Fatalf("expected background task to preserve invocation context, got %+v", response.Background)
+	}
 
 	completed := router.HandleBackgroundTask(context.Background(), *response.Background)
 	if completed.Content != "background summary" {
@@ -1083,6 +1314,9 @@ func TestLongSummarizeCanPrepareBackgroundTask(t *testing.T) {
 	}
 	if len(client.requests) != 1 {
 		t.Fatalf("expected one LLM request after background execution, got %+v", client.requests)
+	}
+	if !strings.Contains(joinLLMMessages(client.requests[0].Messages), "recent async context") {
+		t.Fatalf("expected background task context in LLM request, got %+v", client.requests[0])
 	}
 }
 

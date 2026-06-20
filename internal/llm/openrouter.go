@@ -89,6 +89,13 @@ func (c *OpenRouterClient) Chat(ctx context.Context, request ChatRequest) (ChatR
 		Temperature: request.Temperature,
 		MaxTokens:   request.MaxTokens,
 	}
+	if len(request.Tools) > 0 {
+		allowFallbacks := false
+		payload.Provider = &providerPreferences{
+			RequireParameters: true,
+			AllowFallbacks:    &allowFallbacks,
+		}
+	}
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return ChatResponse{}, err
@@ -369,11 +376,17 @@ func (b *circuitBreaker) recordFailure() {
 }
 
 type chatCompletionRequest struct {
-	Model       string    `json:"model"`
-	Messages    []Message `json:"messages"`
-	Tools       []Tool    `json:"tools,omitempty"`
-	Temperature float64   `json:"temperature,omitempty"`
-	MaxTokens   int       `json:"max_tokens,omitempty"`
+	Model       string               `json:"model"`
+	Messages    []Message            `json:"messages"`
+	Tools       []Tool               `json:"tools,omitempty"`
+	Provider    *providerPreferences `json:"provider,omitempty"`
+	Temperature float64              `json:"temperature,omitempty"`
+	MaxTokens   int                  `json:"max_tokens,omitempty"`
+}
+
+type providerPreferences struct {
+	RequireParameters bool  `json:"require_parameters,omitempty"`
+	AllowFallbacks    *bool `json:"allow_fallbacks,omitempty"`
 }
 
 type chatCompletionResponse struct {

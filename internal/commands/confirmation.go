@@ -7,20 +7,10 @@ const (
 	ConfirmationCancelID = "p2c:cancel"
 
 	confirmationOpAdminDisable = "ad"
-	confirmationOpToolApprove  = "ta"
-	confirmationOpToolRollback = "tr"
 )
 
 func adminDisableConfirmationID(userID string) string {
 	return confirmationID(confirmationOpAdminDisable, userID)
-}
-
-func toolApproveConfirmationID(userID, name, version string) string {
-	return strings.Join([]string{confirmationPrefix, confirmationOpToolApprove, cleanConfirmationPart(userID), cleanConfirmationPart(name), cleanConfirmationPart(version)}, ":")
-}
-
-func toolRollbackConfirmationID(userID, name, version string) string {
-	return strings.Join([]string{confirmationPrefix, confirmationOpToolRollback, cleanConfirmationPart(userID), cleanConfirmationPart(name), cleanConfirmationPart(version)}, ":")
 }
 
 func confirmationID(op, userID string) string {
@@ -70,22 +60,6 @@ func RequestFromConfirmationID(id string, base Request) (Request, bool) {
 			return Request{}, false
 		}
 		base.Subcommand = "disable"
-	case confirmationOpToolApprove:
-		if len(parts) != 5 {
-			return Request{}, false
-		}
-		base.Command = "tool"
-		base.Subcommand = "approve"
-		base.Options["tool"] = parts[3]
-		base.Options["version"] = parts[4]
-	case confirmationOpToolRollback:
-		if len(parts) != 5 {
-			return Request{}, false
-		}
-		base.Command = "tool"
-		base.Subcommand = "rollback"
-		base.Options["tool"] = parts[3]
-		base.Options["version"] = parts[4]
 	default:
 		return Request{}, false
 	}

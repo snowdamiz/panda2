@@ -5,10 +5,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/sn0w/panda2/internal/admin"
 	"github.com/sn0w/panda2/internal/assistant"
@@ -44,14 +46,21 @@ type AttachmentReader interface {
 }
 
 type helpAccess struct {
-	config     bool
-	soul       bool
-	moderation bool
-	tools      bool
+	config      bool
+	soul        bool
+	moderation  bool
+	toolDraft   bool
+	toolApprove bool
+	toolInvoke  bool
+	toolAudit   bool
 }
 
 func (access helpAccess) elevated() bool {
-	return access.config || access.soul || access.moderation || access.tools
+	return access.config || access.soul || access.moderation || access.composedTools()
+}
+
+func (access helpAccess) composedTools() bool {
+	return access.toolDraft || access.toolApprove || access.toolInvoke || access.toolAudit
 }
 
 const baseHelpMessage = "### Panda Help\n\n" +
@@ -66,6 +75,10 @@ const regularHelpMessage = baseHelpMessage + "\n\n" +
 	"- Questions about the conversation\n" +
 	"- Summaries, rewrites, and explanations\n" +
 	"- Help thinking through an idea or decision"
+
+const discordMessageContentLimit = 2000
+const invocationContextWindow = 2 * time.Minute
+const invocationContextLimit = 50
 
 func NewRouter(adminService *admin.Service, assistantService *assistant.Service, opsService *ops.Service, limiter *ratelimit.Limiter) *Router {
 	return &Router{admin: adminService, assistant: assistantService, ops: opsService, rateLimit: limiter}
@@ -101,8 +114,6 @@ func (r *Router) Handle(ctx context.Context, request Request) Response {
 		return r.handleAdmin(ctx, request)
 	case "ops":
 		return r.handleOps(ctx, request)
-	case "tool":
-		return r.handleTool(ctx, request)
 	case "ask":
 		return r.handleAsk(ctx, request, "ask")
 	case "chat":
@@ -136,13 +147,13 @@ func (r *Router) helpAccess(ctx context.Context, request Request) helpAccess {
 		return err == nil && ok
 	}
 	return helpAccess{
-		config:     allowed(r.admin.CanWriteConfig),
-		soul:       allowed(r.admin.CanWriteSoul),
-		moderation: allowed(r.admin.CanUseModeration),
-		tools: allowed(r.admin.CanDraftComposedTool) ||
-			allowed(r.admin.CanApproveComposedTool) ||
-			allowed(r.admin.CanInvokeComposedTool) ||
-			allowed(r.admin.CanAuditComposedTool),
+		config:      allowed(r.admin.CanWriteConfig),
+		soul:        allowed(r.admin.CanWriteSoul),
+		moderation:  allowed(r.admin.CanUseModeration),
+		toolDraft:   allowed(r.admin.CanDraftComposedTool),
+		toolApprove: allowed(r.admin.CanApproveComposedTool),
+		toolInvoke:  allowed(r.admin.CanInvokeComposedTool),
+		toolAudit:   allowed(r.admin.CanAuditComposedTool),
 	}
 }
 
@@ -158,35 +169,33 @@ func elevatedHelpMessage(access helpAccess) string {
 	if access.config || access.soul {
 		builder.WriteString("\n\n**Admin commands**\n")
 		if access.config {
-			builder.WriteString("- `/admin badge role:@Role` - treat that Discord role as Panda admins.\n")
-			builder.WriteString("- `/admin tool action:list` - show role-specific native and composed tool grants.\n")
-			builder.WriteString("- `/admin tool action:add tool_name:<tool> role:@Role` - allow a role to use a specific tool.\n")
-			builder.WriteString("- `/admin tool action:remove tool_name:<tool> role:@Role` - remove that tool grant.\n")
-			builder.WriteString("- `/admin model model:<slug> fallback_models:<slug,slug> temperature:<0-2> max_response_tokens:<64-4000> tool_policy:<policy> dry_run:<true|false>` - update model routing and the server-wide tool ceiling.\n")
-			builder.WriteString("- Tool policy choices: `off`, `read_only`, `assistive`, `admin_only`, `moderator`, `write_confirmed`, `owner_ops`.\n")
-			builder.WriteString("- `/admin prompt prompt:<text> dry_run:<true|false>` - set server instructions; omit `prompt` to open the modal.\n")
-			builder.WriteString("- `/admin audit` - show recent privileged changes.\n")
-			builder.WriteString("- `/admin enable dry_run:<true|false>` - allow Panda to answer again.\n")
-			builder.WriteString("- `/admin disable confirm:<confirmation> dry_run:<true|false>` - pause Panda after confirmation.\n")
+			builder.WriteString("- `/admin badge role:@Role` - delegated admin badge\n")
+			builder.WriteString("- `/admin tool action:list|add|remove tool_name:<tool> role:@Role` - role tool grants\n")
+			builder.WriteString("- `/admin model model:<slug> fallback_models:<csv> temperature:<0-2> max_response_tokens:<64-4000> tool_policy:<policy> dry_run:<bool>`\n")
+			builder.WriteString("- Policies: `off`, `read_only`, `assistive`, `admin_only`, `moderator`, `write_confirmed`, `owner_ops`\n")
+			builder.WriteString("- `/admin prompt prompt:<text> dry_run:<bool>` - server instructions; omit `prompt` for modal\n")
+			builder.WriteString("- `/admin audit` - recent privileged changes\n")
+			builder.WriteString("- `/admin enable dry_run:<bool>` / `/admin disable confirm:<token> dry_run:<bool>`\n")
 		}
 		if access.soul {
-			builder.WriteString("- `/admin soul soul:<text> dry_run:<true|false>` - set Panda's personality and tone; omit `soul` to open the modal.\n")
+			builder.WriteString("- `/admin soul soul:<text> dry_run:<bool>` - personality/tone; omit `soul` for modal\n")
 		}
 	}
 
-	if access.tools {
+	if access.composedTools() {
 		builder.WriteString("\n\n**Composed tools**\n")
-		builder.WriteString("- `/tool draft request:<description> dry_run:<true|false>` - draft a composed tool from natural language.\n")
-		builder.WriteString("- `/tool draft spec_json:<json> dry_run:<true|false>` - draft from a complete composed-tool spec.\n")
-		builder.WriteString("- Draft helpers: `role_id`, `role_name`, `channel_id`, `channel_name`, `welcome_text`, `model`.\n")
-		builder.WriteString("- `/tool approve tool:<name> version:<n> confirm:<confirmation>` - approve and enable a version.\n")
-		builder.WriteString("- `/tool list` - list composed tools for this server.\n")
-		builder.WriteString("- `/tool show tool:<name>` - inspect versions and recent runs.\n")
-		builder.WriteString("- `/tool pause|resume|disable|archive tool:<name> dry_run:<true|false>` - change tool status.\n")
-		builder.WriteString("- `/tool run tool:<name> input_json:<object>` - run an approved composed tool.\n")
-		builder.WriteString("- `/tool simulate tool:<name> input_json:<object>` - run with dry-run writes.\n")
-		builder.WriteString("- `/tool export tool:<name>` - export the approved spec JSON.\n")
-		builder.WriteString("- `/tool rollback tool:<name> version:<n> confirm:<confirmation>` - roll back to an approved version.\n")
+		if access.toolDraft {
+			builder.WriteString("- Ask Panda to draft or preview new server tools.\n")
+		}
+		if access.toolAudit {
+			builder.WriteString("- Ask Panda to list/show tools or export approved spec JSON.\n")
+		}
+		if access.toolApprove {
+			builder.WriteString("- Ask Panda to approve, pause, resume, disable, archive, or roll back tools. Approval/rollback use buttons.\n")
+		}
+		if access.toolInvoke {
+			builder.WriteString("- Ask Panda to run or simulate approved composed tools.\n")
+		}
 	}
 
 	if access.config || access.moderation {
@@ -223,7 +232,19 @@ func (r *Router) HandleNaturalMessage(ctx context.Context, request Request) Resp
 		ReplyMessageID:   request.Options["reply_message_id"],
 		ReplyAuthorIsBot: truthyOption(request.Options["reply_author_is_bot"]),
 	})
-	if err != nil || !decision.Respond {
+	if err != nil {
+		slog.Warn("natural message classification failed", slog.Any("err", err), slog.String("guild_id", request.GuildID), slog.String("channel_id", request.ChannelID), slog.String("request_id", request.RequestID))
+		if prompt, ok := naturalMessageFallbackPrompt(message, request.Options); ok {
+			request.Command = "chat"
+			if request.Options == nil {
+				request.Options = map[string]string{}
+			}
+			request.Options["question"] = prompt
+			return r.handleChatMode(ctx, request, false)
+		}
+		return Response{}
+	}
+	if !decision.Respond {
 		return Response{}
 	}
 	request.Command = "chat"
@@ -232,6 +253,111 @@ func (r *Router) HandleNaturalMessage(ctx context.Context, request Request) Resp
 	}
 	request.Options["question"] = decision.Prompt
 	return r.handleChatMode(ctx, request, false)
+}
+
+func naturalMessageFallbackPrompt(message string, options map[string]string) (string, bool) {
+	message = strings.TrimSpace(message)
+	if message == "" {
+		return "", false
+	}
+	if truthyOption(options["bot_mentioned"]) || truthyOption(options["reply_author_is_bot"]) {
+		return message, true
+	}
+	if !directlyAddressesPanda(message) {
+		return "", false
+	}
+	prompt := stripLeadingPandaWakePhrase(message)
+	if prompt == "" {
+		prompt = message
+	}
+	return prompt, true
+}
+
+func directlyAddressesPanda(message string) bool {
+	words := leadingWords(message, 3)
+	if len(words) == 0 {
+		return false
+	}
+	if words[0] == "panda" {
+		return true
+	}
+	return len(words) >= 2 && isGreetingWord(words[0]) && words[1] == "panda"
+}
+
+func stripLeadingPandaWakePhrase(message string) string {
+	tokens := leadingWordTokens(message, 3)
+	if len(tokens) == 0 {
+		return strings.TrimSpace(message)
+	}
+	removeThrough := -1
+	if strings.EqualFold(tokens[0].word, "panda") {
+		removeThrough = 0
+	} else if len(tokens) >= 2 && isGreetingWord(strings.ToLower(tokens[0].word)) && strings.EqualFold(tokens[1].word, "panda") {
+		removeThrough = 1
+	}
+	if removeThrough < 0 {
+		return strings.TrimSpace(message)
+	}
+	return strings.TrimLeftFunc(strings.TrimSpace(message[tokens[removeThrough].end:]), func(value rune) bool {
+		return value == ',' || value == ':' || value == '-' || unicode.IsSpace(value)
+	})
+}
+
+type wordToken struct {
+	word string
+	end  int
+}
+
+func leadingWords(message string, limit int) []string {
+	tokens := leadingWordTokens(message, limit)
+	words := make([]string, 0, len(tokens))
+	for _, token := range tokens {
+		words = append(words, strings.ToLower(token.word))
+	}
+	return words
+}
+
+func leadingWordTokens(message string, limit int) []wordToken {
+	var tokens []wordToken
+	wordStart := -1
+	for index, value := range message {
+		if isMessageWordRune(value) {
+			if wordStart < 0 {
+				wordStart = index
+			}
+			continue
+		}
+		if wordStart >= 0 {
+			tokens = append(tokens, wordToken{word: message[wordStart:index], end: index})
+			if len(tokens) >= limit {
+				return tokens
+			}
+			wordStart = -1
+		}
+		if len(tokens) == 0 && !unicode.IsSpace(value) && value != ',' && value != ':' && value != '-' {
+			return tokens
+		}
+	}
+	if wordStart >= 0 {
+		tokens = append(tokens, wordToken{word: message[wordStart:], end: len(message)})
+	}
+	if len(tokens) > limit {
+		return tokens[:limit]
+	}
+	return tokens
+}
+
+func isGreetingWord(word string) bool {
+	switch word {
+	case "hey", "hi", "hello", "yo", "ok", "okay", "please":
+		return true
+	default:
+		return false
+	}
+}
+
+func isMessageWordRune(value rune) bool {
+	return value == '_' || unicode.IsLetter(value) || unicode.IsDigit(value)
 }
 
 func (r *Router) handleOps(ctx context.Context, request Request) Response {
@@ -474,6 +600,24 @@ func (r *Router) handleAdminAudit(ctx context.Context, request Request) Response
 	return Response{Content: renderAudit(events), Ephemeral: true}
 }
 
+func (r *Router) invocationContext(ctx context.Context, request Request) string {
+	if r.context == nil || strings.TrimSpace(request.GuildID) == "" || strings.TrimSpace(request.ChannelID) == "" {
+		return ""
+	}
+	packed, err := r.context.RecentMessagesSinceContext(ctx, contextsvc.ChannelRef{
+		GuildID:   request.GuildID,
+		ChannelID: request.ChannelID,
+	}, invocationContextLimit, time.Now().UTC().Add(-invocationContextWindow))
+	if err != nil {
+		slog.Warn("invocation context fetch failed", slog.Any("err", err), slog.String("guild_id", request.GuildID), slog.String("channel_id", request.ChannelID), slog.String("request_id", request.RequestID))
+		return ""
+	}
+	if strings.TrimSpace(packed.Text) == "" || len(packed.Citations) == 0 {
+		return ""
+	}
+	return packed.Text
+}
+
 func (r *Router) handleAsk(ctx context.Context, request Request, command string) Response {
 	question := strings.TrimSpace(request.Options["question"])
 	if question == "" {
@@ -490,12 +634,14 @@ func (r *Router) handleAsk(ctx context.Context, request Request, command string)
 	}
 
 	toolFilter := r.toolFilter(ctx, request)
+	invocationContext := r.invocationContext(ctx, request)
 	answer, err := r.assistant.Ask(ctx, assistant.AskRequest{
 		RequestID:                    request.RequestID,
 		GuildID:                      request.GuildID,
 		UserID:                       request.UserID,
 		ChannelID:                    request.ChannelID,
 		Question:                     question,
+		InvocationContext:            invocationContext,
 		AllowedPermissions:           r.allowedToolPermissions(ctx, request),
 		AllowedTools:                 toolFilter.allowed,
 		RestrictedTools:              toolFilter.restricted,
@@ -553,6 +699,7 @@ func (r *Router) handleChatMode(ctx context.Context, request Request, threaded b
 	}
 
 	toolFilter := r.toolFilter(ctx, request)
+	invocationContext := r.invocationContext(ctx, request)
 	answer, err := r.assistant.Chat(ctx, assistant.AskRequest{
 		RequestID:                    request.RequestID,
 		GuildID:                      request.GuildID,
@@ -560,6 +707,10 @@ func (r *Router) handleChatMode(ctx context.Context, request Request, threaded b
 		ChannelID:                    chatChannelID,
 		ThreadID:                     threadID,
 		Question:                     question,
+		InvocationContext:            invocationContext,
+		ReplyContent:                 request.Options["reply_text"],
+		ReplyMessageID:               request.Options["reply_message_id"],
+		ReplyAuthorIsBot:             truthyOption(request.Options["reply_author_is_bot"]),
 		AllowedPermissions:           r.allowedToolPermissions(ctx, request),
 		AllowedTools:                 toolFilter.allowed,
 		RestrictedTools:              toolFilter.restricted,
@@ -587,6 +738,7 @@ func (r *Router) handleTask(ctx context.Context, request Request) Response {
 	}
 
 	toolFilter := r.toolFilter(ctx, request)
+	invocationContext := r.invocationContext(ctx, request)
 	task := BackgroundTask{
 		RequestID:                    request.RequestID,
 		GuildID:                      request.GuildID,
@@ -594,6 +746,7 @@ func (r *Router) handleTask(ctx context.Context, request Request) Response {
 		ChannelID:                    request.ChannelID,
 		Command:                      request.Command,
 		Input:                        input,
+		InvocationContext:            invocationContext,
 		Tone:                         request.Options["tone"],
 		Language:                     request.Options["language"],
 		Detail:                       request.Options["detail"],
@@ -616,6 +769,7 @@ func (r *Router) HandleBackgroundTask(ctx context.Context, task BackgroundTask) 
 		ChannelID:                    task.ChannelID,
 		Command:                      task.Command,
 		Input:                        task.Input,
+		InvocationContext:            task.InvocationContext,
 		Tone:                         task.Tone,
 		Language:                     task.Language,
 		Detail:                       task.Detail,
@@ -692,6 +846,40 @@ func (r *Router) HandleToolConfirmation(ctx context.Context, request ToolConfirm
 			return toolConfirmationError(err, "Channel rule could not be removed.", "That channel rule was not found.")
 		}
 		return Response{Content: fmt.Sprintf("Removed channel access rule for `%s`.", channelID), Ephemeral: true}
+	case toolActionComposedToolApprove:
+		if denied := r.ensureToolConfirmationPermission(ctx, request.Request, r.admin.CanApproveComposedTool, "You do not have permission to approve composed tools."); denied.Content != "" {
+			return denied
+		}
+		if r.composed == nil {
+			return Response{Content: "Composed tools are not configured for this runtime.", Ephemeral: true}
+		}
+		toolName := strings.TrimSpace(request.Options["tool_name"])
+		version := intOption(request.Options["version"], 1)
+		if toolName == "" || version <= 0 {
+			return Response{Content: "That composed-tool approval confirmation is invalid.", Ephemeral: true}
+		}
+		result, err := r.composed.Approve(ctx, request.Request.GuildID, toolName, version, request.Request.UserID)
+		if err != nil {
+			return toolConfirmationError(err, "Composed tool could not be approved.", "That composed tool version was not found.")
+		}
+		return Response{Content: fmt.Sprintf("Approved `%s` version %d. Risk: `%s`.", result.Tool, result.Version, result.Validation.RiskLevel), Ephemeral: true}
+	case toolActionComposedToolRollback:
+		if denied := r.ensureToolConfirmationPermission(ctx, request.Request, r.admin.CanApproveComposedTool, "You do not have permission to roll back composed tools."); denied.Content != "" {
+			return denied
+		}
+		if r.composed == nil {
+			return Response{Content: "Composed tools are not configured for this runtime.", Ephemeral: true}
+		}
+		toolName := strings.TrimSpace(request.Options["tool_name"])
+		version := intOption(request.Options["version"], 0)
+		if toolName == "" || version <= 0 {
+			return Response{Content: "That composed-tool rollback confirmation is invalid.", Ephemeral: true}
+		}
+		result, err := r.composed.Rollback(ctx, request.Request.GuildID, toolName, version, request.Request.UserID)
+		if err != nil {
+			return toolConfirmationError(err, "Composed tool could not be rolled back.", "That approved composed tool version was not found.")
+		}
+		return Response{Content: fmt.Sprintf("Rolled `%s` back to version %d.", result.Tool, result.Version), Ephemeral: true}
 	default:
 		return Response{Content: "That confirmation is no longer supported.", Ephemeral: true}
 	}
@@ -864,6 +1052,12 @@ func (r *Router) toolAccess(ctx context.Context, request Request, policy string)
 }
 
 func (r *Router) allowedToolPermissions(ctx context.Context, request Request) map[string]struct{} {
+	if r.admin != nil {
+		hasControl, err := r.admin.HasGuildControl(ctx, assistantAccessRequest(request))
+		if err == nil && hasControl {
+			return permissionsFromNames(admin.AllPermissionNames())
+		}
+	}
 	permissions := map[string]struct{}{}
 	r.addPermissionIfAllowed(ctx, request, permissions, admin.PermissionAssistantUse, r.admin.CanUseAssistant)
 	r.addPermissionIfAllowed(ctx, request, permissions, admin.PermissionAssistantAttachments, r.admin.CanUseAttachments)
@@ -961,6 +1155,7 @@ func assistantError(err error) Response {
 	case errors.Is(err, assistant.ErrAssistantDisabled):
 		return Response{Content: "Assistant responses are disabled for this server.", Ephemeral: true}
 	default:
+		slog.Warn("assistant request failed", slog.Any("err", err))
 		return Response{Content: "The model request failed. Please try again later.", Ephemeral: true}
 	}
 }
