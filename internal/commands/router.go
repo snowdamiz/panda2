@@ -32,6 +32,7 @@ type Router struct {
 	composed    *composed.Service
 	context     *contextsvc.Service
 	threads     ThreadManager
+	memberRoles MemberRoleManager
 	attachments AttachmentReader
 	ops         *ops.Service
 	rateLimit   *ratelimit.Limiter
@@ -39,6 +40,11 @@ type Router struct {
 
 type ThreadManager interface {
 	EnsureChatThread(ctx context.Context, request ThreadRequest) (Thread, error)
+}
+
+type MemberRoleManager interface {
+	AddMemberRole(ctx context.Context, request MemberRoleRequest) error
+	RemoveMemberRole(ctx context.Context, request MemberRoleRequest) error
 }
 
 type AttachmentReader interface {
@@ -91,6 +97,11 @@ func (r *Router) WithContextService(contextService *contextsvc.Service) *Router 
 
 func (r *Router) WithThreadManager(threadManager ThreadManager) *Router {
 	r.threads = threadManager
+	return r
+}
+
+func (r *Router) WithMemberRoleManager(memberRoles MemberRoleManager) *Router {
+	r.memberRoles = memberRoles
 	return r
 }
 
@@ -169,7 +180,8 @@ func elevatedHelpMessage(access helpAccess) string {
 	if access.config || access.soul {
 		builder.WriteString("\n\n**Admin commands**\n")
 		if access.config {
-			builder.WriteString("- `/admin badge role:@Role` - delegated admin badge\n")
+			builder.WriteString("- `/admin role action:list|set|remove profile:admin|moderator role:@Role` - Panda role profiles\n")
+			builder.WriteString("- `/admin member-role action:add|remove user:@User role:@Role` - assign Discord roles to users\n")
 			builder.WriteString("- `/admin tool action:list|add|remove tool_name:<tool> role:@Role` - role tool grants\n")
 			builder.WriteString("- `/admin model model:<slug> fallback_models:<csv> temperature:<0-2> max_response_tokens:<64-4000> tool_policy:<policy> dry_run:<bool>`\n")
 			builder.WriteString("- Policies: `off`, `read_only`, `assistive`, `admin_only`, `moderator`, `write_confirmed`, `owner_ops`\n")
@@ -437,8 +449,10 @@ func (r *Router) handleAdmin(ctx context.Context, request Request) Response {
 	}
 
 	switch subcommand {
-	case "badge":
-		return r.handleAdminBadge(ctx, request)
+	case "role":
+		return r.handleAdminRoleProfile(ctx, request)
+	case "member-role", "member_role":
+		return r.handleAdminMemberRole(ctx, request)
 	case "tool":
 		return r.handleAdminToolAccess(ctx, request)
 	case "model":
@@ -458,24 +472,157 @@ func (r *Router) handleAdmin(ctx context.Context, request Request) Response {
 	}
 }
 
-func (r *Router) handleAdminBadge(ctx context.Context, request Request) Response {
-	roleID := strings.TrimSpace(firstNonEmpty(request.Options["badge_role_id"], firstNonEmpty(request.Options["role_id"], request.Options["role"])))
-	if roleID == "" {
-		return Response{Content: "Choose a role for `/admin badge`.", Ephemeral: true}
-	}
-	if _, err := r.admin.SetAdminBadge(ctx, request.GuildID, request.UserID, roleID); err != nil {
-		return Response{Content: "Admin badge could not be saved.", Ephemeral: true}
-	}
-	return Response{Content: fmt.Sprintf("Admin badge set to %s.", adminBadgeMention(roleID, firstNonEmpty(request.Options["badge_role_name"], request.Options["role_name"]))), Ephemeral: true}
-}
-
-func adminBadgeMention(roleID, roleName string) string {
+func roleDisplay(roleID, roleName string) string {
 	roleID = strings.TrimSpace(roleID)
 	roleName = strings.TrimSpace(roleName)
 	if roleName == "" {
 		return fmt.Sprintf("`%s`", roleID)
 	}
 	return fmt.Sprintf("`%s` (`%s`)", roleName, roleID)
+}
+
+func (r *Router) handleAdminRoleProfile(ctx context.Context, request Request) Response {
+	action := strings.ToLower(strings.TrimSpace(firstNonEmpty(request.Options["action"], "list")))
+	switch action {
+	case "list", "":
+		roles, err := r.admin.ListRolePermissions(ctx, request.GuildID)
+		if err != nil {
+			return Response{Content: "Role profile lookup failed.", Ephemeral: true}
+		}
+		return Response{Content: renderRoleProfiles(roles), Ephemeral: true}
+	case "set", "add":
+		if denied := r.ensureGuildControl(ctx, request, "Only the installing server owner, a server administrator, or the current Panda admin role can set Panda role profiles."); denied.Content != "" {
+			return denied
+		}
+		profile, roleID, roleName, response := roleProfileOptions(request)
+		if response.Content != "" {
+			return response
+		}
+		if _, err := r.admin.ApplyRoleProfile(ctx, request.GuildID, request.UserID, roleID, profile); err != nil {
+			return Response{Content: "Role profile could not be saved.", Ephemeral: true}
+		}
+		return Response{Content: fmt.Sprintf("%s is now a Panda %s role.", roleDisplay(roleID, roleName), admin.RoleProfileLabel(profile)), Ephemeral: true}
+	case "remove", "unset":
+		if denied := r.ensureGuildControl(ctx, request, "Only the installing server owner, a server administrator, or the current Panda admin role can remove Panda role profiles."); denied.Content != "" {
+			return denied
+		}
+		profile, roleID, roleName, response := roleProfileOptions(request)
+		if response.Content != "" {
+			return response
+		}
+		if err := r.admin.RemoveRoleProfile(ctx, request.GuildID, request.UserID, roleID, profile); err != nil {
+			if errors.Is(err, repository.ErrNotFound) {
+				return Response{Content: "That role profile was not configured for this role.", Ephemeral: true}
+			}
+			return Response{Content: "Role profile could not be removed.", Ephemeral: true}
+		}
+		return Response{Content: fmt.Sprintf("Removed the Panda %s profile from %s.", admin.RoleProfileLabel(profile), roleDisplay(roleID, roleName)), Ephemeral: true}
+	default:
+		return Response{Content: "`action` must be `list`, `set`, or `remove`.", Ephemeral: true}
+	}
+}
+
+func roleProfileOptions(request Request) (string, string, string, Response) {
+	profile, ok := admin.NormalizeRoleProfile(request.Options["profile"])
+	if !ok {
+		return "", "", "", Response{Content: "`profile` must be `admin` or `moderator`.", Ephemeral: true}
+	}
+	roleID := strings.TrimSpace(firstNonEmpty(request.Options["role_id"], request.Options["role"]))
+	if roleID == "" {
+		return "", "", "", Response{Content: "Choose a Discord role.", Ephemeral: true}
+	}
+	return profile, roleID, request.Options["role_name"], Response{}
+}
+
+func renderRoleProfiles(roles []store.GuildRole) string {
+	adminRoles := roleIDsForPermission(roles, admin.PermissionAdminBadge)
+	moderatorRoles := roleIDsForPermission(roles, admin.PermissionModerationUse)
+	var builder strings.Builder
+	builder.WriteString("Panda role profiles:\n")
+	builder.WriteString(roleProfileLine("admin", adminRoles))
+	builder.WriteString("\n")
+	builder.WriteString(roleProfileLine("moderator", moderatorRoles))
+	builder.WriteString("\n\nModerator roles include `assistant.use` and `moderation.use`.")
+	return builder.String()
+}
+
+func roleIDsForPermission(roles []store.GuildRole, permission string) []string {
+	seen := map[string]struct{}{}
+	var ids []string
+	for _, role := range roles {
+		if role.Permission != permission {
+			continue
+		}
+		if _, ok := seen[role.RoleID]; ok {
+			continue
+		}
+		seen[role.RoleID] = struct{}{}
+		ids = append(ids, role.RoleID)
+	}
+	sort.Strings(ids)
+	return ids
+}
+
+func roleProfileLine(profile string, roleIDs []string) string {
+	if len(roleIDs) == 0 {
+		return fmt.Sprintf("- %s: not configured", profile)
+	}
+	values := make([]string, 0, len(roleIDs))
+	for _, roleID := range roleIDs {
+		values = append(values, fmt.Sprintf("`%s`", roleID))
+	}
+	return fmt.Sprintf("- %s: %s", profile, strings.Join(values, ", "))
+}
+
+func (r *Router) handleAdminMemberRole(ctx context.Context, request Request) Response {
+	if denied := r.ensureGuildControl(ctx, request, "Only the installing server owner, a server administrator, or the current Panda admin role can assign Discord roles."); denied.Content != "" {
+		return denied
+	}
+	if r.memberRoles == nil {
+		return Response{Content: "Discord role assignment is not configured for this runtime.", Ephemeral: true}
+	}
+	action := strings.ToLower(strings.TrimSpace(firstNonEmpty(request.Options["action"], "add")))
+	memberRequest, response := memberRoleOptions(request)
+	if response.Content != "" {
+		return response
+	}
+	switch action {
+	case "add", "assign", "set":
+		memberRequest.Reason = "Panda admin member-role add"
+		if err := r.memberRoles.AddMemberRole(ctx, memberRequest); err != nil {
+			return Response{Content: "Discord role could not be assigned. Check Panda's Manage Roles permission and role hierarchy.", Ephemeral: true}
+		}
+		return Response{Content: fmt.Sprintf("Assigned %s to %s.", roleDisplay(memberRequest.RoleID, request.Options["role_name"]), userMention(memberRequest.UserID, request.Options["member_user_name"])), Ephemeral: true}
+	case "remove", "unassign", "unset":
+		memberRequest.Reason = "Panda admin member-role remove"
+		if err := r.memberRoles.RemoveMemberRole(ctx, memberRequest); err != nil {
+			return Response{Content: "Discord role could not be removed. Check Panda's Manage Roles permission and role hierarchy.", Ephemeral: true}
+		}
+		return Response{Content: fmt.Sprintf("Removed %s from %s.", roleDisplay(memberRequest.RoleID, request.Options["role_name"]), userMention(memberRequest.UserID, request.Options["member_user_name"])), Ephemeral: true}
+	default:
+		return Response{Content: "`action` must be `add` or `remove`.", Ephemeral: true}
+	}
+}
+
+func memberRoleOptions(request Request) (MemberRoleRequest, Response) {
+	userID := strings.TrimSpace(firstNonEmpty(request.Options["member_user_id"], firstNonEmpty(request.Options["user_id"], request.Options["user"])))
+	roleID := strings.TrimSpace(firstNonEmpty(request.Options["role_id"], request.Options["role"]))
+	if userID == "" {
+		return MemberRoleRequest{}, Response{Content: "Choose a Discord user.", Ephemeral: true}
+	}
+	if roleID == "" {
+		return MemberRoleRequest{}, Response{Content: "Choose a Discord role.", Ephemeral: true}
+	}
+	return MemberRoleRequest{GuildID: request.GuildID, UserID: userID, RoleID: roleID, ActorID: request.UserID}, Response{}
+}
+
+func userMention(userID, username string) string {
+	userID = strings.TrimSpace(userID)
+	username = strings.TrimSpace(username)
+	if username == "" {
+		return fmt.Sprintf("`%s`", userID)
+	}
+	return fmt.Sprintf("`%s` (`%s`)", username, userID)
 }
 
 func (r *Router) handleAdminToolAccess(ctx context.Context, request Request) Response {
@@ -504,7 +651,7 @@ func (r *Router) handleAdminToolAccess(ctx context.Context, request Request) Res
 		if err != nil {
 			return Response{Content: "Tool access could not be saved.", Ephemeral: true}
 		}
-		return Response{Content: fmt.Sprintf("Allowed %s to use `%s`.", adminBadgeMention(toolRole.RoleID, request.Options["role_name"]), toolRole.ToolName), Ephemeral: true}
+		return Response{Content: fmt.Sprintf("Allowed %s to use `%s`.", roleDisplay(toolRole.RoleID, request.Options["role_name"]), toolRole.ToolName), Ephemeral: true}
 	case "remove", "deny":
 		if toolName == "" || roleID == "" {
 			return Response{Content: "Provide `tool_name` and `role` to remove tool access.", Ephemeral: true}
@@ -515,7 +662,7 @@ func (r *Router) handleAdminToolAccess(ctx context.Context, request Request) Res
 			}
 			return Response{Content: "Tool access could not be removed.", Ephemeral: true}
 		}
-		return Response{Content: fmt.Sprintf("Removed %s from `%s`.", adminBadgeMention(roleID, request.Options["role_name"]), toolName), Ephemeral: true}
+		return Response{Content: fmt.Sprintf("Removed %s from `%s`.", roleDisplay(roleID, request.Options["role_name"]), toolName), Ephemeral: true}
 	default:
 		return Response{Content: "`action` must be `list`, `add`, or `remove`.", Ephemeral: true}
 	}
@@ -834,6 +981,60 @@ func (r *Router) HandleToolConfirmation(ctx context.Context, request ToolConfirm
 			return toolConfirmationError(err, "Role permission could not be removed.", "That role permission was not found.")
 		}
 		return Response{Content: fmt.Sprintf("Removed `%s` from role `%s`.", permission, roleID), Ephemeral: true}
+	case toolActionRoleProfileAdd:
+		if denied := r.ensureGuildControl(ctx, request.Request, "Only the installing server owner, a server administrator, or the current Panda admin role can set Panda role profiles."); denied.Content != "" {
+			return denied
+		}
+		roleID := strings.TrimSpace(request.Options["role_id"])
+		profile, ok := admin.NormalizeRoleProfile(request.Options["profile"])
+		if roleID == "" || !ok {
+			return Response{Content: "That role-profile confirmation is invalid.", Ephemeral: true}
+		}
+		if _, err := r.admin.ApplyRoleProfile(ctx, request.Request.GuildID, request.Request.UserID, roleID, profile); err != nil {
+			return Response{Content: "Role profile could not be saved.", Ephemeral: true}
+		}
+		return Response{Content: fmt.Sprintf("Role `%s` is now a Panda %s role.", roleID, admin.RoleProfileLabel(profile)), Ephemeral: true}
+	case toolActionRoleProfileRemove:
+		if denied := r.ensureGuildControl(ctx, request.Request, "Only the installing server owner, a server administrator, or the current Panda admin role can remove Panda role profiles."); denied.Content != "" {
+			return denied
+		}
+		roleID := strings.TrimSpace(request.Options["role_id"])
+		profile, ok := admin.NormalizeRoleProfile(request.Options["profile"])
+		if roleID == "" || !ok {
+			return Response{Content: "That role-profile confirmation is invalid.", Ephemeral: true}
+		}
+		if err := r.admin.RemoveRoleProfile(ctx, request.Request.GuildID, request.Request.UserID, roleID, profile); err != nil {
+			return toolConfirmationError(err, "Role profile could not be removed.", "That role profile was not configured for this role.")
+		}
+		return Response{Content: fmt.Sprintf("Removed the Panda %s profile from role `%s`.", admin.RoleProfileLabel(profile), roleID), Ephemeral: true}
+	case toolActionMemberRoleAdd, toolActionMemberRoleRemove:
+		if denied := r.ensureGuildControl(ctx, request.Request, "Only the installing server owner, a server administrator, or the current Panda admin role can assign Discord roles."); denied.Content != "" {
+			return denied
+		}
+		if r.memberRoles == nil {
+			return Response{Content: "Discord role assignment is not configured for this runtime.", Ephemeral: true}
+		}
+		memberRequest := MemberRoleRequest{
+			GuildID: request.Request.GuildID,
+			UserID:  strings.TrimSpace(request.Options["user_id"]),
+			RoleID:  strings.TrimSpace(request.Options["role_id"]),
+			ActorID: request.Request.UserID,
+		}
+		if memberRequest.UserID == "" || memberRequest.RoleID == "" {
+			return Response{Content: "That member-role confirmation is invalid.", Ephemeral: true}
+		}
+		if request.Action == toolActionMemberRoleAdd {
+			memberRequest.Reason = "Panda natural-language member-role add"
+			if err := r.memberRoles.AddMemberRole(ctx, memberRequest); err != nil {
+				return Response{Content: "Discord role could not be assigned. Check Panda's Manage Roles permission and role hierarchy.", Ephemeral: true}
+			}
+			return Response{Content: fmt.Sprintf("Assigned role `%s` to user `%s`.", memberRequest.RoleID, memberRequest.UserID), Ephemeral: true}
+		}
+		memberRequest.Reason = "Panda natural-language member-role remove"
+		if err := r.memberRoles.RemoveMemberRole(ctx, memberRequest); err != nil {
+			return Response{Content: "Discord role could not be removed. Check Panda's Manage Roles permission and role hierarchy.", Ephemeral: true}
+		}
+		return Response{Content: fmt.Sprintf("Removed role `%s` from user `%s`.", memberRequest.RoleID, memberRequest.UserID), Ephemeral: true}
 	case toolActionChannelRuleRemove:
 		if denied := r.ensureToolConfirmationPermission(ctx, request.Request, r.admin.CanWriteConfig, "You do not have permission to manage channel rules."); denied.Content != "" {
 			return denied
@@ -999,6 +1200,17 @@ func (r *Router) ensureMemoryReadAllowed(ctx context.Context, request Request) R
 	}
 	if !allowed {
 		return Response{Content: "You do not have permission to search server knowledge.", Ephemeral: true}
+	}
+	return Response{}
+}
+
+func (r *Router) ensureGuildControl(ctx context.Context, request Request, denial string) Response {
+	allowed, err := r.admin.HasGuildControl(ctx, assistantAccessRequest(request))
+	if err != nil {
+		return Response{Content: "Permission lookup failed. Please try again later.", Ephemeral: true}
+	}
+	if !allowed {
+		return Response{Content: denial, Ephemeral: true}
 	}
 	return Response{}
 }

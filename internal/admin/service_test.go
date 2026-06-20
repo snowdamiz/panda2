@@ -164,7 +164,7 @@ func TestAddRolePermissionRejectsUnknownPermission(t *testing.T) {
 	}
 }
 
-func TestAdminBadgeRoleHasGuildControl(t *testing.T) {
+func TestAdminRoleHasGuildControl(t *testing.T) {
 	ctx := context.Background()
 	db, err := store.Open(ctx, "file::memory:?cache=shared")
 	if err != nil {
@@ -182,11 +182,11 @@ func TestAdminBadgeRoleHasGuildControl(t *testing.T) {
 		nil,
 		"openrouter/auto",
 	)
-	if _, err := service.SetAdminBadge(ctx, "guild-1", "owner", "role-mod"); err != nil {
-		t.Fatalf("SetAdminBadge: %v", err)
+	if _, err := service.SetAdminRole(ctx, "guild-1", "owner", "role-mod"); err != nil {
+		t.Fatalf("SetAdminRole: %v", err)
 	}
-	if _, err := service.SetAdminBadge(ctx, "guild-1", "owner", "guild-1"); err == nil {
-		t.Fatal("expected @everyone admin badge to be rejected")
+	if _, err := service.SetAdminRole(ctx, "guild-1", "owner", "guild-1"); err == nil {
+		t.Fatal("expected @everyone admin role to be rejected")
 	}
 
 	request := AssistantAccessRequest{GuildID: "guild-1", RoleIDs: []string{"role-mod"}}
@@ -197,25 +197,73 @@ func TestAdminBadgeRoleHasGuildControl(t *testing.T) {
 	} {
 		allowed, err := check(ctx, request)
 		if err != nil || !allowed {
-			t.Fatalf("expected admin badge to allow %s, allowed=%t err=%v", name, allowed, err)
+			t.Fatalf("expected admin role to allow %s, allowed=%t err=%v", name, allowed, err)
 		}
 	}
 
 	allowed, err := service.CanWriteConfig(ctx, AssistantAccessRequest{GuildID: "guild-1", RoleIDs: []string{"role-user"}})
 	if err != nil || allowed {
-		t.Fatalf("expected non-badged role denial, allowed=%t err=%v", allowed, err)
+		t.Fatalf("expected non-admin role denial, allowed=%t err=%v", allowed, err)
 	}
 
-	if _, err := service.SetAdminBadge(ctx, "guild-1", "owner", "role-admin"); err != nil {
-		t.Fatalf("SetAdminBadge replacement: %v", err)
+	if _, err := service.SetAdminRole(ctx, "guild-1", "owner", "role-admin"); err != nil {
+		t.Fatalf("SetAdminRole replacement: %v", err)
 	}
 	allowed, err = service.CanWriteConfig(ctx, AssistantAccessRequest{GuildID: "guild-1", RoleIDs: []string{"role-mod"}})
 	if err != nil || allowed {
-		t.Fatalf("expected replaced admin badge to stop granting control, allowed=%t err=%v", allowed, err)
+		t.Fatalf("expected replaced admin role to stop granting control, allowed=%t err=%v", allowed, err)
 	}
 	allowed, err = service.CanWriteConfig(ctx, AssistantAccessRequest{GuildID: "guild-1", RoleIDs: []string{"role-admin"}})
 	if err != nil || !allowed {
-		t.Fatalf("expected new admin badge to grant control, allowed=%t err=%v", allowed, err)
+		t.Fatalf("expected new admin role to grant control, allowed=%t err=%v", allowed, err)
+	}
+}
+
+func TestRoleProfilesGrantExpectedAccess(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(ctx, "file::memory:?cache=shared")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer db.Close()
+
+	service := NewService(
+		repository.NewGuildConfigRepository(db.DB),
+		repository.NewUsageRepository(db.DB),
+		repository.NewAuditRepository(db.DB),
+		memory.NewService(repository.NewKnowledgeRepository(db.DB)),
+		repository.NewAccessRepository(db.DB),
+		repository.NewBudgetRepository(db.DB),
+		nil,
+		"openrouter/auto",
+	)
+
+	if _, err := service.ApplyRoleProfile(ctx, "guild-1", "owner", "role-pickle", "mod"); err != nil {
+		t.Fatalf("ApplyRoleProfile moderator: %v", err)
+	}
+	allowed, err := service.CanUseModeration(ctx, AssistantAccessRequest{GuildID: "guild-1", RoleIDs: []string{"role-pickle"}})
+	if err != nil || !allowed {
+		t.Fatalf("expected moderator profile to grant moderation, allowed=%t err=%v", allowed, err)
+	}
+	allowed, err = service.CanUseAssistant(ctx, AssistantAccessRequest{GuildID: "guild-1", RoleIDs: []string{"role-pickle"}})
+	if err != nil || !allowed {
+		t.Fatalf("expected moderator profile to grant assistant use, allowed=%t err=%v", allowed, err)
+	}
+
+	if _, err := service.ApplyRoleProfile(ctx, "guild-1", "owner", "role-admin", "admin"); err != nil {
+		t.Fatalf("ApplyRoleProfile admin: %v", err)
+	}
+	allowed, err = service.CanWriteConfig(ctx, AssistantAccessRequest{GuildID: "guild-1", RoleIDs: []string{"role-admin"}})
+	if err != nil || !allowed {
+		t.Fatalf("expected admin profile to grant config write, allowed=%t err=%v", allowed, err)
+	}
+
+	if err := service.RemoveRoleProfile(ctx, "guild-1", "owner", "role-pickle", "moderator"); err != nil {
+		t.Fatalf("RemoveRoleProfile moderator: %v", err)
+	}
+	allowed, err = service.CanUseModeration(ctx, AssistantAccessRequest{GuildID: "guild-1", RoleIDs: []string{"role-pickle"}})
+	if err != nil || allowed {
+		t.Fatalf("expected removed moderator profile to stop granting moderation, allowed=%t err=%v", allowed, err)
 	}
 }
 

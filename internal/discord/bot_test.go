@@ -361,14 +361,43 @@ func TestAdminModelCommandIncludesRuntimeOptions(t *testing.T) {
 	}
 }
 
-func TestAdminBadgeCommandIncludesRequiredRolePicker(t *testing.T) {
-	badge := adminSubcommand(t, adminSlashCommand(t), "badge")
-	option, ok := findSubcommandRoleOption(badge, "role")
-	if !ok {
-		t.Fatal("expected /admin badge to include role picker")
+func TestAdminRoleCommandIncludesProfileControls(t *testing.T) {
+	roleCommand := adminSubcommand(t, adminSlashCommand(t), "role")
+	action := subcommandStringOption(t, roleCommand, "action")
+	if !action.Required {
+		t.Fatal("role action should be required")
 	}
-	if !option.Required {
-		t.Fatal("role should be required because badge only sets delegated admin access")
+	if !subcommandHasStringOption(roleCommand, "profile") {
+		t.Fatal("expected /admin role to include profile option")
+	}
+	option, ok := findSubcommandRoleOption(roleCommand, "role")
+	if !ok {
+		t.Fatal("expected /admin role to include role picker")
+	}
+	if option.Required {
+		t.Fatal("role should be optional so action=list can omit it")
+	}
+}
+
+func TestAdminMemberRoleCommandIncludesUserAndRolePickers(t *testing.T) {
+	memberRole := adminSubcommand(t, adminSlashCommand(t), "member-role")
+	action := subcommandStringOption(t, memberRole, "action")
+	if !action.Required {
+		t.Fatal("member-role action should be required")
+	}
+	user, ok := findSubcommandUserOption(memberRole, "user")
+	if !ok {
+		t.Fatal("expected /admin member-role to include user picker")
+	}
+	if !user.Required {
+		t.Fatal("member-role user should be required")
+	}
+	role, ok := findSubcommandRoleOption(memberRole, "role")
+	if !ok {
+		t.Fatal("expected /admin member-role to include role picker")
+	}
+	if !role.Required {
+		t.Fatal("member-role role should be required")
 	}
 }
 
@@ -497,6 +526,66 @@ func TestResponsePartOnlyRendersComponentsWhenRequested(t *testing.T) {
 	withComponents := channelMessageCreateFromResponsePart(response, "part two", true)
 	if len(withComponents.Components) != 1 {
 		t.Fatalf("expected components on final chunk, got %+v", withComponents.Components)
+	}
+}
+
+func TestChannelMessageCreateWithReferenceRepliesWithoutPingingInvoker(t *testing.T) {
+	channelID := snowflake.MustParse("100000000000000002")
+	messageID := snowflake.MustParse("100000000000000003")
+	reference := &disgoDiscord.MessageReference{
+		MessageID: &messageID,
+		ChannelID: &channelID,
+	}
+
+	message := channelMessageCreateFromResponsePartWithReference(commands.Response{Content: "hello"}, "hello", true, reference)
+
+	if message.MessageReference != reference {
+		t.Fatalf("expected outbound message to include reply reference, got %+v", message.MessageReference)
+	}
+	if message.AllowedMentions == nil {
+		t.Fatal("expected explicit allowed mentions for reply")
+	}
+	if message.AllowedMentions.RepliedUser {
+		t.Fatal("expected reply not to ping the invoking user")
+	}
+	if len(message.AllowedMentions.Parse) != 3 {
+		t.Fatalf("expected normal content mention parsing to be preserved, got %+v", message.AllowedMentions.Parse)
+	}
+}
+
+func TestChannelMessageCreateWithoutReferenceStaysPlainChannelMessage(t *testing.T) {
+	message := channelMessageCreateFromResponsePartWithReference(commands.Response{Content: "hello"}, "hello", true, nil)
+
+	if message.MessageReference != nil {
+		t.Fatalf("expected no reply reference for plain channel message, got %+v", message.MessageReference)
+	}
+	if message.AllowedMentions != nil {
+		t.Fatalf("expected plain channel message to use REST default allowed mentions, got %+v", message.AllowedMentions)
+	}
+}
+
+func TestMessageReferenceFromMessageTargetsIncomingMessage(t *testing.T) {
+	guildID := snowflake.MustParse("100000000000000001")
+	channelID := snowflake.MustParse("100000000000000002")
+	messageID := snowflake.MustParse("100000000000000003")
+
+	reference := messageReferenceFromMessage(disgoDiscord.Message{
+		ID:        messageID,
+		ChannelID: channelID,
+		GuildID:   &guildID,
+	})
+
+	if reference == nil || reference.MessageID == nil || *reference.MessageID != messageID {
+		t.Fatalf("expected reply reference to target message %s, got %+v", messageID, reference)
+	}
+	if reference.ChannelID == nil || *reference.ChannelID != channelID {
+		t.Fatalf("expected reply reference to target channel %s, got %+v", channelID, reference)
+	}
+	if reference.GuildID == nil || *reference.GuildID != guildID {
+		t.Fatalf("expected reply reference to include guild %s, got %+v", guildID, reference)
+	}
+	if reference.FailIfNotExists {
+		t.Fatal("expected missing original message not to make Panda's response fail")
 	}
 }
 
@@ -644,4 +733,14 @@ func findSubcommandRoleOption(subcommand disgoDiscord.ApplicationCommandOptionSu
 		}
 	}
 	return disgoDiscord.ApplicationCommandOptionRole{}, false
+}
+
+func findSubcommandUserOption(subcommand disgoDiscord.ApplicationCommandOptionSubCommand, name string) (disgoDiscord.ApplicationCommandOptionUser, bool) {
+	for _, option := range subcommand.Options {
+		userOption, ok := option.(disgoDiscord.ApplicationCommandOptionUser)
+		if ok && userOption.Name == name {
+			return userOption, true
+		}
+	}
+	return disgoDiscord.ApplicationCommandOptionUser{}, false
 }

@@ -38,6 +38,12 @@ type fakeThreadManager struct {
 	calls  []ThreadRequest
 }
 
+type fakeMemberRoleManager struct {
+	adds    []MemberRoleRequest
+	removes []MemberRoleRequest
+	err     error
+}
+
 type fakeAttachmentReader struct {
 	attachment store.Attachment
 	err        error
@@ -56,6 +62,16 @@ func (f *fakeThreadManager) EnsureChatThread(_ context.Context, request ThreadRe
 		return Thread{}, f.err
 	}
 	return f.thread, nil
+}
+
+func (f *fakeMemberRoleManager) AddMemberRole(_ context.Context, request MemberRoleRequest) error {
+	f.adds = append(f.adds, request)
+	return f.err
+}
+
+func (f *fakeMemberRoleManager) RemoveMemberRole(_ context.Context, request MemberRoleRequest) error {
+	f.removes = append(f.removes, request)
+	return f.err
 }
 
 func (f fakeContextProvider) FetchMessage(_ context.Context, ref contextsvc.MessageRef) (contextsvc.Message, error) {
@@ -195,7 +211,8 @@ func TestRouterHelpShowsAdminGuidanceToGuildAdmins(t *testing.T) {
 	}
 	for _, want := range []string{
 		"**Admin commands**",
-		"- `/admin badge role:@Role` - delegated admin badge",
+		"- `/admin role action:list|set|remove profile:admin|moderator role:@Role` - Panda role profiles",
+		"- `/admin member-role action:add|remove user:@User role:@Role` - assign Discord roles to users",
 		"- `/admin tool action:list|add|remove tool_name:<tool> role:@Role` - role tool grants",
 		"- `/admin model model:<slug> fallback_models:<csv> temperature:<0-2> max_response_tokens:<64-4000> tool_policy:<policy> dry_run:<bool>`",
 		"- Policies: `off`, `read_only`, `assistive`, `admin_only`, `moderator`, `write_confirmed`, `owner_ops`",
@@ -244,7 +261,7 @@ func TestRouterHelpShowsOnlyAllowedElevatedGuidanceToModerators(t *testing.T) {
 		}
 	}
 	for _, hidden := range []string{
-		"`/admin badge`",
+		"`/admin role`",
 		"`/admin model`",
 		"Composed tools",
 		"`/tool draft`",
@@ -287,36 +304,44 @@ func TestRouterHelpShowsOnlyAllowedComposedToolGuidance(t *testing.T) {
 	}
 }
 
-func TestAdminBadgeRequiresAdmin(t *testing.T) {
+func TestAdminRoleProfileRequiresGuildControl(t *testing.T) {
 	router := newTestRouter(t, &fakeLLM{}, 5)
-	response := router.Handle(context.Background(), Request{Command: "admin", Subcommand: "badge", GuildID: "guild-1", UserID: "user-1"})
-	if !response.Ephemeral || response.Content == "" {
+	response := router.Handle(context.Background(), Request{
+		Command:    "admin",
+		Subcommand: "role",
+		GuildID:    "guild-1",
+		UserID:     "user-1",
+		Options:    map[string]string{"action": "set", "profile": "admin", "role_id": "role-admin"},
+	})
+	if !response.Ephemeral || !strings.Contains(response.Content, "Only the installing server owner") {
 		t.Fatalf("expected denial response, got %+v", response)
 	}
 }
 
-func TestAdminBadgeConfiguresDelegatedAdminRole(t *testing.T) {
+func TestAdminRoleProfileConfiguresDelegatedAdminRole(t *testing.T) {
 	ctx := context.Background()
 	router := newTestRouter(t, &fakeLLM{response: llm.ChatResponse{Content: "ok"}}, 5)
-	badge := router.Handle(ctx, Request{
+	profile := router.Handle(ctx, Request{
 		Command:      "admin",
-		Subcommand:   "badge",
+		Subcommand:   "role",
 		GuildID:      "guild-1",
 		UserID:       "owner",
 		IsGuildAdmin: true,
 		Options: map[string]string{
-			"badge_role_id":   "role-mod",
-			"badge_role_name": "MOD",
+			"action":    "set",
+			"profile":   "admin",
+			"role_id":   "role-mod",
+			"role_name": "MOD",
 		},
 	})
-	if !badge.Ephemeral || !strings.Contains(badge.Content, "Admin badge set to `MOD` (`role-mod`)") {
-		t.Fatalf("expected badge command to configure admin badge, got %+v", badge)
+	if !profile.Ephemeral || !strings.Contains(profile.Content, "`MOD` (`role-mod`) is now a Panda admin role") {
+		t.Fatalf("expected role profile command to configure admin role, got %+v", profile)
 	}
 
 	help := router.Handle(ctx, Request{Command: "help", GuildID: "guild-1", UserID: "mod", RoleIDs: []string{"role-mod"}})
 	for _, want := range []string{"**Admin commands**", "**Moderator tools**", "Role/channel access"} {
 		if !strings.Contains(help.Content, want) {
-			t.Fatalf("expected admin badge help to include %q:\n%s", want, help.Content)
+			t.Fatalf("expected admin role profile help to include %q:\n%s", want, help.Content)
 		}
 	}
 
@@ -329,7 +354,63 @@ func TestAdminBadgeConfiguresDelegatedAdminRole(t *testing.T) {
 		Options:    map[string]string{"model": "provider/new"},
 	})
 	if !strings.Contains(model.Content, "Model settings updated") {
-		t.Fatalf("expected admin badge to allow admin model update, got %+v", model)
+		t.Fatalf("expected admin role profile to allow admin model update, got %+v", model)
+	}
+}
+
+func TestAdminRoleProfileConfiguresModeratorRole(t *testing.T) {
+	ctx := context.Background()
+	router := newTestRouter(t, &fakeLLM{}, 5)
+	response := router.Handle(ctx, Request{
+		Command:      "admin",
+		Subcommand:   "role",
+		GuildID:      "guild-1",
+		UserID:       "owner",
+		IsGuildAdmin: true,
+		Options: map[string]string{
+			"action":    "set",
+			"profile":   "mod",
+			"role_id":   "role-pickle",
+			"role_name": "Pickle",
+		},
+	})
+	if !response.Ephemeral || !strings.Contains(response.Content, "`Pickle` (`role-pickle`) is now a Panda moderator role") {
+		t.Fatalf("expected moderator role profile response, got %+v", response)
+	}
+	allowed, err := router.admin.CanUseModeration(ctx, admin.AssistantAccessRequest{GuildID: "guild-1", RoleIDs: []string{"role-pickle"}})
+	if err != nil || !allowed {
+		t.Fatalf("expected Pickle role to grant moderation, allowed=%t err=%v", allowed, err)
+	}
+	list := router.Handle(ctx, Request{Command: "admin", Subcommand: "role", GuildID: "guild-1", UserID: "owner", IsGuildAdmin: true, Options: map[string]string{"action": "list"}})
+	if !strings.Contains(list.Content, "moderator: `role-pickle`") {
+		t.Fatalf("expected role profile list to include moderator role, got %+v", list)
+	}
+}
+
+func TestAdminMemberRoleAssignsDiscordRole(t *testing.T) {
+	ctx := context.Background()
+	manager := &fakeMemberRoleManager{}
+	router := newTestRouter(t, &fakeLLM{}, 5).WithMemberRoleManager(manager)
+
+	response := router.Handle(ctx, Request{
+		Command:      "admin",
+		Subcommand:   "member-role",
+		GuildID:      "guild-1",
+		UserID:       "owner",
+		IsGuildAdmin: true,
+		Options: map[string]string{
+			"action":           "add",
+			"member_user_id":   "user-target",
+			"member_user_name": "Snow",
+			"role_id":          "role-pickle",
+			"role_name":        "Pickle",
+		},
+	})
+	if !response.Ephemeral || !strings.Contains(response.Content, "Assigned `Pickle` (`role-pickle`) to `Snow` (`user-target`)") {
+		t.Fatalf("unexpected member-role response: %+v", response)
+	}
+	if len(manager.adds) != 1 || manager.adds[0].GuildID != "guild-1" || manager.adds[0].UserID != "user-target" || manager.adds[0].RoleID != "role-pickle" {
+		t.Fatalf("unexpected member role calls: %+v", manager.adds)
 	}
 }
 
@@ -776,6 +857,48 @@ func TestHandleToolConfirmationRemovesChannelRule(t *testing.T) {
 	}
 	if len(rules) != 0 {
 		t.Fatalf("expected channel rule to be removed, got %+v", rules)
+	}
+}
+
+func TestHandleToolConfirmationAppliesRoleProfile(t *testing.T) {
+	router := newTestRouter(t, &fakeLLM{}, 20)
+
+	response := router.HandleToolConfirmation(context.Background(), ToolConfirmationRequest{
+		Request: Request{
+			GuildID:      "guild-1",
+			UserID:       "admin",
+			IsGuildAdmin: true,
+		},
+		Action:  toolActionRoleProfileAdd,
+		Options: map[string]string{"role_id": "role-pickle", "profile": "moderator"},
+	})
+	if !response.Ephemeral || !strings.Contains(response.Content, "Panda moderator role") {
+		t.Fatalf("unexpected role profile confirmation response: %+v", response)
+	}
+	allowed, err := router.admin.CanUseModeration(context.Background(), admin.AssistantAccessRequest{GuildID: "guild-1", RoleIDs: []string{"role-pickle"}})
+	if err != nil || !allowed {
+		t.Fatalf("expected confirmed role profile to grant moderation, allowed=%t err=%v", allowed, err)
+	}
+}
+
+func TestHandleToolConfirmationAssignsMemberRole(t *testing.T) {
+	manager := &fakeMemberRoleManager{}
+	router := newTestRouter(t, &fakeLLM{}, 20).WithMemberRoleManager(manager)
+
+	response := router.HandleToolConfirmation(context.Background(), ToolConfirmationRequest{
+		Request: Request{
+			GuildID:      "guild-1",
+			UserID:       "admin",
+			IsGuildAdmin: true,
+		},
+		Action:  toolActionMemberRoleAdd,
+		Options: map[string]string{"user_id": "user-target", "role_id": "role-pickle"},
+	})
+	if !response.Ephemeral || !strings.Contains(response.Content, "Assigned role `role-pickle` to user `user-target`") {
+		t.Fatalf("unexpected member role confirmation response: %+v", response)
+	}
+	if len(manager.adds) != 1 || manager.adds[0].UserID != "user-target" || manager.adds[0].RoleID != "role-pickle" {
+		t.Fatalf("unexpected member role manager calls: %+v", manager.adds)
 	}
 }
 

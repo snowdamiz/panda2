@@ -132,6 +132,7 @@ func New(cfg config.Config, router *commands.Router, logger *slog.Logger) (*Bot,
 	instance.context = contextsvc.NewService(NewContextProvider(client.Rest))
 	router.WithContextService(instance.context)
 	router.WithThreadManager(NewThreadManager(client.Rest))
+	router.WithMemberRoleManager(NewMemberRoleManager(client.Rest))
 	return instance, nil
 }
 
@@ -268,6 +269,15 @@ func applicationCommands() []disgoDiscord.ApplicationCommandCreate {
 		Description: "Preview the change without saving it",
 		Required:    false,
 	}
+	roleProfileOption := disgoDiscord.ApplicationCommandOptionString{
+		Name:        "profile",
+		Description: "Panda role profile",
+		Required:    false,
+		Choices: []disgoDiscord.ApplicationCommandOptionChoiceString{
+			{Name: "Admin", Value: "admin"},
+			{Name: "Moderator", Value: "moderator"},
+		},
+	}
 
 	return []disgoDiscord.ApplicationCommandCreate{
 		disgoDiscord.SlashCommandCreate{
@@ -327,12 +337,48 @@ func applicationCommands() []disgoDiscord.ApplicationCommandCreate {
 			Description: "Admin commands",
 			Options: []disgoDiscord.ApplicationCommandOption{
 				disgoDiscord.ApplicationCommandOptionSubCommand{
-					Name:        "badge",
-					Description: "Delegate Panda admin access to a role",
+					Name:        "role",
+					Description: "Set which Discord roles mean Panda admin or moderator",
 					Options: []disgoDiscord.ApplicationCommandOption{
+						disgoDiscord.ApplicationCommandOptionString{
+							Name:        "action",
+							Description: "Role profile action",
+							Required:    true,
+							Choices: []disgoDiscord.ApplicationCommandOptionChoiceString{
+								{Name: "List", Value: "list"},
+								{Name: "Set", Value: "set"},
+								{Name: "Remove", Value: "remove"},
+							},
+						},
+						roleProfileOption,
 						disgoDiscord.ApplicationCommandOptionRole{
 							Name:        "role",
-							Description: "Role Panda should treat as admin",
+							Description: "Role to mark as admin/moderator",
+							Required:    false,
+						},
+					},
+				},
+				disgoDiscord.ApplicationCommandOptionSubCommand{
+					Name:        "member-role",
+					Description: "Assign or remove a Discord role for a user",
+					Options: []disgoDiscord.ApplicationCommandOption{
+						disgoDiscord.ApplicationCommandOptionString{
+							Name:        "action",
+							Description: "Member role action",
+							Required:    true,
+							Choices: []disgoDiscord.ApplicationCommandOptionChoiceString{
+								{Name: "Add", Value: "add"},
+								{Name: "Remove", Value: "remove"},
+							},
+						},
+						disgoDiscord.ApplicationCommandOptionUser{
+							Name:        "user",
+							Description: "User to update",
+							Required:    true,
+						},
+						disgoDiscord.ApplicationCommandOptionRole{
+							Name:        "role",
+							Description: "Role to assign or remove",
 							Required:    true,
 						},
 					},
@@ -493,7 +539,7 @@ func (b *Bot) handleSlashCommand(event *events.ApplicationCommandInteractionCrea
 	if question, ok := data.OptString("question"); ok {
 		request.Options["question"] = question
 	}
-	for _, name := range []string{"model", "fallback_models", "temperature", "max_response_tokens", "max_tokens", "tool_policy", "prompt", "soul", "action", "confirm", "tool_name"} {
+	for _, name := range []string{"model", "fallback_models", "temperature", "max_response_tokens", "max_tokens", "tool_policy", "prompt", "soul", "action", "confirm", "tool_name", "profile"} {
 		if value, ok := data.OptString(name); ok {
 			request.Options[name] = value
 		}
@@ -501,6 +547,10 @@ func (b *Bot) handleSlashCommand(event *events.ApplicationCommandInteractionCrea
 	if role, ok := data.OptRole("role"); ok {
 		request.Options["role_id"] = role.ID.String()
 		request.Options["role_name"] = role.Name
+	}
+	if user, ok := data.OptUser("user"); ok {
+		request.Options["member_user_id"] = user.ID.String()
+		request.Options["member_user_name"] = user.Username
 	}
 	if dryRun, ok := data.OptBool("dry_run"); ok && dryRun {
 		request.Options["dry_run"] = "true"
@@ -823,9 +873,16 @@ func channelMessageCreateFromResponse(response commands.Response) disgoDiscord.M
 }
 
 func channelMessageCreateFromResponsePart(response commands.Response, content string, includeComponents bool) disgoDiscord.MessageCreate {
+	return channelMessageCreateFromResponsePartWithReference(response, content, includeComponents, nil)
+}
+
+func channelMessageCreateFromResponsePartWithReference(response commands.Response, content string, includeComponents bool, reference *disgoDiscord.MessageReference) disgoDiscord.MessageCreate {
 	message := disgoDiscord.NewMessageCreate().WithContent(content)
 	if includeComponents {
 		message = message.WithComponents(componentsFromResponse(response)...)
+	}
+	if reference != nil {
+		message = message.WithMessageReference(reference).WithAllowedMentions(discordReplyAllowedMentions())
 	}
 	return message
 }
@@ -903,10 +960,19 @@ func (b *Bot) createInteractionFollowups(applicationID snowflake.ID, token strin
 	return nil
 }
 
-func (b *Bot) sendChannelResponse(channelID snowflake.ID, response commands.Response) error {
+func (b *Bot) sendChannelResponse(channelID snowflake.ID, response commands.Response, reference ...*disgoDiscord.MessageReference) error {
+	var replyReference *disgoDiscord.MessageReference
+	if len(reference) > 0 {
+		replyReference = reference[0]
+	}
 	chunks := splitDiscordContent(response.Content)
 	for index, chunk := range chunks {
-		if _, err := b.client.Rest.CreateMessage(channelID, channelMessageCreateFromResponsePart(response, chunk, index == len(chunks)-1)); err != nil {
+		chunkReference := replyReference
+		if index > 0 {
+			chunkReference = nil
+		}
+		message := channelMessageCreateFromResponsePartWithReference(response, chunk, index == len(chunks)-1, chunkReference)
+		if _, err := b.client.Rest.CreateMessage(channelID, message); err != nil {
 			return err
 		}
 	}
@@ -1055,8 +1121,35 @@ func (b *Bot) onMessageCreate(event *events.MessageCreate) {
 	if response.Content == "" {
 		return
 	}
-	if err := b.sendChannelResponse(event.ChannelID, response); err != nil {
+	if err := b.sendChannelResponse(event.ChannelID, response, messageReferenceFromMessage(event.Message)); err != nil {
 		b.logger.Warn("failed to reply to natural message", slog.Any("err", err))
+	}
+}
+
+func messageReferenceFromMessage(message disgoDiscord.Message) *disgoDiscord.MessageReference {
+	if message.ID == 0 || message.ChannelID == 0 {
+		return nil
+	}
+	messageID := message.ID
+	channelID := message.ChannelID
+	reference := &disgoDiscord.MessageReference{
+		MessageID:       &messageID,
+		ChannelID:       &channelID,
+		FailIfNotExists: false,
+	}
+	if message.GuildID != nil {
+		guildID := *message.GuildID
+		reference.GuildID = &guildID
+	}
+	return reference
+}
+
+func discordReplyAllowedMentions() *disgoDiscord.AllowedMentions {
+	return &disgoDiscord.AllowedMentions{
+		Parse:       []disgoDiscord.AllowedMentionType{disgoDiscord.AllowedMentionTypeUsers, disgoDiscord.AllowedMentionTypeRoles, disgoDiscord.AllowedMentionTypeEveryone},
+		Roles:       []snowflake.ID{},
+		Users:       []snowflake.ID{},
+		RepliedUser: false,
 	}
 }
 

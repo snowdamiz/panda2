@@ -3,6 +3,7 @@ package admin
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -28,6 +29,9 @@ type Service struct {
 }
 
 const (
+	RoleProfileAdmin     = "admin"
+	RoleProfileModerator = "moderator"
+
 	PermissionAssistantUse         = "assistant.use"
 	PermissionAssistantUseThreads  = "assistant.use_threads"
 	PermissionAssistantAttachments = "assistant.attachments"
@@ -102,6 +106,47 @@ type ModelSettings struct {
 type ToolRoleAccess struct {
 	AllowedTools    []string
 	RestrictedTools []string
+}
+
+func NormalizeRoleProfile(profile string) (string, bool) {
+	switch strings.ToLower(strings.TrimSpace(profile)) {
+	case RoleProfileAdmin, "administrator":
+		return RoleProfileAdmin, true
+	case RoleProfileModerator, "mod", "moderation":
+		return RoleProfileModerator, true
+	default:
+		return "", false
+	}
+}
+
+func RoleProfileLabel(profile string) string {
+	normalized, ok := NormalizeRoleProfile(profile)
+	if !ok {
+		return strings.TrimSpace(profile)
+	}
+	switch normalized {
+	case RoleProfileAdmin:
+		return "admin"
+	case RoleProfileModerator:
+		return "moderator"
+	default:
+		return normalized
+	}
+}
+
+func RoleProfilePermissions(profile string) []string {
+	normalized, ok := NormalizeRoleProfile(profile)
+	if !ok {
+		return nil
+	}
+	switch normalized {
+	case RoleProfileAdmin:
+		return []string{PermissionAdminBadge}
+	case RoleProfileModerator:
+		return []string{PermissionAssistantUse, PermissionModerationUse}
+	default:
+		return nil
+	}
 }
 
 func (s *Service) WithGuildRepository(guilds *repository.GuildRepository) *Service {
@@ -453,14 +498,14 @@ func (s *Service) AddRolePermission(ctx context.Context, guildID, actorID, roleI
 	return role, nil
 }
 
-func (s *Service) SetAdminBadge(ctx context.Context, guildID, actorID, roleID string) (store.GuildRole, error) {
+func (s *Service) SetAdminRole(ctx context.Context, guildID, actorID, roleID string) (store.GuildRole, error) {
 	guildID = strings.TrimSpace(guildID)
 	roleID = strings.TrimSpace(roleID)
 	if roleID == "" {
-		return store.GuildRole{}, fmt.Errorf("admin badge role is required")
+		return store.GuildRole{}, fmt.Errorf("admin role is required")
 	}
 	if guildID != "" && roleID == guildID {
-		return store.GuildRole{}, fmt.Errorf("admin badge cannot be @everyone")
+		return store.GuildRole{}, fmt.Errorf("admin role cannot be @everyone")
 	}
 	role, err := s.access.SetRolePermission(ctx, guildID, roleID, PermissionAdminBadge)
 	if err != nil {
@@ -469,12 +514,88 @@ func (s *Service) SetAdminBadge(ctx context.Context, guildID, actorID, roleID st
 	_ = s.audit.Record(ctx, store.AuditEvent{
 		GuildID:    guildID,
 		ActorID:    actorID,
-		Action:     "admin.badge.set",
+		Action:     "admin.role_profile.set",
 		TargetType: "guild_role",
 		TargetID:   role.RoleID,
 		Metadata:   metadata(map[string]string{"permission": PermissionAdminBadge}),
 	})
 	return role, nil
+}
+
+func (s *Service) ApplyRoleProfile(ctx context.Context, guildID, actorID, roleID, profile string) ([]store.GuildRole, error) {
+	rawProfile := profile
+	profile, ok := NormalizeRoleProfile(profile)
+	if !ok {
+		return nil, fmt.Errorf("unsupported role profile %q", strings.TrimSpace(rawProfile))
+	}
+	guildID = strings.TrimSpace(guildID)
+	roleID = strings.TrimSpace(roleID)
+	if roleID == "" {
+		return nil, fmt.Errorf("role id is required")
+	}
+	if guildID != "" && roleID == guildID {
+		return nil, fmt.Errorf("role profile cannot be @everyone")
+	}
+	if profile == RoleProfileAdmin {
+		role, err := s.SetAdminRole(ctx, guildID, actorID, roleID)
+		if err != nil {
+			return nil, err
+		}
+		return []store.GuildRole{role}, nil
+	}
+	permissions := RoleProfilePermissions(profile)
+	roles := make([]store.GuildRole, 0, len(permissions))
+	for _, permission := range permissions {
+		role, err := s.AddRolePermission(ctx, guildID, actorID, roleID, permission)
+		if err != nil {
+			return nil, err
+		}
+		roles = append(roles, role)
+	}
+	return roles, nil
+}
+
+func (s *Service) RemoveRoleProfile(ctx context.Context, guildID, actorID, roleID, profile string) error {
+	rawProfile := profile
+	profile, ok := NormalizeRoleProfile(profile)
+	if !ok {
+		return fmt.Errorf("unsupported role profile %q", strings.TrimSpace(rawProfile))
+	}
+	roleID = strings.TrimSpace(roleID)
+	if roleID == "" {
+		return fmt.Errorf("role id is required")
+	}
+	permissions := RoleProfilePermissions(profile)
+	removed := false
+	for _, permission := range permissions {
+		var err error
+		if permission == PermissionAdminBadge {
+			err = s.access.RemoveRolePermission(ctx, guildID, roleID, permission)
+			if err == nil {
+				_ = s.audit.Record(ctx, store.AuditEvent{
+					GuildID:    guildID,
+					ActorID:    actorID,
+					Action:     "admin.role_profile.remove",
+					TargetType: "guild_role",
+					TargetID:   roleID,
+					Metadata:   metadata(map[string]string{"permission": permission}),
+				})
+			}
+		} else {
+			err = s.RemoveRolePermission(ctx, guildID, actorID, roleID, permission)
+		}
+		if err == nil {
+			removed = true
+			continue
+		}
+		if !errors.Is(err, repository.ErrNotFound) {
+			return err
+		}
+	}
+	if !removed {
+		return repository.ErrNotFound
+	}
+	return nil
 }
 
 func (s *Service) RemoveRolePermission(ctx context.Context, guildID, actorID, roleID, permission string) error {

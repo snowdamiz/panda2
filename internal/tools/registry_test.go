@@ -23,7 +23,7 @@ func TestDefaultRegistryDefinitionsAreValid(t *testing.T) {
 		t.Fatalf("NewDefaultRegistry: %v", err)
 	}
 	definitions := registry.Definitions()
-	if len(definitions) != 81 {
+	if len(definitions) != 82 {
 		t.Fatalf("expected full Discord tool surface plus assistant tools, got %d", len(definitions))
 	}
 	for _, definition := range definitions {
@@ -261,11 +261,17 @@ func (fakeToolAttachmentReader) Get(context.Context, string, uint) (store.Attach
 }
 
 type fakeDiscordProvider struct {
-	calls int
+	calls    int
+	requests []DiscordToolRequest
+	result   any
 }
 
-func (f *fakeDiscordProvider) ExecuteDiscordTool(context.Context, DiscordToolRequest) (any, error) {
+func (f *fakeDiscordProvider) ExecuteDiscordTool(_ context.Context, request DiscordToolRequest) (any, error) {
 	f.calls++
+	f.requests = append(f.requests, request)
+	if f.result != nil {
+		return f.result, nil
+	}
 	return map[string]any{"executed": true}, nil
 }
 
@@ -747,6 +753,60 @@ func TestExecutorRunsAdminServiceTools(t *testing.T) {
 	}
 }
 
+func TestExecutorRoleProfileAndMemberRoleToolsRequireConfirmation(t *testing.T) {
+	registry, err := NewDefaultRegistry()
+	if err != nil {
+		t.Fatalf("NewDefaultRegistry: %v", err)
+	}
+	provider := &fakeDiscordProvider{result: map[string]any{"roles": []map[string]any{{
+		"id":   "100000000000000777",
+		"name": "Pickle",
+	}}}}
+	executor := NewExecutor(registry, nil, nil).
+		WithAdminOperations(newToolAdminService(t)).
+		WithDiscordToolProvider(provider)
+
+	profile, err := executor.Execute(context.Background(), ExecutionRequest{
+		GuildID: "guild-1",
+		ActorID: "admin",
+		Access:  testAccess(ToolPolicyOff, admin.PermissionAdminConfigWrite),
+		Call: llm.ToolCall{
+			ID:   "call-profile",
+			Type: "function",
+			Function: llm.ToolCallFunction{
+				Name:      "panda_manage_role_permission",
+				Arguments: `{"action":"add","profile":"moderator","role_name":"Pickle"}`,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Execute role profile: %v", err)
+	}
+	if profile.Confirmation == nil || profile.Confirmation.Action != "role_profile.add" || profile.Confirmation.Arguments["profile"] != "moderator" || profile.Confirmation.Arguments["role_id"] != "100000000000000777" {
+		t.Fatalf("expected role profile confirmation, got %+v", profile)
+	}
+
+	memberRole, err := executor.Execute(context.Background(), ExecutionRequest{
+		GuildID: "guild-1",
+		ActorID: "admin",
+		Access:  testAccess(ToolPolicyOff, admin.PermissionAdminConfigWrite),
+		Call: llm.ToolCall{
+			ID:   "call-member-role",
+			Type: "function",
+			Function: llm.ToolCallFunction{
+				Name:      "panda_manage_member_role",
+				Arguments: `{"action":"add","user_id":"user-target","role_name":"Pickle"}`,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Execute member role: %v", err)
+	}
+	if memberRole.Confirmation == nil || memberRole.Confirmation.Action != "member_role.add" || memberRole.Confirmation.Arguments["user_id"] != "user-target" || memberRole.Confirmation.Arguments["role_id"] != "100000000000000777" {
+		t.Fatalf("expected member role confirmation, got %+v", memberRole)
+	}
+}
+
 func TestExecutorAdminRemovalToolsRequireConfirmation(t *testing.T) {
 	registry, err := NewDefaultRegistry()
 	if err != nil {
@@ -873,6 +933,86 @@ func TestExecutorListsNativeAndComposedTools(t *testing.T) {
 	}
 	if strings.Contains(content, "[redacted]") {
 		t.Fatalf("tool names should not be redacted in list_tools output: %s", content)
+	}
+}
+
+func TestExecutorListToolsHidesAdminToolsFromNormalUsers(t *testing.T) {
+	registry, err := NewDefaultRegistry()
+	if err != nil {
+		t.Fatalf("NewDefaultRegistry: %v", err)
+	}
+	executor := NewExecutor(registry, nil, fakeConfigReader{}).
+		WithDiscordToolProvider(&fakeDiscordProvider{}).
+		WithAdminOperations(newToolAdminService(t))
+
+	result, err := executor.Execute(context.Background(), ExecutionRequest{
+		GuildID: "guild-1",
+		ActorID: "user-1",
+		Access:  testAccess(ToolPolicyReadOnly, admin.PermissionAssistantUse),
+		Call: llm.ToolCall{
+			ID:   "call-list-normal",
+			Type: "function",
+			Function: llm.ToolCallFunction{
+				Name:      "panda_list_tools",
+				Arguments: `{"include_schemas":true}`,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	content := result.Message.Content
+	for _, want := range []string{`"name":"discord_fetch_message"`, `"name":"panda_list_tools"`, `"admin_tools_hidden":true`, "super secret admin tools"} {
+		if !strings.Contains(content, want) {
+			t.Fatalf("expected normal user tool listing to contain %s, got %s", want, content)
+		}
+	}
+	for _, hidden := range []string{"read_config", "panda_manage_tool_access", "discord_modify_channel_permissions", "admin.config.write", "admin_read", "admin_write"} {
+		if strings.Contains(content, hidden) {
+			t.Fatalf("normal user tool listing leaked admin detail %q: %s", hidden, content)
+		}
+	}
+}
+
+func TestExecutorListToolsShowsAdminToolsToAdmins(t *testing.T) {
+	registry, err := NewDefaultRegistry()
+	if err != nil {
+		t.Fatalf("NewDefaultRegistry: %v", err)
+	}
+	executor := NewExecutor(registry, nil, fakeConfigReader{}).
+		WithDiscordToolProvider(&fakeDiscordProvider{}).
+		WithAdminOperations(newToolAdminService(t))
+
+	result, err := executor.Execute(context.Background(), ExecutionRequest{
+		GuildID: "guild-1",
+		ActorID: "admin",
+		Access: testAccess(
+			ToolPolicyWriteConfirmed,
+			admin.PermissionAssistantUse,
+			admin.PermissionAdminConfigRead,
+			admin.PermissionAdminConfigWrite,
+			admin.PermissionAdminUsageRead,
+		),
+		Call: llm.ToolCall{
+			ID:   "call-list-admin",
+			Type: "function",
+			Function: llm.ToolCallFunction{
+				Name:      "panda_list_tools",
+				Arguments: `{}`,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	content := result.Message.Content
+	for _, want := range []string{`"name":"read_config"`, `"name":"panda_manage_tool_access"`, `"tool_class":"admin_write"`} {
+		if !strings.Contains(content, want) {
+			t.Fatalf("expected admin tool listing to contain %s, got %s", want, content)
+		}
+	}
+	if strings.Contains(content, "admin_tools_hidden") || strings.Contains(content, "super secret admin tools") {
+		t.Fatalf("admin tool listing should not include hidden-admin notice: %s", content)
 	}
 }
 

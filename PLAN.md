@@ -47,7 +47,8 @@ This plan is for the engineer who will build the first production-ready version 
 
 ### Admin And Moderator Tools
 
-- `/admin badge` lets an admin delegate Panda admin access to a role.
+- `/admin role` lets an owner/admin map Discord roles to Panda admin or moderator profiles.
+- `/admin member-role` lets an owner/admin assign or remove Discord roles for users.
 - `/admin tool` lets an admin allow specific roles to use specific native or composed tools.
 - `/admin model` sets default model, temperature, max response size, and tool policy.
 - `/admin prompt` manages server-level system instructions.

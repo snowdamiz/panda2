@@ -57,7 +57,8 @@ Panda listens to normal Discord messages that contain the word `Panda`, then use
 
 - `/ping`
 - `/help`
-- `/admin badge` to delegate Panda admin access to a role
+- `/admin role` to define which Discord roles mean Panda admin or moderator
+- `/admin member-role` to assign or remove Discord roles for users
 - `/admin tool` to allow a role to use a specific native or composed tool
 - `/admin model`
 - `/admin prompt`
@@ -74,11 +75,11 @@ Panda listens to normal Discord messages that contain the word `Panda`, then use
 - Message context menu: `Explain with Panda`
 - Message context menu: `Summarize with Panda`
 
-Guild config is created automatically the first time an admin changes Panda settings. The installing owner can use `/admin badge` to choose any Discord role as Panda's admin badge; members with that badge are treated as Panda admins, so servers can use custom labels like `MOD` instead of Discord's built-in Administrator permission. Role mappings are enforced when at least one `assistant.use` role is configured. Channel rules support explicit allow lists and deny rules; owners, guild administrators, and the configured admin badge bypass assistant-use policy checks.
+Guild config is created automatically the first time an admin changes Panda settings. The installing owner can use `/admin role` to choose any Discord role as Panda's admin or moderator role profile; for example, a server role named `Pickle` can be configured as the Panda moderator role. `/admin member-role` assigns those Discord roles to users. Role mappings are enforced when at least one `assistant.use` role is configured. Channel rules support explicit allow lists and deny rules; owners, guild administrators, and the configured Panda admin role bypass assistant-use policy checks.
 
 Tool access has two layers: `tool_policy` sets the server-wide ceiling for tool classes, and `/admin tool` can restrict individual native or composed tools to specific roles. Native tools keep their underlying permissions, so allowing a role to use an admin tool does not grant admin access. Composed tools are admin-only for regular members until a role is explicitly allowed for that composed tool; composed tools that wrap native admin tools remain admin-only.
 
-Usage reports, request budgets, server knowledge, role permissions, channel rules, memory consent, moderation guidance, and composed-tool management are available through Panda chat/tools instead of direct slash commands.
+Usage reports, request budgets, server knowledge, role profiles and permissions, Discord role assignment, channel rules, memory consent, moderation guidance, and composed-tool management are available through Panda chat/tools instead of direct slash commands.
 
 When a chat-triggered tool prepares a destructive admin removal or a composed-tool approval/rollback, Panda renders a Discord confirmation button tied to the requesting user. Clicking it executes the reviewed server-side action only after fresh permission checks.
 

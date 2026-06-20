@@ -72,6 +72,8 @@ type AdminOperations interface {
 	AddRolePermission(ctx context.Context, guildID, actorID, roleID, permission string) (store.GuildRole, error)
 	RemoveRolePermission(ctx context.Context, guildID, actorID, roleID, permission string) error
 	ListRolePermissions(ctx context.Context, guildID string) ([]store.GuildRole, error)
+	ApplyRoleProfile(ctx context.Context, guildID, actorID, roleID, profile string) ([]store.GuildRole, error)
+	RemoveRoleProfile(ctx context.Context, guildID, actorID, roleID, profile string) error
 	AddToolRole(ctx context.Context, guildID, actorID, toolName, roleID string) (store.GuildToolRole, error)
 	RemoveToolRole(ctx context.Context, guildID, actorID, toolName, roleID string) error
 	ListToolRoles(ctx context.Context, guildID string) ([]store.GuildToolRole, error)
@@ -318,6 +320,8 @@ func (e *Executor) Execute(ctx context.Context, request ExecutionRequest) (Execu
 		payload, err = e.manageKnowledge(toolCtx, request, arguments)
 	case "panda.manage_role_permission":
 		payload, err = e.manageRolePermission(toolCtx, request, arguments)
+	case "panda.manage_member_role":
+		payload, err = e.manageMemberRole(toolCtx, request, arguments)
 	case "panda.manage_tool_access":
 		payload, err = e.manageToolAccess(toolCtx, request, arguments)
 	case "panda.manage_composed_tool":
@@ -855,8 +859,12 @@ func (e *Executor) manageRolePermission(ctx context.Context, request ExecutionRe
 		return nil, err
 	}
 	action := strings.ToLower(stringArgument(args, "action"))
-	permission := firstNonEmpty(stringArgument(args, "permission"), admin.PermissionAssistantUse)
-	if !admin.IsPermissionNameAllowed(permission) {
+	profile, hasProfile := admin.NormalizeRoleProfile(stringArgument(args, "profile"))
+	permission := strings.TrimSpace(stringArgument(args, "permission"))
+	if !hasProfile {
+		permission = firstNonEmpty(permission, admin.PermissionAssistantUse)
+	}
+	if !hasProfile && !admin.IsPermissionNameAllowed(permission) {
 		return nil, fmt.Errorf("unsupported permission")
 	}
 	switch action {
@@ -867,9 +875,19 @@ func (e *Executor) manageRolePermission(ctx context.Context, request ExecutionRe
 		}
 		return map[string]any{"result": map[string]any{"roles": rolePermissionPayloads(roles)}}, nil
 	case "add":
-		roleID := stringArgument(args, "role_id")
+		roleID, err := e.roleIDArgument(ctx, request, args)
+		if err != nil {
+			return nil, err
+		}
 		if roleID == "" {
 			return nil, fmt.Errorf("role_id is required")
+		}
+		if hasProfile {
+			preview := map[string]any{"role_id": roleID, "profile": profile}
+			if boolArgument(args, "dry_run") {
+				return dryRunToolResult("role_profile.add", preview), nil
+			}
+			return confirmationRequired("role_profile.add", preview), nil
 		}
 		preview := map[string]any{"role_id": roleID, "permission": permission}
 		if boolArgument(args, "dry_run") {
@@ -881,9 +899,19 @@ func (e *Executor) manageRolePermission(ctx context.Context, request ExecutionRe
 		}
 		return map[string]any{"result": rolePermissionPayload(role)}, nil
 	case "remove":
-		roleID := stringArgument(args, "role_id")
+		roleID, err := e.roleIDArgument(ctx, request, args)
+		if err != nil {
+			return nil, err
+		}
 		if roleID == "" {
 			return nil, fmt.Errorf("role_id is required")
+		}
+		if hasProfile {
+			preview := map[string]any{"role_id": roleID, "profile": profile}
+			if boolArgument(args, "dry_run") {
+				return dryRunToolResult("role_profile.remove", preview), nil
+			}
+			return confirmationRequired("role_profile.remove", preview), nil
 		}
 		preview := map[string]any{"role_id": roleID, "permission": permission}
 		if boolArgument(args, "dry_run") {
@@ -893,6 +921,135 @@ func (e *Executor) manageRolePermission(ctx context.Context, request ExecutionRe
 	default:
 		return nil, fmt.Errorf("action must be list, add, or remove")
 	}
+}
+
+func (e *Executor) manageMemberRole(ctx context.Context, request ExecutionRequest, arguments string) (any, error) {
+	if e.discord == nil {
+		return nil, fmt.Errorf("discord tool provider is not configured")
+	}
+	args, err := parseArguments(arguments)
+	if err != nil {
+		return nil, err
+	}
+	action := strings.ToLower(firstNonEmpty(stringArgument(args, "action"), "add"))
+	userID := stringArgument(args, "user_id")
+	roleID, err := e.roleIDArgument(ctx, request, args)
+	if err != nil {
+		return nil, err
+	}
+	if userID == "" {
+		return nil, fmt.Errorf("user_id is required")
+	}
+	if roleID == "" {
+		return nil, fmt.Errorf("role_id is required")
+	}
+	switch action {
+	case "add", "assign", "set":
+		preview := map[string]any{"user_id": userID, "role_id": roleID}
+		if boolArgument(args, "dry_run") {
+			return dryRunToolResult("member_role.add", preview), nil
+		}
+		return confirmationRequired("member_role.add", preview), nil
+	case "remove", "unassign", "unset":
+		preview := map[string]any{"user_id": userID, "role_id": roleID}
+		if boolArgument(args, "dry_run") {
+			return dryRunToolResult("member_role.remove", preview), nil
+		}
+		return confirmationRequired("member_role.remove", preview), nil
+	default:
+		return nil, fmt.Errorf("action must be add or remove")
+	}
+}
+
+func (e *Executor) roleIDArgument(ctx context.Context, request ExecutionRequest, args map[string]any) (string, error) {
+	if roleID := discordIDArgument(firstNonEmpty(stringArgument(args, "role_id"), stringArgument(args, "role"))); roleID != "" {
+		return roleID, nil
+	}
+	roleName := firstNonEmpty(stringArgument(args, "role_name"), stringArgument(args, "role"))
+	if roleID := discordIDArgument(roleName); roleID != "" {
+		return roleID, nil
+	}
+	roleName = strings.TrimSpace(strings.TrimPrefix(roleName, "@"))
+	if roleName == "" {
+		return "", nil
+	}
+	if e.discord == nil {
+		return "", fmt.Errorf("role_id is required because Discord role lookup is not configured")
+	}
+	payload, err := e.discord.ExecuteDiscordTool(ctx, DiscordToolRequest{
+		ToolName:  "discord.list_roles",
+		GuildID:   request.GuildID,
+		ActorID:   request.ActorID,
+		RequestID: request.RequestID,
+		Arguments: map[string]any{"guild_id": request.GuildID},
+	})
+	if err != nil {
+		return "", err
+	}
+	return roleIDFromListRolesPayload(payload, roleName)
+}
+
+func roleIDFromListRolesPayload(payload any, roleName string) (string, error) {
+	payloadMap, ok := payload.(map[string]any)
+	if !ok {
+		return "", fmt.Errorf("Discord role lookup returned an unexpected shape")
+	}
+	rolesValue, ok := payloadMap["roles"]
+	if !ok {
+		return "", fmt.Errorf("Discord role lookup returned no roles")
+	}
+	target := normalizeDiscordLookupName(roleName)
+	var matches []string
+	switch roles := rolesValue.(type) {
+	case []map[string]any:
+		for _, role := range roles {
+			if normalizeDiscordLookupName(fmt.Sprint(role["name"])) == target {
+				matches = append(matches, strings.TrimSpace(fmt.Sprint(role["id"])))
+			}
+		}
+	case []any:
+		for _, value := range roles {
+			role, ok := value.(map[string]any)
+			if ok && normalizeDiscordLookupName(fmt.Sprint(role["name"])) == target {
+				matches = append(matches, strings.TrimSpace(fmt.Sprint(role["id"])))
+			}
+		}
+	default:
+		return "", fmt.Errorf("Discord role lookup returned an unexpected shape")
+	}
+	cleaned := make([]string, 0, len(matches))
+	for _, match := range matches {
+		if id := discordIDArgument(match); id != "" {
+			cleaned = append(cleaned, id)
+		}
+	}
+	if len(cleaned) == 0 {
+		return "", fmt.Errorf("role %q was not found", roleName)
+	}
+	if len(cleaned) > 1 {
+		return "", fmt.Errorf("role name %q is ambiguous", roleName)
+	}
+	return cleaned[0], nil
+}
+
+func discordIDArgument(value string) string {
+	value = strings.TrimSpace(value)
+	value = strings.TrimPrefix(value, "<@&")
+	value = strings.TrimPrefix(value, "<@")
+	value = strings.TrimSuffix(value, ">")
+	if value == "" {
+		return ""
+	}
+	for _, char := range value {
+		if char < '0' || char > '9' {
+			return ""
+		}
+	}
+	return value
+}
+
+func normalizeDiscordLookupName(value string) string {
+	return strings.ToLower(strings.TrimSpace(strings.TrimPrefix(value, "@")))
 }
 
 func (e *Executor) manageToolAccess(ctx context.Context, request ExecutionRequest, arguments string) (any, error) {
@@ -1087,11 +1244,18 @@ func (e *Executor) listAvailableTools(ctx context.Context, request ExecutionRequ
 		return nil, fmt.Errorf("kind must be all, native, or composed")
 	}
 	includeSchemas := boolArgument(args, "include_schemas")
+	canSeeAdminTools := canSeeAdminToolDetails(request.Access)
+	adminToolsHidden := false
 
 	nativeTools := []map[string]any{}
 	if kind == "all" || kind == "native" {
 		for _, definition := range e.registry.Definitions() {
-			if !definition.AvailableTo(request.Access) || !e.canExecute(definition.Name) {
+			executable := e.canExecute(definition.Name)
+			adminTool := isAdminToolDefinition(definition)
+			if adminTool && !canSeeAdminTools && executable {
+				adminToolsHidden = true
+			}
+			if !definition.AvailableTo(request.Access) || !executable || (adminTool && !canSeeAdminTools) {
 				continue
 			}
 			item := map[string]any{
@@ -1153,7 +1317,7 @@ func (e *Executor) listAvailableTools(ctx context.Context, request ExecutionRequ
 		}
 		return leftKind < rightKind
 	})
-	return map[string]any{
+	response := map[string]any{
 		"tools":           items,
 		"count":           len(items),
 		"native_count":    len(nativeTools),
@@ -1162,7 +1326,51 @@ func (e *Executor) listAvailableTools(ctx context.Context, request ExecutionRequ
 		"policy":          normalizeToolPolicy(request.Access.Policy),
 		"invocation_type": firstNonEmpty(request.InvocationType, "chat_tool"),
 		"note":            "This list is already filtered by guild tool policy, role tool access, user permissions, and configured integrations. Tools not returned here are not callable in this context.",
-	}, nil
+	}
+	if adminToolsHidden {
+		response["admin_tools_hidden"] = true
+		response["admin_tools_notice"] = hiddenAdminToolsNotice()
+	}
+	return response, nil
+}
+
+func hiddenAdminToolsNotice() string {
+	return "There are also a lot of super secret admin tools, but their names and details are hidden unless your role can use them."
+}
+
+func canSeeAdminToolDetails(access ToolAccess) bool {
+	for _, permission := range []string{
+		admin.PermissionAdminConfigRead,
+		admin.PermissionAdminConfigWrite,
+		admin.PermissionAdminUsageRead,
+		admin.PermissionAdminAuditRead,
+		admin.PermissionAdminMemoryManage,
+		admin.PermissionOwnerOps,
+	} {
+		if _, ok := access.Permissions[permission]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+func isAdminToolDefinition(definition Definition) bool {
+	switch definition.ToolClass {
+	case ToolClassAdminRead, ToolClassAdminWrite, ToolClassOwnerOps:
+		return true
+	}
+	for _, permission := range append([]string{definition.RequiredPermission}, definition.AlternatePermissions...) {
+		switch permission {
+		case admin.PermissionAdminConfigRead,
+			admin.PermissionAdminConfigWrite,
+			admin.PermissionAdminUsageRead,
+			admin.PermissionAdminAuditRead,
+			admin.PermissionAdminMemoryManage,
+			admin.PermissionOwnerOps:
+			return true
+		}
+	}
+	return false
 }
 
 func (e *Executor) canExecute(name string) bool {
@@ -1179,6 +1387,8 @@ func (e *Executor) canExecute(name string) bool {
 		return e.configs != nil
 	case "manage_memory_consent", "panda.usage_report", "panda.manage_soul", "panda.manage_budget_limit", "panda.manage_knowledge", "panda.manage_role_permission", "panda.manage_tool_access", "panda.manage_channel_rule":
 		return e.adminOps != nil
+	case "panda.manage_member_role":
+		return e.discord != nil
 	case "panda.manage_composed_tool":
 		return e.composed != nil
 	case "draft_moderator_note", "generate_workflow_json", "panda.list_tools":
@@ -1245,6 +1455,10 @@ func confirmationArguments(action string, preview map[string]any) map[string]str
 		return stringArguments(preview, "scope", "subject_id")
 	case "role_permission.remove":
 		return stringArguments(preview, "role_id", "permission")
+	case "role_profile.add", "role_profile.remove":
+		return stringArguments(preview, "role_id", "profile")
+	case "member_role.add", "member_role.remove":
+		return stringArguments(preview, "user_id", "role_id")
 	case "channel_rule.remove":
 		return stringArguments(preview, "channel_id")
 	case "composed_tool.approve", "composed_tool.rollback":
@@ -1262,6 +1476,14 @@ func confirmationCopy(action string, arguments map[string]string) (string, strin
 		return fmt.Sprintf("Panda prepared removal of the `%s` budget limit for `%s`.", arguments["scope"], firstNonEmpty(arguments["subject_id"], "global")), "Remove limit"
 	case "role_permission.remove":
 		return fmt.Sprintf("Panda prepared removal of `%s` from role `%s`.", arguments["permission"], arguments["role_id"]), "Remove permission"
+	case "role_profile.add":
+		return fmt.Sprintf("Panda prepared the `%s` profile for role `%s`.", arguments["profile"], arguments["role_id"]), "Set role profile"
+	case "role_profile.remove":
+		return fmt.Sprintf("Panda prepared removal of the `%s` profile from role `%s`.", arguments["profile"], arguments["role_id"]), "Remove role profile"
+	case "member_role.add":
+		return fmt.Sprintf("Panda prepared assignment of role `%s` to user `%s`.", arguments["role_id"], arguments["user_id"]), "Assign role"
+	case "member_role.remove":
+		return fmt.Sprintf("Panda prepared removal of role `%s` from user `%s`.", arguments["role_id"], arguments["user_id"]), "Remove role"
 	case "channel_rule.remove":
 		return fmt.Sprintf("Panda prepared removal of the channel access rule for `%s`.", arguments["channel_id"]), "Remove rule"
 	case "composed_tool.approve":

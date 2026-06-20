@@ -76,3 +76,11 @@ type Thread struct {
 	Name    string
 	Created bool
 }
+
+type MemberRoleRequest struct {
+	GuildID string
+	UserID  string
+	RoleID  string
+	ActorID string
+	Reason  string
+}

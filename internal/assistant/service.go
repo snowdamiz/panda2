@@ -488,7 +488,7 @@ func toolAvailabilityMessage(availableTools []llm.Tool) string {
 	if len(names) == 0 {
 		return "Tool availability for this request and user: no function tools are currently exposed to Panda. If asked what tools or capabilities Panda has, answer for the current user only, say that no function tools are available in this context, and do not list generic model/platform tools."
 	}
-	return "Tool availability for this request and user: Panda can call only these current function tools: `" + strings.Join(names, "`, `") + "`. If asked what tools or capabilities Panda has and `panda_list_tools` is listed, call it before answering. Otherwise answer only from this user-scoped list. Do not describe tools available to other users or roles. Do not claim arbitrary webpage browsing, image generation or analysis, code execution, hidden tools, or platform abilities unless they are listed here."
+	return "Tool availability for this request and user: Panda can call only these current function tools: `" + strings.Join(names, "`, `") + "`. If asked what tools or capabilities Panda has and `panda_list_tools` is listed, call it before answering. Otherwise answer only from this user-scoped list. Do not describe tools available to other users or roles. If `panda_list_tools` returns an admin_tools_notice, you may mention that admin-only tools exist only in that generic way; do not name or describe hidden admin tools. Do not claim arbitrary webpage browsing, image generation or analysis, code execution, hidden tools, or platform abilities unless they are listed here."
 }
 
 func confirmationFromTool(confirmation tools.InteractionConfirmation) InteractionConfirmation {
