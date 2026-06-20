@@ -17,6 +17,7 @@ import (
 	"github.com/sn0w/panda2/internal/repository"
 	"github.com/sn0w/panda2/internal/security"
 	"github.com/sn0w/panda2/internal/store"
+	"github.com/sn0w/panda2/internal/textutil"
 	"github.com/sn0w/panda2/internal/tools"
 )
 
@@ -915,6 +916,7 @@ func approvedToolAccess(spec Spec) tools.ToolAccess {
 		admin.PermissionAssistantUse:         {},
 		admin.PermissionAssistantAttachments: {},
 		admin.PermissionAssistantMemoryRead:  {},
+		admin.PermissionAssistantWebSearch:   {},
 		admin.PermissionModerationUse:        {},
 		admin.PermissionAdminConfigRead:      {},
 		admin.PermissionAdminConfigWrite:     {},
@@ -1136,7 +1138,7 @@ func truncate(value string, limit int) string {
 	if len(value) <= limit {
 		return value
 	}
-	return strings.TrimSpace(value[:limit]) + "...[truncated]"
+	return textutil.Truncate(value, limit, "...[truncated]")
 }
 
 func validStatusTransition(status string) bool {

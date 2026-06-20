@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/sn0w/panda2/internal/llm"
 	"github.com/sn0w/panda2/internal/memory"
@@ -67,6 +68,9 @@ func TestAskUsesGuildPromptAndMemory(t *testing.T) {
 	if _, err := configs.UpdatePrompt(ctx, "guild-1", "Prefer short answers."); err != nil {
 		t.Fatalf("UpdatePrompt: %v", err)
 	}
+	if _, err := configs.UpdateSoul(ctx, "guild-1", "Sound calm and quietly funny."); err != nil {
+		t.Fatalf("UpdateSoul: %v", err)
+	}
 	if _, err := configs.SetMemoryEnabled(ctx, "guild-1", true); err != nil {
 		t.Fatalf("SetMemoryEnabled: %v", err)
 	}
@@ -87,6 +91,9 @@ func TestAskUsesGuildPromptAndMemory(t *testing.T) {
 	joined := joinMessages(client.requests[0].Messages)
 	if !strings.Contains(joined, "Prefer short answers.") {
 		t.Fatalf("guild prompt missing from request: %s", joined)
+	}
+	if !strings.Contains(joined, "Sound calm and quietly funny.") {
+		t.Fatalf("agent soul missing from request: %s", joined)
 	}
 	if !strings.Contains(joined, "Deploys happen on Fridays") {
 		t.Fatalf("memory context missing from request: %s", joined)
@@ -307,6 +314,16 @@ func TestAskExecutesKnowledgeSearchTool(t *testing.T) {
 	finalMessages := joinMessages(client.requests[1].Messages)
 	if !strings.Contains(finalMessages, "Deploy notes") || !strings.Contains(finalMessages, "call-1") {
 		t.Fatalf("expected tool result in final request: %s", finalMessages)
+	}
+}
+
+func TestTitleFromQuestionTruncatesUTF8Safely(t *testing.T) {
+	title := titleFromQuestion("x" + strings.Repeat("界", 30))
+	if !strings.HasSuffix(title, "...") {
+		t.Fatalf("expected title truncation suffix, got %q", title)
+	}
+	if !utf8.ValidString(title) {
+		t.Fatalf("title is not valid UTF-8: %q", title)
 	}
 }
 

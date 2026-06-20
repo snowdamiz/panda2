@@ -23,6 +23,7 @@ import (
 	"github.com/sn0w/panda2/internal/repository"
 	"github.com/sn0w/panda2/internal/store"
 	"github.com/sn0w/panda2/internal/tools"
+	"github.com/sn0w/panda2/internal/websearch"
 )
 
 type App struct {
@@ -79,6 +80,12 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 		WithAttachmentReader(attachments).
 		WithAuditRecorder(audit).
 		WithAdminOperations(adminService)
+	if cfg.BraveSearchConfigured() {
+		toolExecutor.WithWebSearcher(websearch.NewBraveClient(websearch.Config{
+			APIKey:  cfg.BraveSearchAPIKey,
+			BaseURL: cfg.BraveSearchBaseURL,
+		}))
+	}
 	composedService := composed.NewService(composedTools, toolRegistry, toolExecutor, openRouter, cfg.OpenRouterModel).
 		WithAuditRecorder(audit)
 	toolExecutor.WithDynamicToolProvider(composedService)

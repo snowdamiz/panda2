@@ -20,6 +20,7 @@ import (
 	"github.com/sn0w/panda2/internal/repository"
 	"github.com/sn0w/panda2/internal/security"
 	"github.com/sn0w/panda2/internal/store"
+	"github.com/sn0w/panda2/internal/textutil"
 )
 
 type Router struct {
@@ -70,7 +71,7 @@ func (r *Router) Handle(ctx context.Context, request Request) Response {
 	case "ping":
 		return Response{Content: "pong", Ephemeral: true}
 	case "help":
-		return Response{Content: "Talk naturally in Discord with the word `Panda`, like `Panda is this true?`; Panda uses the model to decide whether to answer. Message context menus can explain or summarize. Admins can use `/admin setup`, `/admin model`, `/admin prompt`, `/admin audit`, `/admin enable`, and `/admin disable`; usage, limits, server knowledge, role/channel access, memory consent, and moderation guidance are handled through Panda chat/tools.", Ephemeral: true}
+		return Response{Content: "Talk naturally in Discord with the word `Panda`, like `Panda is this true?`; Panda uses the model to decide whether to answer. Message context menus can explain or summarize. Admins can use `/admin setup`, `/admin model`, `/admin prompt`, `/admin soul`, `/admin audit`, `/admin enable`, and `/admin disable`; usage, limits, server knowledge, role/channel access, memory consent, and moderation guidance are handled through Panda chat/tools.", Ephemeral: true}
 	case "admin":
 		return r.handleAdmin(ctx, request)
 	case "ops":
@@ -167,20 +168,33 @@ func (r *Router) handleOps(ctx context.Context, request Request) Response {
 }
 
 func (r *Router) handleAdmin(ctx context.Context, request Request) Response {
-	if !request.IsGuildAdmin && !request.IsOwner {
-		return Response{Content: "Only a server administrator can use admin commands.", Ephemeral: true}
-	}
 	if request.GuildID == "" {
 		return Response{Content: "Admin commands must be run inside a Discord server.", Ephemeral: true}
 	}
 
-	switch strings.ToLower(request.Subcommand) {
+	subcommand := strings.ToLower(request.Subcommand)
+	if !request.IsGuildAdmin && !request.IsOwner {
+		if subcommand != "soul" {
+			return Response{Content: "Only a server administrator can use admin commands.", Ephemeral: true}
+		}
+		allowed, err := r.admin.CanWriteSoul(ctx, assistantAccessRequest(request))
+		if err != nil {
+			return Response{Content: "Permission lookup failed. Please try again later.", Ephemeral: true}
+		}
+		if !allowed {
+			return Response{Content: "Only a server administrator, moderator, or creator can update Panda's soul.", Ephemeral: true}
+		}
+	}
+
+	switch subcommand {
 	case "setup":
 		return r.handleAdminSetup(ctx, request)
 	case "model":
 		return r.handleAdminModel(ctx, request)
 	case "prompt":
 		return r.handleAdminPrompt(ctx, request)
+	case "soul":
+		return r.handleAdminSoul(ctx, request)
 	case "audit":
 		return r.handleAdminAudit(ctx, request)
 	case "enable":
@@ -237,6 +251,24 @@ func (r *Router) handleAdminPrompt(ctx context.Context, request Request) Respons
 		return Response{Content: "Prompt update failed.", Ephemeral: true}
 	}
 	return Response{Content: fmt.Sprintf("Server prompt updated (%d characters).", len(config.SystemPromptOverlay)), Ephemeral: true}
+}
+
+func (r *Router) handleAdminSoul(ctx context.Context, request Request) Response {
+	soul := strings.TrimSpace(request.Options["soul"])
+	if dryRunRequested(request) {
+		return dryRunResponse("agent soul would be updated (%d characters).", len(soul))
+	}
+	if soul == "" {
+		return soulModalResponse(request.UserID)
+	}
+	config, err := r.admin.SetSoul(ctx, request.GuildID, request.UserID, soul)
+	if err != nil {
+		if errors.Is(err, repository.ErrNotFound) {
+			return Response{Content: "Run `/admin setup` before changing the soul.", Ephemeral: true}
+		}
+		return Response{Content: "Soul update failed.", Ephemeral: true}
+	}
+	return Response{Content: fmt.Sprintf("Agent soul updated (%d characters).", len(config.AgentSoul)), Ephemeral: true}
 }
 
 func (r *Router) handleAdminToggle(ctx context.Context, request Request, enabled bool) Response {
@@ -617,6 +649,8 @@ func (r *Router) allowedToolPermissions(ctx context.Context, request Request) ma
 	r.addPermissionIfAllowed(ctx, request, permissions, admin.PermissionAssistantUse, r.admin.CanUseAssistant)
 	r.addPermissionIfAllowed(ctx, request, permissions, admin.PermissionAssistantAttachments, r.admin.CanUseAttachments)
 	r.addPermissionIfAllowed(ctx, request, permissions, admin.PermissionAssistantMemoryRead, r.admin.CanReadMemory)
+	r.addPermissionIfAllowed(ctx, request, permissions, admin.PermissionAssistantWebSearch, r.admin.CanUseWebSearch)
+	r.addPermissionIfAllowed(ctx, request, permissions, admin.PermissionAssistantSoulWrite, r.admin.CanWriteSoul)
 	r.addPermissionIfAllowed(ctx, request, permissions, admin.PermissionModerationUse, r.admin.CanUseModeration)
 	r.addPermissionIfAllowed(ctx, request, permissions, admin.PermissionAdminConfigRead, r.admin.CanReadConfig)
 	r.addPermissionIfAllowed(ctx, request, permissions, admin.PermissionAdminConfigWrite, r.admin.CanWriteConfig)
@@ -881,7 +915,7 @@ func chatThreadTitle(question string) string {
 	}
 	title = strings.ReplaceAll(title, "\n", " ")
 	if len(title) > 72 {
-		title = strings.TrimSpace(title[:72])
+		title = textutil.Truncate(title, 72, "")
 	}
 	return "Panda: " + title
 }

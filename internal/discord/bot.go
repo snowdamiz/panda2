@@ -316,6 +316,19 @@ func applicationCommands() []disgoDiscord.ApplicationCommandCreate {
 					},
 				},
 				disgoDiscord.ApplicationCommandOptionSubCommand{
+					Name:        "soul",
+					Description: "Set Panda's response style and personality",
+					Options: []disgoDiscord.ApplicationCommandOption{
+						disgoDiscord.ApplicationCommandOptionString{
+							Name:        "soul",
+							Description: "Personality, style, and response voice",
+							Required:    false,
+							MaxLength:   &maxTextLength,
+						},
+						dryRunOption,
+					},
+				},
+				disgoDiscord.ApplicationCommandOptionSubCommand{
 					Name:        "audit",
 					Description: "Show recent privileged actions",
 				},
@@ -453,7 +466,7 @@ func (b *Bot) handleSlashCommand(event *events.ApplicationCommandInteractionCrea
 	if question, ok := data.OptString("question"); ok {
 		request.Options["question"] = question
 	}
-	for _, name := range []string{"model", "fallback_models", "temperature", "max_response_tokens", "max_tokens", "tool_policy", "prompt", "action", "confirm", "request", "description", "spec_json", "role_id", "role_name", "channel_id", "channel_name", "welcome_text", "tool", "name", "version", "input_json"} {
+	for _, name := range []string{"model", "fallback_models", "temperature", "max_response_tokens", "max_tokens", "tool_policy", "prompt", "soul", "action", "confirm", "request", "description", "spec_json", "role_id", "role_name", "channel_id", "channel_name", "welcome_text", "tool", "name", "version", "input_json"} {
 		if value, ok := data.OptString(name); ok {
 			request.Options[name] = value
 		}

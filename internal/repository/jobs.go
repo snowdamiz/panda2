@@ -37,9 +37,32 @@ func (r *JobRepository) ClaimNext(ctx context.Context, kind, workerID string, le
 	}
 	now = now.UTC()
 	var claimed store.Job
+	claimedOne := false
 
 	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		query := tx.Where("status = ? AND run_after <= ?", "queued", now)
+		var expired []store.Job
+		if err := tx.Where("status = ? AND lease_expires_at IS NOT NULL AND lease_expires_at <= ?", "running", now).Find(&expired).Error; err != nil {
+			return err
+		}
+		for _, job := range expired {
+			if job.Attempts < job.MaxAttempts {
+				continue
+			}
+			if err := tx.Model(&store.Job{}).Where("id = ? AND status = ?", job.ID, "running").Updates(map[string]any{
+				"status":           "failed",
+				"lock_owner":       "",
+				"lease_expires_at": nil,
+				"last_error":       "job lease expired after max attempts",
+				"updated_at":       now,
+			}).Error; err != nil {
+				return err
+			}
+		}
+
+		query := tx.Where(`
+			(status = ? AND run_after <= ?)
+			OR (status = ? AND lease_expires_at IS NOT NULL AND lease_expires_at <= ? AND attempts < max_attempts)
+		`, "queued", now, "running", now)
 		if kind != "" {
 			query = query.Where("kind = ?", kind)
 		}
@@ -48,14 +71,19 @@ func (r *JobRepository) ClaimNext(ctx context.Context, kind, workerID string, le
 		err := query.Order("run_after ASC, id ASC").First(&job).Error
 		if err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
-				return ErrNotFound
+				return nil
 			}
 			return err
 		}
 
 		leaseUntil := now.Add(lease)
 		result := tx.Model(&store.Job{}).
-			Where("id = ? AND status = ?", job.ID, "queued").
+			Where(`
+				id = ? AND (
+					(status = ? AND run_after <= ?)
+					OR (status = ? AND lease_expires_at IS NOT NULL AND lease_expires_at <= ? AND attempts < max_attempts)
+				)
+			`, job.ID, "queued", now, "running", now).
 			Updates(map[string]any{
 				"status":           "running",
 				"lock_owner":       workerID,
@@ -67,14 +95,15 @@ func (r *JobRepository) ClaimNext(ctx context.Context, kind, workerID string, le
 			return result.Error
 		}
 		if result.RowsAffected == 0 {
-			return ErrNotFound
+			return nil
 		}
-		return tx.First(&claimed, job.ID).Error
+		if err := tx.First(&claimed, job.ID).Error; err != nil {
+			return err
+		}
+		claimedOne = true
+		return nil
 	})
-	if errors.Is(err, ErrNotFound) {
-		return store.Job{}, false, nil
-	}
-	return claimed, err == nil, err
+	return claimed, claimedOne, err
 }
 
 func (r *JobRepository) Complete(ctx context.Context, jobID uint, now time.Time) error {

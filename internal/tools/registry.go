@@ -37,6 +37,7 @@ const (
 	ToolClassAdminRead       ToolClass = "admin_read"
 	ToolClassAdminWrite      ToolClass = "admin_write"
 	ToolClassMemory          ToolClass = "memory"
+	ToolClassWebRead         ToolClass = "web_read"
 	ToolClassWorkflow        ToolClass = "workflow"
 	ToolClassMetadata        ToolClass = "metadata"
 	ToolClassOwnerOps        ToolClass = "owner_ops"
@@ -196,24 +197,27 @@ func (d Definition) AvailableTo(access ToolAccess) bool {
 	case ToolPolicyOff:
 		return false
 	case ToolPolicyReadOnly:
-		return d.ToolClass == ToolClassDiscordRead || d.ToolClass == ToolClassMemory || d.ToolClass == ToolClassMetadata
+		return d.ToolClass == ToolClassDiscordRead || d.ToolClass == ToolClassMemory || d.ToolClass == ToolClassWebRead || d.ToolClass == ToolClassMetadata
 	case ToolPolicyAssistive:
 		return d.ToolClass == ToolClassDiscordRead ||
 			d.ToolClass == ToolClassMemory ||
+			d.ToolClass == ToolClassWebRead ||
 			d.ToolClass == ToolClassWorkflow ||
 			d.ToolClass == ToolClassMetadata ||
 			(d.ToolClass == ToolClassModerationWrite && d.RequiresConfirmation)
 	case ToolPolicyAdminOnly:
-		return d.ToolClass == ToolClassAdminRead || d.ToolClass == ToolClassDiscordRead || d.ToolClass == ToolClassMetadata
+		return d.ToolClass == ToolClassAdminRead || d.ToolClass == ToolClassDiscordRead || d.ToolClass == ToolClassWebRead || d.ToolClass == ToolClassMetadata
 	case ToolPolicyModerator:
 		return d.ToolClass == ToolClassDiscordRead ||
 			d.ToolClass == ToolClassMemory ||
+			d.ToolClass == ToolClassWebRead ||
 			d.ToolClass == ToolClassWorkflow ||
 			d.ToolClass == ToolClassMetadata ||
 			d.ToolClass == ToolClassModerationWrite
 	case ToolPolicyWriteConfirmed:
 		return d.ToolClass == ToolClassDiscordRead ||
 			d.ToolClass == ToolClassMemory ||
+			d.ToolClass == ToolClassWebRead ||
 			d.ToolClass == ToolClassWorkflow ||
 			d.ToolClass == ToolClassMetadata ||
 			d.ToolClass == ToolClassAdminWrite ||
@@ -227,6 +231,7 @@ func (d Definition) AvailableTo(access ToolAccess) bool {
 			d.ToolClass == ToolClassDiscordWrite ||
 			d.ToolClass == ToolClassModerationWrite ||
 			d.ToolClass == ToolClassMemory ||
+			d.ToolClass == ToolClassWebRead ||
 			d.ToolClass == ToolClassWorkflow ||
 			d.ToolClass == ToolClassMetadata
 	default:
@@ -337,6 +342,19 @@ func DefaultDefinitions() []Definition {
 			IncludeInModelContext: true,
 		},
 		{
+			Name:                  "web.search",
+			Description:           "Search the public web with Brave Search and return ranked URLs, titles, and snippets for current-information answers.",
+			RequiredPermission:    admin.PermissionAssistantWebSearch,
+			ToolClass:             ToolClassWebRead,
+			InputSchema:           webSearchSchema(),
+			OutputSchema:          objectSchema("results"),
+			Timeout:               8 * time.Second,
+			Redaction:             RedactContent,
+			Audit:                 AuditSensitive,
+			IncludeInModelContext: true,
+			MaxLimit:              20,
+		},
+		{
 			Name:                  "summarize_text_file",
 			Description:           "Summarize extracted text from a safe uploaded file.",
 			RequiredPermission:    admin.PermissionAssistantAttachments,
@@ -395,6 +413,19 @@ func DefaultDefinitions() []Definition {
 			Redaction:             RedactSecrets,
 			Audit:                 AuditOnUse,
 			IncludeInModelContext: true,
+		},
+		{
+			Name:                  "panda.manage_soul",
+			Description:           "Read or update Panda's agent soul: response style, personality, and voice for the current guild.",
+			RequiredPermission:    admin.PermissionAssistantSoulWrite,
+			ToolClass:             ToolClassAdminWrite,
+			InputSchema:           actionSchema([]string{"action"}, "action", "soul", "dry_run"),
+			OutputSchema:          objectSchema("result"),
+			Timeout:               time.Second,
+			Redaction:             RedactContent,
+			Audit:                 AuditOnUse,
+			IncludeInModelContext: true,
+			SupportsDryRun:        true,
 		},
 		{
 			Name:                  "panda.manage_budget_limit",
@@ -507,6 +538,20 @@ func toolListSchema() json.RawMessage {
 	return schemaWithProperties(nil, map[string]any{
 		"kind":            map[string]string{"type": "string", "description": "Optional filter: native, composed, or all."},
 		"include_schemas": map[string]string{"type": "boolean", "description": "Include input schemas in the listing."},
+	})
+}
+
+func webSearchSchema() json.RawMessage {
+	return schemaWithProperties([]string{"query"}, map[string]any{
+		"query":          map[string]string{"type": "string", "description": "Public web search query. Use search operators like site: or filetype: inside this string when useful."},
+		"limit":          map[string]any{"type": "integer", "minimum": 1, "maximum": 20, "description": "Maximum web results to return."},
+		"offset":         map[string]any{"type": "integer", "minimum": 0, "maximum": 9, "description": "Zero-based result page offset for pagination."},
+		"country":        map[string]string{"type": "string", "description": "Two-letter result country code, default US."},
+		"search_lang":    map[string]string{"type": "string", "description": "Search result language code, default en."},
+		"ui_lang":        map[string]string{"type": "string", "description": "Response UI language code, default en-US."},
+		"safesearch":     map[string]any{"type": "string", "enum": []string{"off", "moderate", "strict"}, "description": "Adult content filtering level."},
+		"freshness":      map[string]string{"type": "string", "description": "Optional recency filter: pd, pw, pm, py, or YYYY-MM-DDtoYYYY-MM-DD."},
+		"extra_snippets": map[string]string{"type": "boolean", "description": "Request additional snippets per result when available. Defaults to true."},
 	})
 }
 

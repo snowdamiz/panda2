@@ -17,10 +17,16 @@ import (
 	"github.com/sn0w/panda2/internal/repository"
 	"github.com/sn0w/panda2/internal/security"
 	"github.com/sn0w/panda2/internal/store"
+	"github.com/sn0w/panda2/internal/textutil"
+	"github.com/sn0w/panda2/internal/websearch"
 )
 
 type KnowledgeSearcher interface {
 	Search(ctx context.Context, guildID, query string, limit int) ([]repository.KnowledgeSearchResult, error)
+}
+
+type WebSearcher interface {
+	Search(ctx context.Context, request websearch.Request) (websearch.Response, error)
 }
 
 type ConfigReader interface {
@@ -51,6 +57,7 @@ type AuditRecorder interface {
 
 type AdminOperations interface {
 	UsageReport(ctx context.Context, guildID string, window time.Duration, dimension string, limit int) (admin.UsageReport, error)
+	SetSoul(ctx context.Context, guildID, actorID, soul string) (store.GuildConfig, error)
 	SetMemoryEnabled(ctx context.Context, guildID, actorID string, enabled bool) (store.GuildConfig, error)
 	AddMemoryDocument(ctx context.Context, request memory.AddDocumentRequest) (store.KnowledgeDocument, error)
 	SearchMemory(ctx context.Context, guildID, query string, limit int) ([]repository.KnowledgeSearchResult, error)
@@ -84,6 +91,7 @@ type DiscordToolRequest struct {
 type Executor struct {
 	registry    *Registry
 	knowledge   KnowledgeSearcher
+	webSearch   WebSearcher
 	configs     ConfigReader
 	context     ContextReader
 	attachments AttachmentReader
@@ -142,6 +150,11 @@ func NewExecutor(registry *Registry, knowledge KnowledgeSearcher, configs Config
 
 func (e *Executor) WithContextReader(reader ContextReader) *Executor {
 	e.context = reader
+	return e
+}
+
+func (e *Executor) WithWebSearcher(searcher WebSearcher) *Executor {
+	e.webSearch = searcher
 	return e
 }
 
@@ -251,6 +264,8 @@ func (e *Executor) Execute(ctx context.Context, request ExecutionRequest) (Execu
 		}
 	case "search_knowledge":
 		payload, err = e.searchKnowledge(toolCtx, request.GuildID, arguments)
+	case "web.search":
+		payload, err = e.searchWeb(toolCtx, arguments)
 	case "summarize_text_file":
 		payload, err = e.summarizeTextFile(toolCtx, request.GuildID, arguments)
 	case "read_config":
@@ -259,6 +274,8 @@ func (e *Executor) Execute(ctx context.Context, request ExecutionRequest) (Execu
 		payload, err = e.manageMemoryConsent(toolCtx, request, arguments)
 	case "panda.usage_report":
 		payload, err = e.usageReport(toolCtx, request, arguments)
+	case "panda.manage_soul":
+		payload, err = e.manageSoul(toolCtx, request, arguments)
 	case "panda.manage_budget_limit":
 		payload, err = e.manageBudgetLimit(toolCtx, request, arguments)
 	case "panda.manage_knowledge":
@@ -415,6 +432,59 @@ func (e *Executor) searchKnowledge(ctx context.Context, guildID string, argument
 	return map[string]any{"results": output}, nil
 }
 
+func (e *Executor) searchWeb(ctx context.Context, arguments string) (any, error) {
+	if e.webSearch == nil {
+		return nil, fmt.Errorf("web search is not configured")
+	}
+	args, err := parseArguments(arguments)
+	if err != nil {
+		return nil, err
+	}
+	query := firstNonEmpty(stringArgument(args, "query"), stringArgument(args, "q"))
+	if query == "" {
+		return nil, fmt.Errorf("query is required")
+	}
+	extraSnippets := true
+	if _, ok := args["extra_snippets"]; ok {
+		extraSnippets = boolArgument(args, "extra_snippets")
+	}
+	response, err := e.webSearch.Search(ctx, websearch.Request{
+		Query:         query,
+		Count:         parseToolLimit(args["limit"], 5),
+		Offset:        intArgument(args, "offset", 0),
+		Country:       stringArgument(args, "country"),
+		SearchLang:    stringArgument(args, "search_lang"),
+		UILang:        stringArgument(args, "ui_lang"),
+		SafeSearch:    stringArgument(args, "safesearch"),
+		Freshness:     stringArgument(args, "freshness"),
+		ExtraSnippets: extraSnippets,
+	})
+	if err != nil {
+		return nil, err
+	}
+	results := make([]map[string]any, 0, len(response.Results))
+	for index, result := range response.Results {
+		results = append(results, map[string]any{
+			"rank":           index + 1,
+			"title":          result.Title,
+			"url":            result.URL,
+			"description":    result.Description,
+			"extra_snippets": result.ExtraSnippets,
+			"age":            result.Age,
+			"page_age":       result.PageAge,
+			"language":       result.Language,
+			"source":         result.Source,
+		})
+	}
+	return map[string]any{
+		"provider":               response.Provider,
+		"query":                  response.Query,
+		"altered_query":          response.AlteredQuery,
+		"more_results_available": response.MoreResultsAvailable,
+		"results":                results,
+	}, nil
+}
+
 func (e *Executor) summarizeTextFile(ctx context.Context, guildID string, arguments string) (any, error) {
 	if e.attachments == nil {
 		return nil, fmt.Errorf("attachment reads are not configured")
@@ -473,7 +543,49 @@ func (e *Executor) readConfig(ctx context.Context, guildID string, arguments str
 		"memory_enabled":      config.MemoryEnabled,
 		"tool_policy":         config.ToolPolicy,
 		"max_response_tokens": config.MaxResponseTokens,
+		"agent_soul":          config.AgentSoul,
 	}, nil
+}
+
+func (e *Executor) manageSoul(ctx context.Context, request ExecutionRequest, arguments string) (any, error) {
+	if e.adminOps == nil {
+		return nil, fmt.Errorf("admin operations are not configured")
+	}
+	args, err := parseArguments(arguments)
+	if err != nil {
+		return nil, err
+	}
+	action := strings.ToLower(firstNonEmpty(stringArgument(args, "action"), "status"))
+	switch action {
+	case "status":
+		if e.configs == nil {
+			return nil, fmt.Errorf("config reads are not configured")
+		}
+		config, ok, err := e.configs.Get(ctx, request.GuildID)
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			return map[string]any{"result": map[string]any{"configured": false}}, nil
+		}
+		return map[string]any{"result": map[string]any{"configured": true, "agent_soul": config.AgentSoul}}, nil
+	case "set", "update":
+		soul := stringArgument(args, "soul")
+		if soul == "" {
+			return nil, fmt.Errorf("soul is required")
+		}
+		preview := map[string]any{"soul_chars": len(soul)}
+		if boolArgument(args, "dry_run") {
+			return dryRunToolResult("soul.set", preview), nil
+		}
+		config, err := e.adminOps.SetSoul(ctx, request.GuildID, request.ActorID, soul)
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{"result": map[string]any{"agent_soul": config.AgentSoul, "soul_chars": len(config.AgentSoul)}}, nil
+	default:
+		return nil, fmt.Errorf("action must be status, set, or update")
+	}
 }
 
 func (e *Executor) manageMemoryConsent(ctx context.Context, request ExecutionRequest, arguments string) (any, error) {
@@ -910,11 +1022,13 @@ func (e *Executor) canExecute(name string) bool {
 		return e.context != nil || e.discord != nil
 	case "search_knowledge":
 		return e.knowledge != nil
+	case "web.search":
+		return e.webSearch != nil
 	case "summarize_text_file":
 		return e.attachments != nil
 	case "read_config":
 		return e.configs != nil
-	case "manage_memory_consent", "panda.usage_report", "panda.manage_budget_limit", "panda.manage_knowledge", "panda.manage_role_permission", "panda.manage_channel_rule":
+	case "manage_memory_consent", "panda.usage_report", "panda.manage_soul", "panda.manage_budget_limit", "panda.manage_knowledge", "panda.manage_role_permission", "panda.manage_channel_rule":
 		return e.adminOps != nil
 	case "draft_moderator_note", "generate_workflow_json", "panda.list_tools":
 		return true
@@ -1209,6 +1323,23 @@ func parseToolLimit(value any, fallback int) int {
 	return fallback
 }
 
+func intArgumentValue(value any, fallback int) int {
+	switch typed := value.(type) {
+	case float64:
+		return int(typed)
+	case string:
+		parsed, err := strconv.Atoi(strings.TrimSpace(typed))
+		if err == nil {
+			return parsed
+		}
+	}
+	return fallback
+}
+
+func intArgument(arguments map[string]any, name string, fallback int) int {
+	return intArgumentValue(arguments[name], fallback)
+}
+
 func parseArguments(raw string) (map[string]any, error) {
 	arguments := map[string]any{}
 	if strings.TrimSpace(raw) == "" {
@@ -1290,7 +1421,7 @@ func truncateToolText(value string, limit int) string {
 	if limit <= 0 || len(value) <= limit {
 		return value
 	}
-	return strings.TrimSpace(value[:limit]) + "\n[truncated]"
+	return textutil.Truncate(value, limit, "\n[truncated]")
 }
 
 func firstNonEmpty(value, fallback string) string {

@@ -47,6 +47,9 @@ func TestHealthReportsMissingOptionalIntegrations(t *testing.T) {
 	if body.Checks["openrouter"].Status != "missing" {
 		t.Fatalf("expected openrouter missing, got %+v", body.Checks["openrouter"])
 	}
+	if body.Checks["brave_search"].Status != "missing" {
+		t.Fatalf("expected brave search missing, got %+v", body.Checks["brave_search"])
+	}
 	if body.Checks["local_storage"].Status != "ok" {
 		t.Fatalf("expected local storage ok, got %+v", body.Checks["local_storage"])
 	}
@@ -94,6 +97,7 @@ func TestMetricsReportsLocalState(t *testing.T) {
 	body := string(data)
 	for _, expected := range []string{
 		"panda_sqlite_up 1",
+		"panda_brave_search_configured 0",
 		"panda_queue_depth 1",
 		"panda_usage_events_total 1",
 		"panda_usage_events_failed_total 1",

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/sn0w/panda2/internal/security"
+	"github.com/sn0w/panda2/internal/textutil"
 )
 
 const (
@@ -157,7 +158,7 @@ func truncatePromptContent(value string, limit int) string {
 	if limit <= 0 || len(value) <= limit {
 		return value
 	}
-	return strings.TrimSpace(value[:limit]) + "\n[truncated]"
+	return textutil.Truncate(value, limit, "\n[truncated]")
 }
 
 func clamp(value, minValue, maxValue int) int {

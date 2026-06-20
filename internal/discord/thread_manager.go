@@ -8,6 +8,7 @@ import (
 	"github.com/disgoorg/disgo/rest"
 	"github.com/disgoorg/snowflake/v2"
 	"github.com/sn0w/panda2/internal/commands"
+	"github.com/sn0w/panda2/internal/textutil"
 )
 
 type threadCreator interface {
@@ -47,7 +48,7 @@ func safeThreadName(value string) string {
 		return "Panda chat"
 	}
 	if len(value) > 90 {
-		value = strings.TrimSpace(value[:90])
+		value = textutil.Truncate(value, 90, "")
 	}
 	return value
 }

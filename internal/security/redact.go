@@ -3,6 +3,8 @@ package security
 import (
 	"regexp"
 	"strings"
+
+	"github.com/sn0w/panda2/internal/textutil"
 )
 
 var secretLikePattern = regexp.MustCompile(`(?i)(sk-[a-z0-9_-]{12,}|[a-z0-9_./+=-]{32,})`)
@@ -18,5 +20,5 @@ func SafeDiscordContent(value string) string {
 	if len(value) <= 1900 {
 		return value
 	}
-	return strings.TrimSpace(value[:1900]) + "\n\n[truncated]"
+	return textutil.Truncate(value, 1900, "\n\n[truncated]")
 }

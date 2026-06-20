@@ -2,8 +2,10 @@ package repository
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/sn0w/panda2/internal/store"
 )
@@ -154,6 +156,18 @@ func TestKnowledgeSearchUsesLocalIndex(t *testing.T) {
 	}
 }
 
+func TestKnowledgeChunksDoNotSplitUTF8Runes(t *testing.T) {
+	chunks := splitKnowledgeChunks("x" + strings.Repeat("界", 500))
+	if len(chunks) < 2 {
+		t.Fatalf("expected content to split into multiple chunks, got %d", len(chunks))
+	}
+	for _, chunk := range chunks {
+		if !utf8.ValidString(chunk) {
+			t.Fatalf("chunk is not valid UTF-8: %q", chunk)
+		}
+	}
+}
+
 func TestAttachmentGetByGuild(t *testing.T) {
 	ctx := context.Background()
 	db, err := store.Open(ctx, "file::memory:?cache=shared")
@@ -256,6 +270,71 @@ func TestJobClaimAndRetry(t *testing.T) {
 	}
 	if depth != 1 {
 		t.Fatalf("expected retried job in queue, got depth %d", depth)
+	}
+}
+
+func TestJobClaimReclaimsExpiredLease(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(ctx, "file::memory:?cache=shared")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer db.Close()
+
+	repo := NewJobRepository(db.DB)
+	job, err := repo.Enqueue(ctx, store.Job{Kind: "summarize", GuildID: "guild-1", Payload: "{}", MaxAttempts: 2})
+	if err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+	now := time.Date(2026, 6, 20, 12, 0, 0, 0, time.UTC)
+	claimed, ok, err := repo.ClaimNext(ctx, "summarize", "worker-1", time.Minute, now)
+	if err != nil || !ok {
+		t.Fatalf("first ClaimNext ok=%t err=%v", ok, err)
+	}
+	if claimed.ID != job.ID || claimed.Attempts != 1 {
+		t.Fatalf("unexpected first claim: %+v", claimed)
+	}
+
+	if _, ok, err := repo.ClaimNext(ctx, "summarize", "worker-2", time.Minute, now.Add(30*time.Second)); err != nil || ok {
+		t.Fatalf("active lease should not be reclaimed: ok=%t err=%v", ok, err)
+	}
+
+	reclaimed, ok, err := repo.ClaimNext(ctx, "summarize", "worker-2", time.Minute, now.Add(2*time.Minute))
+	if err != nil || !ok {
+		t.Fatalf("expired ClaimNext ok=%t err=%v", ok, err)
+	}
+	if reclaimed.ID != job.ID || reclaimed.Attempts != 2 || reclaimed.LockOwner != "worker-2" {
+		t.Fatalf("unexpected reclaimed job: %+v", reclaimed)
+	}
+}
+
+func TestJobClaimFailsExpiredLeaseAfterMaxAttempts(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(ctx, "file::memory:?cache=shared")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer db.Close()
+
+	repo := NewJobRepository(db.DB)
+	job, err := repo.Enqueue(ctx, store.Job{Kind: "summarize", GuildID: "guild-1", Payload: "{}", MaxAttempts: 1})
+	if err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+	now := time.Date(2026, 6, 20, 12, 0, 0, 0, time.UTC)
+	if _, ok, err := repo.ClaimNext(ctx, "summarize", "worker-1", time.Minute, now); err != nil || !ok {
+		t.Fatalf("first ClaimNext ok=%t err=%v", ok, err)
+	}
+	if _, ok, err := repo.ClaimNext(ctx, "summarize", "worker-2", time.Minute, now.Add(2*time.Minute)); err != nil || ok {
+		t.Fatalf("maxed expired lease should not be reclaimed: ok=%t err=%v", ok, err)
+	}
+
+	var saved store.Job
+	if err := db.DB.First(&saved, job.ID).Error; err != nil {
+		t.Fatalf("lookup job: %v", err)
+	}
+	if saved.Status != "failed" || !strings.Contains(saved.LastError, "lease expired") || saved.LockOwner != "" || saved.LeaseExpiresAt != nil {
+		t.Fatalf("expected failed expired job, got %+v", saved)
 	}
 }
 

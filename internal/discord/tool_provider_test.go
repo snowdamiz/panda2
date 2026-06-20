@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/disgoorg/snowflake/v2"
 	"github.com/sn0w/panda2/internal/tools"
 )
 
@@ -26,5 +27,16 @@ func TestDiscordToolProviderCoversRegisteredDiscordTools(t *testing.T) {
 	if len(missing) > 0 {
 		sort.Strings(missing)
 		t.Fatalf("registered Discord tools missing provider handlers: %s", strings.Join(missing, ", "))
+	}
+}
+
+func TestDiscordToolPreflightRequiresGuildForPermissionChecks(t *testing.T) {
+	provider := &ToolProvider{botUserID: snowflake.MustParse("100000000000000001")}
+	err := provider.preflight(tools.DiscordToolRequest{
+		Arguments:   map[string]any{},
+		Permissions: []string{"SEND_MESSAGES"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "guild_id is required") {
+		t.Fatalf("expected missing guild preflight error, got %v", err)
 	}
 }

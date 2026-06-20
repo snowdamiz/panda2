@@ -76,6 +76,9 @@ func TestLoadConfigFile(t *testing.T) {
 				"cooldown": "45s"
 			}
 		},
+		"brave_search": {
+			"base_url": "https://brave.example/res/v1"
+		},
 		"runtime": {
 			"port": "9090",
 			"environment": "development",
@@ -112,6 +115,9 @@ func TestLoadConfigFile(t *testing.T) {
 	if cfg.OpenRouterCircuitBreakerFailureThreshold != 3 || cfg.OpenRouterCircuitBreakerCooldown.String() != "45s" {
 		t.Fatalf("unexpected circuit breaker config: threshold=%d cooldown=%s", cfg.OpenRouterCircuitBreakerFailureThreshold, cfg.OpenRouterCircuitBreakerCooldown)
 	}
+	if cfg.BraveSearchBaseURL != "https://brave.example/res/v1" {
+		t.Fatalf("unexpected Brave Search base URL: %q", cfg.BraveSearchBaseURL)
+	}
 	if cfg.Port != "9090" || cfg.Environment != "development" || cfg.LogLevel != "debug" {
 		t.Fatalf("unexpected runtime config: port=%q environment=%q log=%q", cfg.Port, cfg.Environment, cfg.LogLevel)
 	}
@@ -140,6 +146,8 @@ func TestEnvOverridesConfigFile(t *testing.T) {
 	t.Setenv("DISCORD_APPLICATION_ID", "app-from-env")
 	t.Setenv("OPENROUTER_DEFAULT_MODEL", "provider/from-env")
 	t.Setenv("OPENROUTER_FALLBACK_MODELS", "provider/env-a,provider/env-b")
+	t.Setenv("BRAVE_SEARCH_API_KEY", "brave-key")
+	t.Setenv("BRAVE_SEARCH_BASE_URL", "https://brave-env.example/res/v1")
 	t.Setenv("OWNER_USER_IDS", "99")
 
 	cfg, _, err := Load()
@@ -157,6 +165,9 @@ func TestEnvOverridesConfigFile(t *testing.T) {
 	}
 	if cfg.IsOwner("42") || !cfg.IsOwner("99") {
 		t.Fatalf("expected env owner ids to override file ids, got %#v", cfg.OwnerUserIDs)
+	}
+	if !cfg.BraveSearchConfigured() || cfg.BraveSearchBaseURL != "https://brave-env.example/res/v1" {
+		t.Fatalf("expected env Brave Search settings, configured=%t base=%q", cfg.BraveSearchConfigured(), cfg.BraveSearchBaseURL)
 	}
 }
 
@@ -211,6 +222,8 @@ func clearConfigEnv(t *testing.T) {
 		"OPENROUTER_APP_TITLE",
 		"OPENROUTER_CIRCUIT_FAILURE_THRESHOLD",
 		"OPENROUTER_CIRCUIT_COOLDOWN",
+		"BRAVE_SEARCH_API_KEY",
+		"BRAVE_SEARCH_BASE_URL",
 		"SQLITE_PATH",
 		"DATA_DIR",
 		"PORT",

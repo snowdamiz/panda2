@@ -252,6 +252,7 @@ Permission names:
 - `assistant.attachments`
 - `assistant.memory.read`
 - `assistant.memory.write`
+- `assistant.web_search`
 - `moderation.use`
 - `admin.config.read`
 - `admin.config.write`

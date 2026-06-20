@@ -71,6 +71,13 @@ func (r *GuildConfigRepository) UpdatePrompt(ctx context.Context, guildID, promp
 	})
 }
 
+func (r *GuildConfigRepository) UpdateSoul(ctx context.Context, guildID, soul string) (store.GuildConfig, error) {
+	return r.update(ctx, guildID, map[string]any{
+		"agent_soul": soul,
+		"updated_at": time.Now().UTC(),
+	})
+}
+
 func (r *GuildConfigRepository) SetAssistantEnabled(ctx context.Context, guildID string, enabled bool) (store.GuildConfig, error) {
 	return r.update(ctx, guildID, map[string]any{
 		"assistant_enabled": enabled,

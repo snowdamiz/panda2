@@ -429,6 +429,13 @@ var migrations = []Migration{
 			`CREATE INDEX IF NOT EXISTS idx_composed_tool_dedupes_expires_at ON composed_tool_dedupes(expires_at)`,
 		},
 	},
+	{
+		Version: 9,
+		Name:    "agent_soul",
+		SQL: []string{
+			`ALTER TABLE guild_configs ADD COLUMN agent_soul TEXT NOT NULL DEFAULT ''`,
+		},
+	},
 }
 
 func RunMigrations(db *gorm.DB) error {

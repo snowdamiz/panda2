@@ -88,6 +88,7 @@ func (s *Server) healthPayload(ctx context.Context) (healthResponse, int) {
 		"fiber":         {Status: "ok"},
 		"discord":       configuredStatus(s.cfg.DiscordConfigured(), "credentials missing; gateway disabled"),
 		"openrouter":    configuredStatus(s.cfg.OpenRouterConfigured(), "api key missing; natural-language assistant disabled"),
+		"brave_search":  configuredStatus(s.cfg.BraveSearchConfigured(), "api key missing; web search disabled"),
 		"local_storage": localStorageStatus(s.cfg.DataDir),
 	}
 
@@ -120,6 +121,7 @@ func (s *Server) metrics(ctx context.Context) string {
 	writeGauge(&builder, "panda_sqlite_up", "SQLite ping status", sqliteUp)
 	writeGauge(&builder, "panda_discord_configured", "Discord credentials configured", boolInt(s.cfg.DiscordConfigured()))
 	writeGauge(&builder, "panda_openrouter_configured", "OpenRouter API key configured", boolInt(s.cfg.OpenRouterConfigured()))
+	writeGauge(&builder, "panda_brave_search_configured", "Brave Search API key configured", boolInt(s.cfg.BraveSearchConfigured()))
 
 	var migrationVersion int
 	_ = s.store.DB.Raw("SELECT COALESCE(MAX(version), 0) FROM schema_migrations").Scan(&migrationVersion).Error

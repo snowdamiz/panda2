@@ -16,6 +16,9 @@
       "cooldown": "30s"
     }
   },
+  "brave_search": {
+    "base_url": "https://api.search.brave.com/res/v1"
+  },
   "runtime": {
     "port": "8080",
     "log_level": "info",

@@ -403,6 +403,78 @@ func TestAdminPromptWithoutTextUsesModal(t *testing.T) {
 	}
 }
 
+func TestAdminSoulUpdatesSystemPrompt(t *testing.T) {
+	client := &fakeLLM{response: llm.ChatResponse{Content: "ok"}}
+	router := newTestRouter(t, client, 20)
+	_ = router.Handle(context.Background(), Request{Command: "admin", Subcommand: "setup", GuildID: "guild-1", UserID: "admin", IsGuildAdmin: true})
+
+	soul := router.Handle(context.Background(), Request{
+		Command:      "admin",
+		Subcommand:   "soul",
+		GuildID:      "guild-1",
+		UserID:       "admin",
+		IsGuildAdmin: true,
+		Options:      map[string]string{"soul": "Be crisp, warm, and lightly irreverent."},
+	})
+	if !strings.Contains(soul.Content, "Agent soul updated") {
+		t.Fatalf("expected soul update response, got %+v", soul)
+	}
+
+	response := router.Handle(context.Background(), Request{
+		Command:   "ask",
+		GuildID:   "guild-1",
+		ChannelID: "channel-1",
+		UserID:    "user-1",
+		Options:   map[string]string{"question": "hi"},
+	})
+	if response.Content != "ok" {
+		t.Fatalf("unexpected ask response: %+v", response)
+	}
+	if len(client.requests) != 1 || !strings.Contains(joinRequestMessages(client.requests[0]), "lightly irreverent") {
+		t.Fatalf("agent soul missing from ask request: %+v", client.requests)
+	}
+}
+
+func TestAdminSoulWithoutTextUsesModal(t *testing.T) {
+	router := newTestRouter(t, &fakeLLM{}, 20)
+	_ = router.Handle(context.Background(), Request{Command: "admin", Subcommand: "setup", GuildID: "guild-1", UserID: "admin", IsGuildAdmin: true})
+
+	soul := router.Handle(context.Background(), Request{
+		Command:      "admin",
+		Subcommand:   "soul",
+		GuildID:      "guild-1",
+		UserID:       "admin",
+		IsGuildAdmin: true,
+		Options:      map[string]string{},
+	})
+	if !soul.Ephemeral || soul.Modal == nil || soul.Modal.ID == "" || len(soul.Modal.Inputs) != 1 {
+		t.Fatalf("expected soul modal response, got %+v", soul)
+	}
+
+	request, ok := RequestFromModalID(soul.Modal.ID, map[string]string{ModalSoulInput: "Make answers gentler."}, Request{
+		GuildID:      "guild-1",
+		ChannelID:    "channel-1",
+		UserID:       "admin",
+		IsGuildAdmin: true,
+	})
+	if !ok {
+		t.Fatal("expected soul modal to parse")
+	}
+	updated := router.Handle(context.Background(), request)
+	if !strings.Contains(updated.Content, "Agent soul updated") {
+		t.Fatalf("expected soul update from modal, got %+v", updated)
+	}
+
+	_, ok = RequestFromModalID(soul.Modal.ID, map[string]string{ModalSoulInput: "Nope"}, Request{UserID: "other-admin"})
+	if ok {
+		t.Fatal("soul modal should be scoped to the original user")
+	}
+	_, ok = RequestFromModalID(soul.Modal.ID, map[string]string{ModalSoulInput: ""}, Request{UserID: "admin"})
+	if ok {
+		t.Fatal("soul modal should reject blank soul text")
+	}
+}
+
 func TestConfirmationIDRestoresCommandRequest(t *testing.T) {
 	base := Request{
 		GuildID:      "guild-1",

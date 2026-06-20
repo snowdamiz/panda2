@@ -31,6 +31,8 @@ type Config struct {
 	OpenRouterAppTitle                       string
 	OpenRouterCircuitBreakerFailureThreshold int
 	OpenRouterCircuitBreakerCooldown         time.Duration
+	BraveSearchAPIKey                        string
+	BraveSearchBaseURL                       string
 	SQLitePath                               string
 	DataDir                                  string
 	Port                                     string
@@ -42,10 +44,11 @@ type Config struct {
 }
 
 type fileConfig struct {
-	Discord    fileDiscordConfig    `json:"discord"`
-	OpenRouter fileOpenRouterConfig `json:"openrouter"`
-	Runtime    fileRuntimeConfig    `json:"runtime"`
-	Storage    fileStorageConfig    `json:"storage"`
+	Discord     fileDiscordConfig     `json:"discord"`
+	OpenRouter  fileOpenRouterConfig  `json:"openrouter"`
+	BraveSearch fileBraveSearchConfig `json:"brave_search"`
+	Runtime     fileRuntimeConfig     `json:"runtime"`
+	Storage     fileStorageConfig     `json:"storage"`
 }
 
 type fileDiscordConfig struct {
@@ -67,6 +70,10 @@ type fileOpenRouterConfig struct {
 type fileCircuitBreakerConfig struct {
 	FailureThreshold *int   `json:"failure_threshold"`
 	Cooldown         string `json:"cooldown"`
+}
+
+type fileBraveSearchConfig struct {
+	BaseURL string `json:"base_url"`
 }
 
 type fileRuntimeConfig struct {
@@ -111,6 +118,9 @@ func (c Config) Validate() ([]string, error) {
 	if c.OpenRouterModel == "" {
 		return nil, errors.New("openrouter.default_model (OPENROUTER_DEFAULT_MODEL) must not be empty")
 	}
+	if c.BraveSearchBaseURL == "" {
+		return nil, errors.New("brave_search.base_url (BRAVE_SEARCH_BASE_URL) must not be empty")
+	}
 	if c.OpenRouterCircuitBreakerFailureThreshold < 0 {
 		return nil, errors.New("openrouter.circuit_breaker.failure_threshold (OPENROUTER_CIRCUIT_FAILURE_THRESHOLD) must not be negative")
 	}
@@ -151,6 +161,10 @@ func (c Config) OpenRouterConfigured() bool {
 	return c.OpenRouterAPIKey != ""
 }
 
+func (c Config) BraveSearchConfigured() bool {
+	return c.BraveSearchAPIKey != ""
+}
+
 func (c Config) IsOwner(userID string) bool {
 	_, ok := c.OwnerUserIDs[userID]
 	return ok
@@ -163,6 +177,7 @@ func defaultConfig() Config {
 		OpenRouterAppTitle:                       "Panda Assistant",
 		OpenRouterCircuitBreakerFailureThreshold: 5,
 		OpenRouterCircuitBreakerCooldown:         30 * time.Second,
+		BraveSearchBaseURL:                       "https://api.search.brave.com/res/v1",
 		Port:                                     "8080",
 		Environment:                              defaultEnvironment(),
 		LogLevel:                                 "info",
@@ -244,6 +259,10 @@ func applyFileConfig(cfg *Config, file fileConfig) error {
 		cfg.OpenRouterCircuitBreakerCooldown = parsed
 	}
 
+	if value := strings.TrimSpace(file.BraveSearch.BaseURL); value != "" {
+		cfg.BraveSearchBaseURL = value
+	}
+
 	if value := strings.TrimSpace(file.Runtime.Port); value != "" {
 		cfg.Port = value
 	}
@@ -288,6 +307,8 @@ func applyEnv(cfg *Config) {
 	cfg.OpenRouterAppTitle = nonEmptyStringFromEnv("OPENROUTER_APP_TITLE", cfg.OpenRouterAppTitle)
 	cfg.OpenRouterCircuitBreakerFailureThreshold = intFromEnv("OPENROUTER_CIRCUIT_FAILURE_THRESHOLD", cfg.OpenRouterCircuitBreakerFailureThreshold)
 	cfg.OpenRouterCircuitBreakerCooldown = durationFromEnv("OPENROUTER_CIRCUIT_COOLDOWN", cfg.OpenRouterCircuitBreakerCooldown)
+	cfg.BraveSearchAPIKey = stringFromEnv("BRAVE_SEARCH_API_KEY", cfg.BraveSearchAPIKey)
+	cfg.BraveSearchBaseURL = nonEmptyStringFromEnv("BRAVE_SEARCH_BASE_URL", cfg.BraveSearchBaseURL)
 	cfg.Port = nonEmptyStringFromEnv("PORT", cfg.Port)
 	cfg.Environment = nonEmptyStringFromEnv("ENVIRONMENT", cfg.Environment)
 	cfg.LogLevel = nonEmptyStringFromEnv("LOG_LEVEL", cfg.LogLevel)

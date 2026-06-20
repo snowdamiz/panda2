@@ -30,8 +30,8 @@ func TestOpenRunsMigrationsAndPragmas(t *testing.T) {
 	if err := store.DB.Table("schema_migrations").Count(&count).Error; err != nil {
 		t.Fatalf("schema migration count failed: %v", err)
 	}
-	if count != 8 {
-		t.Fatalf("expected eight migrations, got %d", count)
+	if count != 9 {
+		t.Fatalf("expected nine migrations, got %d", count)
 	}
 
 	var tableCount int64

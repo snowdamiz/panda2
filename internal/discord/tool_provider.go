@@ -17,6 +17,7 @@ import (
 	"github.com/sn0w/panda2/internal/repository"
 	"github.com/sn0w/panda2/internal/security"
 	"github.com/sn0w/panda2/internal/store"
+	"github.com/sn0w/panda2/internal/textutil"
 	"github.com/sn0w/panda2/internal/tools"
 )
 
@@ -1370,12 +1371,12 @@ func (p *ToolProvider) deleteScheduledEvent(request tools.DiscordToolRequest) (a
 
 func (p *ToolProvider) preflight(request tools.DiscordToolRequest) error {
 	required := permissionBits(request.Permissions)
-	if required == disgoDiscord.PermissionsNone || request.GuildID == "" || p.botUserID == 0 {
+	if required == disgoDiscord.PermissionsNone || p.botUserID == 0 {
 		return nil
 	}
 	guildID, err := guildIDArg(request)
 	if err != nil {
-		return err
+		return fmt.Errorf("discord permission preflight failed: %w", err)
 	}
 	member, err := p.rest.GetMember(guildID, p.botUserID)
 	if err != nil {
@@ -2454,7 +2455,7 @@ func truncateDiscordToolText(value string, limit int) string {
 	if limit <= 0 || len(value) <= limit {
 		return value
 	}
-	return strings.TrimSpace(value[:limit]) + "\n[truncated]"
+	return textutil.Truncate(value, limit, "\n[truncated]")
 }
 
 func referencedMessageID(message disgoDiscord.Message) string {

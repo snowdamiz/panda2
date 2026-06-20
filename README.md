@@ -15,9 +15,11 @@ Non-secret settings live in `panda.config.json`. Set `PANDA_CONFIG=/path/to/conf
 
 For live Discord/OpenRouter integrations, set `DISCORD_BOT_TOKEN` and `OPENROUTER_API_KEY` in your shell or deployment secrets, then set `discord.application_id` in `panda.config.json` or provide `DISCORD_APPLICATION_ID`.
 
+To enable public web search, set `BRAVE_SEARCH_API_KEY`. Panda exposes Brave Search to the model as the read-only `web.search` tool when the key is configured, the guild tool policy allows read tools, and the caller has `assistant.web_search` permission. The optional `brave_search.base_url` setting defaults to `https://api.search.brave.com/res/v1`.
+
 For queue-only processing without Discord or HTTP, run `go run ./cmd/worker`.
 
-Health endpoints report configuration, Fiber, Discord, OpenRouter, SQLite, and local storage status:
+Health endpoints report configuration, Fiber, Discord, OpenRouter, Brave Search, SQLite, and local storage status:
 
 - `GET /healthz`
 - `GET /readyz`
@@ -41,6 +43,7 @@ Panda listens to normal Discord messages that contain the word `Panda`, then use
 - `/admin setup`
 - `/admin model`
 - `/admin prompt`
+- `/admin soul`
 - `/admin audit`
 - `/admin enable`
 - `/admin disable`

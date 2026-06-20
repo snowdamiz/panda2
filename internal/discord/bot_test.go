@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	disgoDiscord "github.com/disgoorg/disgo/discord"
 	"github.com/disgoorg/snowflake/v2"
@@ -208,7 +209,7 @@ func TestAdminToggleCommandsIncludeSafetyOptions(t *testing.T) {
 	if !subcommandHasStringOption(disable, "confirm") {
 		t.Fatal("expected /admin disable to include confirm option")
 	}
-	for _, subcommandName := range []string{"model", "prompt", "enable", "disable"} {
+	for _, subcommandName := range []string{"model", "prompt", "soul", "enable", "disable"} {
 		subcommand := adminSubcommand(t, adminCommand, subcommandName)
 		if !subcommandHasBoolOption(subcommand, "dry_run") {
 			t.Fatalf("expected /admin %s to include dry_run option", subcommandName)
@@ -285,10 +286,28 @@ func TestAdminPromptCommandCanOpenModal(t *testing.T) {
 	}
 }
 
+func TestAdminSoulCommandCanOpenModal(t *testing.T) {
+	soul := adminSubcommand(t, adminSlashCommand(t), "soul")
+	option := subcommandStringOption(t, soul, "soul")
+	if option.Required {
+		t.Fatal("soul option should be optional so the modal flow can open")
+	}
+}
+
 func TestThreadNoticeMentionsThread(t *testing.T) {
 	got := threadNotice(commands.Response{ThreadID: "12345", ThreadName: "Panda chat"})
 	if got != "Continued this chat in <#12345> (`Panda chat`)." {
 		t.Fatalf("unexpected thread notice %q", got)
+	}
+}
+
+func TestSafeThreadNameTruncatesUTF8Safely(t *testing.T) {
+	name := safeThreadName(strings.Repeat("🐼", 23))
+	if len(name) > 90 {
+		t.Fatalf("thread name exceeds byte budget: %d", len(name))
+	}
+	if !utf8.ValidString(name) {
+		t.Fatalf("thread name is not valid UTF-8: %q", name)
 	}
 }
 

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/sn0w/panda2/internal/store"
+	"github.com/sn0w/panda2/internal/textutil"
 	"gorm.io/gorm"
 )
 
@@ -138,5 +139,5 @@ func preview(value string) string {
 	if len(value) <= conversationPreviewLimit {
 		return value
 	}
-	return strings.TrimSpace(value[:conversationPreviewLimit]) + "..."
+	return textutil.Truncate(value, conversationPreviewLimit, "...")
 }

@@ -97,6 +97,59 @@ func TestConfigureModelRejectsInvalidRuntimeSettings(t *testing.T) {
 	}
 }
 
+func TestSetSoulPersistsAndSoulWritersAreDelegated(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(ctx, "file::memory:?cache=shared")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer db.Close()
+
+	service := NewService(
+		repository.NewGuildConfigRepository(db.DB),
+		repository.NewUsageRepository(db.DB),
+		repository.NewAuditRepository(db.DB),
+		memory.NewService(repository.NewKnowledgeRepository(db.DB)),
+		repository.NewAccessRepository(db.DB),
+		repository.NewBudgetRepository(db.DB),
+		nil,
+		"openrouter/auto",
+	)
+	if _, err := service.SetupGuild(ctx, "guild-1", "admin"); err != nil {
+		t.Fatalf("SetupGuild: %v", err)
+	}
+	config, err := service.SetSoul(ctx, "guild-1", "admin", "Be precise, warm, and a little playful.")
+	if err != nil {
+		t.Fatalf("SetSoul: %v", err)
+	}
+	if !strings.Contains(config.AgentSoul, "playful") {
+		t.Fatalf("unexpected soul: %+v", config)
+	}
+	if _, err := service.SetSoul(ctx, "guild-1", "admin", " "); err == nil {
+		t.Fatal("expected blank soul to be rejected")
+	}
+
+	for _, tc := range []struct {
+		name       string
+		roleID     string
+		permission string
+	}{
+		{name: "explicit soul writer", roleID: "role-soul", permission: PermissionAssistantSoulWrite},
+		{name: "moderator", roleID: "role-mod", permission: PermissionModerationUse},
+		{name: "creator", roleID: "role-creator", permission: PermissionToolComposeDraft},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := service.AddRolePermission(ctx, "guild-1", "admin", tc.roleID, tc.permission); err != nil {
+				t.Fatalf("AddRolePermission: %v", err)
+			}
+			allowed, err := service.CanWriteSoul(ctx, AssistantAccessRequest{GuildID: "guild-1", RoleIDs: []string{tc.roleID}})
+			if err != nil || !allowed {
+				t.Fatalf("expected soul writer access, allowed=%t err=%v", allowed, err)
+			}
+		})
+	}
+}
+
 func TestAddRolePermissionRejectsUnknownPermission(t *testing.T) {
 	ctx := context.Background()
 	db, err := store.Open(ctx, "file::memory:?cache=shared")

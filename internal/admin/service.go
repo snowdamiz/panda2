@@ -32,6 +32,8 @@ const (
 	PermissionAssistantAttachments = "assistant.attachments"
 	PermissionAssistantMemoryRead  = "assistant.memory.read"
 	PermissionAssistantMemoryWrite = "assistant.memory.write"
+	PermissionAssistantWebSearch   = "assistant.web_search"
+	PermissionAssistantSoulWrite   = "assistant.soul.write"
 	PermissionModerationUse        = "moderation.use"
 	PermissionAdminConfigRead      = "admin.config.read"
 	PermissionAdminConfigWrite     = "admin.config.write"
@@ -49,6 +51,7 @@ const (
 	maxTemperature         = 2
 	minMaxResponseTokens   = 64
 	maxMaxResponseTokens   = 4000
+	maxInstructionChars    = 4000
 	defaultModelToolPolicy = "off"
 )
 
@@ -212,7 +215,11 @@ func (s *Service) validateModel(ctx context.Context, model string) error {
 }
 
 func (s *Service) SetPrompt(ctx context.Context, guildID, actorID, prompt string) (store.GuildConfig, error) {
-	config, err := s.configs.UpdatePrompt(ctx, guildID, strings.TrimSpace(prompt))
+	prompt, err := cleanInstruction(prompt, "prompt")
+	if err != nil {
+		return store.GuildConfig{}, err
+	}
+	config, err := s.configs.UpdatePrompt(ctx, guildID, prompt)
 	if err != nil {
 		return store.GuildConfig{}, err
 	}
@@ -222,7 +229,27 @@ func (s *Service) SetPrompt(ctx context.Context, guildID, actorID, prompt string
 		Action:     "admin.prompt.set",
 		TargetType: "guild_config",
 		TargetID:   guildID,
-		Metadata:   metadata(map[string]string{"prompt_chars": strconv.Itoa(len(strings.TrimSpace(prompt)))}),
+		Metadata:   metadata(map[string]string{"prompt_chars": strconv.Itoa(len(prompt))}),
+	})
+	return config, nil
+}
+
+func (s *Service) SetSoul(ctx context.Context, guildID, actorID, soul string) (store.GuildConfig, error) {
+	soul, err := cleanInstruction(soul, "soul")
+	if err != nil {
+		return store.GuildConfig{}, err
+	}
+	config, err := s.configs.UpdateSoul(ctx, guildID, soul)
+	if err != nil {
+		return store.GuildConfig{}, err
+	}
+	_ = s.audit.Record(ctx, store.AuditEvent{
+		GuildID:    guildID,
+		ActorID:    actorID,
+		Action:     "admin.soul.set",
+		TargetType: "guild_config",
+		TargetID:   guildID,
+		Metadata:   metadata(map[string]string{"soul_chars": strconv.Itoa(len(soul))}),
 	})
 	return config, nil
 }
@@ -549,6 +576,10 @@ func (s *Service) CanReadMemory(ctx context.Context, request AssistantAccessRequ
 	return s.canUseOptionalAssistantPermission(ctx, request, PermissionAssistantMemoryRead)
 }
 
+func (s *Service) CanUseWebSearch(ctx context.Context, request AssistantAccessRequest) (bool, error) {
+	return s.canUseOptionalAssistantPermission(ctx, request, PermissionAssistantWebSearch)
+}
+
 func (s *Service) CanReadConfig(ctx context.Context, request AssistantAccessRequest) (bool, error) {
 	if request.IsOwner || request.IsGuildAdmin {
 		return true, nil
@@ -567,6 +598,22 @@ func (s *Service) CanWriteConfig(ctx context.Context, request AssistantAccessReq
 		return false, nil
 	}
 	return s.canUsePermission(ctx, request.GuildID, request.RoleIDs, PermissionAdminConfigWrite, false)
+}
+
+func (s *Service) CanWriteSoul(ctx context.Context, request AssistantAccessRequest) (bool, error) {
+	if request.IsOwner || request.IsGuildAdmin {
+		return true, nil
+	}
+	if request.GuildID == "" {
+		return false, nil
+	}
+	for _, permission := range []string{PermissionAssistantSoulWrite, PermissionModerationUse, PermissionToolComposeDraft} {
+		allowed, err := s.canUsePermission(ctx, request.GuildID, request.RoleIDs, permission, false)
+		if err != nil || allowed {
+			return allowed, err
+		}
+	}
+	return false, nil
 }
 
 func (s *Service) CanReadUsage(ctx context.Context, request AssistantAccessRequest) (bool, error) {
@@ -724,6 +771,8 @@ func IsPermissionNameAllowed(permission string) bool {
 		PermissionAssistantAttachments,
 		PermissionAssistantMemoryRead,
 		PermissionAssistantMemoryWrite,
+		PermissionAssistantWebSearch,
+		PermissionAssistantSoulWrite,
 		PermissionModerationUse,
 		PermissionAdminConfigRead,
 		PermissionAdminConfigWrite,
@@ -739,6 +788,17 @@ func IsPermissionNameAllowed(permission string) bool {
 	default:
 		return false
 	}
+}
+
+func cleanInstruction(value, field string) (string, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "", fmt.Errorf("%s is required", field)
+	}
+	if len(value) > maxInstructionChars {
+		return "", fmt.Errorf("%s must be %d characters or fewer", field, maxInstructionChars)
+	}
+	return value, nil
 }
 
 func metadata(values map[string]string) string {

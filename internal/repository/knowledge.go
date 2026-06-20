@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/sn0w/panda2/internal/store"
+	"github.com/sn0w/panda2/internal/textutil"
 	"gorm.io/gorm"
 )
 
@@ -252,12 +253,13 @@ func splitKnowledgeChunks(content string) []string {
 
 	var chunks []string
 	for len(content) > maxKnowledgeChunkBytes {
-		splitAt := strings.LastIndex(content[:maxKnowledgeChunkBytes], "\n\n")
+		prefix := textutil.PrefixBytes(content, maxKnowledgeChunkBytes)
+		splitAt := strings.LastIndex(prefix, "\n\n")
 		if splitAt < maxKnowledgeChunkBytes/3 {
-			splitAt = strings.LastIndex(content[:maxKnowledgeChunkBytes], ". ")
+			splitAt = strings.LastIndex(prefix, ". ")
 		}
 		if splitAt < maxKnowledgeChunkBytes/3 {
-			splitAt = maxKnowledgeChunkBytes
+			splitAt = len(prefix)
 		}
 
 		chunks = append(chunks, strings.TrimSpace(content[:splitAt]))
@@ -311,7 +313,7 @@ func fallbackSnippet(content, term string) string {
 	}
 	index := strings.Index(strings.ToLower(content), strings.ToLower(term))
 	if index < 0 {
-		return strings.TrimSpace(content[:180]) + "..."
+		return textutil.Truncate(content, 180, "...")
 	}
 	start := index - 60
 	if start < 0 {
@@ -329,5 +331,5 @@ func fallbackSnippet(content, term string) string {
 	if end < len(content) {
 		suffix = "..."
 	}
-	return prefix + strings.TrimSpace(content[start:end]) + suffix
+	return prefix + strings.TrimSpace(textutil.SliceBytes(content, start, end)) + suffix
 }

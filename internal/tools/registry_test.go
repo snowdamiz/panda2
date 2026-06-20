@@ -14,6 +14,7 @@ import (
 	"github.com/sn0w/panda2/internal/memory"
 	"github.com/sn0w/panda2/internal/repository"
 	"github.com/sn0w/panda2/internal/store"
+	"github.com/sn0w/panda2/internal/websearch"
 )
 
 func TestDefaultRegistryDefinitionsAreValid(t *testing.T) {
@@ -22,7 +23,7 @@ func TestDefaultRegistryDefinitionsAreValid(t *testing.T) {
 		t.Fatalf("NewDefaultRegistry: %v", err)
 	}
 	definitions := registry.Definitions()
-	if len(definitions) != 77 {
+	if len(definitions) != 79 {
 		t.Fatalf("expected full Discord tool surface plus assistant tools, got %d", len(definitions))
 	}
 	for _, definition := range definitions {
@@ -108,6 +109,23 @@ func (fakeKnowledgeSearch) Search(context.Context, string, string, int) ([]repos
 		Snippet:    "Deploys happen Friday",
 		Content:    "Deploys happen Friday after review.",
 	}}, nil
+}
+
+type fakeWebSearch struct{}
+
+func (fakeWebSearch) Search(context.Context, websearch.Request) (websearch.Response, error) {
+	return websearch.Response{
+		Provider:             "brave_search",
+		Query:                "sqlite release",
+		MoreResultsAvailable: true,
+		Results: []websearch.Result{{
+			Title:         "SQLite Release History",
+			URL:           "https://sqlite.org/changes.html",
+			Description:   "Recent SQLite releases.",
+			Source:        "SQLite",
+			ExtraSnippets: []string{"Version details"},
+		}},
+	}, nil
 }
 
 type fakeConfigReader struct{}
@@ -213,6 +231,33 @@ func TestExecutorRunsKnowledgeSearchTool(t *testing.T) {
 	}
 	message := result.Message
 	if message.Role != "tool" || message.ToolCallID != "call-1" || !strings.Contains(message.Content, "Deploy notes") {
+		t.Fatalf("unexpected tool message: %+v", message)
+	}
+}
+
+func TestExecutorRunsWebSearchTool(t *testing.T) {
+	registry, err := NewDefaultRegistry()
+	if err != nil {
+		t.Fatalf("NewDefaultRegistry: %v", err)
+	}
+	executor := NewExecutor(registry, nil, nil).WithWebSearcher(fakeWebSearch{})
+	result, err := executor.Execute(context.Background(), ExecutionRequest{
+		GuildID: "guild-1",
+		Access:  testAccess(ToolPolicyReadOnly, admin.PermissionAssistantWebSearch),
+		Call: llm.ToolCall{
+			ID:   "call-web",
+			Type: "function",
+			Function: llm.ToolCallFunction{
+				Name:      "web_search",
+				Arguments: `{"query":"sqlite release","limit":1,"freshness":"pw"}`,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	message := result.Message
+	if message.Role != "tool" || message.ToolCallID != "call-web" || !strings.Contains(message.Content, "sqlite.org") || !strings.Contains(message.Content, "brave_search") {
 		t.Fatalf("unexpected tool message: %+v", message)
 	}
 }
@@ -389,6 +434,26 @@ func TestExecutorRunsAdminServiceTools(t *testing.T) {
 	}
 	if !strings.Contains(consent.Message.Content, `"enabled":true`) {
 		t.Fatalf("unexpected consent result: %+v", consent)
+	}
+
+	soul, err := executor.Execute(context.Background(), ExecutionRequest{
+		GuildID: "guild-1",
+		ActorID: "admin",
+		Access:  testAccess(ToolPolicyWriteConfirmed, admin.PermissionAssistantSoulWrite),
+		Call: llm.ToolCall{
+			ID:   "call-soul",
+			Type: "function",
+			Function: llm.ToolCallFunction{
+				Name:      "panda_manage_soul",
+				Arguments: `{"action":"set","soul":"Answer with dry wit and crisp bullets."}`,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Execute soul update: %v", err)
+	}
+	if !strings.Contains(soul.Message.Content, "dry wit") {
+		t.Fatalf("unexpected soul result: %+v", soul)
 	}
 
 	added, err := executor.Execute(context.Background(), ExecutionRequest{
@@ -581,14 +646,23 @@ func TestExecutorFiltersExecutableToolsByPermission(t *testing.T) {
 		t.Fatalf("unexpected assistant executable tools: %+v", names)
 	}
 
-	executor = NewExecutor(registry, nil, nil).WithContextReader(fakeToolContextReader{}).WithAttachmentReader(fakeToolAttachmentReader{})
+	executor = NewExecutor(registry, nil, nil).WithContextReader(fakeToolContextReader{}).WithAttachmentReader(fakeToolAttachmentReader{}).WithWebSearcher(fakeWebSearch{})
 	assistantTools = executor.OpenRouterTools(testAccess(ToolPolicyAssistive, admin.PermissionAssistantUse, admin.PermissionAssistantAttachments))
 	names = map[string]bool{}
 	for _, tool := range assistantTools {
 		names[tool.Function.Name] = true
 	}
-	if !names["discord_fetch_message"] || !names["discord_fetch_messages"] || !names["summarize_text_file"] || !names["generate_workflow_json"] {
+	if !names["discord_fetch_message"] || !names["discord_fetch_messages"] || !names["summarize_text_file"] || !names["generate_workflow_json"] || names["web_search"] {
 		t.Fatalf("expected configured context and attachment tools, got %+v", names)
+	}
+
+	assistantTools = executor.OpenRouterTools(testAccess(ToolPolicyAssistive, admin.PermissionAssistantUse, admin.PermissionAssistantWebSearch))
+	names = map[string]bool{}
+	for _, tool := range assistantTools {
+		names[tool.Function.Name] = true
+	}
+	if !names["web_search"] || !names["discord_fetch_message"] || !names["generate_workflow_json"] {
+		t.Fatalf("expected configured web search tool, got %+v", names)
 	}
 }
 

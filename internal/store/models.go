@@ -16,6 +16,7 @@ type GuildConfig struct {
 	MaxResponseTokens   int       `gorm:"not null;default:900"`
 	ToolPolicy          string    `gorm:"not null;default:'off'"`
 	SystemPromptOverlay string    `gorm:"not null;default:''"`
+	AgentSoul           string    `gorm:"not null;default:''"`
 	AssistantEnabled    bool      `gorm:"not null;default:true"`
 	MemoryEnabled       bool      `gorm:"not null;default:false"`
 	CreatedAt           time.Time `gorm:"not null"`
