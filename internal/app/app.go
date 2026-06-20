@@ -46,6 +46,7 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 	knowledge := repository.NewKnowledgeRepository(dataStore.DB)
 	conversations := repository.NewConversationRepository(dataStore.DB)
 	attachments := repository.NewAttachmentRepository(dataStore.DB)
+	discordEvents := repository.NewDiscordEventRepository(dataStore.DB)
 	access := repository.NewAccessRepository(dataStore.DB)
 	budgets := repository.NewBudgetRepository(dataStore.DB)
 	members := repository.NewMemberRepository(dataStore.DB)
@@ -73,7 +74,9 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 		_ = dataStore.Close()
 		return nil, err
 	}
-	toolExecutor := tools.NewExecutor(toolRegistry, memoryService, guildConfigs).WithAttachmentReader(attachments)
+	toolExecutor := tools.NewExecutor(toolRegistry, memoryService, guildConfigs).
+		WithAttachmentReader(attachments).
+		WithAuditRecorder(audit)
 	assistantService := assistant.NewService(openRouter, usage, guildConfigs, memoryService, conversations, cfg.OpenRouterModel, cfg.OpenRouterFallbackModels).
 		WithToolExecutor(toolExecutor)
 	moderationService := moderation.NewService(assistantService)
@@ -85,9 +88,12 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 		_ = dataStore.Close()
 		return nil, err
 	}
-	discord.WithAttachmentRecorder(attachments).WithJobQueue(jobs)
+	discord.WithAttachmentRecorder(attachments).WithDiscordEventRecorder(discordEvents).WithJobQueue(jobs)
 	if contextService := discord.ContextService(); contextService != nil {
 		toolExecutor.WithContextReader(contextService)
+	}
+	if provider := discord.ToolProvider(discordEvents); provider != nil {
+		toolExecutor.WithDiscordToolProvider(provider)
 	}
 	worker.Register(discordbot.InteractionJobKind, discord.HandleInteractionJob)
 

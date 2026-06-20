@@ -315,6 +315,32 @@ var migrations = []Migration{
 			`CREATE UNIQUE INDEX IF NOT EXISTS idx_knowledge_embeddings_chunk_model ON knowledge_embeddings(chunk_id, model)`,
 		},
 	},
+	{
+		Version: 7,
+		Name:    "discord_recent_events",
+		SQL: []string{
+			`CREATE TABLE IF NOT EXISTS discord_events (
+				id INTEGER PRIMARY KEY AUTOINCREMENT,
+				guild_id TEXT NOT NULL,
+				channel_id TEXT NOT NULL DEFAULT '',
+				user_id TEXT NOT NULL DEFAULT '',
+				message_id TEXT NOT NULL DEFAULT '',
+				event_type TEXT NOT NULL,
+				summary TEXT NOT NULL DEFAULT '',
+				metadata TEXT NOT NULL DEFAULT '',
+				content_preview TEXT NOT NULL DEFAULT '',
+				created_at DATETIME NOT NULL,
+				expires_at DATETIME
+			)`,
+			`CREATE INDEX IF NOT EXISTS idx_discord_events_guild_id ON discord_events(guild_id)`,
+			`CREATE INDEX IF NOT EXISTS idx_discord_events_channel_id ON discord_events(channel_id)`,
+			`CREATE INDEX IF NOT EXISTS idx_discord_events_user_id ON discord_events(user_id)`,
+			`CREATE INDEX IF NOT EXISTS idx_discord_events_message_id ON discord_events(message_id)`,
+			`CREATE INDEX IF NOT EXISTS idx_discord_events_event_type ON discord_events(event_type)`,
+			`CREATE INDEX IF NOT EXISTS idx_discord_events_created_at ON discord_events(created_at)`,
+			`CREATE INDEX IF NOT EXISTS idx_discord_events_expires_at ON discord_events(expires_at)`,
+		},
+	},
 }
 
 func RunMigrations(db *gorm.DB) error {

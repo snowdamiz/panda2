@@ -10,6 +10,7 @@ import (
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/sn0w/panda2/internal/config"
+	discordbot "github.com/sn0w/panda2/internal/discord"
 	"github.com/sn0w/panda2/internal/store"
 )
 
@@ -135,6 +136,33 @@ func (s *Server) metrics(ctx context.Context) string {
 	var usageFailures int64
 	_ = s.store.DB.Table("usage_events").Where("success = ?", false).Count(&usageFailures).Error
 	writeGauge(&builder, "panda_usage_events_failed_total", "Failed assistant usage events", usageFailures)
+
+	var discordEventsTotal int64
+	_ = s.store.DB.Table("discord_events").Count(&discordEventsTotal).Error
+	writeGauge(&builder, "panda_discord_events_total", "Recorded Discord gateway events", discordEventsTotal)
+
+	var discordEventCacheSize int64
+	_ = s.store.DB.Table("discord_events").Where("expires_at IS NULL OR expires_at > ?", time.Now().UTC()).Count(&discordEventCacheSize).Error
+	writeGauge(&builder, "panda_discord_event_cache_size", "Non-expired Discord gateway events retained locally", discordEventCacheSize)
+
+	var expiredDiscordEvents int64
+	_ = s.store.DB.Table("discord_events").Where("expires_at IS NOT NULL AND expires_at <= ?", time.Now().UTC()).Count(&expiredDiscordEvents).Error
+	writeGauge(&builder, "panda_discord_event_cache_expired", "Expired Discord gateway events awaiting cleanup", expiredDiscordEvents)
+
+	var latestDiscordEvent time.Time
+	_ = s.store.DB.Raw("SELECT COALESCE(MAX(created_at), ?) FROM discord_events", time.Time{}).Scan(&latestDiscordEvent).Error
+	lagSeconds := 0
+	if !latestDiscordEvent.IsZero() {
+		lagSeconds = int(time.Since(latestDiscordEvent).Seconds())
+		if lagSeconds < 0 {
+			lagSeconds = 0
+		}
+	}
+	writeGauge(&builder, "panda_discord_event_lag_seconds", "Seconds since the newest retained Discord gateway event", lagSeconds)
+	writeGauge(&builder, "panda_discord_event_dropped_total", "Discord gateway events dropped because local recording failed", discordbot.EventDropCount())
+	writeGauge(&builder, "panda_discord_intent_guild_members_enabled", "Guild Members privileged intent enabled", 0)
+	writeGauge(&builder, "panda_discord_intent_presences_enabled", "Presence privileged intent enabled", 0)
+	writeGauge(&builder, "panda_discord_intent_message_content_enabled", "Message Content privileged intent requested when Discord is configured", boolInt(s.cfg.DiscordConfigured()))
 	return builder.String()
 }
 

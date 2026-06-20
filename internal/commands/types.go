@@ -1,6 +1,7 @@
 package commands
 
 type Request struct {
+	RequestID    string
 	Command      string
 	Subcommand   string
 	Options      map[string]string
@@ -60,14 +61,16 @@ type ModalInput struct {
 }
 
 type BackgroundTask struct {
-	GuildID   string `json:"guild_id"`
-	UserID    string `json:"user_id"`
-	ChannelID string `json:"channel_id"`
-	Command   string `json:"command"`
-	Input     string `json:"input"`
-	Tone      string `json:"tone,omitempty"`
-	Language  string `json:"language,omitempty"`
-	Detail    string `json:"detail,omitempty"`
+	RequestID          string   `json:"request_id,omitempty"`
+	GuildID            string   `json:"guild_id"`
+	UserID             string   `json:"user_id"`
+	ChannelID          string   `json:"channel_id"`
+	Command            string   `json:"command"`
+	Input              string   `json:"input"`
+	Tone               string   `json:"tone,omitempty"`
+	Language           string   `json:"language,omitempty"`
+	Detail             string   `json:"detail,omitempty"`
+	AllowedPermissions []string `json:"allowed_permissions,omitempty"`
 }
 
 type ThreadRequest struct {

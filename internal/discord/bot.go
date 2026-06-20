@@ -34,11 +34,16 @@ type Bot struct {
 	jobs        InteractionJobQueue
 	context     *contextsvc.Service
 	attachments AttachmentRecorder
+	events      DiscordEventRecorder
 	httpClient  *http.Client
 }
 
 type AttachmentRecorder interface {
 	Record(ctx context.Context, attachment store.Attachment) (store.Attachment, error)
+}
+
+type DiscordEventRecorder interface {
+	Record(ctx context.Context, event store.DiscordEvent) (store.DiscordEvent, error)
 }
 
 type InteractionJobQueue interface {
@@ -63,13 +68,47 @@ func New(cfg config.Config, router *commands.Router, logger *slog.Logger) (*Bot,
 	instance := &Bot{cfg: cfg, router: router, logger: logger}
 	client, err := disgo.New(cfg.DiscordBotToken,
 		bot.WithGatewayConfigOpts(gateway.WithIntents(
-			gateway.IntentGuildMessages,
+			gateway.IntentsNonPrivileged.Remove(gateway.IntentDirectMessages, gateway.IntentDirectMessageReactions, gateway.IntentDirectMessageTyping, gateway.IntentDirectMessagePolls),
 			gateway.IntentMessageContent,
 		)),
 		bot.WithEventListenerFunc(instance.onApplicationCommand),
 		bot.WithEventListenerFunc(instance.onComponentInteraction),
 		bot.WithEventListenerFunc(instance.onModalSubmit),
 		bot.WithEventListenerFunc(instance.onMessageCreate),
+		bot.WithEventListenerFunc(instance.onGuildMessageUpdate),
+		bot.WithEventListenerFunc(instance.onGuildMessageDelete),
+		bot.WithEventListenerFunc(instance.onGuildMessageReactionAdd),
+		bot.WithEventListenerFunc(instance.onGuildMessageReactionRemove),
+		bot.WithEventListenerFunc(instance.onGuildMessageReactionRemoveAll),
+		bot.WithEventListenerFunc(instance.onGuildMessageReactionRemoveEmoji),
+		bot.WithEventListenerFunc(instance.onGuildMessagePollVoteAdd),
+		bot.WithEventListenerFunc(instance.onGuildMessagePollVoteRemove),
+		bot.WithEventListenerFunc(instance.onGuildChannelCreate),
+		bot.WithEventListenerFunc(instance.onGuildChannelUpdate),
+		bot.WithEventListenerFunc(instance.onGuildChannelDelete),
+		bot.WithEventListenerFunc(instance.onGuildChannelPinsUpdate),
+		bot.WithEventListenerFunc(instance.onThreadCreate),
+		bot.WithEventListenerFunc(instance.onThreadUpdate),
+		bot.WithEventListenerFunc(instance.onThreadDelete),
+		bot.WithEventListenerFunc(instance.onThreadMemberUpdate),
+		bot.WithEventListenerFunc(instance.onRoleCreate),
+		bot.WithEventListenerFunc(instance.onRoleUpdate),
+		bot.WithEventListenerFunc(instance.onRoleDelete),
+		bot.WithEventListenerFunc(instance.onGuildBan),
+		bot.WithEventListenerFunc(instance.onGuildUnban),
+		bot.WithEventListenerFunc(instance.onInviteCreate),
+		bot.WithEventListenerFunc(instance.onInviteDelete),
+		bot.WithEventListenerFunc(instance.onWebhooksUpdate),
+		bot.WithEventListenerFunc(instance.onAutoModerationRuleCreate),
+		bot.WithEventListenerFunc(instance.onAutoModerationRuleUpdate),
+		bot.WithEventListenerFunc(instance.onAutoModerationRuleDelete),
+		bot.WithEventListenerFunc(instance.onAutoModerationActionExecution),
+		bot.WithEventListenerFunc(instance.onGuildScheduledEventCreate),
+		bot.WithEventListenerFunc(instance.onGuildScheduledEventUpdate),
+		bot.WithEventListenerFunc(instance.onGuildScheduledEventDelete),
+		bot.WithEventListenerFunc(instance.onGuildScheduledEventUserAdd),
+		bot.WithEventListenerFunc(instance.onGuildScheduledEventUserRemove),
+		bot.WithEventListenerFunc(instance.onGuildVoiceStateUpdate),
 	)
 	if err != nil {
 		return nil, err
@@ -86,6 +125,11 @@ func (b *Bot) WithAttachmentRecorder(recorder AttachmentRecorder) *Bot {
 	if b.httpClient == nil {
 		b.httpClient = &http.Client{Timeout: 5 * time.Second}
 	}
+	return b
+}
+
+func (b *Bot) WithDiscordEventRecorder(recorder DiscordEventRecorder) *Bot {
+	b.events = recorder
 	return b
 }
 
@@ -287,7 +331,11 @@ func applicationCommands() []disgoDiscord.ApplicationCommandCreate {
 							Choices: []disgoDiscord.ApplicationCommandOptionChoiceString{
 								{Name: "Off", Value: "off"},
 								{Name: "Read Only", Value: "read_only"},
+								{Name: "Assistive", Value: "assistive"},
 								{Name: "Admin Only", Value: "admin_only"},
+								{Name: "Moderator", Value: "moderator"},
+								{Name: "Write Confirmed", Value: "write_confirmed"},
+								{Name: "Owner Ops", Value: "owner_ops"},
 							},
 						},
 						dryRunOption,
@@ -587,6 +635,7 @@ func (b *Bot) onApplicationCommand(event *events.ApplicationCommandInteractionCr
 
 func (b *Bot) handleSlashCommand(event *events.ApplicationCommandInteractionCreate, data disgoDiscord.SlashCommandInteractionData) {
 	request := commands.Request{
+		RequestID:    interactionID(event),
 		Command:      data.CommandName(),
 		Options:      map[string]string{},
 		UserID:       event.User().ID.String(),
@@ -620,6 +669,7 @@ func (b *Bot) handleSlashCommand(event *events.ApplicationCommandInteractionCrea
 func (b *Bot) handleMessageCommand(event *events.ApplicationCommandInteractionCreate, data disgoDiscord.MessageCommandInteractionData) {
 	target := data.TargetMessage()
 	request := commands.Request{
+		RequestID:    interactionID(event),
 		Options:      map[string]string{"text": target.Content},
 		UserID:       event.User().ID.String(),
 		IsOwner:      b.cfg.IsOwner(event.User().ID.String()),
@@ -877,6 +927,7 @@ func (b *Bot) onStringSelectInteraction(event *events.ComponentInteractionCreate
 
 func (b *Bot) requestFromComponentEvent(event *events.ComponentInteractionCreate) commands.Request {
 	request := commands.Request{
+		RequestID:    event.ID().String(),
 		Options:      map[string]string{},
 		UserID:       event.User().ID.String(),
 		IsOwner:      b.cfg.IsOwner(event.User().ID.String()),
@@ -915,6 +966,7 @@ func (b *Bot) onModalSubmit(event *events.ModalSubmitInteractionCreate) {
 
 func (b *Bot) requestFromModalEvent(event *events.ModalSubmitInteractionCreate) commands.Request {
 	request := commands.Request{
+		RequestID:    event.ID().String(),
 		Options:      map[string]string{},
 		UserID:       event.User().ID.String(),
 		IsOwner:      b.cfg.IsOwner(event.User().ID.String()),
@@ -1049,7 +1101,11 @@ func shouldDeferEphemeral(request commands.Request) bool {
 }
 
 func (b *Bot) onMessageCreate(event *events.MessageCreate) {
-	if event.Message.Author.Bot || b.client == nil {
+	if b.client == nil {
+		return
+	}
+	b.recordMessageEvent(context.Background(), "message_create", event.Message)
+	if event.Message.Author.Bot {
 		return
 	}
 	b.captureAttachments(context.Background(), event.Message)
@@ -1074,6 +1130,7 @@ func (b *Bot) onMessageCreate(event *events.MessageCreate) {
 		}
 	}
 	response := b.router.HandleNaturalMessage(context.Background(), commands.Request{
+		RequestID: event.Message.ID.String(),
 		Options:   options,
 		GuildID:   guildID,
 		ChannelID: event.ChannelID.String(),

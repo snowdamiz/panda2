@@ -283,7 +283,15 @@ func TestAskExecutesKnowledgeSearchTool(t *testing.T) {
 		t.Fatalf("AddDocument: %v", err)
 	}
 
-	response, err := service.Ask(ctx, AskRequest{GuildID: "guild-1", UserID: "user-1", ChannelID: "channel-1", Question: "When are deploys?"})
+	response, err := service.Ask(ctx, AskRequest{
+		GuildID:   "guild-1",
+		UserID:    "user-1",
+		ChannelID: "channel-1",
+		Question:  "When are deploys?",
+		AllowedPermissions: map[string]struct{}{
+			"assistant.memory.read": {},
+		},
+	})
 	if err != nil {
 		t.Fatalf("Ask: %v", err)
 	}

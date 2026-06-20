@@ -165,7 +165,7 @@ func (s *Service) ConfigureModel(ctx context.Context, guildID, actorID string, s
 			policy = defaultModelToolPolicy
 		}
 		if !allowedToolPolicy(policy) {
-			return store.GuildConfig{}, fmt.Errorf("tool policy must be off, read_only, or admin_only")
+			return store.GuildConfig{}, fmt.Errorf("tool policy must be off, read_only, assistive, admin_only, moderator, write_confirmed, or owner_ops")
 		}
 		updates["tool_policy"] = policy
 		meta["tool_policy"] = policy
@@ -541,6 +541,40 @@ func (s *Service) CanReadMemory(ctx context.Context, request AssistantAccessRequ
 	return s.canUseOptionalAssistantPermission(ctx, request, PermissionAssistantMemoryRead)
 }
 
+func (s *Service) CanReadConfig(ctx context.Context, request AssistantAccessRequest) (bool, error) {
+	if request.IsOwner || request.IsGuildAdmin {
+		return true, nil
+	}
+	if request.GuildID == "" {
+		return false, nil
+	}
+	return s.canUsePermission(ctx, request.GuildID, request.RoleIDs, PermissionAdminConfigRead, false)
+}
+
+func (s *Service) CanWriteConfig(ctx context.Context, request AssistantAccessRequest) (bool, error) {
+	if request.IsOwner || request.IsGuildAdmin {
+		return true, nil
+	}
+	if request.GuildID == "" {
+		return false, nil
+	}
+	return s.canUsePermission(ctx, request.GuildID, request.RoleIDs, PermissionAdminConfigWrite, false)
+}
+
+func (s *Service) CanReadAudit(ctx context.Context, request AssistantAccessRequest) (bool, error) {
+	if request.IsOwner || request.IsGuildAdmin {
+		return true, nil
+	}
+	if request.GuildID == "" {
+		return false, nil
+	}
+	return s.canUsePermission(ctx, request.GuildID, request.RoleIDs, PermissionAdminAuditRead, false)
+}
+
+func (s *Service) CanUseOwnerOps(_ context.Context, request AssistantAccessRequest) (bool, error) {
+	return request.IsOwner, nil
+}
+
 func (s *Service) RecordModerationAudit(ctx context.Context, guildID, actorID, action, targetID string) {
 	_ = s.audit.Record(ctx, store.AuditEvent{
 		GuildID:    guildID,
@@ -604,7 +638,7 @@ func normalizeFallbackModels(values []string) ([]string, error) {
 
 func allowedToolPolicy(policy string) bool {
 	switch strings.ToLower(strings.TrimSpace(policy)) {
-	case "off", "read_only", "admin_only":
+	case "off", "read_only", "assistive", "admin_only", "moderator", "write_confirmed", "owner_ops":
 		return true
 	default:
 		return false

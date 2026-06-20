@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -688,10 +689,12 @@ func (r *Router) handleAsk(ctx context.Context, request Request, command string)
 	}
 
 	answer, err := r.assistant.Ask(ctx, assistant.AskRequest{
-		GuildID:   request.GuildID,
-		UserID:    request.UserID,
-		ChannelID: request.ChannelID,
-		Question:  question,
+		RequestID:          request.RequestID,
+		GuildID:            request.GuildID,
+		UserID:             request.UserID,
+		ChannelID:          request.ChannelID,
+		Question:           question,
+		AllowedPermissions: r.allowedToolPermissions(ctx, request),
 	})
 	if err != nil {
 		return assistantError(err)
@@ -745,11 +748,13 @@ func (r *Router) handleChatMode(ctx context.Context, request Request, threaded b
 	}
 
 	answer, err := r.assistant.Chat(ctx, assistant.AskRequest{
-		GuildID:   request.GuildID,
-		UserID:    request.UserID,
-		ChannelID: chatChannelID,
-		ThreadID:  threadID,
-		Question:  question,
+		RequestID:          request.RequestID,
+		GuildID:            request.GuildID,
+		UserID:             request.UserID,
+		ChannelID:          chatChannelID,
+		ThreadID:           threadID,
+		Question:           question,
+		AllowedPermissions: r.allowedToolPermissions(ctx, request),
 	})
 	if err != nil {
 		return assistantError(err)
@@ -773,14 +778,16 @@ func (r *Router) handleTask(ctx context.Context, request Request) Response {
 	}
 
 	task := BackgroundTask{
-		GuildID:   request.GuildID,
-		UserID:    request.UserID,
-		ChannelID: request.ChannelID,
-		Command:   request.Command,
-		Input:     input,
-		Tone:      request.Options["tone"],
-		Language:  request.Options["language"],
-		Detail:    request.Options["detail"],
+		RequestID:          request.RequestID,
+		GuildID:            request.GuildID,
+		UserID:             request.UserID,
+		ChannelID:          request.ChannelID,
+		Command:            request.Command,
+		Input:              input,
+		Tone:               request.Options["tone"],
+		Language:           request.Options["language"],
+		Detail:             request.Options["detail"],
+		AllowedPermissions: permissionNames(r.allowedToolPermissions(ctx, request)),
 	}
 	if shouldBackgroundTask(request, input) {
 		return Response{Content: "Queued long summary. The result will replace this response when it is ready.", Background: &task}
@@ -790,14 +797,16 @@ func (r *Router) handleTask(ctx context.Context, request Request) Response {
 
 func (r *Router) HandleBackgroundTask(ctx context.Context, task BackgroundTask) Response {
 	answer, err := r.assistant.CompleteTask(ctx, assistant.TaskRequest{
-		GuildID:   task.GuildID,
-		UserID:    task.UserID,
-		ChannelID: task.ChannelID,
-		Command:   task.Command,
-		Input:     task.Input,
-		Tone:      task.Tone,
-		Language:  task.Language,
-		Detail:    task.Detail,
+		RequestID:          task.RequestID,
+		GuildID:            task.GuildID,
+		UserID:             task.UserID,
+		ChannelID:          task.ChannelID,
+		Command:            task.Command,
+		Input:              task.Input,
+		Tone:               task.Tone,
+		Language:           task.Language,
+		Detail:             task.Detail,
+		AllowedPermissions: permissionsFromNames(task.AllowedPermissions),
 	})
 	if err != nil {
 		return assistantError(err)
@@ -953,6 +962,49 @@ func assistantAccessRequest(request Request) admin.AssistantAccessRequest {
 		IsGuildAdmin: request.IsGuildAdmin,
 		IsOwner:      request.IsOwner,
 	}
+}
+
+func (r *Router) allowedToolPermissions(ctx context.Context, request Request) map[string]struct{} {
+	permissions := map[string]struct{}{}
+	r.addPermissionIfAllowed(ctx, request, permissions, admin.PermissionAssistantUse, r.admin.CanUseAssistant)
+	r.addPermissionIfAllowed(ctx, request, permissions, admin.PermissionAssistantAttachments, r.admin.CanUseAttachments)
+	r.addPermissionIfAllowed(ctx, request, permissions, admin.PermissionAssistantMemoryRead, r.admin.CanReadMemory)
+	r.addPermissionIfAllowed(ctx, request, permissions, admin.PermissionModerationUse, r.admin.CanUseModeration)
+	r.addPermissionIfAllowed(ctx, request, permissions, admin.PermissionAdminConfigRead, r.admin.CanReadConfig)
+	r.addPermissionIfAllowed(ctx, request, permissions, admin.PermissionAdminConfigWrite, r.admin.CanWriteConfig)
+	r.addPermissionIfAllowed(ctx, request, permissions, admin.PermissionAdminAuditRead, r.admin.CanReadAudit)
+	r.addPermissionIfAllowed(ctx, request, permissions, admin.PermissionOwnerOps, r.admin.CanUseOwnerOps)
+	return permissions
+}
+
+func (r *Router) addPermissionIfAllowed(ctx context.Context, request Request, permissions map[string]struct{}, permission string, check func(context.Context, admin.AssistantAccessRequest) (bool, error)) {
+	allowed, err := check(ctx, assistantAccessRequest(request))
+	if err == nil && allowed {
+		permissions[permission] = struct{}{}
+	}
+}
+
+func permissionNames(permissions map[string]struct{}) []string {
+	if len(permissions) == 0 {
+		return nil
+	}
+	names := make([]string, 0, len(permissions))
+	for permission := range permissions {
+		names = append(names, permission)
+	}
+	sort.Strings(names)
+	return names
+}
+
+func permissionsFromNames(names []string) map[string]struct{} {
+	permissions := map[string]struct{}{}
+	for _, name := range names {
+		name = strings.TrimSpace(name)
+		if name != "" {
+			permissions[name] = struct{}{}
+		}
+	}
+	return permissions
 }
 
 func (r *Router) ensureBudgetAvailable(ctx context.Context, request Request) Response {

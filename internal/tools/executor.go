@@ -32,18 +32,43 @@ type AttachmentReader interface {
 	Get(ctx context.Context, guildID string, id uint) (store.Attachment, error)
 }
 
+type DiscordToolProvider interface {
+	ExecuteDiscordTool(ctx context.Context, request DiscordToolRequest) (any, error)
+}
+
+type AuditRecorder interface {
+	Record(ctx context.Context, event store.AuditEvent) error
+}
+
+type DiscordToolRequest struct {
+	ToolName    string
+	GuildID     string
+	ChannelID   string
+	ActorID     string
+	RequestID   string
+	Arguments   map[string]any
+	DryRun      bool
+	MaxLimit    int
+	Permissions []string
+}
+
 type Executor struct {
 	registry    *Registry
 	knowledge   KnowledgeSearcher
 	configs     ConfigReader
 	context     ContextReader
 	attachments AttachmentReader
+	discord     DiscordToolProvider
+	audit       AuditRecorder
 }
 
 type ExecutionRequest struct {
-	GuildID     string
-	Permissions map[string]struct{}
-	Call        llm.ToolCall
+	GuildID   string
+	ChannelID string
+	ActorID   string
+	RequestID string
+	Access    ToolAccess
+	Call      llm.ToolCall
 }
 
 func NewExecutor(registry *Registry, knowledge KnowledgeSearcher, configs ConfigReader) *Executor {
@@ -60,26 +85,29 @@ func (e *Executor) WithAttachmentReader(reader AttachmentReader) *Executor {
 	return e
 }
 
-func (e *Executor) OpenRouterTools(permissions map[string]struct{}) []llm.Tool {
+func (e *Executor) WithDiscordToolProvider(provider DiscordToolProvider) *Executor {
+	e.discord = provider
+	return e
+}
+
+func (e *Executor) WithAuditRecorder(recorder AuditRecorder) *Executor {
+	e.audit = recorder
+	return e
+}
+
+func (e *Executor) OpenRouterTools(access ToolAccess) []llm.Tool {
 	if e == nil || e.registry == nil {
 		return nil
 	}
 	var result []llm.Tool
 	for _, definition := range e.registry.Definitions() {
-		if _, ok := permissions[definition.RequiredPermission]; !ok {
+		if !definition.AvailableTo(access) {
 			continue
 		}
 		if !e.canExecute(definition.Name) {
 			continue
 		}
-		result = append(result, llm.Tool{
-			Type: "function",
-			Function: llm.ToolFunction{
-				Name:        definition.Name,
-				Description: definition.Description,
-				Parameters:  definition.InputSchema,
-			},
-		})
+		result = append(result, definition.OpenRouterTool())
 	}
 	return result
 }
@@ -92,7 +120,7 @@ func (e *Executor) Execute(ctx context.Context, request ExecutionRequest) (llm.M
 	if err != nil {
 		return llm.Message{}, err
 	}
-	if _, ok := request.Permissions[definition.RequiredPermission]; !ok {
+	if !definition.AvailableTo(request.Access) {
 		return llm.Message{}, fmt.Errorf("missing permission for tool %s", definition.Name)
 	}
 	if !e.canExecute(definition.Name) {
@@ -106,24 +134,39 @@ func (e *Executor) Execute(ctx context.Context, request ExecutionRequest) (llm.M
 	toolCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
+	arguments := request.Call.Function.Arguments
+	e.recordToolAudit(toolCtx, definition, request, arguments)
+
 	var payload any
 	switch definition.Name {
-	case "fetch_recent_messages":
-		payload, err = e.fetchRecentMessages(toolCtx, request.GuildID, request.Call.Function.Arguments)
-	case "fetch_message":
-		payload, err = e.fetchMessage(toolCtx, request.GuildID, request.Call.Function.Arguments)
+	case "discord.fetch_messages":
+		if e.discord != nil {
+			payload, err = e.executeDiscordTool(toolCtx, definition, request, arguments)
+		} else {
+			payload, err = e.fetchRecentMessages(toolCtx, request.GuildID, arguments)
+		}
+	case "discord.fetch_message":
+		if e.discord != nil {
+			payload, err = e.executeDiscordTool(toolCtx, definition, request, arguments)
+		} else {
+			payload, err = e.fetchMessage(toolCtx, request.GuildID, arguments)
+		}
 	case "search_knowledge":
-		payload, err = e.searchKnowledge(toolCtx, request.GuildID, request.Call.Function.Arguments)
+		payload, err = e.searchKnowledge(toolCtx, request.GuildID, arguments)
 	case "summarize_text_file":
-		payload, err = e.summarizeTextFile(toolCtx, request.GuildID, request.Call.Function.Arguments)
+		payload, err = e.summarizeTextFile(toolCtx, request.GuildID, arguments)
 	case "read_config":
-		payload, err = e.readConfig(toolCtx, request.GuildID, request.Call.Function.Arguments)
+		payload, err = e.readConfig(toolCtx, request.GuildID, arguments)
 	case "draft_moderator_note":
-		payload, err = e.draftModeratorNote(request.Call.Function.Arguments)
+		payload, err = e.draftModeratorNote(arguments)
 	case "generate_workflow_json":
-		payload, err = e.generateWorkflowJSON(request.Call.Function.Arguments)
+		payload, err = e.generateWorkflowJSON(arguments)
 	default:
-		err = fmt.Errorf("tool %s has no executor", definition.Name)
+		if strings.HasPrefix(definition.Name, "discord.") {
+			payload, err = e.executeDiscordTool(toolCtx, definition, request, arguments)
+		} else {
+			err = fmt.Errorf("tool %s has no executor", definition.Name)
+		}
 	}
 	if err != nil {
 		payload = map[string]any{"error": err.Error()}
@@ -137,6 +180,46 @@ func (e *Executor) Execute(ctx context.Context, request ExecutionRequest) (llm.M
 		ToolCallID: request.Call.ID,
 		Content:    security.RedactSecrets(string(data)),
 	}, nil
+}
+
+func (e *Executor) executeDiscordTool(ctx context.Context, definition Definition, request ExecutionRequest, rawArguments string) (any, error) {
+	if e.discord == nil {
+		return nil, fmt.Errorf("discord tool provider is not configured")
+	}
+	arguments, err := parseArguments(rawArguments)
+	if err != nil {
+		return nil, err
+	}
+	dryRun := boolArgument(arguments, "dry_run")
+	if definition.SupportsDryRun && dryRun {
+		return map[string]any{
+			"dry_run":               true,
+			"tool":                  definition.Name,
+			"requires_confirmation": definition.RequiresConfirmation,
+			"discord_permissions":   definition.DiscordPermissions,
+			"preview":               safePreviewArguments(arguments),
+		}, nil
+	}
+	if definition.RequiresConfirmation {
+		return map[string]any{
+			"confirmation_required": true,
+			"tool":                  definition.Name,
+			"message":               "This Discord write is prepared as a dry-run only from the model tool loop. Use an explicit Discord confirmation flow before execution.",
+			"discord_permissions":   definition.DiscordPermissions,
+			"preview":               safePreviewArguments(arguments),
+		}, nil
+	}
+	return e.discord.ExecuteDiscordTool(ctx, DiscordToolRequest{
+		ToolName:    definition.Name,
+		GuildID:     request.GuildID,
+		ChannelID:   request.ChannelID,
+		ActorID:     request.ActorID,
+		RequestID:   request.RequestID,
+		Arguments:   arguments,
+		DryRun:      dryRun,
+		MaxLimit:    definition.MaxLimit,
+		Permissions: definition.DiscordPermissions,
+	})
 }
 
 func (e *Executor) fetchRecentMessages(ctx context.Context, guildID string, arguments string) (any, error) {
@@ -320,8 +403,8 @@ func (e *Executor) generateWorkflowJSON(arguments string) (any, error) {
 
 func (e *Executor) canExecute(name string) bool {
 	switch name {
-	case "fetch_recent_messages", "fetch_message":
-		return e.context != nil
+	case "discord.fetch_messages", "discord.fetch_message":
+		return e.context != nil || e.discord != nil
 	case "search_knowledge":
 		return e.knowledge != nil
 	case "summarize_text_file":
@@ -331,8 +414,39 @@ func (e *Executor) canExecute(name string) bool {
 	case "draft_moderator_note", "generate_workflow_json":
 		return true
 	default:
-		return false
+		return strings.HasPrefix(name, "discord.") && e.discord != nil
 	}
+}
+
+func (e *Executor) recordToolAudit(ctx context.Context, definition Definition, request ExecutionRequest, arguments string) {
+	if e.audit == nil || definition.Audit == AuditNone {
+		return
+	}
+	metadata := map[string]string{
+		"tool":       definition.Name,
+		"wire_tool":  definition.ModelName(),
+		"request_id": request.RequestID,
+		"channel_id": request.ChannelID,
+		"tool_class": string(definition.ToolClass),
+		"arguments":  redactToolArguments(arguments, definition.Redaction),
+	}
+	if targetIDs := toolTargetIDs(arguments); targetIDs != "" {
+		metadata["target_ids"] = targetIDs
+	}
+	if definition.SupportsDryRun {
+		if args, err := parseArguments(arguments); err == nil {
+			metadata["dry_run"] = strconv.FormatBool(boolArgument(args, "dry_run"))
+		}
+	}
+	data, _ := json.Marshal(metadata)
+	_ = e.audit.Record(ctx, store.AuditEvent{
+		GuildID:    request.GuildID,
+		ActorID:    request.ActorID,
+		Action:     "tool.call",
+		TargetType: "tool",
+		TargetID:   definition.Name,
+		Metadata:   string(data),
+	})
 }
 
 func packedContextPayload(packed contextsvc.PackedContext) map[string]any {
@@ -365,6 +479,82 @@ func parseToolLimit(value any, fallback int) int {
 		}
 	}
 	return fallback
+}
+
+func parseArguments(raw string) (map[string]any, error) {
+	arguments := map[string]any{}
+	if strings.TrimSpace(raw) == "" {
+		return arguments, nil
+	}
+	if err := json.Unmarshal([]byte(raw), &arguments); err != nil {
+		return nil, err
+	}
+	return arguments, nil
+}
+
+func boolArgument(arguments map[string]any, name string) bool {
+	switch value := arguments[name].(type) {
+	case bool:
+		return value
+	case string:
+		switch strings.ToLower(strings.TrimSpace(value)) {
+		case "true", "1", "yes", "y":
+			return true
+		default:
+			return false
+		}
+	default:
+		return false
+	}
+}
+
+func safePreviewArguments(arguments map[string]any) map[string]any {
+	preview := make(map[string]any, len(arguments))
+	for key, value := range arguments {
+		if key == "content" || key == "text" || key == "reason" {
+			preview[key] = truncateToolText(fmt.Sprint(value), 500)
+			continue
+		}
+		preview[key] = value
+	}
+	return preview
+}
+
+func redactToolArguments(arguments string, policy RedactionPolicy) string {
+	value := strings.TrimSpace(arguments)
+	if value == "" {
+		return "{}"
+	}
+	switch policy {
+	case RedactContent:
+		return "[content redacted]"
+	case RedactSecrets:
+		return truncateToolText(value, 1000)
+	default:
+		return value
+	}
+}
+
+func toolTargetIDs(arguments string) string {
+	args, err := parseArguments(arguments)
+	if err != nil || len(args) == 0 {
+		return ""
+	}
+	targets := map[string]string{}
+	for _, key := range []string{"guild_id", "channel_id", "thread_id", "message_id", "user_id", "role_id", "event_id", "rule_id", "webhook_id", "overwrite_id", "code"} {
+		value := strings.TrimSpace(fmt.Sprint(args[key]))
+		if value != "" && value != "<nil>" {
+			targets[key] = value
+		}
+	}
+	if len(targets) == 0 {
+		return ""
+	}
+	data, err := json.Marshal(targets)
+	if err != nil {
+		return ""
+	}
+	return string(data)
 }
 
 func truncateToolText(value string, limit int) string {

@@ -167,6 +167,20 @@ type Attachment struct {
 	UpdatedAt     time.Time `gorm:"not null"`
 }
 
+type DiscordEvent struct {
+	ID             uint       `gorm:"primaryKey"`
+	GuildID        string     `gorm:"index;not null;size:32"`
+	ChannelID      string     `gorm:"index;not null;default:'';size:32"`
+	UserID         string     `gorm:"index;not null;default:'';size:32"`
+	MessageID      string     `gorm:"index;not null;default:'';size:32"`
+	EventType      string     `gorm:"index;not null"`
+	Summary        string     `gorm:"not null;default:''"`
+	Metadata       string     `gorm:"not null;default:''"`
+	ContentPreview string     `gorm:"not null;default:''"`
+	CreatedAt      time.Time  `gorm:"index;not null"`
+	ExpiresAt      *time.Time `gorm:"index"`
+}
+
 type RateLimitBucket struct {
 	ID          uint      `gorm:"primaryKey"`
 	Scope       string    `gorm:"index;not null"`

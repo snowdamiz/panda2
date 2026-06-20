@@ -31,11 +31,13 @@ type Service struct {
 }
 
 type AskRequest struct {
-	GuildID   string
-	UserID    string
-	ChannelID string
-	ThreadID  string
-	Question  string
+	RequestID          string
+	GuildID            string
+	UserID             string
+	ChannelID          string
+	ThreadID           string
+	Question           string
+	AllowedPermissions map[string]struct{}
 }
 
 type AskResponse struct {
@@ -45,14 +47,16 @@ type AskResponse struct {
 }
 
 type TaskRequest struct {
-	GuildID   string
-	UserID    string
-	ChannelID string
-	Command   string
-	Input     string
-	Tone      string
-	Language  string
-	Detail    string
+	RequestID          string
+	GuildID            string
+	UserID             string
+	ChannelID          string
+	Command            string
+	Input              string
+	Tone               string
+	Language           string
+	Detail             string
+	AllowedPermissions map[string]struct{}
 }
 
 type NaturalMessageRequest struct {
@@ -73,11 +77,13 @@ type NaturalMessageDecision struct {
 
 func (s *Service) Ask(ctx context.Context, request AskRequest) (AskResponse, error) {
 	return s.complete(ctx, TaskRequest{
-		GuildID:   request.GuildID,
-		UserID:    request.UserID,
-		ChannelID: request.ChannelID,
-		Command:   "ask",
-		Input:     request.Question,
+		RequestID:          request.RequestID,
+		GuildID:            request.GuildID,
+		UserID:             request.UserID,
+		ChannelID:          request.ChannelID,
+		Command:            "ask",
+		Input:              request.Question,
+		AllowedPermissions: request.AllowedPermissions,
 	})
 }
 
@@ -164,7 +170,7 @@ func (s *Service) Chat(ctx context.Context, request AskRequest) (AskResponse, er
 	messages = append(messages, llm.Message{Role: "user", Content: sanitizePromptInput(request.Question)})
 
 	start := time.Now()
-	response, err := s.completeWithTools(ctx, config, llm.ChatRequest{
+	response, err := s.completeWithTools(ctx, config, request.RequestID, request.UserID, request.ChannelID, request.AllowedPermissions, llm.ChatRequest{
 		Messages:    messages,
 		Temperature: temperatureFromConfig(config, "chat"),
 		MaxTokens:   maxTokensFromConfig(config, "chat"),
@@ -214,7 +220,7 @@ func (s *Service) complete(ctx context.Context, request TaskRequest) (AskRespons
 	}
 
 	start := time.Now()
-	response, err := s.completeWithTools(ctx, config, llm.ChatRequest{
+	response, err := s.completeWithTools(ctx, config, request.RequestID, request.UserID, request.ChannelID, request.AllowedPermissions, llm.ChatRequest{
 		Messages:    s.taskMessages(ctx, config, request),
 		Temperature: temperatureFromConfig(config, request.Command),
 		MaxTokens:   maxTokensFromConfig(config, request.Command),
@@ -326,10 +332,10 @@ func (s *Service) guildConfig(ctx context.Context, guildID string) (store.GuildC
 	return config, true, nil
 }
 
-func (s *Service) completeWithTools(ctx context.Context, config store.GuildConfig, request llm.ChatRequest) (llm.ChatResponse, error) {
-	permissions := toolPermissions(config)
-	if s.toolExecutor != nil && len(permissions) > 0 {
-		request.Tools = s.toolExecutor.OpenRouterTools(permissions)
+func (s *Service) completeWithTools(ctx context.Context, config store.GuildConfig, requestID, actorID, channelID string, allowedPermissions map[string]struct{}, request llm.ChatRequest) (llm.ChatResponse, error) {
+	access := toolAccess(config, allowedPermissions)
+	if s.toolExecutor != nil && len(access.Permissions) > 0 {
+		request.Tools = s.toolExecutor.OpenRouterTools(access)
 	}
 	response, err := s.chatWithFallback(ctx, config, request)
 	if err != nil || len(response.ToolCalls) == 0 || s.toolExecutor == nil {
@@ -344,9 +350,12 @@ func (s *Service) completeWithTools(ctx context.Context, config store.GuildConfi
 	})
 	for _, call := range response.ToolCalls {
 		message, err := s.toolExecutor.Execute(ctx, tools.ExecutionRequest{
-			GuildID:     config.GuildID,
-			Permissions: permissions,
-			Call:        call,
+			GuildID:   config.GuildID,
+			ChannelID: channelID,
+			ActorID:   actorID,
+			RequestID: requestID,
+			Access:    access,
+			Call:      call,
 		})
 		if err != nil {
 			message = llm.Message{
@@ -510,16 +519,25 @@ func modelFromConfig(config store.GuildConfig, fallback string) string {
 	return firstNonEmpty(config.DefaultModel, fallback)
 }
 
-func toolPermissions(config store.GuildConfig) map[string]struct{} {
-	if strings.EqualFold(strings.TrimSpace(config.ToolPolicy), "off") || strings.TrimSpace(config.ToolPolicy) == "" {
-		return nil
+func toolAccess(config store.GuildConfig, allowedPermissions map[string]struct{}) tools.ToolAccess {
+	policy := strings.ToLower(strings.TrimSpace(config.ToolPolicy))
+	if policy == "" {
+		policy = tools.ToolPolicyOff
 	}
-	permissions := map[string]struct{}{}
-	if config.MemoryEnabled {
-		permissions[admin.PermissionAssistantMemoryRead] = struct{}{}
+	permissions := clonePermissions(allowedPermissions)
+	if !config.MemoryEnabled {
+		delete(permissions, admin.PermissionAssistantMemoryRead)
 	}
-	if strings.EqualFold(config.ToolPolicy, "admin_only") {
-		permissions[admin.PermissionAdminConfigRead] = struct{}{}
+	return tools.ToolAccess{Policy: policy, Permissions: permissions}
+}
+
+func clonePermissions(values map[string]struct{}) map[string]struct{} {
+	if len(values) == 0 {
+		return map[string]struct{}{}
+	}
+	permissions := make(map[string]struct{}, len(values))
+	for permission := range values {
+		permissions[permission] = struct{}{}
 	}
 	return permissions
 }

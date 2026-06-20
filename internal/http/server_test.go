@@ -65,6 +65,9 @@ func TestMetricsReportsLocalState(t *testing.T) {
 	if err := db.DB.Create(&store.UsageEvent{Command: "ask", Success: false, CreatedAt: time.Now().UTC()}).Error; err != nil {
 		t.Fatalf("create usage fixture: %v", err)
 	}
+	if err := db.DB.Create(&store.DiscordEvent{GuildID: "guild-1", ChannelID: "channel-1", EventType: "message_create", CreatedAt: time.Now().UTC()}).Error; err != nil {
+		t.Fatalf("create discord event fixture: %v", err)
+	}
 
 	server := New(config.Config{
 		SQLitePath:          ":memory:",
@@ -94,6 +97,9 @@ func TestMetricsReportsLocalState(t *testing.T) {
 		"panda_queue_depth 1",
 		"panda_usage_events_total 1",
 		"panda_usage_events_failed_total 1",
+		"panda_discord_events_total 1",
+		"panda_discord_event_cache_size 1",
+		"panda_discord_intent_guild_members_enabled 0",
 	} {
 		if !strings.Contains(body, expected) {
 			t.Fatalf("expected metrics body to contain %q, got:\n%s", expected, body)
