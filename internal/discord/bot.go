@@ -68,6 +68,7 @@ func New(cfg config.Config, router *commands.Router, logger *slog.Logger) (*Bot,
 	client, err := disgo.New(cfg.DiscordBotToken,
 		bot.WithGatewayConfigOpts(gateway.WithIntents(
 			gateway.IntentsNonPrivileged.Remove(gateway.IntentDirectMessages, gateway.IntentDirectMessageReactions, gateway.IntentDirectMessageTyping, gateway.IntentDirectMessagePolls),
+			gateway.IntentGuildMembers,
 			gateway.IntentMessageContent,
 		)),
 		bot.WithEventListenerFunc(instance.onApplicationCommand),
@@ -90,6 +91,7 @@ func New(cfg config.Config, router *commands.Router, logger *slog.Logger) (*Bot,
 		bot.WithEventListenerFunc(instance.onThreadUpdate),
 		bot.WithEventListenerFunc(instance.onThreadDelete),
 		bot.WithEventListenerFunc(instance.onThreadMemberUpdate),
+		bot.WithEventListenerFunc(instance.onGuildMemberUpdate),
 		bot.WithEventListenerFunc(instance.onRoleCreate),
 		bot.WithEventListenerFunc(instance.onRoleUpdate),
 		bot.WithEventListenerFunc(instance.onRoleDelete),
@@ -334,6 +336,87 @@ func applicationCommands() []disgoDiscord.ApplicationCommandCreate {
 				},
 			},
 		},
+		disgoDiscord.SlashCommandCreate{
+			Name:        "tool",
+			Description: "Manage moderator-created composed tools",
+			Options: []disgoDiscord.ApplicationCommandOption{
+				disgoDiscord.ApplicationCommandOptionSubCommand{
+					Name:        "draft",
+					Description: "Draft or preview a composed tool",
+					Options: []disgoDiscord.ApplicationCommandOption{
+						disgoDiscord.ApplicationCommandOptionString{Name: "request", Description: "Natural-language tool request", Required: false, MaxLength: &maxTextLength},
+						disgoDiscord.ApplicationCommandOptionString{Name: "spec_json", Description: "Complete composed-tool spec JSON", Required: false, MaxLength: &maxTextLength},
+						disgoDiscord.ApplicationCommandOptionString{Name: "role_id", Description: "Stable Discord role ID", Required: false, MaxLength: &maxConfirmLength},
+						disgoDiscord.ApplicationCommandOptionString{Name: "role_name", Description: "Role name to resolve", Required: false, MaxLength: &maxConfirmLength},
+						disgoDiscord.ApplicationCommandOptionString{Name: "channel_id", Description: "Stable Discord channel ID", Required: false, MaxLength: &maxConfirmLength},
+						disgoDiscord.ApplicationCommandOptionString{Name: "channel_name", Description: "Channel name to resolve", Required: false, MaxLength: &maxConfirmLength},
+						disgoDiscord.ApplicationCommandOptionString{Name: "welcome_text", Description: "Welcome message template", Required: false, MaxLength: &maxTextLength},
+						dryRunOption,
+					},
+				},
+				disgoDiscord.ApplicationCommandOptionSubCommand{
+					Name:        "approve",
+					Description: "Approve and enable a composed tool version",
+					Options: []disgoDiscord.ApplicationCommandOption{
+						disgoDiscord.ApplicationCommandOptionString{Name: "tool", Description: "Tool name", Required: true, MaxLength: &maxConfirmLength},
+						disgoDiscord.ApplicationCommandOptionString{Name: "version", Description: "Version number", Required: false, MaxLength: &maxConfirmLength},
+						confirmOption,
+					},
+				},
+				disgoDiscord.ApplicationCommandOptionSubCommand{Name: "list", Description: "List composed tools"},
+				disgoDiscord.ApplicationCommandOptionSubCommand{
+					Name:        "show",
+					Description: "Show composed tool details",
+					Options: []disgoDiscord.ApplicationCommandOption{
+						disgoDiscord.ApplicationCommandOptionString{Name: "tool", Description: "Tool name", Required: true, MaxLength: &maxConfirmLength},
+					},
+				},
+				toolStatusSubcommand("pause", "Pause a composed tool", maxConfirmLength, dryRunOption),
+				toolStatusSubcommand("resume", "Resume a composed tool", maxConfirmLength, dryRunOption),
+				toolStatusSubcommand("disable", "Disable a composed tool", maxConfirmLength, dryRunOption),
+				toolStatusSubcommand("archive", "Archive a composed tool", maxConfirmLength, dryRunOption),
+				toolRunSubcommand("run", "Run a composed tool manually", maxConfirmLength, maxTextLength),
+				toolRunSubcommand("simulate", "Simulate a composed tool with dry-run writes", maxConfirmLength, maxTextLength),
+				disgoDiscord.ApplicationCommandOptionSubCommand{
+					Name:        "export",
+					Description: "Export the approved composed-tool spec",
+					Options: []disgoDiscord.ApplicationCommandOption{
+						disgoDiscord.ApplicationCommandOptionString{Name: "tool", Description: "Tool name", Required: true, MaxLength: &maxConfirmLength},
+					},
+				},
+				disgoDiscord.ApplicationCommandOptionSubCommand{
+					Name:        "rollback",
+					Description: "Roll back to an approved version",
+					Options: []disgoDiscord.ApplicationCommandOption{
+						disgoDiscord.ApplicationCommandOptionString{Name: "tool", Description: "Tool name", Required: true, MaxLength: &maxConfirmLength},
+						disgoDiscord.ApplicationCommandOptionString{Name: "version", Description: "Approved version number", Required: true, MaxLength: &maxConfirmLength},
+						confirmOption,
+					},
+				},
+			},
+		},
+	}
+}
+
+func toolStatusSubcommand(name, description string, maxLength int, dryRunOption disgoDiscord.ApplicationCommandOptionBool) disgoDiscord.ApplicationCommandOptionSubCommand {
+	return disgoDiscord.ApplicationCommandOptionSubCommand{
+		Name:        name,
+		Description: description,
+		Options: []disgoDiscord.ApplicationCommandOption{
+			disgoDiscord.ApplicationCommandOptionString{Name: "tool", Description: "Tool name", Required: true, MaxLength: &maxLength},
+			dryRunOption,
+		},
+	}
+}
+
+func toolRunSubcommand(name, description string, maxToolLength, maxInputLength int) disgoDiscord.ApplicationCommandOptionSubCommand {
+	return disgoDiscord.ApplicationCommandOptionSubCommand{
+		Name:        name,
+		Description: description,
+		Options: []disgoDiscord.ApplicationCommandOption{
+			disgoDiscord.ApplicationCommandOptionString{Name: "tool", Description: "Tool name", Required: true, MaxLength: &maxToolLength},
+			disgoDiscord.ApplicationCommandOptionString{Name: "input_json", Description: "Input JSON object", Required: false, MaxLength: &maxInputLength},
+		},
 	}
 }
 
@@ -370,7 +453,7 @@ func (b *Bot) handleSlashCommand(event *events.ApplicationCommandInteractionCrea
 	if question, ok := data.OptString("question"); ok {
 		request.Options["question"] = question
 	}
-	for _, name := range []string{"model", "fallback_models", "temperature", "max_response_tokens", "max_tokens", "tool_policy", "prompt", "action", "confirm"} {
+	for _, name := range []string{"model", "fallback_models", "temperature", "max_response_tokens", "max_tokens", "tool_policy", "prompt", "action", "confirm", "request", "description", "spec_json", "role_id", "role_name", "channel_id", "channel_name", "welcome_text", "tool", "name", "version", "input_json"} {
 		if value, ok := data.OptString(name); ok {
 			request.Options[name] = value
 		}

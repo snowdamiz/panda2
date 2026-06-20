@@ -10,6 +10,7 @@ import (
 	"github.com/sn0w/panda2/internal/admin"
 	"github.com/sn0w/panda2/internal/assistant"
 	"github.com/sn0w/panda2/internal/commands"
+	"github.com/sn0w/panda2/internal/composed"
 	"github.com/sn0w/panda2/internal/config"
 	discordbot "github.com/sn0w/panda2/internal/discord"
 	pandahttp "github.com/sn0w/panda2/internal/http"
@@ -50,6 +51,7 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 	budgets := repository.NewBudgetRepository(dataStore.DB)
 	members := repository.NewMemberRepository(dataStore.DB)
 	jobs := repository.NewJobRepository(dataStore.DB)
+	composedTools := repository.NewComposedToolRepository(dataStore.DB)
 	openRouter := llm.NewOpenRouterClient(llm.OpenRouterConfig{
 		APIKey:                         cfg.OpenRouterAPIKey,
 		BaseURL:                        cfg.OpenRouterBaseURL,
@@ -77,10 +79,14 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 		WithAttachmentReader(attachments).
 		WithAuditRecorder(audit).
 		WithAdminOperations(adminService)
+	composedService := composed.NewService(composedTools, toolRegistry, toolExecutor, openRouter, cfg.OpenRouterModel).
+		WithAuditRecorder(audit)
+	toolExecutor.WithDynamicToolProvider(composedService)
 	assistantService := assistant.NewService(openRouter, usage, guildConfigs, memoryService, conversations, cfg.OpenRouterModel, cfg.OpenRouterFallbackModels).
 		WithToolExecutor(toolExecutor)
 	router := commands.NewRouter(adminService, assistantService, opsService, ratelimit.New(cfg.UserRateLimit, cfg.UserRateLimitWindow)).
-		WithAttachmentReader(attachments)
+		WithAttachmentReader(attachments).
+		WithComposedService(composedService)
 
 	discord, err := discordbot.New(cfg, router, logger)
 	if err != nil {
@@ -93,8 +99,11 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 	}
 	if provider := discord.ToolProvider(discordEvents); provider != nil {
 		toolExecutor.WithDiscordToolProvider(provider)
+		composedService.WithDiscordResolver(provider)
 	}
 	worker.Register(discordbot.InteractionJobKind, discord.HandleInteractionJob)
+	worker.Register(composed.EventJobKind, composedService.HandleEventJob)
+	worker.Register(composed.RunJobKind, composedService.HandleRunJob)
 
 	return &App{
 		cfg:        cfg,

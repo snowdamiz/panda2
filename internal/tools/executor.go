@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -36,6 +37,11 @@ type AttachmentReader interface {
 
 type DiscordToolProvider interface {
 	ExecuteDiscordTool(ctx context.Context, request DiscordToolRequest) (any, error)
+}
+
+type DynamicToolProvider interface {
+	OpenRouterTools(ctx context.Context, request DynamicToolListRequest) ([]llm.Tool, error)
+	ExecuteDynamicTool(ctx context.Context, request DynamicExecutionRequest) (ExecutionResult, error)
 }
 
 type AuditRecorder interface {
@@ -83,20 +89,42 @@ type Executor struct {
 	discord     DiscordToolProvider
 	audit       AuditRecorder
 	adminOps    AdminOperations
+	dynamic     DynamicToolProvider
 }
 
 type ExecutionRequest struct {
-	GuildID   string
-	ChannelID string
-	ActorID   string
-	RequestID string
-	Access    ToolAccess
-	Call      llm.ToolCall
+	GuildID              string
+	ChannelID            string
+	ActorID              string
+	RequestID            string
+	InvocationType       string
+	Access               ToolAccess
+	Call                 llm.ToolCall
+	AllowConfirmedWrites bool
 }
 
 type ExecutionResult struct {
 	Message      llm.Message
 	Confirmation *InteractionConfirmation
+}
+
+type DynamicToolListRequest struct {
+	GuildID        string
+	ChannelID      string
+	ActorID        string
+	Access         ToolAccess
+	InvocationType string
+}
+
+type DynamicExecutionRequest struct {
+	GuildID        string
+	ChannelID      string
+	ActorID        string
+	RequestID      string
+	Access         ToolAccess
+	InvocationType string
+	Call           llm.ToolCall
+	NestedDepth    int
 }
 
 type InteractionConfirmation struct {
@@ -136,6 +164,11 @@ func (e *Executor) WithAdminOperations(adminOps AdminOperations) *Executor {
 	return e
 }
 
+func (e *Executor) WithDynamicToolProvider(provider DynamicToolProvider) *Executor {
+	e.dynamic = provider
+	return e
+}
+
 func (e *Executor) OpenRouterTools(access ToolAccess) []llm.Tool {
 	if e == nil || e.registry == nil {
 		return nil
@@ -153,12 +186,35 @@ func (e *Executor) OpenRouterTools(access ToolAccess) []llm.Tool {
 	return result
 }
 
+func (e *Executor) OpenRouterToolsForRequest(ctx context.Context, request DynamicToolListRequest) []llm.Tool {
+	result := e.OpenRouterTools(request.Access)
+	if e == nil || e.dynamic == nil {
+		return result
+	}
+	dynamicTools, err := e.dynamic.OpenRouterTools(ctx, request)
+	if err != nil {
+		return result
+	}
+	return append(result, dynamicTools...)
+}
+
 func (e *Executor) Execute(ctx context.Context, request ExecutionRequest) (ExecutionResult, error) {
 	if e == nil || e.registry == nil {
 		return ExecutionResult{}, fmt.Errorf("tool executor is not configured")
 	}
 	definition, err := e.registry.MustGet(request.Call.Function.Name)
 	if err != nil {
+		if errors.Is(err, ErrUnknownTool) && e.dynamic != nil {
+			return e.dynamic.ExecuteDynamicTool(ctx, DynamicExecutionRequest{
+				GuildID:        request.GuildID,
+				ChannelID:      request.ChannelID,
+				ActorID:        request.ActorID,
+				RequestID:      request.RequestID,
+				Access:         request.Access,
+				InvocationType: request.InvocationType,
+				Call:           request.Call,
+			})
+		}
 		return ExecutionResult{}, err
 	}
 	if !definition.AvailableTo(request.Access) {
@@ -257,7 +313,7 @@ func (e *Executor) executeDiscordTool(ctx context.Context, definition Definition
 			"preview":               safePreviewArguments(arguments),
 		}, nil
 	}
-	if definition.RequiresConfirmation {
+	if definition.RequiresConfirmation && !request.AllowConfirmedWrites {
 		return map[string]any{
 			"confirmation_required": true,
 			"tool":                  definition.Name,

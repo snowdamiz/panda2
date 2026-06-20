@@ -1,0 +1,178 @@
+package composed
+
+import (
+	"encoding/json"
+	"time"
+)
+
+const (
+	StatusDraft           = "draft"
+	StatusPendingApproval = "pending_approval"
+	StatusEnabled         = "enabled"
+	StatusPaused          = "paused"
+	StatusDisabled        = "disabled"
+	StatusArchived        = "archived"
+
+	VisibilityGuild  = "guild"
+	VisibilityHidden = "hidden"
+
+	RunnerDeterministic = "deterministic"
+	RunnerAgentic       = "agentic"
+	RunnerHybrid        = "hybrid"
+
+	StepToolCall         = "tool_call"
+	StepComposedToolCall = "composed_tool_call"
+
+	InvocationChatTool       = "chat_tool"
+	InvocationSlashCommand   = "slash_command"
+	InvocationMessageContext = "message_context"
+	InvocationScheduled      = "scheduled"
+	InvocationEvent          = "event"
+	InvocationNestedTool     = "nested_tool"
+	InvocationManual         = "manual"
+
+	RunQueued      = "queued"
+	RunRunning     = "running"
+	RunSucceeded   = "succeeded"
+	RunFailed      = "failed"
+	RunSkipped     = "skipped"
+	RunBlocked     = "blocked"
+	RunRateLimited = "rate_limited"
+	RunDeduped     = "deduped"
+
+	EventJobKind = "composed_tool.event"
+	RunJobKind   = "composed_tool.run"
+)
+
+type Spec struct {
+	SchemaVersion int              `json:"schema_version"`
+	Name          string           `json:"name"`
+	Description   string           `json:"description"`
+	InputSchema   json.RawMessage  `json:"input_schema"`
+	OutputSchema  json.RawMessage  `json:"output_schema"`
+	Runner        RunnerSpec       `json:"runner"`
+	Steps         []StepSpec       `json:"steps,omitempty"`
+	Invocations   []InvocationSpec `json:"invocations"`
+	Safety        SafetySpec       `json:"safety"`
+}
+
+type RunnerSpec struct {
+	Type                  string   `json:"type"`
+	SystemPrompt          string   `json:"system_prompt"`
+	Model                 string   `json:"model,omitempty"`
+	Temperature           float64  `json:"temperature"`
+	MaxTokens             int      `json:"max_tokens"`
+	ToolAllowlist         []string `json:"tool_allowlist"`
+	ComposedToolAllowlist []string `json:"composed_tool_allowlist,omitempty"`
+}
+
+type StepSpec struct {
+	ID        string         `json:"id"`
+	Type      string         `json:"type"`
+	Tool      string         `json:"tool"`
+	Arguments map[string]any `json:"arguments,omitempty"`
+	OutputKey string         `json:"output_key,omitempty"`
+}
+
+type InvocationSpec struct {
+	Type               string            `json:"type"`
+	Enabled            *bool             `json:"enabled,omitempty"`
+	EventType          string            `json:"event_type,omitempty"`
+	Filters            map[string]string `json:"filters,omitempty"`
+	InputMapping       map[string]string `json:"input_mapping,omitempty"`
+	RequiredPermission string            `json:"required_permission,omitempty"`
+	Cron               string            `json:"cron,omitempty"`
+}
+
+type SafetySpec struct {
+	RequiresApproval            bool `json:"requires_approval"`
+	RequiresConfirmationOnWrite bool `json:"requires_confirmation_on_write"`
+	MaxNestedDepth              int  `json:"max_nested_depth"`
+	CooldownSeconds             int  `json:"cooldown_seconds"`
+	MaxRunsPerHour              int  `json:"max_runs_per_hour"`
+	DedupeWindowSeconds         int  `json:"dedupe_window_seconds"`
+}
+
+type ValidationReport struct {
+	Valid       bool     `json:"valid"`
+	RiskLevel   string   `json:"risk_level"`
+	Errors      []string `json:"errors,omitempty"`
+	Warnings    []string `json:"warnings,omitempty"`
+	NativeTools []string `json:"native_tools,omitempty"`
+	Writes      []string `json:"writes,omitempty"`
+}
+
+type EventJobPayload struct {
+	GuildID   string            `json:"guild_id"`
+	EventID   string            `json:"event_id"`
+	EventType string            `json:"event_type"`
+	UserID    string            `json:"user_id,omitempty"`
+	ChannelID string            `json:"channel_id,omitempty"`
+	MessageID string            `json:"message_id,omitempty"`
+	Metadata  map[string]string `json:"metadata,omitempty"`
+	CreatedAt time.Time         `json:"created_at,omitempty"`
+}
+
+type RunJobPayload struct {
+	GuildID           string         `json:"guild_id"`
+	ToolName          string         `json:"tool_name"`
+	InvocationType    string         `json:"invocation_type"`
+	InvokingUserID    string         `json:"invoking_user_id,omitempty"`
+	TriggeringEventID string         `json:"triggering_event_id,omitempty"`
+	Input             map[string]any `json:"input,omitempty"`
+	DryRun            bool           `json:"dry_run,omitempty"`
+}
+
+type RunRequest struct {
+	GuildID           string
+	ToolName          string
+	InvocationType    string
+	InvokingUserID    string
+	TriggeringEventID string
+	Input             map[string]any
+	NestedDepth       int
+	DryRun            bool
+}
+
+type RunResult struct {
+	RunID      uint
+	Status     string
+	Output     map[string]any
+	Transcript []TranscriptEntry
+	Error      string
+}
+
+type TranscriptEntry struct {
+	StepID       string         `json:"step_id,omitempty"`
+	Tool         string         `json:"tool"`
+	Arguments    map[string]any `json:"arguments,omitempty"`
+	Result       any            `json:"result,omitempty"`
+	Error        string         `json:"error,omitempty"`
+	NestedRunID  uint           `json:"nested_run_id,omitempty"`
+	ElapsedMS    int64          `json:"elapsed_ms,omitempty"`
+	Confirmation bool           `json:"confirmation_required,omitempty"`
+}
+
+type DraftRequest struct {
+	GuildID      string
+	ActorID      string
+	Text         string
+	SpecJSON     string
+	RoleID       string
+	RoleName     string
+	ChannelID    string
+	ChannelName  string
+	WelcomeText  string
+	DefaultModel string
+}
+
+type DraftResult struct {
+	Tool       string
+	Version    int
+	Spec       Spec
+	Validation ValidationReport
+}
+
+func invocationEnabled(invocation InvocationSpec) bool {
+	return invocation.Enabled == nil || *invocation.Enabled
+}

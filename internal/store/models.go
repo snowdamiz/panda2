@@ -230,3 +230,59 @@ type Job struct {
 	CreatedAt      time.Time  `gorm:"not null"`
 	UpdatedAt      time.Time  `gorm:"not null"`
 }
+
+type ComposedTool struct {
+	ID               uint      `gorm:"primaryKey"`
+	GuildID          string    `gorm:"index;not null;size:32"`
+	ToolID           string    `gorm:"uniqueIndex;not null;size:64"`
+	CurrentVersionID *uint     `gorm:"index"`
+	Name             string    `gorm:"index;not null;size:80"`
+	Status           string    `gorm:"index;not null;default:'draft'"`
+	Visibility       string    `gorm:"index;not null;default:'guild'"`
+	CreatedBy        string    `gorm:"index;not null;size:32"`
+	ApprovedBy       string    `gorm:"index;not null;default:'';size:32"`
+	CreatedAt        time.Time `gorm:"not null"`
+	UpdatedAt        time.Time `gorm:"not null"`
+}
+
+type ComposedToolVersion struct {
+	ID                 uint       `gorm:"primaryKey"`
+	ComposedToolID     uint       `gorm:"uniqueIndex:idx_composed_tool_versions_tool_version;index;not null"`
+	VersionNumber      int        `gorm:"uniqueIndex:idx_composed_tool_versions_tool_version;not null"`
+	SpecJSON           string     `gorm:"not null"`
+	ValidationJSON     string     `gorm:"not null;default:'{}'"`
+	ToolDefinitionJSON string     `gorm:"not null;default:'{}'"`
+	CreatedBy          string     `gorm:"index;not null;size:32"`
+	ApprovedBy         string     `gorm:"index;not null;default:'';size:32"`
+	ApprovedAt         *time.Time `gorm:"index"`
+	CreatedAt          time.Time  `gorm:"not null"`
+}
+
+type ComposedToolRun struct {
+	ID                uint       `gorm:"primaryKey"`
+	ComposedToolID    uint       `gorm:"index;not null"`
+	VersionID         uint       `gorm:"index;not null"`
+	GuildID           string     `gorm:"index;not null;size:32"`
+	InvocationType    string     `gorm:"index;not null"`
+	InvokingUserID    string     `gorm:"index;not null;default:'';size:32"`
+	TriggeringEventID string     `gorm:"index;not null;default:'';size:64"`
+	Status            string     `gorm:"index;not null;default:'queued'"`
+	AttemptCount      int        `gorm:"not null;default:0"`
+	Model             string     `gorm:"not null;default:''"`
+	InputJSON         string     `gorm:"not null;default:'{}'"`
+	OutputJSON        string     `gorm:"not null;default:'{}'"`
+	TranscriptJSON    string     `gorm:"not null;default:'[]'"`
+	Error             string     `gorm:"not null;default:''"`
+	StartedAt         *time.Time `gorm:"index"`
+	FinishedAt        *time.Time `gorm:"index"`
+	CreatedAt         time.Time  `gorm:"index;not null"`
+	UpdatedAt         time.Time  `gorm:"not null"`
+}
+
+type ComposedToolDedupe struct {
+	ID                    uint      `gorm:"primaryKey"`
+	ComposedToolID        uint      `gorm:"uniqueIndex:idx_composed_tool_dedupes_tool_fingerprint;index;not null"`
+	InvocationFingerprint string    `gorm:"uniqueIndex:idx_composed_tool_dedupes_tool_fingerprint;not null;size:128"`
+	ExpiresAt             time.Time `gorm:"index;not null"`
+	CreatedAt             time.Time `gorm:"not null"`
+}

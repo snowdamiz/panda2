@@ -12,6 +12,7 @@ import (
 
 	"github.com/sn0w/panda2/internal/admin"
 	"github.com/sn0w/panda2/internal/assistant"
+	"github.com/sn0w/panda2/internal/composed"
 	contextsvc "github.com/sn0w/panda2/internal/context"
 	"github.com/sn0w/panda2/internal/llm"
 	"github.com/sn0w/panda2/internal/ops"
@@ -24,6 +25,7 @@ import (
 type Router struct {
 	admin       *admin.Service
 	assistant   *assistant.Service
+	composed    *composed.Service
 	context     *contextsvc.Service
 	threads     ThreadManager
 	attachments AttachmentReader
@@ -58,6 +60,11 @@ func (r *Router) WithAttachmentReader(attachmentReader AttachmentReader) *Router
 	return r
 }
 
+func (r *Router) WithComposedService(composedService *composed.Service) *Router {
+	r.composed = composedService
+	return r
+}
+
 func (r *Router) Handle(ctx context.Context, request Request) Response {
 	switch strings.ToLower(request.Command) {
 	case "ping":
@@ -68,6 +75,8 @@ func (r *Router) Handle(ctx context.Context, request Request) Response {
 		return r.handleAdmin(ctx, request)
 	case "ops":
 		return r.handleOps(ctx, request)
+	case "tool":
+		return r.handleTool(ctx, request)
 	case "ask":
 		return r.handleAsk(ctx, request, "ask")
 	case "chat":
@@ -614,6 +623,10 @@ func (r *Router) allowedToolPermissions(ctx context.Context, request Request) ma
 	r.addPermissionIfAllowed(ctx, request, permissions, admin.PermissionAdminUsageRead, r.admin.CanReadUsage)
 	r.addPermissionIfAllowed(ctx, request, permissions, admin.PermissionAdminAuditRead, r.admin.CanReadAudit)
 	r.addPermissionIfAllowed(ctx, request, permissions, admin.PermissionAdminMemoryManage, r.admin.CanManageMemory)
+	r.addPermissionIfAllowed(ctx, request, permissions, admin.PermissionToolComposeDraft, r.admin.CanDraftComposedTool)
+	r.addPermissionIfAllowed(ctx, request, permissions, admin.PermissionToolComposeApprove, r.admin.CanApproveComposedTool)
+	r.addPermissionIfAllowed(ctx, request, permissions, admin.PermissionToolComposeInvoke, r.admin.CanInvokeComposedTool)
+	r.addPermissionIfAllowed(ctx, request, permissions, admin.PermissionToolComposeAudit, r.admin.CanAuditComposedTool)
 	r.addPermissionIfAllowed(ctx, request, permissions, admin.PermissionOwnerOps, r.admin.CanUseOwnerOps)
 	return permissions
 }

@@ -294,3 +294,55 @@ func TestBudgetCheckAndConsumeUsesDurableWindow(t *testing.T) {
 		t.Fatalf("expected 30m retry, got %s", denial.RetryAfter)
 	}
 }
+
+func TestComposedToolApprovedVersionsAreImmutable(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(ctx, "file::memory:?cache=shared")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer db.Close()
+
+	repo := NewComposedToolRepository(db.DB)
+	record, err := repo.CreateDraft(ctx, store.ComposedTool{
+		GuildID:   "guild-1",
+		ToolID:    "guild-1:builder_welcome",
+		Name:      "builder_welcome",
+		Status:    "pending_approval",
+		CreatedBy: "moderator-1",
+	}, store.ComposedToolVersion{
+		SpecJSON:           `{"schema_version":1}`,
+		ValidationJSON:     `{"valid":true}`,
+		ToolDefinitionJSON: `{"type":"function"}`,
+		CreatedBy:          "moderator-1",
+	})
+	if err != nil {
+		t.Fatalf("CreateDraft: %v", err)
+	}
+	if _, err := repo.ApproveVersion(ctx, "guild-1", "builder_welcome", 1, "admin-1"); err != nil {
+		t.Fatalf("ApproveVersion: %v", err)
+	}
+	if err := repo.UpdateDraftVersion(ctx, record.Version.ID, `{"mutated":true}`, `{}`, `{}`); err == nil {
+		t.Fatal("expected approved version mutation to fail")
+	}
+
+	next, err := repo.AddDraftVersion(ctx, record.Tool.ID, store.ComposedToolVersion{
+		SpecJSON:           `{"schema_version":1,"name":"builder_welcome"}`,
+		ValidationJSON:     `{"valid":true}`,
+		ToolDefinitionJSON: `{"type":"function"}`,
+		CreatedBy:          "moderator-1",
+	})
+	if err != nil {
+		t.Fatalf("AddDraftVersion: %v", err)
+	}
+	if next.VersionNumber != 2 {
+		t.Fatalf("expected version 2, got %d", next.VersionNumber)
+	}
+	tool, ok, err := repo.GetByName(ctx, "guild-1", "builder_welcome")
+	if err != nil || !ok {
+		t.Fatalf("GetByName: ok=%t err=%v", ok, err)
+	}
+	if tool.Status != "enabled" {
+		t.Fatalf("new draft version should not disable current approved tool, got %s", tool.Status)
+	}
+}

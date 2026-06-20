@@ -11,6 +11,7 @@ import (
 	disgoDiscord "github.com/disgoorg/disgo/discord"
 	"github.com/disgoorg/disgo/events"
 	"github.com/disgoorg/snowflake/v2"
+	"github.com/sn0w/panda2/internal/composed"
 	"github.com/sn0w/panda2/internal/repository"
 	"github.com/sn0w/panda2/internal/security"
 	"github.com/sn0w/panda2/internal/store"
@@ -139,6 +140,23 @@ func (b *Bot) onThreadMemberUpdate(event *events.ThreadMemberUpdate) {
 		EventType: "thread_member_update",
 		Summary:   "Thread member updated",
 	})
+}
+
+func (b *Bot) onGuildMemberUpdate(event *events.GuildMemberUpdate) {
+	oldRoles := snowflakeSet(event.OldMember.RoleIDs)
+	for _, roleID := range event.Member.RoleIDs {
+		if _, existed := oldRoles[roleID]; existed {
+			continue
+		}
+		b.recordMemberRoleEvent(context.Background(), "guild.member.role_added", event.GuildID, event.Member.User.ID, roleID)
+	}
+	newRoles := snowflakeSet(event.Member.RoleIDs)
+	for _, roleID := range event.OldMember.RoleIDs {
+		if _, exists := newRoles[roleID]; exists {
+			continue
+		}
+		b.recordMemberRoleEvent(context.Background(), "guild.member.role_removed", event.GuildID, event.Member.User.ID, roleID)
+	}
 }
 
 func (b *Bot) onRoleCreate(event *events.RoleCreate) {
@@ -342,6 +360,84 @@ func (b *Bot) recordRoleEvent(eventType string, guildID, roleID snowflake.ID, na
 	})
 }
 
+func (b *Bot) recordMemberRoleEvent(ctx context.Context, eventType string, guildID, userID, roleID snowflake.ID) {
+	roleName := b.roleName(guildID, roleID)
+	metadata := map[string]string{"role_id": roleID.String()}
+	if roleName != "" {
+		metadata["role_name"] = roleName
+	}
+	event := store.DiscordEvent{
+		GuildID:   guildID.String(),
+		UserID:    userID.String(),
+		EventType: eventType,
+		Summary:   "Member role changed",
+		Metadata:  metadataJSON(metadata),
+	}
+	recorded := event
+	if b.events != nil {
+		var err error
+		recorded, err = b.events.Record(ctx, event)
+		if err != nil {
+			discordEventDrops.Add(1)
+			logger := b.logger
+			if logger == nil {
+				logger = slog.Default()
+			}
+			logger.Debug("failed to record discord member role event", slog.Any("err", err), slog.String("event_type", event.EventType))
+		}
+	}
+	b.enqueueComposedEvent(ctx, recorded, map[string]string{
+		"role_id":   roleID.String(),
+		"role_name": roleName,
+	})
+}
+
+func (b *Bot) enqueueComposedEvent(ctx context.Context, event store.DiscordEvent, metadata map[string]string) {
+	if b == nil || b.jobs == nil || event.GuildID == "" {
+		return
+	}
+	eventID := ""
+	if event.ID != 0 {
+		eventID = fmt.Sprintf("%d", event.ID)
+	}
+	payload, err := json.Marshal(composed.EventJobPayload{
+		GuildID:   event.GuildID,
+		EventID:   eventID,
+		EventType: event.EventType,
+		UserID:    event.UserID,
+		ChannelID: event.ChannelID,
+		MessageID: event.MessageID,
+		Metadata:  cleanStringMap(metadata),
+		CreatedAt: event.CreatedAt,
+	})
+	if err != nil {
+		return
+	}
+	if _, err := b.jobs.Enqueue(ctx, store.Job{
+		Kind:        composed.EventJobKind,
+		GuildID:     event.GuildID,
+		Payload:     string(payload),
+		MaxAttempts: 3,
+	}); err != nil {
+		logger := b.logger
+		if logger == nil {
+			logger = slog.Default()
+		}
+		logger.Debug("failed to enqueue composed event", slog.Any("err", err), slog.String("event_type", event.EventType))
+	}
+}
+
+func (b *Bot) roleName(guildID, roleID snowflake.ID) string {
+	if b == nil || b.client == nil {
+		return ""
+	}
+	role, err := b.client.Rest.GetRole(guildID, roleID)
+	if err != nil || role == nil {
+		return ""
+	}
+	return role.Name
+}
+
 func (b *Bot) recordGuildUserEvent(eventType string, guildID, userID snowflake.ID, summary string) {
 	b.recordDiscordEvent(context.Background(), store.DiscordEvent{
 		GuildID:   guildID.String(),
@@ -388,4 +484,24 @@ func metadataJSON(values map[string]string) string {
 		return "{}"
 	}
 	return string(data)
+}
+
+func snowflakeSet(ids []snowflake.ID) map[snowflake.ID]struct{} {
+	result := make(map[snowflake.ID]struct{}, len(ids))
+	for _, id := range ids {
+		result[id] = struct{}{}
+	}
+	return result
+}
+
+func cleanStringMap(values map[string]string) map[string]string {
+	result := map[string]string{}
+	for key, value := range values {
+		key = strings.TrimSpace(key)
+		value = strings.TrimSpace(value)
+		if key != "" && value != "" {
+			result[key] = security.RedactSecrets(value)
+		}
+	}
+	return result
 }

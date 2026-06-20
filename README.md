@@ -65,3 +65,9 @@ Large summarize requests from Discord are queued as durable background jobs afte
 Fly.io should mount persistent storage at `/data`; the included `fly.toml` and `Dockerfile` keep SQLite and temp data off the ephemeral root filesystem. The Docker build runs tests and builds with `sqlite_fts5` enabled for production search.
 
 See `OPERATIONS.md` for deploy, rollback, backup, and incident notes.
+
+## Planning Docs
+
+- `PLAN.md` covers the original production bot plan.
+- `DISCORD_TOOLS_PLAN.md` covers Discord tool coverage before self-extension.
+- `MOD_EXTENSION_AGENT_PLAN.md` covers moderator-created composed tools and agents.

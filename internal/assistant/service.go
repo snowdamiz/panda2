@@ -344,7 +344,13 @@ func (s *Service) guildConfig(ctx context.Context, guildID string) (store.GuildC
 func (s *Service) completeWithTools(ctx context.Context, config store.GuildConfig, requestID, actorID, channelID string, allowedPermissions map[string]struct{}, request llm.ChatRequest) (llm.ChatResponse, []InteractionConfirmation, error) {
 	access := toolAccess(config, allowedPermissions)
 	if s.toolExecutor != nil && len(access.Permissions) > 0 {
-		request.Tools = s.toolExecutor.OpenRouterTools(access)
+		request.Tools = s.toolExecutor.OpenRouterToolsForRequest(ctx, tools.DynamicToolListRequest{
+			GuildID:        config.GuildID,
+			ChannelID:      channelID,
+			ActorID:        actorID,
+			Access:         access,
+			InvocationType: "chat_tool",
+		})
 	}
 	response, err := s.chatWithFallback(ctx, config, request)
 	if err != nil || len(response.ToolCalls) == 0 || s.toolExecutor == nil {
@@ -360,12 +366,13 @@ func (s *Service) completeWithTools(ctx context.Context, config store.GuildConfi
 	var confirmations []InteractionConfirmation
 	for _, call := range response.ToolCalls {
 		result, err := s.toolExecutor.Execute(ctx, tools.ExecutionRequest{
-			GuildID:   config.GuildID,
-			ChannelID: channelID,
-			ActorID:   actorID,
-			RequestID: requestID,
-			Access:    access,
-			Call:      call,
+			GuildID:        config.GuildID,
+			ChannelID:      channelID,
+			ActorID:        actorID,
+			RequestID:      requestID,
+			InvocationType: "chat_tool",
+			Access:         access,
+			Call:           call,
 		})
 		message := result.Message
 		if err != nil {

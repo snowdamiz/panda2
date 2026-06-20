@@ -38,6 +38,10 @@ const (
 	PermissionAdminUsageRead       = "admin.usage.read"
 	PermissionAdminAuditRead       = "admin.audit.read"
 	PermissionAdminMemoryManage    = "admin.memory.manage"
+	PermissionToolComposeDraft     = "tool.compose.draft"
+	PermissionToolComposeApprove   = "tool.compose.approve"
+	PermissionToolComposeInvoke    = "tool.compose.invoke"
+	PermissionToolComposeAudit     = "tool.compose.audit"
 	PermissionOwnerOps             = "owner.ops"
 
 	maxFallbackModels      = 5
@@ -595,6 +599,46 @@ func (s *Service) CanManageMemory(ctx context.Context, request AssistantAccessRe
 	return s.canUsePermission(ctx, request.GuildID, request.RoleIDs, PermissionAdminMemoryManage, false)
 }
 
+func (s *Service) CanDraftComposedTool(ctx context.Context, request AssistantAccessRequest) (bool, error) {
+	if request.IsOwner || request.IsGuildAdmin {
+		return true, nil
+	}
+	if request.GuildID == "" {
+		return false, nil
+	}
+	return s.canUsePermission(ctx, request.GuildID, request.RoleIDs, PermissionToolComposeDraft, false)
+}
+
+func (s *Service) CanApproveComposedTool(ctx context.Context, request AssistantAccessRequest) (bool, error) {
+	if request.IsOwner || request.IsGuildAdmin {
+		return true, nil
+	}
+	if request.GuildID == "" {
+		return false, nil
+	}
+	return s.canUsePermission(ctx, request.GuildID, request.RoleIDs, PermissionToolComposeApprove, false)
+}
+
+func (s *Service) CanInvokeComposedTool(ctx context.Context, request AssistantAccessRequest) (bool, error) {
+	if request.IsOwner || request.IsGuildAdmin {
+		return true, nil
+	}
+	if request.GuildID == "" {
+		return false, nil
+	}
+	return s.canUsePermission(ctx, request.GuildID, request.RoleIDs, PermissionToolComposeInvoke, false)
+}
+
+func (s *Service) CanAuditComposedTool(ctx context.Context, request AssistantAccessRequest) (bool, error) {
+	if request.IsOwner || request.IsGuildAdmin {
+		return true, nil
+	}
+	if request.GuildID == "" {
+		return false, nil
+	}
+	return s.canUsePermission(ctx, request.GuildID, request.RoleIDs, PermissionToolComposeAudit, false)
+}
+
 func (s *Service) CanUseOwnerOps(_ context.Context, request AssistantAccessRequest) (bool, error) {
 	return request.IsOwner, nil
 }
@@ -686,6 +730,10 @@ func IsPermissionNameAllowed(permission string) bool {
 		PermissionAdminUsageRead,
 		PermissionAdminAuditRead,
 		PermissionAdminMemoryManage,
+		PermissionToolComposeDraft,
+		PermissionToolComposeApprove,
+		PermissionToolComposeInvoke,
+		PermissionToolComposeAudit,
 		PermissionOwnerOps:
 		return true
 	default:

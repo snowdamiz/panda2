@@ -12,6 +12,7 @@ import (
 	disgoDiscord "github.com/disgoorg/disgo/discord"
 	"github.com/disgoorg/disgo/rest"
 	"github.com/disgoorg/snowflake/v2"
+	"github.com/sn0w/panda2/internal/composed"
 	"github.com/sn0w/panda2/internal/repository"
 	"github.com/sn0w/panda2/internal/security"
 	"github.com/sn0w/panda2/internal/store"
@@ -94,9 +95,64 @@ func (p *ToolProvider) ExecuteDiscordTool(ctx context.Context, request tools.Dis
 		return p.recentEvents(ctx, request)
 	case "discord.channel_activity_summary":
 		return p.channelActivitySummary(ctx, request)
+	case "discord.send_message":
+		return p.sendMessage(request)
 	default:
 		return nil, fmt.Errorf("discord tool %s is not implemented by this adapter", request.ToolName)
 	}
+}
+
+func (p *ToolProvider) ResolveRoleByName(ctx context.Context, guildID, name string) (composed.ResolvedDiscordObject, bool, error) {
+	if p == nil || p.rest == nil {
+		return composed.ResolvedDiscordObject{}, false, fmt.Errorf("discord REST adapter is not configured")
+	}
+	id, err := snowflake.Parse(strings.TrimSpace(guildID))
+	if err != nil {
+		return composed.ResolvedDiscordObject{}, false, err
+	}
+	roles, err := p.rest.GetRoles(id)
+	if err != nil {
+		return composed.ResolvedDiscordObject{}, false, err
+	}
+	return resolveNamedRole(roles, name)
+}
+
+func (p *ToolProvider) ResolveChannelByName(ctx context.Context, guildID, name string) (composed.ResolvedDiscordObject, bool, error) {
+	if p == nil || p.rest == nil {
+		return composed.ResolvedDiscordObject{}, false, fmt.Errorf("discord REST adapter is not configured")
+	}
+	id, err := snowflake.Parse(strings.TrimSpace(guildID))
+	if err != nil {
+		return composed.ResolvedDiscordObject{}, false, err
+	}
+	channels, err := p.rest.GetGuildChannels(id)
+	if err != nil {
+		return composed.ResolvedDiscordObject{}, false, err
+	}
+	return resolveNamedChannel(channels, name)
+}
+
+func (p *ToolProvider) sendMessage(request tools.DiscordToolRequest) (any, error) {
+	channelID, err := snowflakeArg(request.Arguments, "channel_id")
+	if err != nil {
+		return nil, err
+	}
+	content := strings.TrimSpace(stringArg(request.Arguments, "content", ""))
+	if content == "" {
+		return nil, fmt.Errorf("content is required")
+	}
+	content = security.SafeDiscordContent(content)
+	message, err := p.rest.CreateMessage(channelID, disgoDiscord.NewMessageCreate().
+		WithContent(content).
+		WithAllowedMentions(allowedMentionsArg(request.Arguments)))
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{
+		"sent":       true,
+		"message_id": message.ID.String(),
+		"channel_id": message.ChannelID.String(),
+	}, nil
 }
 
 func (p *ToolProvider) fetchMessage(request tools.DiscordToolRequest) (any, error) {
@@ -813,6 +869,64 @@ func permissionBits(names []string) disgoDiscord.Permissions {
 		}
 	}
 	return permissions
+}
+
+func allowedMentionsArg(arguments map[string]any) *disgoDiscord.AllowedMentions {
+	allowed := &disgoDiscord.AllowedMentions{Parse: []disgoDiscord.AllowedMentionType{}}
+	raw, ok := arguments["allowed_mentions"].(map[string]any)
+	if !ok {
+		return allowed
+	}
+	if boolArg(raw, "users") {
+		allowed.Parse = append(allowed.Parse, disgoDiscord.AllowedMentionTypeUsers)
+	}
+	if boolArg(raw, "roles") {
+		allowed.Parse = append(allowed.Parse, disgoDiscord.AllowedMentionTypeRoles)
+	}
+	// Everyone mentions remain suppressed for composed and model-driven sends.
+	allowed.RepliedUser = boolArg(raw, "replied_user")
+	return allowed
+}
+
+func resolveNamedRole(roles []disgoDiscord.Role, name string) (composed.ResolvedDiscordObject, bool, error) {
+	target := normalizeDiscordName(name)
+	var matches []disgoDiscord.Role
+	for _, role := range roles {
+		if normalizeDiscordName(role.Name) == target {
+			matches = append(matches, role)
+		}
+	}
+	if len(matches) == 0 {
+		return composed.ResolvedDiscordObject{}, false, nil
+	}
+	if len(matches) > 1 {
+		return composed.ResolvedDiscordObject{}, false, fmt.Errorf("role name %q is ambiguous", name)
+	}
+	return composed.ResolvedDiscordObject{ID: matches[0].ID.String(), Name: matches[0].Name}, true, nil
+}
+
+func resolveNamedChannel(channels []disgoDiscord.GuildChannel, name string) (composed.ResolvedDiscordObject, bool, error) {
+	target := normalizeDiscordName(name)
+	var matches []disgoDiscord.GuildChannel
+	for _, channel := range channels {
+		if normalizeDiscordName(channel.Name()) == target {
+			matches = append(matches, channel)
+		}
+	}
+	if len(matches) == 0 {
+		return composed.ResolvedDiscordObject{}, false, nil
+	}
+	if len(matches) > 1 {
+		return composed.ResolvedDiscordObject{}, false, fmt.Errorf("channel name %q is ambiguous", name)
+	}
+	return composed.ResolvedDiscordObject{ID: matches[0].ID().String(), Name: matches[0].Name()}, true, nil
+}
+
+func normalizeDiscordName(name string) string {
+	name = strings.TrimSpace(name)
+	name = strings.TrimPrefix(name, "#")
+	name = strings.TrimPrefix(name, "@")
+	return strings.ToLower(strings.TrimSpace(name))
 }
 
 func guildIDArg(request tools.DiscordToolRequest) (snowflake.ID, error) {
