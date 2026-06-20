@@ -22,7 +22,7 @@ func TestDefaultRegistryDefinitionsAreValid(t *testing.T) {
 		t.Fatalf("NewDefaultRegistry: %v", err)
 	}
 	definitions := registry.Definitions()
-	if len(definitions) != 76 {
+	if len(definitions) != 77 {
 		t.Fatalf("expected full Discord tool surface plus assistant tools, got %d", len(definitions))
 	}
 	for _, definition := range definitions {
@@ -67,7 +67,7 @@ func TestOpenRouterToolsFiltersByPermission(t *testing.T) {
 		Permissions: map[string]struct{}{admin.PermissionAssistantUse: {}},
 	})
 	names := toolNames(tools)
-	if !names["discord_fetch_message"] || names["generate_workflow_json"] {
+	if !names["discord_fetch_message"] || !names["panda_list_tools"] || names["generate_workflow_json"] {
 		t.Fatalf("unexpected read-only tools: %+v", names)
 	}
 	for _, tool := range tools {
@@ -148,6 +148,18 @@ type fakeDiscordProvider struct {
 func (f *fakeDiscordProvider) ExecuteDiscordTool(context.Context, DiscordToolRequest) (any, error) {
 	f.calls++
 	return map[string]any{"executed": true}, nil
+}
+
+type fakeDynamicProvider struct {
+	tools []llm.Tool
+}
+
+func (f fakeDynamicProvider) OpenRouterTools(context.Context, DynamicToolListRequest) ([]llm.Tool, error) {
+	return f.tools, nil
+}
+
+func (f fakeDynamicProvider) ExecuteDynamicTool(context.Context, DynamicExecutionRequest) (ExecutionResult, error) {
+	return ExecutionResult{}, ErrUnknownTool
 }
 
 func newToolAdminService(t *testing.T) *admin.Service {
@@ -502,6 +514,46 @@ func TestExecutorRunsModeratorNoteTool(t *testing.T) {
 	message := result.Message
 	if message.Role != "tool" || !strings.Contains(message.Content, "human review") || !strings.Contains(message.Content, "calm tone") {
 		t.Fatalf("unexpected moderator note message: %+v", message)
+	}
+}
+
+func TestExecutorListsNativeAndComposedTools(t *testing.T) {
+	registry, err := NewDefaultRegistry()
+	if err != nil {
+		t.Fatalf("NewDefaultRegistry: %v", err)
+	}
+	executor := NewExecutor(registry, nil, nil).
+		WithContextReader(fakeToolContextReader{}).
+		WithDynamicToolProvider(fakeDynamicProvider{tools: []llm.Tool{{
+			Type: "function",
+			Function: llm.ToolFunction{
+				Name:        "builder_welcome",
+				Description: "Welcomes builders.",
+				Parameters:  objectSchema("user_id", "role_id"),
+			},
+		}}})
+	result, err := executor.Execute(context.Background(), ExecutionRequest{
+		GuildID:        "guild-1",
+		ActorID:        "user-1",
+		InvocationType: "chat_tool",
+		Access:         testAccess(ToolPolicyReadOnly, admin.PermissionAssistantUse, admin.PermissionToolComposeInvoke),
+		Call: llm.ToolCall{
+			ID:   "call-list",
+			Type: "function",
+			Function: llm.ToolCallFunction{
+				Name:      "panda_list_tools",
+				Arguments: `{"include_schemas":true}`,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	content := result.Message.Content
+	for _, want := range []string{`"native_name":"discord.fetch_message"`, `"name":"panda_list_tools"`, `"kind":"composed"`, `"name":"builder_welcome"`, `"input_schema"`} {
+		if !strings.Contains(content, want) {
+			t.Fatalf("expected tool listing to contain %s, got %s", want, content)
+		}
 	}
 }
 

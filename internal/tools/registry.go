@@ -38,6 +38,7 @@ const (
 	ToolClassAdminWrite      ToolClass = "admin_write"
 	ToolClassMemory          ToolClass = "memory"
 	ToolClassWorkflow        ToolClass = "workflow"
+	ToolClassMetadata        ToolClass = "metadata"
 	ToolClassOwnerOps        ToolClass = "owner_ops"
 )
 
@@ -195,23 +196,26 @@ func (d Definition) AvailableTo(access ToolAccess) bool {
 	case ToolPolicyOff:
 		return false
 	case ToolPolicyReadOnly:
-		return d.ToolClass == ToolClassDiscordRead || d.ToolClass == ToolClassMemory
+		return d.ToolClass == ToolClassDiscordRead || d.ToolClass == ToolClassMemory || d.ToolClass == ToolClassMetadata
 	case ToolPolicyAssistive:
 		return d.ToolClass == ToolClassDiscordRead ||
 			d.ToolClass == ToolClassMemory ||
 			d.ToolClass == ToolClassWorkflow ||
+			d.ToolClass == ToolClassMetadata ||
 			(d.ToolClass == ToolClassModerationWrite && d.RequiresConfirmation)
 	case ToolPolicyAdminOnly:
-		return d.ToolClass == ToolClassAdminRead || d.ToolClass == ToolClassDiscordRead
+		return d.ToolClass == ToolClassAdminRead || d.ToolClass == ToolClassDiscordRead || d.ToolClass == ToolClassMetadata
 	case ToolPolicyModerator:
 		return d.ToolClass == ToolClassDiscordRead ||
 			d.ToolClass == ToolClassMemory ||
 			d.ToolClass == ToolClassWorkflow ||
+			d.ToolClass == ToolClassMetadata ||
 			d.ToolClass == ToolClassModerationWrite
 	case ToolPolicyWriteConfirmed:
 		return d.ToolClass == ToolClassDiscordRead ||
 			d.ToolClass == ToolClassMemory ||
 			d.ToolClass == ToolClassWorkflow ||
+			d.ToolClass == ToolClassMetadata ||
 			d.ToolClass == ToolClassAdminWrite ||
 			d.ToolClass == ToolClassDiscordWrite ||
 			d.ToolClass == ToolClassModerationWrite
@@ -223,7 +227,8 @@ func (d Definition) AvailableTo(access ToolAccess) bool {
 			d.ToolClass == ToolClassDiscordWrite ||
 			d.ToolClass == ToolClassModerationWrite ||
 			d.ToolClass == ToolClassMemory ||
-			d.ToolClass == ToolClassWorkflow
+			d.ToolClass == ToolClassWorkflow ||
+			d.ToolClass == ToolClassMetadata
 	default:
 		return false
 	}
@@ -448,6 +453,18 @@ func DefaultDefinitions() []Definition {
 			SupportsDryRun:        true,
 		},
 		{
+			Name:                  "panda.list_tools",
+			Description:           "List Panda tools callable in the current guild and channel context, including built-in native tools and enabled composed tools.",
+			RequiredPermission:    admin.PermissionAssistantUse,
+			ToolClass:             ToolClassMetadata,
+			InputSchema:           toolListSchema(),
+			OutputSchema:          objectSchema("tools"),
+			Timeout:               time.Second,
+			Redaction:             RedactNone,
+			Audit:                 AuditNone,
+			IncludeInModelContext: true,
+		},
+		{
 			Name:                  "generate_workflow_json",
 			Description:           "Generate structured JSON for command workflows without taking action.",
 			RequiredPermission:    admin.PermissionAssistantUse,
@@ -486,21 +503,50 @@ func objectSchema(required ...string) json.RawMessage {
 	return schemaWithProperties(required, properties)
 }
 
+func toolListSchema() json.RawMessage {
+	return schemaWithProperties(nil, map[string]any{
+		"kind":            map[string]string{"type": "string", "description": "Optional filter: native, composed, or all."},
+		"include_schemas": map[string]string{"type": "boolean", "description": "Include input schemas in the listing."},
+	})
+}
+
 func toolInputSchema(required []string) json.RawMessage {
 	properties := map[string]any{}
 	for _, name := range required {
-		properties[name] = map[string]string{"type": "string"}
+		properties[name] = toolInputProperty(name)
 	}
-	properties["dry_run"] = map[string]string{"type": "boolean"}
-	properties["purpose"] = map[string]string{"type": "string"}
-	properties["limit"] = map[string]any{"type": "integer", "minimum": 1}
-	properties["before"] = map[string]string{"type": "string"}
-	properties["after"] = map[string]string{"type": "string"}
-	properties["around"] = map[string]string{"type": "string"}
-	properties["include_author_ids"] = map[string]string{"type": "boolean"}
-	properties["include_attachments"] = map[string]string{"type": "boolean"}
-	properties["reason"] = map[string]string{"type": "string"}
+	for _, name := range []string{
+		"dry_run", "purpose", "limit", "before", "after", "around",
+		"include_author_ids", "include_attachments", "allowed_mentions",
+		"content", "name", "emoji", "duration", "delete_message_duration",
+		"delete_message_seconds", "nick", "seconds", "locked", "private",
+		"archived", "auto_archive_duration", "overwrite_type", "allow",
+		"deny", "rule_json", "event_json", "starts_at", "ends_at",
+		"description", "entity_type", "location", "status", "max_age",
+		"max_uses", "temporary", "unique", "enabled", "channel_ids",
+		"author_ids", "user_ids", "message_ids", "role_ids", "webhook_id",
+		"keyword_filter", "custom_message", "reason",
+	} {
+		if _, exists := properties[name]; !exists {
+			properties[name] = toolInputProperty(name)
+		}
+	}
 	return schemaWithProperties(required, properties)
+}
+
+func toolInputProperty(name string) any {
+	switch name {
+	case "dry_run", "include_author_ids", "include_attachments", "locked", "private", "archived", "temporary", "unique", "enabled":
+		return map[string]string{"type": "boolean"}
+	case "limit", "seconds", "delete_message_seconds", "max_age", "max_uses", "auto_archive_duration":
+		return map[string]any{"type": "integer", "minimum": 0}
+	case "allowed_mentions", "rule_json", "event_json":
+		return map[string]string{"type": "object"}
+	case "channel_ids", "author_ids", "user_ids", "message_ids", "role_ids", "keyword_filter":
+		return map[string]any{"type": "array", "items": map[string]string{"type": "string"}}
+	default:
+		return map[string]string{"type": "string"}
+	}
 }
 
 func schemaWithProperties(required []string, properties map[string]any) json.RawMessage {

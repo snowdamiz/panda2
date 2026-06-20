@@ -17,11 +17,10 @@ Current Discord/user surfaces:
 
 Registered LLM tool definitions:
 
-- The registry contains 76 reviewed definitions across Discord reads, Discord writes, moderation writes, admin writes, workflow helpers, and Panda admin/memory helpers.
+- The registry contains 77 reviewed definitions across Discord reads, Discord writes, moderation writes, admin writes, workflow helpers, metadata, and Panda admin/memory helpers.
 - Executable tools are filtered per request by tool policy, configured providers, and Panda permissions.
 - Native executors are currently wired for:
-  - `discord.fetch_message`
-  - `discord.fetch_messages`
+  - All registered `discord.*` read, metadata, message/thread write, moderation write, and admin write definitions through the typed Discord REST adapter.
   - `search_knowledge`
   - `summarize_text_file`
   - `draft_moderator_note`
@@ -32,6 +31,7 @@ Registered LLM tool definitions:
   - `panda.manage_knowledge`
   - `panda.manage_role_permission`
   - `panda.manage_channel_rule`
+  - `panda.list_tools`
   - `generate_workflow_json`
 
 LLM-triggered interaction support:
@@ -39,11 +39,6 @@ LLM-triggered interaction support:
 - Destructive Panda admin removal tools return a typed confirmation artifact from the tool loop.
 - The command router renders that artifact as a Discord confirmation button scoped to the requesting user.
 - Button clicks perform fresh permission checks and execute only allowlisted server-side operations.
-
-Remaining executor gaps:
-
-- Most Discord REST write definitions still return dry-run or confirmation-required previews until typed adapters are implemented.
-- Broad metadata read definitions are registered but need Discord adapter implementations before they become executable.
 
 Core helper tools:
 
@@ -57,6 +52,7 @@ Core helper tools:
 - `panda.manage_knowledge`
 - `panda.manage_role_permission`
 - `panda.manage_channel_rule`
+- `panda.list_tools`
 - `generate_workflow_json`
 
 ## Design Boundaries
@@ -85,8 +81,8 @@ The current `tool_policy` behavior is capability-aware:
 Implementation tasks:
 
 - Add Discord permission checks in the Discord adapter for every tool execution.
-- Add tests proving unavailable tools are not advertised to the model.
-- Continue adding adapter implementations for registered Discord metadata and write definitions.
+- Keep tests proving unavailable tools are not advertised to the model.
+- Keep tests proving every registered `discord.*` definition has a typed provider handler.
 
 ## Phase 1: Read Previous Chats And Context
 
@@ -329,13 +325,11 @@ Guardrails:
 
 ## Suggested Build Order
 
-1. Expand message read tools for previous chat access.
-2. Add guild/channel/thread/role/member read tool executors.
-3. Continue hardening audit, rate-limit, dry-run, and confirmation infrastructure for write tools.
-4. Add safe message/thread write tools.
-5. Add moderation/admin action tools behind opt-in feature flags.
-6. Add gateway event cache and recent activity tools.
-7. Add self-extension manifest tools.
+1. Continue hardening audit, rate-limit, dry-run, and confirmation infrastructure for write tools.
+2. Add generated slash/context invocation surfaces for approved composed tools.
+3. Add scheduling adapters for approved composed tools.
+4. Add optional voice/stage tools if server use cases justify them.
+5. Add self-extension manifest tools.
 
 ## Reference Links
 

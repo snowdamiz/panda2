@@ -11,6 +11,7 @@ import (
 
 	disgoDiscord "github.com/disgoorg/disgo/discord"
 	"github.com/disgoorg/disgo/rest"
+	"github.com/disgoorg/omit"
 	"github.com/disgoorg/snowflake/v2"
 	"github.com/sn0w/panda2/internal/composed"
 	"github.com/sn0w/panda2/internal/repository"
@@ -24,6 +25,8 @@ type ToolProvider struct {
 	events    *repository.DiscordEventRepository
 	botUserID snowflake.ID
 }
+
+type discordToolHandler func(context.Context, tools.DiscordToolRequest) (any, error)
 
 func NewToolProvider(restClient rest.Rest, events *repository.DiscordEventRepository, botUserID ...snowflake.ID) *ToolProvider {
 	provider := &ToolProvider{rest: restClient, events: events}
@@ -40,65 +43,86 @@ func (p *ToolProvider) ExecuteDiscordTool(ctx context.Context, request tools.Dis
 	if err := p.preflight(request); err != nil {
 		return nil, err
 	}
-	switch request.ToolName {
-	case "discord.fetch_message":
-		return p.fetchMessage(request)
-	case "discord.fetch_messages":
-		return p.fetchMessages(request)
-	case "discord.fetch_thread_context":
-		return p.fetchThreadContext(request)
-	case "discord.fetch_reply_chain":
-		return p.fetchReplyChain(request)
-	case "discord.list_pins":
-		return p.listPins(request)
-	case "discord.search_messages":
-		return p.searchMessages(ctx, request)
-	case "discord.get_guild":
-		return p.getGuild(request)
-	case "discord.list_channels":
-		return p.listChannels(request)
-	case "discord.get_channel":
-		return p.getChannel(request)
-	case "discord.list_active_threads":
-		return p.listActiveThreads(request)
-	case "discord.list_archived_threads":
-		return p.listArchivedThreads(request)
-	case "discord.list_roles":
-		return p.listRoles(request)
-	case "discord.get_role":
-		return p.getRole(request)
-	case "discord.get_member":
-		return p.getMember(request)
-	case "discord.list_members":
-		return p.listMembers(request)
-	case "discord.list_bans":
-		return p.listBans(request)
-	case "discord.get_invite":
-		return p.getInvite(request)
-	case "discord.list_invites":
-		return p.listInvites(request)
-	case "discord.list_webhooks":
-		return p.listWebhooks(request)
-	case "discord.list_scheduled_events":
-		return p.listScheduledEvents(request)
-	case "discord.get_audit_logs":
-		return p.getAuditLogs(request)
-	case "discord.list_auto_moderation_rules":
-		return p.listAutoModerationRules(request)
-	case "discord.list_emojis":
-		return p.listEmojis(request)
-	case "discord.list_stickers":
-		return p.listStickers(request)
-	case "discord.list_soundboard_sounds":
-		return p.listSoundboardSounds(request)
-	case "discord.recent_events":
-		return p.recentEvents(ctx, request)
-	case "discord.channel_activity_summary":
-		return p.channelActivitySummary(ctx, request)
-	case "discord.send_message":
-		return p.sendMessage(request)
-	default:
+	handler, ok := p.discordToolHandlers()[request.ToolName]
+	if !ok {
 		return nil, fmt.Errorf("discord tool %s is not implemented by this adapter", request.ToolName)
+	}
+	return handler(ctx, request)
+}
+
+func (p *ToolProvider) discordToolHandlers() map[string]discordToolHandler {
+	return map[string]discordToolHandler{
+		"discord.fetch_message":               p.withoutContext(p.fetchMessage),
+		"discord.fetch_messages":              p.withoutContext(p.fetchMessages),
+		"discord.fetch_thread_context":        p.withoutContext(p.fetchThreadContext),
+		"discord.fetch_reply_chain":           p.withoutContext(p.fetchReplyChain),
+		"discord.list_pins":                   p.withoutContext(p.listPins),
+		"discord.search_messages":             p.searchMessages,
+		"discord.get_guild":                   p.withoutContext(p.getGuild),
+		"discord.list_channels":               p.withoutContext(p.listChannels),
+		"discord.get_channel":                 p.withoutContext(p.getChannel),
+		"discord.list_active_threads":         p.withoutContext(p.listActiveThreads),
+		"discord.list_archived_threads":       p.withoutContext(p.listArchivedThreads),
+		"discord.list_roles":                  p.withoutContext(p.listRoles),
+		"discord.get_role":                    p.withoutContext(p.getRole),
+		"discord.get_member":                  p.withoutContext(p.getMember),
+		"discord.list_members":                p.withoutContext(p.listMembers),
+		"discord.list_bans":                   p.withoutContext(p.listBans),
+		"discord.get_invite":                  p.withoutContext(p.getInvite),
+		"discord.list_invites":                p.withoutContext(p.listInvites),
+		"discord.list_webhooks":               p.withoutContext(p.listWebhooks),
+		"discord.list_scheduled_events":       p.withoutContext(p.listScheduledEvents),
+		"discord.get_audit_logs":              p.withoutContext(p.getAuditLogs),
+		"discord.list_auto_moderation_rules":  p.withoutContext(p.listAutoModerationRules),
+		"discord.list_emojis":                 p.withoutContext(p.listEmojis),
+		"discord.list_stickers":               p.withoutContext(p.listStickers),
+		"discord.list_soundboard_sounds":      p.withoutContext(p.listSoundboardSounds),
+		"discord.recent_events":               p.recentEvents,
+		"discord.channel_activity_summary":    p.channelActivitySummary,
+		"discord.send_message":                p.withoutContext(p.sendMessage),
+		"discord.reply_message":               p.withoutContext(p.replyMessage),
+		"discord.edit_own_message":            p.withoutContext(p.editOwnMessage),
+		"discord.delete_own_message":          p.withoutContext(p.deleteOwnMessage),
+		"discord.add_reaction":                p.withoutContext(p.addReaction),
+		"discord.remove_own_reaction":         p.withoutContext(p.removeOwnReaction),
+		"discord.create_thread":               p.withoutContext(p.createThread),
+		"discord.rename_thread":               p.withoutContext(p.renameThread),
+		"discord.archive_thread":              p.withoutContext(p.archiveThread),
+		"discord.add_thread_member":           p.withoutContext(p.addThreadMember),
+		"discord.remove_thread_member":        p.withoutContext(p.removeThreadMember),
+		"discord.pin_message":                 p.withoutContext(p.pinMessage),
+		"discord.unpin_message":               p.withoutContext(p.unpinMessage),
+		"discord.timeout_member":              p.withoutContext(p.timeoutMember),
+		"discord.remove_timeout":              p.withoutContext(p.removeTimeout),
+		"discord.kick_member":                 p.withoutContext(p.kickMember),
+		"discord.ban_member":                  p.withoutContext(p.banMember),
+		"discord.unban_member":                p.withoutContext(p.unbanMember),
+		"discord.bulk_ban_members":            p.withoutContext(p.bulkBanMembers),
+		"discord.add_member_role":             p.withoutContext(p.addMemberRole),
+		"discord.remove_member_role":          p.withoutContext(p.removeMemberRole),
+		"discord.set_member_nick":             p.withoutContext(p.setMemberNick),
+		"discord.delete_message":              p.withoutContext(p.deleteMessage),
+		"discord.bulk_delete_messages":        p.withoutContext(p.bulkDeleteMessages),
+		"discord.set_channel_slowmode":        p.withoutContext(p.setChannelSlowmode),
+		"discord.lock_thread":                 p.withoutContext(p.lockThread),
+		"discord.modify_channel_permissions":  p.withoutContext(p.modifyChannelPermissions),
+		"discord.create_auto_moderation_rule": p.withoutContext(p.createAutoModerationRule),
+		"discord.update_auto_moderation_rule": p.withoutContext(p.updateAutoModerationRule),
+		"discord.delete_auto_moderation_rule": p.withoutContext(p.deleteAutoModerationRule),
+		"discord.create_invite":               p.withoutContext(p.createInvite),
+		"discord.delete_invite":               p.withoutContext(p.deleteInvite),
+		"discord.create_webhook":              p.withoutContext(p.createWebhook),
+		"discord.update_webhook":              p.withoutContext(p.updateWebhook),
+		"discord.delete_webhook":              p.withoutContext(p.deleteWebhook),
+		"discord.create_scheduled_event":      p.withoutContext(p.createScheduledEvent),
+		"discord.update_scheduled_event":      p.withoutContext(p.updateScheduledEvent),
+		"discord.delete_scheduled_event":      p.withoutContext(p.deleteScheduledEvent),
+	}
+}
+
+func (p *ToolProvider) withoutContext(handler func(tools.DiscordToolRequest) (any, error)) discordToolHandler {
+	return func(_ context.Context, request tools.DiscordToolRequest) (any, error) {
+		return handler(request)
 	}
 }
 
@@ -153,6 +177,236 @@ func (p *ToolProvider) sendMessage(request tools.DiscordToolRequest) (any, error
 		"message_id": message.ID.String(),
 		"channel_id": message.ChannelID.String(),
 	}, nil
+}
+
+func (p *ToolProvider) replyMessage(request tools.DiscordToolRequest) (any, error) {
+	channelID, err := snowflakeArg(request.Arguments, "channel_id")
+	if err != nil {
+		return nil, err
+	}
+	messageID, err := snowflakeArg(request.Arguments, "message_id")
+	if err != nil {
+		return nil, err
+	}
+	content := strings.TrimSpace(stringArg(request.Arguments, "content", ""))
+	if content == "" {
+		return nil, fmt.Errorf("content is required")
+	}
+	content = security.SafeDiscordContent(content)
+	reference := &disgoDiscord.MessageReference{
+		MessageID:       &messageID,
+		ChannelID:       &channelID,
+		FailIfNotExists: true,
+	}
+	message, err := p.rest.CreateMessage(channelID, disgoDiscord.NewMessageCreate().
+		WithContent(content).
+		WithMessageReference(reference).
+		WithAllowedMentions(allowedMentionsArg(request.Arguments)))
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{
+		"replied":    true,
+		"message_id": message.ID.String(),
+		"channel_id": message.ChannelID.String(),
+	}, nil
+}
+
+func (p *ToolProvider) editOwnMessage(request tools.DiscordToolRequest) (any, error) {
+	channelID, err := snowflakeArg(request.Arguments, "channel_id")
+	if err != nil {
+		return nil, err
+	}
+	messageID, err := snowflakeArg(request.Arguments, "message_id")
+	if err != nil {
+		return nil, err
+	}
+	if err := p.ensureOwnMessage(channelID, messageID); err != nil {
+		return nil, err
+	}
+	content := strings.TrimSpace(stringArg(request.Arguments, "content", ""))
+	if content == "" {
+		return nil, fmt.Errorf("content is required")
+	}
+	content = security.SafeDiscordContent(content)
+	message, err := p.rest.UpdateMessage(channelID, messageID, disgoDiscord.NewMessageUpdate().
+		WithContent(content).
+		WithAllowedMentions(allowedMentionsArg(request.Arguments)))
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"edited": true, "message": messageSummary(*message)}, nil
+}
+
+func (p *ToolProvider) deleteOwnMessage(request tools.DiscordToolRequest) (any, error) {
+	channelID, err := snowflakeArg(request.Arguments, "channel_id")
+	if err != nil {
+		return nil, err
+	}
+	messageID, err := snowflakeArg(request.Arguments, "message_id")
+	if err != nil {
+		return nil, err
+	}
+	if err := p.ensureOwnMessage(channelID, messageID); err != nil {
+		return nil, err
+	}
+	if err := p.rest.DeleteMessage(channelID, messageID, reasonOpt(request)...); err != nil {
+		return nil, err
+	}
+	return map[string]any{"deleted": true, "channel_id": channelID.String(), "message_id": messageID.String()}, nil
+}
+
+func (p *ToolProvider) ensureOwnMessage(channelID, messageID snowflake.ID) error {
+	if p.botUserID == 0 {
+		return fmt.Errorf("bot user id is required to verify message ownership")
+	}
+	message, err := p.rest.GetMessage(channelID, messageID)
+	if err != nil {
+		return err
+	}
+	if message.Author.ID != p.botUserID {
+		return fmt.Errorf("message %s was not authored by Panda", messageID.String())
+	}
+	return nil
+}
+
+func (p *ToolProvider) addReaction(request tools.DiscordToolRequest) (any, error) {
+	channelID, messageID, emoji, err := reactionArgs(request.Arguments)
+	if err != nil {
+		return nil, err
+	}
+	if err := p.rest.AddReaction(channelID, messageID, emoji); err != nil {
+		return nil, err
+	}
+	return map[string]any{"reacted": true, "channel_id": channelID.String(), "message_id": messageID.String(), "emoji": emoji}, nil
+}
+
+func (p *ToolProvider) removeOwnReaction(request tools.DiscordToolRequest) (any, error) {
+	channelID, messageID, emoji, err := reactionArgs(request.Arguments)
+	if err != nil {
+		return nil, err
+	}
+	if err := p.rest.RemoveOwnReaction(channelID, messageID, emoji); err != nil {
+		return nil, err
+	}
+	return map[string]any{"removed": true, "channel_id": channelID.String(), "message_id": messageID.String(), "emoji": emoji}, nil
+}
+
+func (p *ToolProvider) createThread(request tools.DiscordToolRequest) (any, error) {
+	channelID, err := snowflakeArg(request.Arguments, "channel_id")
+	if err != nil {
+		return nil, err
+	}
+	name := strings.TrimSpace(stringArg(request.Arguments, "name", ""))
+	if name == "" {
+		return nil, fmt.Errorf("name is required")
+	}
+	autoArchive := disgoDiscord.AutoArchiveDuration(intArg(request.Arguments, "auto_archive_duration", 0))
+	if messageID, ok := optionalSnowflakeArg(request.Arguments, "message_id"); ok {
+		thread, err := p.rest.CreateThreadFromMessage(channelID, messageID, disgoDiscord.ThreadCreateFromMessage{
+			Name:                name,
+			AutoArchiveDuration: autoArchive,
+			RateLimitPerUser:    intArg(request.Arguments, "seconds", 0),
+		}, reasonOpt(request)...)
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{"created": true, "thread": guildChannelSummary(*thread)}, nil
+	}
+	var thread *disgoDiscord.GuildThread
+	if boolArg(request.Arguments, "private") {
+		invitable := !boolArg(request.Arguments, "locked")
+		thread, err = p.rest.CreateThread(channelID, disgoDiscord.GuildPrivateThreadCreate{
+			Name:                name,
+			AutoArchiveDuration: autoArchive,
+			Invitable:           &invitable,
+		}, reasonOpt(request)...)
+	} else {
+		thread, err = p.rest.CreateThread(channelID, disgoDiscord.GuildPublicThreadCreate{
+			Name:                name,
+			AutoArchiveDuration: autoArchive,
+		}, reasonOpt(request)...)
+	}
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"created": true, "thread": guildChannelSummary(*thread)}, nil
+}
+
+func (p *ToolProvider) renameThread(request tools.DiscordToolRequest) (any, error) {
+	threadID, err := snowflakeArg(request.Arguments, "thread_id")
+	if err != nil {
+		return nil, err
+	}
+	name := strings.TrimSpace(stringArg(request.Arguments, "name", ""))
+	if name == "" {
+		return nil, fmt.Errorf("name is required")
+	}
+	channel, err := p.rest.UpdateChannel(threadID, disgoDiscord.GuildThreadUpdate{Name: &name}, reasonOpt(request)...)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"renamed": true, "thread": channelSummary(channel)}, nil
+}
+
+func (p *ToolProvider) archiveThread(request tools.DiscordToolRequest) (any, error) {
+	threadID, err := snowflakeArg(request.Arguments, "thread_id")
+	if err != nil {
+		return nil, err
+	}
+	archived := true
+	if _, ok := request.Arguments["archived"]; ok {
+		archived = boolArg(request.Arguments, "archived")
+	}
+	channel, err := p.rest.UpdateChannel(threadID, disgoDiscord.GuildThreadUpdate{Archived: &archived}, reasonOpt(request)...)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"archived": archived, "thread": channelSummary(channel)}, nil
+}
+
+func (p *ToolProvider) addThreadMember(request tools.DiscordToolRequest) (any, error) {
+	threadID, userID, err := threadMemberArgs(request.Arguments)
+	if err != nil {
+		return nil, err
+	}
+	if err := p.rest.AddThreadMember(threadID, userID, reasonOpt(request)...); err != nil {
+		return nil, err
+	}
+	return map[string]any{"added": true, "thread_id": threadID.String(), "user_id": userID.String()}, nil
+}
+
+func (p *ToolProvider) removeThreadMember(request tools.DiscordToolRequest) (any, error) {
+	threadID, userID, err := threadMemberArgs(request.Arguments)
+	if err != nil {
+		return nil, err
+	}
+	if err := p.rest.RemoveThreadMember(threadID, userID, reasonOpt(request)...); err != nil {
+		return nil, err
+	}
+	return map[string]any{"removed": true, "thread_id": threadID.String(), "user_id": userID.String()}, nil
+}
+
+func (p *ToolProvider) pinMessage(request tools.DiscordToolRequest) (any, error) {
+	channelID, messageID, err := messageTargetArgs(request.Arguments)
+	if err != nil {
+		return nil, err
+	}
+	if err := p.rest.PinMessage(channelID, messageID, reasonOpt(request)...); err != nil {
+		return nil, err
+	}
+	return map[string]any{"pinned": true, "channel_id": channelID.String(), "message_id": messageID.String()}, nil
+}
+
+func (p *ToolProvider) unpinMessage(request tools.DiscordToolRequest) (any, error) {
+	channelID, messageID, err := messageTargetArgs(request.Arguments)
+	if err != nil {
+		return nil, err
+	}
+	if err := p.rest.UnpinMessage(channelID, messageID, reasonOpt(request)...); err != nil {
+		return nil, err
+	}
+	return map[string]any{"unpinned": true, "channel_id": channelID.String(), "message_id": messageID.String()}, nil
 }
 
 func (p *ToolProvider) fetchMessage(request tools.DiscordToolRequest) (any, error) {
@@ -705,6 +959,415 @@ func (p *ToolProvider) channelActivitySummary(ctx context.Context, request tools
 	}, nil
 }
 
+func (p *ToolProvider) timeoutMember(request tools.DiscordToolRequest) (any, error) {
+	guildID, userID, err := guildUserArgs(request)
+	if err != nil {
+		return nil, err
+	}
+	duration, err := durationArg(request.Arguments, "duration")
+	if err != nil {
+		return nil, err
+	}
+	if duration <= 0 || duration > 28*24*time.Hour {
+		return nil, fmt.Errorf("duration must be greater than 0 and no more than 28 days")
+	}
+	until := time.Now().UTC().Add(duration)
+	member, err := p.rest.UpdateMember(guildID, userID, disgoDiscord.MemberUpdate{
+		CommunicationDisabledUntil: omit.New[*time.Time](&until),
+	}, reasonOpt(request)...)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"timed_out": true, "until": until.Format(time.RFC3339), "member": memberSummary(*member)}, nil
+}
+
+func (p *ToolProvider) removeTimeout(request tools.DiscordToolRequest) (any, error) {
+	guildID, userID, err := guildUserArgs(request)
+	if err != nil {
+		return nil, err
+	}
+	member, err := p.rest.UpdateMember(guildID, userID, disgoDiscord.MemberUpdate{
+		CommunicationDisabledUntil: omit.NewNilPtr[time.Time](),
+	}, reasonOpt(request)...)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"timeout_removed": true, "member": memberSummary(*member)}, nil
+}
+
+func (p *ToolProvider) kickMember(request tools.DiscordToolRequest) (any, error) {
+	guildID, userID, err := guildUserArgs(request)
+	if err != nil {
+		return nil, err
+	}
+	if err := p.rest.RemoveMember(guildID, userID, reasonOpt(request)...); err != nil {
+		return nil, err
+	}
+	return map[string]any{"kicked": true, "guild_id": guildID.String(), "user_id": userID.String()}, nil
+}
+
+func (p *ToolProvider) banMember(request tools.DiscordToolRequest) (any, error) {
+	guildID, userID, err := guildUserArgs(request)
+	if err != nil {
+		return nil, err
+	}
+	deleteDuration, err := deleteMessageDurationArg(request.Arguments)
+	if err != nil {
+		return nil, err
+	}
+	if err := p.rest.AddBan(guildID, userID, deleteDuration, reasonOpt(request)...); err != nil {
+		return nil, err
+	}
+	return map[string]any{"banned": true, "guild_id": guildID.String(), "user_id": userID.String()}, nil
+}
+
+func (p *ToolProvider) unbanMember(request tools.DiscordToolRequest) (any, error) {
+	guildID, userID, err := guildUserArgs(request)
+	if err != nil {
+		return nil, err
+	}
+	if err := p.rest.DeleteBan(guildID, userID, reasonOpt(request)...); err != nil {
+		return nil, err
+	}
+	return map[string]any{"unbanned": true, "guild_id": guildID.String(), "user_id": userID.String()}, nil
+}
+
+func (p *ToolProvider) bulkBanMembers(request tools.DiscordToolRequest) (any, error) {
+	guildID, err := guildIDArg(request)
+	if err != nil {
+		return nil, err
+	}
+	userIDs := snowflakeSliceArg(request.Arguments, "user_ids", 25)
+	if len(userIDs) == 0 {
+		return nil, fmt.Errorf("user_ids is required")
+	}
+	deleteDuration, err := deleteMessageDurationArg(request.Arguments)
+	if err != nil {
+		return nil, err
+	}
+	result, err := p.rest.BulkBan(guildID, disgoDiscord.BulkBan{
+		UserIDs:              userIDs,
+		DeleteMessageSeconds: int(deleteDuration.Seconds()),
+	}, reasonOpt(request)...)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{
+		"bulk_ban":     true,
+		"banned_users": snowflakeStrings(result.BannedUsers),
+		"failed_users": snowflakeStrings(result.FailedUsers),
+	}, nil
+}
+
+func (p *ToolProvider) addMemberRole(request tools.DiscordToolRequest) (any, error) {
+	guildID, userID, roleID, err := memberRoleArgs(request)
+	if err != nil {
+		return nil, err
+	}
+	if err := p.rest.AddMemberRole(guildID, userID, roleID, reasonOpt(request)...); err != nil {
+		return nil, err
+	}
+	return map[string]any{"added": true, "guild_id": guildID.String(), "user_id": userID.String(), "role_id": roleID.String()}, nil
+}
+
+func (p *ToolProvider) removeMemberRole(request tools.DiscordToolRequest) (any, error) {
+	guildID, userID, roleID, err := memberRoleArgs(request)
+	if err != nil {
+		return nil, err
+	}
+	if err := p.rest.RemoveMemberRole(guildID, userID, roleID, reasonOpt(request)...); err != nil {
+		return nil, err
+	}
+	return map[string]any{"removed": true, "guild_id": guildID.String(), "user_id": userID.String(), "role_id": roleID.String()}, nil
+}
+
+func (p *ToolProvider) setMemberNick(request tools.DiscordToolRequest) (any, error) {
+	guildID, userID, err := guildUserArgs(request)
+	if err != nil {
+		return nil, err
+	}
+	nick := stringArg(request.Arguments, "nick", "")
+	member, err := p.rest.UpdateMember(guildID, userID, disgoDiscord.MemberUpdate{Nick: &nick}, reasonOpt(request)...)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"updated": true, "member": memberSummary(*member)}, nil
+}
+
+func (p *ToolProvider) deleteMessage(request tools.DiscordToolRequest) (any, error) {
+	channelID, messageID, err := messageTargetArgs(request.Arguments)
+	if err != nil {
+		return nil, err
+	}
+	if err := p.rest.DeleteMessage(channelID, messageID, reasonOpt(request)...); err != nil {
+		return nil, err
+	}
+	return map[string]any{"deleted": true, "channel_id": channelID.String(), "message_id": messageID.String()}, nil
+}
+
+func (p *ToolProvider) bulkDeleteMessages(request tools.DiscordToolRequest) (any, error) {
+	channelID, err := snowflakeArg(request.Arguments, "channel_id")
+	if err != nil {
+		return nil, err
+	}
+	messageIDs := snowflakeSliceArg(request.Arguments, "message_ids", 50)
+	if len(messageIDs) < 2 {
+		return nil, fmt.Errorf("at least two message_ids are required")
+	}
+	for _, messageID := range messageIDs {
+		if time.Since(messageID.Time()) > 14*24*time.Hour {
+			return nil, fmt.Errorf("message %s is too old for Discord bulk deletion", messageID.String())
+		}
+	}
+	if err := p.rest.BulkDeleteMessages(channelID, messageIDs, reasonOpt(request)...); err != nil {
+		return nil, err
+	}
+	return map[string]any{"deleted": true, "channel_id": channelID.String(), "message_ids": snowflakeStrings(messageIDs)}, nil
+}
+
+func (p *ToolProvider) setChannelSlowmode(request tools.DiscordToolRequest) (any, error) {
+	channelID, err := snowflakeArg(request.Arguments, "channel_id")
+	if err != nil {
+		return nil, err
+	}
+	seconds := intArg(request.Arguments, "seconds", -1)
+	if seconds < 0 || seconds > 21600 {
+		return nil, fmt.Errorf("seconds must be between 0 and 21600")
+	}
+	channel, err := p.rest.UpdateChannel(channelID, disgoDiscord.GuildTextChannelUpdate{RateLimitPerUser: &seconds}, reasonOpt(request)...)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"updated": true, "channel": channelSummary(channel)}, nil
+}
+
+func (p *ToolProvider) lockThread(request tools.DiscordToolRequest) (any, error) {
+	threadID, err := snowflakeArg(request.Arguments, "thread_id")
+	if err != nil {
+		return nil, err
+	}
+	locked := true
+	if _, ok := request.Arguments["locked"]; ok {
+		locked = boolArg(request.Arguments, "locked")
+	}
+	channel, err := p.rest.UpdateChannel(threadID, disgoDiscord.GuildThreadUpdate{Locked: &locked}, reasonOpt(request)...)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"locked": locked, "thread": channelSummary(channel)}, nil
+}
+
+func (p *ToolProvider) modifyChannelPermissions(request tools.DiscordToolRequest) (any, error) {
+	channelID, err := snowflakeArg(request.Arguments, "channel_id")
+	if err != nil {
+		return nil, err
+	}
+	overwriteID, err := snowflakeArg(request.Arguments, "overwrite_id")
+	if err != nil {
+		return nil, err
+	}
+	allow, err := permissionsArg(request.Arguments, "allow")
+	if err != nil {
+		return nil, err
+	}
+	deny, err := permissionsArg(request.Arguments, "deny")
+	if err != nil {
+		return nil, err
+	}
+	var update disgoDiscord.PermissionOverwriteUpdate
+	overwriteType := strings.TrimSpace(stringArg(request.Arguments, "overwrite_type", ""))
+	if overwriteType == "" {
+		overwriteType = "role"
+	}
+	switch strings.ToLower(overwriteType) {
+	case "role":
+		update = disgoDiscord.RolePermissionOverwriteUpdate{Allow: &allow, Deny: &deny}
+	case "member", "user":
+		update = disgoDiscord.MemberPermissionOverwriteUpdate{Allow: &allow, Deny: &deny}
+	default:
+		return nil, fmt.Errorf("overwrite_type must be role or member")
+	}
+	if err := p.rest.UpdatePermissionOverwrite(channelID, overwriteID, update, reasonOpt(request)...); err != nil {
+		return nil, err
+	}
+	return map[string]any{"updated": true, "channel_id": channelID.String(), "overwrite_id": overwriteID.String()}, nil
+}
+
+func (p *ToolProvider) createAutoModerationRule(request tools.DiscordToolRequest) (any, error) {
+	guildID, err := guildIDArg(request)
+	if err != nil {
+		return nil, err
+	}
+	rule, err := autoModerationCreateArg(request.Arguments)
+	if err != nil {
+		return nil, err
+	}
+	created, err := p.rest.CreateAutoModerationRule(guildID, rule, reasonOpt(request)...)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"created": true, "rule": autoModerationRuleSummary(*created)}, nil
+}
+
+func (p *ToolProvider) updateAutoModerationRule(request tools.DiscordToolRequest) (any, error) {
+	guildID, err := guildIDArg(request)
+	if err != nil {
+		return nil, err
+	}
+	ruleID, err := snowflakeArg(request.Arguments, "rule_id")
+	if err != nil {
+		return nil, err
+	}
+	update, err := autoModerationUpdateArg(request.Arguments)
+	if err != nil {
+		return nil, err
+	}
+	updated, err := p.rest.UpdateAutoModerationRule(guildID, ruleID, update, reasonOpt(request)...)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"updated": true, "rule": autoModerationRuleSummary(*updated)}, nil
+}
+
+func (p *ToolProvider) deleteAutoModerationRule(request tools.DiscordToolRequest) (any, error) {
+	guildID, err := guildIDArg(request)
+	if err != nil {
+		return nil, err
+	}
+	ruleID, err := snowflakeArg(request.Arguments, "rule_id")
+	if err != nil {
+		return nil, err
+	}
+	if err := p.rest.DeleteAutoModerationRule(guildID, ruleID, reasonOpt(request)...); err != nil {
+		return nil, err
+	}
+	return map[string]any{"deleted": true, "rule_id": ruleID.String()}, nil
+}
+
+func (p *ToolProvider) createInvite(request tools.DiscordToolRequest) (any, error) {
+	channelID, err := snowflakeArg(request.Arguments, "channel_id")
+	if err != nil {
+		return nil, err
+	}
+	invite, err := p.rest.CreateInvite(channelID, inviteCreateArg(request.Arguments), reasonOpt(request)...)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"created": true, "invite": inviteSummary(*invite)}, nil
+}
+
+func (p *ToolProvider) deleteInvite(request tools.DiscordToolRequest) (any, error) {
+	code := strings.TrimSpace(stringArg(request.Arguments, "code", ""))
+	if code == "" {
+		return nil, fmt.Errorf("code is required")
+	}
+	invite, err := p.rest.DeleteInvite(code, reasonOpt(request)...)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"deleted": true, "invite": inviteSummary(*invite)}, nil
+}
+
+func (p *ToolProvider) createWebhook(request tools.DiscordToolRequest) (any, error) {
+	channelID, err := snowflakeArg(request.Arguments, "channel_id")
+	if err != nil {
+		return nil, err
+	}
+	name := strings.TrimSpace(stringArg(request.Arguments, "name", ""))
+	if name == "" {
+		return nil, fmt.Errorf("name is required")
+	}
+	webhook, err := p.rest.CreateWebhook(channelID, disgoDiscord.WebhookCreate{Name: name}, reasonOpt(request)...)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"created": true, "webhook": webhookSummary(webhook)}, nil
+}
+
+func (p *ToolProvider) updateWebhook(request tools.DiscordToolRequest) (any, error) {
+	webhookID, err := snowflakeArg(request.Arguments, "webhook_id")
+	if err != nil {
+		return nil, err
+	}
+	update := disgoDiscord.WebhookUpdate{}
+	if name := strings.TrimSpace(stringArg(request.Arguments, "name", "")); name != "" {
+		update.Name = &name
+	}
+	if channelID, ok := optionalSnowflakeArg(request.Arguments, "channel_id"); ok {
+		update.ChannelID = &channelID
+	}
+	if update.Name == nil && update.ChannelID == nil {
+		return nil, fmt.Errorf("name or channel_id is required")
+	}
+	webhook, err := p.rest.UpdateWebhook(webhookID, update, reasonOpt(request)...)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"updated": true, "webhook": webhookSummary(webhook)}, nil
+}
+
+func (p *ToolProvider) deleteWebhook(request tools.DiscordToolRequest) (any, error) {
+	webhookID, err := snowflakeArg(request.Arguments, "webhook_id")
+	if err != nil {
+		return nil, err
+	}
+	if err := p.rest.DeleteWebhook(webhookID, reasonOpt(request)...); err != nil {
+		return nil, err
+	}
+	return map[string]any{"deleted": true, "webhook_id": webhookID.String()}, nil
+}
+
+func (p *ToolProvider) createScheduledEvent(request tools.DiscordToolRequest) (any, error) {
+	guildID, err := guildIDArg(request)
+	if err != nil {
+		return nil, err
+	}
+	create, err := scheduledEventCreateArg(request.Arguments)
+	if err != nil {
+		return nil, err
+	}
+	event, err := p.rest.CreateGuildScheduledEvent(guildID, create, reasonOpt(request)...)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"created": true, "scheduled_event": scheduledEventSummary(*event)}, nil
+}
+
+func (p *ToolProvider) updateScheduledEvent(request tools.DiscordToolRequest) (any, error) {
+	guildID, err := guildIDArg(request)
+	if err != nil {
+		return nil, err
+	}
+	eventID, err := snowflakeArg(request.Arguments, "event_id")
+	if err != nil {
+		return nil, err
+	}
+	update, err := scheduledEventUpdateArg(request.Arguments)
+	if err != nil {
+		return nil, err
+	}
+	event, err := p.rest.UpdateGuildScheduledEvent(guildID, eventID, update, reasonOpt(request)...)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"updated": true, "scheduled_event": scheduledEventSummary(*event)}, nil
+}
+
+func (p *ToolProvider) deleteScheduledEvent(request tools.DiscordToolRequest) (any, error) {
+	guildID, err := guildIDArg(request)
+	if err != nil {
+		return nil, err
+	}
+	eventID, err := snowflakeArg(request.Arguments, "event_id")
+	if err != nil {
+		return nil, err
+	}
+	if err := p.rest.DeleteGuildScheduledEvent(guildID, eventID, reasonOpt(request)...); err != nil {
+		return nil, err
+	}
+	return map[string]any{"deleted": true, "event_id": eventID.String()}, nil
+}
+
 func (p *ToolProvider) preflight(request tools.DiscordToolRequest) error {
 	required := permissionBits(request.Permissions)
 	if required == disgoDiscord.PermissionsNone || request.GuildID == "" || p.botUserID == 0 {
@@ -927,6 +1590,486 @@ func normalizeDiscordName(name string) string {
 	name = strings.TrimPrefix(name, "#")
 	name = strings.TrimPrefix(name, "@")
 	return strings.ToLower(strings.TrimSpace(name))
+}
+
+func reasonOpt(request tools.DiscordToolRequest) []rest.RequestOpt {
+	reason := strings.TrimSpace(stringArg(request.Arguments, "reason", ""))
+	if reason == "" {
+		reason = "Panda Discord tool"
+		if strings.TrimSpace(request.RequestID) != "" {
+			reason += " " + strings.TrimSpace(request.RequestID)
+		}
+	}
+	return []rest.RequestOpt{rest.WithReason(truncateDiscordToolText(reason, 512))}
+}
+
+func reactionArgs(arguments map[string]any) (snowflake.ID, snowflake.ID, string, error) {
+	channelID, messageID, err := messageTargetArgs(arguments)
+	if err != nil {
+		return 0, 0, "", err
+	}
+	emoji := strings.TrimSpace(stringArg(arguments, "emoji", ""))
+	if emoji == "" {
+		return 0, 0, "", fmt.Errorf("emoji is required")
+	}
+	return channelID, messageID, emoji, nil
+}
+
+func messageTargetArgs(arguments map[string]any) (snowflake.ID, snowflake.ID, error) {
+	channelID, err := snowflakeArg(arguments, "channel_id")
+	if err != nil {
+		return 0, 0, err
+	}
+	messageID, err := snowflakeArg(arguments, "message_id")
+	if err != nil {
+		return 0, 0, err
+	}
+	return channelID, messageID, nil
+}
+
+func threadMemberArgs(arguments map[string]any) (snowflake.ID, snowflake.ID, error) {
+	threadID, err := snowflakeArg(arguments, "thread_id")
+	if err != nil {
+		return 0, 0, err
+	}
+	userID, err := snowflakeArg(arguments, "user_id")
+	if err != nil {
+		return 0, 0, err
+	}
+	return threadID, userID, nil
+}
+
+func guildUserArgs(request tools.DiscordToolRequest) (snowflake.ID, snowflake.ID, error) {
+	guildID, err := guildIDArg(request)
+	if err != nil {
+		return 0, 0, err
+	}
+	userID, err := snowflakeArg(request.Arguments, "user_id")
+	if err != nil {
+		return 0, 0, err
+	}
+	return guildID, userID, nil
+}
+
+func memberRoleArgs(request tools.DiscordToolRequest) (snowflake.ID, snowflake.ID, snowflake.ID, error) {
+	guildID, userID, err := guildUserArgs(request)
+	if err != nil {
+		return 0, 0, 0, err
+	}
+	roleID, err := snowflakeArg(request.Arguments, "role_id")
+	if err != nil {
+		return 0, 0, 0, err
+	}
+	return guildID, userID, roleID, nil
+}
+
+func durationArg(arguments map[string]any, name string) (time.Duration, error) {
+	value, ok := arguments[name]
+	if !ok || value == nil {
+		return 0, fmt.Errorf("%s is required", name)
+	}
+	switch typed := value.(type) {
+	case float64:
+		return time.Duration(typed) * time.Second, nil
+	case int:
+		return time.Duration(typed) * time.Second, nil
+	case string:
+		raw := strings.TrimSpace(typed)
+		if raw == "" {
+			return 0, fmt.Errorf("%s is required", name)
+		}
+		if seconds, err := strconv.Atoi(raw); err == nil {
+			return time.Duration(seconds) * time.Second, nil
+		}
+		duration, err := time.ParseDuration(raw)
+		if err != nil {
+			return 0, fmt.Errorf("%s must be a duration like 30m, 2h, or seconds", name)
+		}
+		return duration, nil
+	default:
+		return 0, fmt.Errorf("%s must be a duration", name)
+	}
+}
+
+func deleteMessageDurationArg(arguments map[string]any) (time.Duration, error) {
+	if _, ok := arguments["delete_message_seconds"]; ok {
+		seconds := intArg(arguments, "delete_message_seconds", 0)
+		if seconds < 0 {
+			return 0, fmt.Errorf("delete_message_seconds must be non-negative")
+		}
+		duration := time.Duration(seconds) * time.Second
+		if duration > 7*24*time.Hour {
+			return 0, fmt.Errorf("delete message duration must be no more than 7 days")
+		}
+		return duration, nil
+	}
+	if _, ok := arguments["delete_message_duration"]; ok {
+		duration, err := durationArg(arguments, "delete_message_duration")
+		if err != nil {
+			return 0, err
+		}
+		if duration < 0 || duration > 7*24*time.Hour {
+			return 0, fmt.Errorf("delete message duration must be between 0 and 7 days")
+		}
+		return duration, nil
+	}
+	return 0, nil
+}
+
+func permissionsArg(arguments map[string]any, name string) (disgoDiscord.Permissions, error) {
+	value, ok := arguments[name]
+	if !ok || value == nil {
+		return disgoDiscord.PermissionsNone, nil
+	}
+	switch typed := value.(type) {
+	case float64:
+		if typed < 0 {
+			return disgoDiscord.PermissionsNone, fmt.Errorf("%s must be non-negative", name)
+		}
+		return disgoDiscord.Permissions(uint64(typed)), nil
+	case int:
+		if typed < 0 {
+			return disgoDiscord.PermissionsNone, fmt.Errorf("%s must be non-negative", name)
+		}
+		return disgoDiscord.Permissions(typed), nil
+	case string:
+		raw := strings.TrimSpace(typed)
+		if raw == "" {
+			return disgoDiscord.PermissionsNone, nil
+		}
+		if parsed, err := strconv.ParseUint(raw, 10, 64); err == nil {
+			return disgoDiscord.Permissions(parsed), nil
+		}
+		return permissionBits(splitNameList(raw)), nil
+	case []any:
+		names := make([]string, 0, len(typed))
+		for _, item := range typed {
+			names = append(names, fmt.Sprint(item))
+		}
+		return permissionBits(names), nil
+	default:
+		return disgoDiscord.PermissionsNone, fmt.Errorf("%s must be a permission bitset or names", name)
+	}
+}
+
+func autoModerationCreateArg(arguments map[string]any) (disgoDiscord.AutoModerationRuleCreate, error) {
+	var rule disgoDiscord.AutoModerationRuleCreate
+	if ok, err := decodeJSONArgument(arguments, "rule_json", &rule); ok || err != nil {
+		if strings.TrimSpace(rule.Name) == "" {
+			rule.Name = strings.TrimSpace(stringArg(arguments, "name", ""))
+		}
+		if err != nil {
+			return rule, err
+		}
+		if strings.TrimSpace(rule.Name) == "" {
+			return rule, fmt.Errorf("name is required")
+		}
+		return rule, nil
+	}
+	name := strings.TrimSpace(stringArg(arguments, "name", ""))
+	if name == "" {
+		return rule, fmt.Errorf("name is required")
+	}
+	keywords := stringListArg(arguments, "keyword_filter")
+	if len(keywords) == 0 {
+		return rule, fmt.Errorf("rule_json or keyword_filter is required")
+	}
+	enabled := true
+	if _, ok := arguments["enabled"]; ok {
+		enabled = boolArg(arguments, "enabled")
+	}
+	metadata := &disgoDiscord.AutoModerationTriggerMetadata{KeywordFilter: keywords}
+	action := disgoDiscord.AutoModerationAction{Type: disgoDiscord.AutoModerationActionTypeBlockMessage}
+	if customMessage := strings.TrimSpace(stringArg(arguments, "custom_message", "")); customMessage != "" {
+		action.Metadata = &disgoDiscord.AutoModerationActionMetadata{CustomMessage: &customMessage}
+	}
+	return disgoDiscord.AutoModerationRuleCreate{
+		Name:            name,
+		EventType:       disgoDiscord.AutoModerationEventTypeMessageSend,
+		TriggerType:     disgoDiscord.AutoModerationTriggerTypeKeyword,
+		TriggerMetadata: metadata,
+		Actions:         []disgoDiscord.AutoModerationAction{action},
+		Enabled:         &enabled,
+		ExemptRoles:     snowflakeSliceArg(arguments, "role_ids", 100),
+		ExemptChannels:  snowflakeSliceArg(arguments, "channel_ids", 100),
+	}, nil
+}
+
+func autoModerationUpdateArg(arguments map[string]any) (disgoDiscord.AutoModerationRuleUpdate, error) {
+	var update disgoDiscord.AutoModerationRuleUpdate
+	if ok, err := decodeJSONArgument(arguments, "rule_json", &update); ok || err != nil {
+		return update, err
+	}
+	changed := false
+	if name := strings.TrimSpace(stringArg(arguments, "name", "")); name != "" {
+		update.Name = &name
+		changed = true
+	}
+	if _, ok := arguments["enabled"]; ok {
+		enabled := boolArg(arguments, "enabled")
+		update.Enabled = &enabled
+		changed = true
+	}
+	if keywords := stringListArg(arguments, "keyword_filter"); len(keywords) > 0 {
+		update.TriggerMetadata = &disgoDiscord.AutoModerationTriggerMetadata{KeywordFilter: keywords}
+		changed = true
+	}
+	if !changed {
+		return update, fmt.Errorf("rule_json, name, enabled, or keyword_filter is required")
+	}
+	return update, nil
+}
+
+func inviteCreateArg(arguments map[string]any) disgoDiscord.InviteCreate {
+	invite := disgoDiscord.InviteCreate{
+		Temporary: boolArg(arguments, "temporary"),
+		Unique:    true,
+		RoleIDs:   snowflakeSliceArg(arguments, "role_ids", 100),
+	}
+	if _, ok := arguments["unique"]; ok {
+		invite.Unique = boolArg(arguments, "unique")
+	}
+	if seconds := intArg(arguments, "max_age", -1); seconds >= 0 {
+		invite.MaxAge = &seconds
+	}
+	if uses := intArg(arguments, "max_uses", -1); uses >= 0 {
+		invite.MaxUses = &uses
+	}
+	return invite
+}
+
+func scheduledEventCreateArg(arguments map[string]any) (disgoDiscord.GuildScheduledEventCreate, error) {
+	var create disgoDiscord.GuildScheduledEventCreate
+	if ok, err := decodeJSONArgument(arguments, "event_json", &create); ok || err != nil {
+		if strings.TrimSpace(create.Name) == "" {
+			create.Name = strings.TrimSpace(stringArg(arguments, "name", ""))
+		}
+		if err != nil {
+			return create, err
+		}
+		if strings.TrimSpace(create.Name) == "" {
+			return create, fmt.Errorf("name is required")
+		}
+		return create, nil
+	}
+	name := strings.TrimSpace(stringArg(arguments, "name", ""))
+	if name == "" {
+		return create, fmt.Errorf("name is required")
+	}
+	startsAt, err := timeArgument(arguments, "starts_at")
+	if err != nil {
+		return create, err
+	}
+	entityType, err := scheduledEventEntityTypeArg(arguments)
+	if err != nil {
+		return create, err
+	}
+	create = disgoDiscord.GuildScheduledEventCreate{
+		Name:               name,
+		Description:        stringArg(arguments, "description", ""),
+		PrivacyLevel:       disgoDiscord.ScheduledEventPrivacyLevelGuildOnly,
+		ScheduledStartTime: startsAt,
+		EntityType:         entityType,
+	}
+	if channelID, ok := optionalSnowflakeArg(arguments, "channel_id"); ok {
+		create.ChannelID = channelID
+	}
+	if endsAt, ok, err := optionalTimeArgument(arguments, "ends_at"); err != nil {
+		return create, err
+	} else if ok {
+		create.ScheduledEndTime = &endsAt
+	}
+	if location := strings.TrimSpace(stringArg(arguments, "location", "")); location != "" {
+		create.EntityMetaData = &disgoDiscord.EntityMetaData{Location: location}
+	}
+	if create.EntityType == disgoDiscord.ScheduledEventEntityTypeExternal && create.EntityMetaData == nil {
+		return create, fmt.Errorf("location is required for external scheduled events")
+	}
+	if create.EntityType != disgoDiscord.ScheduledEventEntityTypeExternal && create.ChannelID == 0 {
+		return create, fmt.Errorf("channel_id is required for voice or stage scheduled events")
+	}
+	return create, nil
+}
+
+func scheduledEventUpdateArg(arguments map[string]any) (disgoDiscord.GuildScheduledEventUpdate, error) {
+	var update disgoDiscord.GuildScheduledEventUpdate
+	if ok, err := decodeJSONArgument(arguments, "event_json", &update); ok || err != nil {
+		return update, err
+	}
+	changed := false
+	if name := strings.TrimSpace(stringArg(arguments, "name", "")); name != "" {
+		update.Name = name
+		changed = true
+	}
+	if description := strings.TrimSpace(stringArg(arguments, "description", "")); description != "" {
+		update.Description = &description
+		changed = true
+	}
+	if channelID, ok := optionalSnowflakeArg(arguments, "channel_id"); ok {
+		update.ChannelID = &channelID
+		changed = true
+	}
+	if startsAt, ok, err := optionalTimeArgument(arguments, "starts_at"); err != nil {
+		return update, err
+	} else if ok {
+		update.ScheduledStartTime = &startsAt
+		changed = true
+	}
+	if endsAt, ok, err := optionalTimeArgument(arguments, "ends_at"); err != nil {
+		return update, err
+	} else if ok {
+		update.ScheduledEndTime = &endsAt
+		changed = true
+	}
+	if location := strings.TrimSpace(stringArg(arguments, "location", "")); location != "" {
+		update.EntityMetaData = &disgoDiscord.EntityMetaData{Location: location}
+		changed = true
+	}
+	if status := strings.TrimSpace(stringArg(arguments, "status", "")); status != "" {
+		parsed, err := scheduledEventStatus(status)
+		if err != nil {
+			return update, err
+		}
+		update.Status = &parsed
+		changed = true
+	}
+	if entityRaw := strings.TrimSpace(stringArg(arguments, "entity_type", "")); entityRaw != "" {
+		entityType, err := scheduledEventEntityType(entityRaw)
+		if err != nil {
+			return update, err
+		}
+		update.EntityType = &entityType
+		changed = true
+	}
+	if !changed {
+		return update, fmt.Errorf("event_json or at least one event field is required")
+	}
+	return update, nil
+}
+
+func scheduledEventEntityTypeArg(arguments map[string]any) (disgoDiscord.ScheduledEventEntityType, error) {
+	raw := strings.TrimSpace(stringArg(arguments, "entity_type", ""))
+	if raw == "" {
+		if strings.TrimSpace(stringArg(arguments, "location", "")) != "" {
+			return disgoDiscord.ScheduledEventEntityTypeExternal, nil
+		}
+		return disgoDiscord.ScheduledEventEntityTypeVoice, nil
+	}
+	return scheduledEventEntityType(raw)
+}
+
+func scheduledEventEntityType(raw string) (disgoDiscord.ScheduledEventEntityType, error) {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "stage", "stage_instance":
+		return disgoDiscord.ScheduledEventEntityTypeStageInstance, nil
+	case "voice":
+		return disgoDiscord.ScheduledEventEntityTypeVoice, nil
+	case "external":
+		return disgoDiscord.ScheduledEventEntityTypeExternal, nil
+	default:
+		return 0, fmt.Errorf("entity_type must be voice, stage, or external")
+	}
+}
+
+func scheduledEventStatus(raw string) (disgoDiscord.ScheduledEventStatus, error) {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "scheduled":
+		return disgoDiscord.ScheduledEventStatusScheduled, nil
+	case "active":
+		return disgoDiscord.ScheduledEventStatusActive, nil
+	case "completed", "complete":
+		return disgoDiscord.ScheduledEventStatusCompleted, nil
+	case "cancelled", "canceled":
+		return disgoDiscord.ScheduledEventStatusCancelled, nil
+	default:
+		return 0, fmt.Errorf("status must be scheduled, active, completed, or cancelled")
+	}
+}
+
+func timeArgument(arguments map[string]any, name string) (time.Time, error) {
+	value, ok, err := optionalTimeArgument(arguments, name)
+	if err != nil {
+		return time.Time{}, err
+	}
+	if !ok {
+		return time.Time{}, fmt.Errorf("%s is required", name)
+	}
+	return value, nil
+}
+
+func optionalTimeArgument(arguments map[string]any, name string) (time.Time, bool, error) {
+	raw := strings.TrimSpace(stringArg(arguments, name, ""))
+	if raw == "" {
+		return time.Time{}, false, nil
+	}
+	value, err := time.Parse(time.RFC3339, raw)
+	if err != nil {
+		return time.Time{}, true, fmt.Errorf("%s must be RFC3339", name)
+	}
+	return value, true, nil
+}
+
+func decodeJSONArgument(arguments map[string]any, name string, out any) (bool, error) {
+	value, ok := arguments[name]
+	if !ok || value == nil {
+		return false, nil
+	}
+	var data []byte
+	switch typed := value.(type) {
+	case string:
+		if strings.TrimSpace(typed) == "" {
+			return false, nil
+		}
+		data = []byte(typed)
+	default:
+		var err error
+		data, err = json.Marshal(typed)
+		if err != nil {
+			return true, err
+		}
+	}
+	if err := json.Unmarshal(data, out); err != nil {
+		return true, err
+	}
+	return true, nil
+}
+
+func stringListArg(arguments map[string]any, name string) []string {
+	value, ok := arguments[name]
+	if !ok || value == nil {
+		return nil
+	}
+	switch typed := value.(type) {
+	case []any:
+		values := make([]string, 0, len(typed))
+		for _, item := range typed {
+			text := strings.TrimSpace(fmt.Sprint(item))
+			if text != "" {
+				values = append(values, text)
+			}
+		}
+		return values
+	case []string:
+		return typed
+	case string:
+		return splitNameList(typed)
+	default:
+		return nil
+	}
+}
+
+func splitNameList(raw string) []string {
+	fields := strings.FieldsFunc(raw, func(r rune) bool {
+		return r == ',' || r == '|' || r == '\n' || r == '\t' || r == ' '
+	})
+	values := make([]string, 0, len(fields))
+	for _, field := range fields {
+		value := strings.TrimSpace(field)
+		if value != "" {
+			values = append(values, value)
+		}
+	}
+	return values
 }
 
 func guildIDArg(request tools.DiscordToolRequest) (snowflake.ID, error) {

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -266,6 +267,8 @@ func (e *Executor) Execute(ctx context.Context, request ExecutionRequest) (Execu
 		payload, err = e.manageRolePermission(toolCtx, request, arguments)
 	case "panda.manage_channel_rule":
 		payload, err = e.manageChannelRule(toolCtx, request, arguments)
+	case "panda.list_tools":
+		payload, err = e.listAvailableTools(toolCtx, request, arguments)
 	case "draft_moderator_note":
 		payload, err = e.draftModeratorNote(arguments)
 	case "generate_workflow_json":
@@ -811,6 +814,96 @@ func (e *Executor) generateWorkflowJSON(arguments string) (any, error) {
 	}, nil
 }
 
+func (e *Executor) listAvailableTools(ctx context.Context, request ExecutionRequest, arguments string) (any, error) {
+	args, err := parseArguments(arguments)
+	if err != nil {
+		return nil, err
+	}
+	kind := strings.ToLower(firstNonEmpty(stringArgument(args, "kind"), "all"))
+	if kind == "built_in" || kind == "builtin" {
+		kind = "native"
+	}
+	if kind != "all" && kind != "native" && kind != "composed" {
+		return nil, fmt.Errorf("kind must be all, native, or composed")
+	}
+	includeSchemas := boolArgument(args, "include_schemas")
+
+	nativeTools := []map[string]any{}
+	if kind == "all" || kind == "native" {
+		for _, definition := range e.registry.Definitions() {
+			if !definition.AvailableTo(request.Access) || !e.canExecute(definition.Name) {
+				continue
+			}
+			item := map[string]any{
+				"kind":                   "native",
+				"name":                   definition.ModelName(),
+				"native_name":            definition.Name,
+				"wire_name":              definition.ModelName(),
+				"description":            definition.Description,
+				"tool_class":             definition.ToolClass,
+				"required_permission":    definition.RequiredPermission,
+				"requires_confirmation":  definition.RequiresConfirmation,
+				"supports_dry_run":       definition.SupportsDryRun,
+				"max_limit":              definition.MaxLimit,
+				"discord_permissions":    definition.DiscordPermissions,
+				"include_in_model_tools": definition.IncludeInModelContext,
+			}
+			if includeSchemas {
+				item["input_schema"] = definition.InputSchema
+				item["output_schema"] = definition.OutputSchema
+			}
+			nativeTools = append(nativeTools, item)
+		}
+	}
+
+	composedTools := []map[string]any{}
+	if (kind == "all" || kind == "composed") && e.dynamic != nil {
+		dynamicTools, err := e.dynamic.OpenRouterTools(ctx, DynamicToolListRequest{
+			GuildID:        request.GuildID,
+			ChannelID:      request.ChannelID,
+			ActorID:        request.ActorID,
+			Access:         request.Access,
+			InvocationType: request.InvocationType,
+		})
+		if err != nil {
+			return nil, err
+		}
+		for _, tool := range dynamicTools {
+			item := map[string]any{
+				"kind":        "composed",
+				"name":        tool.Function.Name,
+				"wire_name":   tool.Function.Name,
+				"description": tool.Function.Description,
+			}
+			if includeSchemas {
+				item["input_schema"] = tool.Function.Parameters
+			}
+			composedTools = append(composedTools, item)
+		}
+	}
+
+	items := make([]map[string]any, 0, len(nativeTools)+len(composedTools))
+	items = append(items, nativeTools...)
+	items = append(items, composedTools...)
+	sort.Slice(items, func(i, j int) bool {
+		leftKind := fmt.Sprint(items[i]["kind"])
+		rightKind := fmt.Sprint(items[j]["kind"])
+		if leftKind == rightKind {
+			return fmt.Sprint(items[i]["name"]) < fmt.Sprint(items[j]["name"])
+		}
+		return leftKind < rightKind
+	})
+	return map[string]any{
+		"tools":           items,
+		"count":           len(items),
+		"native_count":    len(nativeTools),
+		"composed_count":  len(composedTools),
+		"kind":            kind,
+		"policy":          normalizeToolPolicy(request.Access.Policy),
+		"invocation_type": firstNonEmpty(request.InvocationType, "chat_tool"),
+	}, nil
+}
+
 func (e *Executor) canExecute(name string) bool {
 	switch name {
 	case "discord.fetch_messages", "discord.fetch_message":
@@ -823,7 +916,7 @@ func (e *Executor) canExecute(name string) bool {
 		return e.configs != nil
 	case "manage_memory_consent", "panda.usage_report", "panda.manage_budget_limit", "panda.manage_knowledge", "panda.manage_role_permission", "panda.manage_channel_rule":
 		return e.adminOps != nil
-	case "draft_moderator_note", "generate_workflow_json":
+	case "draft_moderator_note", "generate_workflow_json", "panda.list_tools":
 		return true
 	default:
 		return strings.HasPrefix(name, "discord.") && e.discord != nil
