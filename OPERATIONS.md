@@ -79,6 +79,6 @@ Schema migrations are forward-only. Restore from a SQLite backup if a bad migrat
 
 ## Incident Mode
 
-For model-provider trouble, disable assistant responses with `/admin disable` in affected guilds or remove `OPENROUTER_API_KEY` from the runtime environment and redeploy. Existing health checks will report OpenRouter as missing and `/ask` will return a setup message instead of calling the model.
+For model-provider trouble, disable assistant responses with `/admin disable` in affected guilds or remove `OPENROUTER_API_KEY` from the runtime environment and redeploy. Existing health checks will report OpenRouter as missing and natural-language assistant responses will stop before calling the model.
 
 Use `/ops drain` before maintenance that should not start new queued work. Use `/ops resume` after health checks pass.

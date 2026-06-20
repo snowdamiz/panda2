@@ -37,14 +37,10 @@ This plan is for the engineer who will build the first production-ready version 
 
 ### User Assistant
 
-- `/ask` asks a one-off question.
-- `/chat` starts or resumes a conversation thread.
-- `/summarize` summarizes a channel, thread, message range, attachment, or linked conversation.
-- `/explain` explains a selected message or uploaded file.
-- `/rewrite` rewrites text with tone controls.
-- `/translate` translates messages or uploaded text.
-- `/search-memory` searches saved server knowledge when enabled.
-- Message mention support lets users tag the bot naturally.
+- Natural-language messages are the primary user surface.
+- Only messages containing the word `Panda` reach the LLM trigger; the trigger then decides whether Panda should respond.
+- Natural requests can ask questions, continue chat, summarize, explain, rewrite, translate, or search remembered context without user-facing slash commands.
+- `/search-memory` remains as a precise fallback for saved server knowledge when enabled.
 - Reply support lets users ask follow-up questions against a specific message.
 - Thread mode keeps long assistant sessions out of busy channels.
 - Ephemeral responses are used for private or sensitive answers.
@@ -401,8 +397,8 @@ Exit criteria:
 ### Milestone 2: Basic LLM Assistant
 
 - Add OpenRouter HTTP client adapter.
-- Implement `/ask`.
-- Implement mention-based questions.
+- Implement natural-language assistant responses.
+- Add an LLM-controlled trigger for deciding when Panda should respond.
 - Add request timeout and cancellation.
 - Add token and response length limits.
 - Add usage event recording.
@@ -417,7 +413,7 @@ Exit criteria:
 
 ### Milestone 3: Threaded Conversations
 
-- Implement `/chat`.
+- Implement chat conversations.
 - Create or reuse Discord threads for sessions.
 - Store conversation metadata.
 - Support follow-up replies.
@@ -463,7 +459,7 @@ Exit criteria:
 
 - Add admin-managed knowledge documents.
 - Add chunking, SQLite FTS5 indexing, and optional OpenRouter embedding pipeline.
-- Add retrieval for `/ask`, `/chat`, and `/search-memory`.
+- Add retrieval for natural chat and `/search-memory`.
 - Add export and delete flows.
 - Add memory consent checks.
 
@@ -544,7 +540,7 @@ The first slice should prove the architecture with the smallest useful bot:
 3. Initialize SQLite, GORM, migrations, and the storage repositories.
 4. Add Dockerfile and `fly.toml` with `/data` volume mount and health check config.
 5. Connect to Discord.
-6. Register `/ping`, `/admin setup`, and `/ask`.
+6. Register `/ping` and `/admin setup`.
 7. Store guild config and usage events.
 8. Call OpenRouter through an internal interface.
 9. Enforce a basic permission check and per-user rate limit.

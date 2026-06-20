@@ -65,7 +65,7 @@ func (r *Router) Handle(ctx context.Context, request Request) Response {
 	case "ping":
 		return Response{Content: "pong", Ephemeral: true}
 	case "help":
-		return Response{Content: "`/ask`, `/chat`, `/summarize`, `/explain`, `/rewrite`, `/translate`, `/search-memory`, `/memory-consent`, and `/mod` helpers are available. Admins can use `/admin setup`, `/admin model`, `/admin usage`, `/admin limits`, `/admin prompt`, `/admin memory`, `/admin roles`, `/admin channels`, `/admin audit`, `/admin enable`, and `/admin disable`.", Ephemeral: true}
+		return Response{Content: "Talk naturally in Discord with the word `Panda`, like `Panda is this true?`; Panda uses the model to decide whether to answer. Fallbacks: `/search-memory`, `/memory-consent`, and message context menus for explain/summarize. Admins can use `/admin setup`, `/admin model`, `/admin usage`, `/admin limits`, `/admin prompt`, `/admin memory`, `/admin roles`, `/admin channels`, `/admin audit`, `/admin enable`, and `/admin disable`.", Ephemeral: true}
 	case "admin":
 		return r.handleAdmin(ctx, request)
 	case "ops":
@@ -85,6 +85,35 @@ func (r *Router) Handle(ctx context.Context, request Request) Response {
 	default:
 		return Response{Content: "Unknown command.", Ephemeral: true}
 	}
+}
+
+func (r *Router) HandleNaturalMessage(ctx context.Context, request Request) Response {
+	message := strings.TrimSpace(firstNonEmpty(request.Options["message"], request.Options["question"]))
+	if message == "" {
+		return Response{}
+	}
+	if denied := r.ensureAssistantAllowed(ctx, request); denied.Content != "" {
+		return Response{}
+	}
+	decision, err := r.assistant.ClassifyNaturalMessage(ctx, assistant.NaturalMessageRequest{
+		GuildID:          request.GuildID,
+		UserID:           request.UserID,
+		ChannelID:        request.ChannelID,
+		Content:          message,
+		BotMentioned:     truthyOption(request.Options["bot_mentioned"]),
+		ReplyContent:     request.Options["reply_text"],
+		ReplyMessageID:   request.Options["reply_message_id"],
+		ReplyAuthorIsBot: truthyOption(request.Options["reply_author_is_bot"]),
+	})
+	if err != nil || !decision.Respond {
+		return Response{}
+	}
+	request.Command = "chat"
+	if request.Options == nil {
+		request.Options = map[string]string{}
+	}
+	request.Options["question"] = decision.Prompt
+	return r.handleChatMode(ctx, request, false)
 }
 
 func (r *Router) handleMod(ctx context.Context, request Request) Response {
@@ -674,6 +703,10 @@ func (r *Router) handleAsk(ctx context.Context, request Request, command string)
 }
 
 func (r *Router) handleChat(ctx context.Context, request Request) Response {
+	return r.handleChatMode(ctx, request, true)
+}
+
+func (r *Router) handleChatMode(ctx context.Context, request Request, threaded bool) Response {
 	question := strings.TrimSpace(request.Options["question"])
 	if question == "" {
 		return Response{Content: "Please include a message.", Ephemeral: true}
@@ -681,7 +714,7 @@ func (r *Router) handleChat(ctx context.Context, request Request) Response {
 	if denied := r.ensureAssistantAllowed(ctx, request); denied.Content != "" {
 		return denied
 	}
-	if r.threads != nil && request.GuildID != "" {
+	if threaded && r.threads != nil && request.GuildID != "" {
 		if denied := r.ensureThreadsAllowed(ctx, request); denied.Content != "" {
 			return denied
 		}
@@ -696,7 +729,7 @@ func (r *Router) handleChat(ctx context.Context, request Request) Response {
 	chatChannelID := request.ChannelID
 	threadID := ""
 	threadName := ""
-	if r.threads != nil && request.GuildID != "" {
+	if threaded && r.threads != nil && request.GuildID != "" {
 		thread, err := r.threads.EnsureChatThread(ctx, ThreadRequest{
 			GuildID:   request.GuildID,
 			ChannelID: request.ChannelID,
@@ -1117,7 +1150,11 @@ func renderModelSettingsDryRun(settings admin.ModelSettings) string {
 }
 
 func dryRunRequested(request Request) bool {
-	switch strings.ToLower(strings.TrimSpace(request.Options["dry_run"])) {
+	return truthyOption(request.Options["dry_run"])
+}
+
+func truthyOption(value string) bool {
+	switch strings.ToLower(strings.TrimSpace(value)) {
 	case "true", "1", "yes", "y":
 		return true
 	default:

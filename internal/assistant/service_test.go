@@ -115,6 +115,54 @@ func TestAskRespectsDisabledGuild(t *testing.T) {
 	}
 }
 
+func TestClassifyNaturalMessageUsesLLMDecision(t *testing.T) {
+	ctx := context.Background()
+	client := &fakeClient{response: llm.ChatResponse{Model: "fixture/model", Content: `{"respond":true,"prompt":"Is the deploy window Friday?"}`}}
+	service, _ := newTestService(t, client)
+
+	decision, err := service.ClassifyNaturalMessage(ctx, NaturalMessageRequest{
+		GuildID:        "guild-1",
+		UserID:         "user-1",
+		ChannelID:      "channel-1",
+		Content:        "Panda is the deploy window Friday?",
+		BotMentioned:   true,
+		ReplyContent:   "The deploy window moved to Friday.",
+		ReplyMessageID: "message-1",
+	})
+	if err != nil {
+		t.Fatalf("ClassifyNaturalMessage: %v", err)
+	}
+	if !decision.Respond || decision.Prompt != "Is the deploy window Friday?" {
+		t.Fatalf("unexpected decision: %+v", decision)
+	}
+	if len(client.requests) != 1 {
+		t.Fatalf("expected one trigger request, got %d", len(client.requests))
+	}
+	joined := joinMessages(client.requests[0].Messages)
+	if !strings.Contains(joined, "Bot mentioned: true") || !strings.Contains(joined, "Reply context") {
+		t.Fatalf("trigger metadata missing from request: %s", joined)
+	}
+}
+
+func TestClassifyNaturalMessageCanDecline(t *testing.T) {
+	ctx := context.Background()
+	client := &fakeClient{response: llm.ChatResponse{Content: `{"respond":false,"prompt":""}`}}
+	service, _ := newTestService(t, client)
+
+	decision, err := service.ClassifyNaturalMessage(ctx, NaturalMessageRequest{
+		GuildID:   "guild-1",
+		UserID:    "user-1",
+		ChannelID: "channel-1",
+		Content:   "ambient channel chatter",
+	})
+	if err != nil {
+		t.Fatalf("ClassifyNaturalMessage: %v", err)
+	}
+	if decision.Respond || decision.Prompt != "" {
+		t.Fatalf("expected declined decision, got %+v", decision)
+	}
+}
+
 func TestChatPersistsConversationMessages(t *testing.T) {
 	ctx := context.Background()
 	client := &fakeClient{response: llm.ChatResponse{Model: "fixture/model", Content: "chat answer"}}

@@ -86,7 +86,7 @@ func (s *Server) healthPayload(ctx context.Context) (healthResponse, int) {
 		"config":        {Status: "ok"},
 		"fiber":         {Status: "ok"},
 		"discord":       configuredStatus(s.cfg.DiscordConfigured(), "credentials missing; gateway disabled"),
-		"openrouter":    configuredStatus(s.cfg.OpenRouterConfigured(), "api key missing; /ask disabled"),
+		"openrouter":    configuredStatus(s.cfg.OpenRouterConfigured(), "api key missing; natural-language assistant disabled"),
 		"local_storage": localStorageStatus(s.cfg.DataDir),
 	}
 

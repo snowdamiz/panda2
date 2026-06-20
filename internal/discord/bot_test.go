@@ -34,33 +34,57 @@ func (f *fakeInteractionJobQueue) Enqueue(_ context.Context, job store.Job) (sto
 	return job, nil
 }
 
-func TestStripBotMentionOnlyRemovesConfiguredBot(t *testing.T) {
-	got := stripBotMention("<@12345> hello", "12345")
-	if got != "hello" {
-		t.Fatalf("expected bot mention to be removed, got %q", got)
-	}
-
-	got = stripBotMention("<@!12345> hello", "12345")
-	if got != "hello" {
-		t.Fatalf("expected nickname mention to be removed, got %q", got)
-	}
-
-	got = stripBotMention("<@99999> hello", "12345")
-	if got != "<@99999> hello" {
-		t.Fatalf("expected other mentions to remain, got %q", got)
-	}
-}
-
 func TestApplicationCommandsIncludeContextMenus(t *testing.T) {
 	commands := applicationCommands()
 	names := map[string]bool{}
 	for _, command := range commands {
 		names[command.CommandName()] = true
 	}
-	for _, name := range []string{"Explain with Panda", "Summarize with Panda", "ask", "memory-consent", "admin", "ops"} {
+	for _, name := range []string{"Explain with Panda", "Summarize with Panda", "memory-consent", "search-memory", "admin", "ops", "mod", "help"} {
 		if !names[name] {
 			t.Fatalf("expected command %q to be registered", name)
 		}
+	}
+	for _, name := range []string{"ask", "chat", "summarize", "explain", "rewrite", "translate"} {
+		if names[name] {
+			t.Fatalf("expected natural-language command %q not to be registered as a slash command", name)
+		}
+	}
+}
+
+func TestMessageMentionsUserUsesMentionsAndContentFallback(t *testing.T) {
+	userID := snowflake.MustParse("100000000000000001")
+	if !messageMentionsUser(disgoDiscord.Message{Mentions: []disgoDiscord.User{{ID: userID}}}, userID.String()) {
+		t.Fatal("expected explicit mention metadata to match")
+	}
+	if !messageMentionsUser(disgoDiscord.Message{Content: "<@!100000000000000001> hello"}, userID.String()) {
+		t.Fatal("expected mention content fallback to match")
+	}
+	if messageMentionsUser(disgoDiscord.Message{Content: "<@!100000000000000002> hello"}, userID.String()) {
+		t.Fatal("expected other user mention not to match")
+	}
+}
+
+func TestContainsPandaWordUsesStandaloneWord(t *testing.T) {
+	tests := []struct {
+		name    string
+		content string
+		want    bool
+	}{
+		{name: "plain", content: "Panda is deploy Friday?", want: true},
+		{name: "lowercase", content: "hey panda, is deploy Friday?", want: true},
+		{name: "possessive", content: "Panda's answer?", want: true},
+		{name: "hyphenated", content: "red-panda facts", want: true},
+		{name: "prefix", content: "pandanotes are ready", want: false},
+		{name: "suffix", content: "Ask PandaBot", want: false},
+		{name: "absent", content: "ambient channel chatter", want: false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := containsPandaWord(test.content); got != test.want {
+				t.Fatalf("containsPandaWord(%q) = %t; want %t", test.content, got, test.want)
+			}
+		})
 	}
 }
 
@@ -329,17 +353,6 @@ func TestThreadNoticeMentionsThread(t *testing.T) {
 	got := threadNotice(commands.Response{ThreadID: "12345", ThreadName: "Panda chat"})
 	if got != "Continued this chat in <#12345> (`Panda chat`)." {
 		t.Fatalf("unexpected thread notice %q", got)
-	}
-}
-
-func TestMentionQuestionIncludesReplyContext(t *testing.T) {
-	referenced := &disgoDiscord.Message{
-		ID:      snowflake.MustParse("100000000000000001"),
-		Content: "The deploy window moved to Friday.",
-	}
-	got := mentionQuestion("why?", referenced)
-	if !strings.Contains(got, "Reply context") || !strings.Contains(got, "The deploy window moved to Friday.") || !strings.Contains(got, "why?") {
-		t.Fatalf("unexpected mention question %q", got)
 	}
 }
 

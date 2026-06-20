@@ -109,7 +109,7 @@ func (c Config) Validate() ([]string, error) {
 		warnings = append(warnings, "Discord credentials are not fully configured; gateway and command registration will be skipped")
 	}
 	if !c.OpenRouterConfigured() {
-		warnings = append(warnings, "OPENROUTER_API_KEY is not configured; /ask will return a setup message")
+		warnings = append(warnings, "OPENROUTER_API_KEY is not configured; natural-language assistant responses are disabled")
 	}
 
 	if strings.EqualFold(c.Environment, "production") {

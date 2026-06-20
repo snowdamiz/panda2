@@ -22,9 +22,10 @@ import (
 )
 
 type fakeLLM struct {
-	response llm.ChatResponse
-	err      error
-	requests []llm.ChatRequest
+	response  llm.ChatResponse
+	responses []llm.ChatResponse
+	err       error
+	requests  []llm.ChatRequest
 }
 
 type fakeContextProvider struct {
@@ -81,7 +82,23 @@ func (f fakeContextProvider) FetchRecentMessages(_ context.Context, ref contexts
 
 func (f *fakeLLM) Chat(_ context.Context, request llm.ChatRequest) (llm.ChatResponse, error) {
 	f.requests = append(f.requests, request)
+	if len(f.responses) > 0 {
+		response := f.responses[0]
+		f.responses = f.responses[1:]
+		return response, nil
+	}
 	return f.response, f.err
+}
+
+func joinRequestMessages(request llm.ChatRequest) string {
+	var builder strings.Builder
+	for _, message := range request.Messages {
+		builder.WriteString(message.Role)
+		builder.WriteString(":")
+		builder.WriteString(message.Content)
+		builder.WriteString("\n")
+	}
+	return builder.String()
 }
 
 func newTestRouter(t *testing.T, client *fakeLLM, limit int) *Router {
@@ -1057,6 +1074,52 @@ func TestChatUsesThreadManagerWhenAvailable(t *testing.T) {
 	}
 	if client.requests[0].Model == "" {
 		t.Fatalf("expected assistant request to be made: %+v", client.requests[0])
+	}
+}
+
+func TestNaturalMessageUsesInlineChat(t *testing.T) {
+	client := &fakeLLM{responses: []llm.ChatResponse{
+		{Content: `{"respond":true,"prompt":"continue"}`},
+		{Content: "chat fixture"},
+	}}
+	threadManager := &fakeThreadManager{thread: Thread{ID: "thread-1", Name: "Panda: continue", Created: true}}
+	router := newTestRouter(t, client, 5).WithThreadManager(threadManager)
+
+	response := router.HandleNaturalMessage(context.Background(), Request{
+		UserID:    "user-1",
+		GuildID:   "guild-1",
+		ChannelID: "channel-1",
+		Options:   map[string]string{"message": "Panda continue", "bot_mentioned": "true"},
+	})
+	if response.Content != "chat fixture" || response.ThreadID != "" {
+		t.Fatalf("unexpected natural message response: %+v", response)
+	}
+	if len(threadManager.calls) != 0 {
+		t.Fatalf("natural messages should not create chat threads, got %+v", threadManager.calls)
+	}
+	if len(client.requests) != 2 {
+		t.Fatalf("expected trigger and chat LLM requests, got %d", len(client.requests))
+	}
+	if !strings.Contains(joinRequestMessages(client.requests[0]), "Bot mentioned: true") {
+		t.Fatalf("expected trigger request to include mention metadata: %+v", client.requests[0])
+	}
+}
+
+func TestNaturalMessageDoesNotRespondWhenTriggerDeclines(t *testing.T) {
+	client := &fakeLLM{response: llm.ChatResponse{Content: `{"respond":false,"prompt":""}`}}
+	router := newTestRouter(t, client, 5)
+
+	response := router.HandleNaturalMessage(context.Background(), Request{
+		UserID:    "user-1",
+		GuildID:   "guild-1",
+		ChannelID: "channel-1",
+		Options:   map[string]string{"message": "ambient channel chatter"},
+	})
+	if response.Content != "" {
+		t.Fatalf("expected no response, got %+v", response)
+	}
+	if len(client.requests) != 1 {
+		t.Fatalf("expected only trigger LLM request, got %d", len(client.requests))
 	}
 }
 

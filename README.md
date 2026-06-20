@@ -31,6 +31,8 @@ SQLite knowledge search uses FTS5 when the binary is built with the `sqlite_fts5
 
 ## Commands
 
+Panda listens to normal Discord messages that contain the word `Panda`, then uses the model to decide whether the message is meant for it. Natural requests like `Panda is this true?` and task-style asks are routed into chat without a slash command.
+
 - `/ping`
 - `/help`
 - `/admin setup`
@@ -55,12 +57,6 @@ SQLite knowledge search uses FTS5 when the binary is built with the `sqlite_fts5
 - `/mod slowmode`
 - `/mod cleanup`
 - `/mod history subject_id:<user_id>` with optional `recent_limit:<n>` and moderator note text
-- `/ask question:<text>`
-- `/chat question:<text>`
-- `/summarize text:<text>`, `attachment_id:<id>`, or `message_id:<id>` / `recent_limit:<n>` when Discord context fetching is configured
-- `/explain text:<text>`, `attachment_id:<id>`, or `message_id:<id>` when Discord context fetching is configured
-- `/rewrite text:<text> tone:<tone>`
-- `/translate text:<text> language:<language>`
 - `/search-memory query:<text>`
 - `/memory-consent action:<status|enable|disable>`
 - Message context menu: `Explain with Panda`
@@ -72,7 +68,7 @@ Moderator helpers are suggestion-only and require guild administrator, owner, or
 
 Server knowledge is opt-in through `/admin memory enable`. User-specific memory consent is separate and defaults off; users can inspect or change it with `/memory-consent`.
 
-Large `/summarize` requests from Discord are queued as durable background jobs after permission, context, rate-limit, and budget checks. Panda updates the deferred Discord response when the job finishes; `/metrics` and `/ops health` expose queue depth for operators.
+Large summarize requests from Discord are queued as durable background jobs after permission, context, rate-limit, and budget checks. Panda updates the deferred Discord response when the job finishes; `/metrics` and `/ops health` expose queue depth for operators.
 
 ## Deployment Notes
 
