@@ -1,0 +1,39 @@
+---
+import BrandMark from './BrandMark.astro';
+import { navLinks, siteMeta } from '../data/landing';
+---
+
+<header class="site-header" data-header>
+  <div class="shell nav-shell">
+    <a class="brand" href="#top" aria-label="Panda home">
+      <BrandMark />
+      <span>PANDA</span>
+    </a>
+
+    <nav class="desktop-nav" aria-label="Primary navigation">
+      {navLinks.map((link) => <a href={link.href}>{link.label}</a>)}
+    </nav>
+
+    <div class="nav-actions">
+      <a class="nav-github" href={siteMeta.repositoryUrl} target="_blank" rel="noreferrer">
+        GitHub
+        <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M5 11 11 5M6 5h5v5" /></svg>
+      </a>
+      <button
+        class="menu-button"
+        type="button"
+        aria-label="Open menu"
+        aria-expanded="false"
+        data-menu-button
+        aria-controls="mobile-nav"
+      >
+        <span></span><span></span>
+      </button>
+    </div>
+  </div>
+
+  <nav class="mobile-nav" id="mobile-nav" aria-label="Mobile navigation" data-mobile-nav hidden>
+    {navLinks.map((link) => <a href={link.href}>{link.label}</a>)}
+    <a href={siteMeta.repositoryUrl} target="_blank" rel="noreferrer">View source</a>
+  </nav>
+</header>

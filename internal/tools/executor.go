@@ -226,6 +226,9 @@ func (e *Executor) OpenRouterTools(access ToolAccess) []llm.Tool {
 	}
 	var result []llm.Tool
 	for _, definition := range e.registry.Definitions() {
+		if !definition.IncludeInModelContext {
+			continue
+		}
 		if !definition.AvailableTo(access) {
 			continue
 		}
@@ -292,13 +295,13 @@ func (e *Executor) Execute(ctx context.Context, request ExecutionRequest) (Execu
 		if e.discord != nil {
 			payload, err = e.executeDiscordTool(toolCtx, definition, request, arguments)
 		} else {
-			payload, err = e.fetchRecentMessages(toolCtx, request.GuildID, arguments)
+			payload, err = e.fetchRecentMessages(toolCtx, request, arguments)
 		}
 	case "discord.fetch_message":
 		if e.discord != nil {
 			payload, err = e.executeDiscordTool(toolCtx, definition, request, arguments)
 		} else {
-			payload, err = e.fetchMessage(toolCtx, request.GuildID, arguments)
+			payload, err = e.fetchMessage(toolCtx, request, arguments)
 		}
 	case "search_knowledge":
 		payload, err = e.searchKnowledge(toolCtx, request.GuildID, arguments)
@@ -307,7 +310,7 @@ func (e *Executor) Execute(ctx context.Context, request ExecutionRequest) (Execu
 	case "summarize_text_file":
 		payload, err = e.summarizeTextFile(toolCtx, request.GuildID, arguments)
 	case "read_config":
-		payload, err = e.readConfig(toolCtx, request.GuildID, arguments)
+		payload, err = e.readConfig(toolCtx, request, arguments)
 	case "manage_memory_consent":
 		payload, err = e.manageMemoryConsent(toolCtx, request, arguments)
 	case "panda.usage_report":
@@ -382,6 +385,9 @@ func (e *Executor) executeDiscordTool(ctx context.Context, definition Definition
 	if err != nil {
 		return nil, err
 	}
+	if err := enforceDiscordReadScope(definition, request, arguments); err != nil {
+		return nil, err
+	}
 	dryRun := boolArgument(arguments, "dry_run")
 	if definition.SupportsDryRun && dryRun {
 		return map[string]any{
@@ -414,7 +420,71 @@ func (e *Executor) executeDiscordTool(ctx context.Context, definition Definition
 	})
 }
 
-func (e *Executor) fetchRecentMessages(ctx context.Context, guildID string, arguments string) (any, error) {
+func enforceDiscordReadScope(definition Definition, request ExecutionRequest, arguments map[string]any) error {
+	if definition.ToolClass != ToolClassDiscordRead {
+		return nil
+	}
+	return enforceDiscordReadTargets(request, discordReadTargetIDs(arguments)...)
+}
+
+func enforceDiscordReadTargets(request ExecutionRequest, targetIDs ...string) error {
+	if canReadAcrossDiscordChannels(request.Access) {
+		return nil
+	}
+	filtered := make([]string, 0, len(targetIDs))
+	for _, targetID := range targetIDs {
+		targetID = strings.TrimSpace(targetID)
+		if targetID != "" {
+			filtered = append(filtered, targetID)
+		}
+	}
+	if len(filtered) == 0 {
+		return nil
+	}
+	currentChannelID := strings.TrimSpace(request.ChannelID)
+	if currentChannelID == "" {
+		return fmt.Errorf("Discord read tools are limited to the current channel for non-admin users")
+	}
+	for _, targetID := range filtered {
+		if targetID != currentChannelID {
+			return fmt.Errorf("Discord read tools are disabled outside the current channel for non-admin users")
+		}
+	}
+	return nil
+}
+
+func discordReadTargetIDs(arguments map[string]any) []string {
+	var targets []string
+	for _, name := range []string{"channel_id", "thread_id", "channel_ids", "thread_ids"} {
+		value, ok := arguments[name]
+		if !ok || value == nil {
+			continue
+		}
+		switch typed := value.(type) {
+		case []string:
+			targets = append(targets, typed...)
+		case []any:
+			for _, item := range typed {
+				targets = append(targets, strings.TrimSpace(fmt.Sprint(item)))
+			}
+		default:
+			targets = append(targets, strings.TrimSpace(fmt.Sprint(typed)))
+		}
+	}
+	return targets
+}
+
+func canReadAcrossDiscordChannels(access ToolAccess) bool {
+	return access.HasAnyPermission(
+		admin.PermissionAdminConfigRead,
+		admin.PermissionAdminConfigWrite,
+		admin.PermissionAdminAuditRead,
+		admin.PermissionModerationUse,
+		admin.PermissionOwnerOps,
+	)
+}
+
+func (e *Executor) fetchRecentMessages(ctx context.Context, request ExecutionRequest, arguments string) (any, error) {
 	if e.context == nil {
 		return nil, fmt.Errorf("discord context is not configured")
 	}
@@ -429,14 +499,17 @@ func (e *Executor) fetchRecentMessages(ctx context.Context, guildID string, argu
 	if channelID == "" {
 		return nil, fmt.Errorf("channel_id is required")
 	}
-	packed, err := e.context.RecentMessagesContext(ctx, contextsvc.ChannelRef{GuildID: guildID, ChannelID: channelID}, parseToolLimit(input.Limit, 10))
+	if err := enforceDiscordReadTargets(request, channelID); err != nil {
+		return nil, err
+	}
+	packed, err := e.context.RecentMessagesContext(ctx, contextsvc.ChannelRef{GuildID: request.GuildID, ChannelID: channelID}, parseToolLimit(input.Limit, 10))
 	if err != nil {
 		return nil, err
 	}
 	return packedContextPayload(packed), nil
 }
 
-func (e *Executor) fetchMessage(ctx context.Context, guildID string, arguments string) (any, error) {
+func (e *Executor) fetchMessage(ctx context.Context, request ExecutionRequest, arguments string) (any, error) {
 	if e.context == nil {
 		return nil, fmt.Errorf("discord context is not configured")
 	}
@@ -452,7 +525,10 @@ func (e *Executor) fetchMessage(ctx context.Context, guildID string, arguments s
 	if channelID == "" || messageID == "" {
 		return nil, fmt.Errorf("channel_id and message_id are required")
 	}
-	packed, err := e.context.MessageContext(ctx, contextsvc.MessageRef{GuildID: guildID, ChannelID: channelID, MessageID: messageID})
+	if err := enforceDiscordReadTargets(request, channelID); err != nil {
+		return nil, err
+	}
+	packed, err := e.context.MessageContext(ctx, contextsvc.MessageRef{GuildID: request.GuildID, ChannelID: channelID, MessageID: messageID})
 	if err != nil {
 		return nil, err
 	}
@@ -576,7 +652,7 @@ func (e *Executor) summarizeTextFile(ctx context.Context, guildID string, argume
 	}, nil
 }
 
-func (e *Executor) readConfig(ctx context.Context, guildID string, arguments string) (any, error) {
+func (e *Executor) readConfig(ctx context.Context, request ExecutionRequest, arguments string) (any, error) {
 	if e.configs == nil {
 		return nil, fmt.Errorf("config reads are not configured")
 	}
@@ -584,8 +660,13 @@ func (e *Executor) readConfig(ctx context.Context, guildID string, arguments str
 		GuildID string `json:"guild_id"`
 	}
 	_ = json.Unmarshal([]byte(arguments), &input)
-	if strings.TrimSpace(input.GuildID) != "" {
-		guildID = strings.TrimSpace(input.GuildID)
+	guildID := strings.TrimSpace(request.GuildID)
+	requestedGuildID := strings.TrimSpace(input.GuildID)
+	if requestedGuildID != "" && requestedGuildID != guildID {
+		if !hasPermission(request.Access, admin.PermissionOwnerOps) {
+			return nil, fmt.Errorf("read_config can only inspect the current guild")
+		}
+		guildID = requestedGuildID
 	}
 	config, ok, err := e.configs.Get(ctx, guildID)
 	if err != nil {
@@ -754,11 +835,7 @@ func (e *Executor) manageBudgetLimit(ctx context.Context, request ExecutionReque
 		if boolArgument(args, "dry_run") {
 			return dryRunToolResult("budget_limit.set", map[string]any{"limit": budgetLimitPayload(limit)}), nil
 		}
-		saved, err := e.adminOps.SetBudgetLimit(ctx, request.GuildID, request.ActorID, limit)
-		if err != nil {
-			return nil, err
-		}
-		return map[string]any{"result": map[string]any{"saved": budgetLimitPayload(saved)}}, nil
+		return confirmationRequired("budget_limit.set", budgetLimitPayload(limit)), nil
 	case "remove":
 		if !validBudgetScope(scope) {
 			return nil, fmt.Errorf("scope must be guild, user, channel, or global")
@@ -893,11 +970,7 @@ func (e *Executor) manageRolePermission(ctx context.Context, request ExecutionRe
 		if boolArgument(args, "dry_run") {
 			return dryRunToolResult("role_permission.add", preview), nil
 		}
-		role, err := e.adminOps.AddRolePermission(ctx, request.GuildID, request.ActorID, roleID, permission)
-		if err != nil {
-			return nil, err
-		}
-		return map[string]any{"result": rolePermissionPayload(role)}, nil
+		return confirmationRequired("role_permission.add", preview), nil
 	case "remove":
 		roleID, err := e.roleIDArgument(ctx, request, args)
 		if err != nil {
@@ -1078,11 +1151,7 @@ func (e *Executor) manageToolAccess(ctx context.Context, request ExecutionReques
 		if boolArgument(args, "dry_run") {
 			return dryRunToolResult("tool_access.add", preview), nil
 		}
-		toolRole, err := e.adminOps.AddToolRole(ctx, request.GuildID, request.ActorID, toolName, roleID)
-		if err != nil {
-			return nil, err
-		}
-		return map[string]any{"result": toolRolePayload(toolRole)}, nil
+		return confirmationRequired("tool_access.add", preview), nil
 	case "remove", "deny":
 		roleID := stringArgument(args, "role_id")
 		if toolName == "" || roleID == "" {
@@ -1092,10 +1161,7 @@ func (e *Executor) manageToolAccess(ctx context.Context, request ExecutionReques
 		if boolArgument(args, "dry_run") {
 			return dryRunToolResult("tool_access.remove", preview), nil
 		}
-		if err := e.adminOps.RemoveToolRole(ctx, request.GuildID, request.ActorID, toolName, roleID); err != nil {
-			return nil, err
-		}
-		return map[string]any{"result": preview}, nil
+		return confirmationRequired("tool_access.remove", preview), nil
 	default:
 		return nil, fmt.Errorf("action must be list, add, or remove")
 	}
@@ -1170,11 +1236,7 @@ func (e *Executor) manageChannelRule(ctx context.Context, request ExecutionReque
 		if boolArgument(args, "dry_run") {
 			return dryRunToolResult("channel_rule."+action, preview), nil
 		}
-		rule, err := e.adminOps.SetChannelRule(ctx, request.GuildID, request.ActorID, channelID, action)
-		if err != nil {
-			return nil, err
-		}
-		return map[string]any{"result": channelRulePayload(rule)}, nil
+		return confirmationRequired("channel_rule.set", preview), nil
 	case "remove":
 		channelID := stringArgument(args, "channel_id")
 		if channelID == "" {
@@ -1324,12 +1386,20 @@ func (e *Executor) listAvailableTools(ctx context.Context, request ExecutionRequ
 		"composed_count":  len(composedTools),
 		"kind":            kind,
 		"policy":          normalizeToolPolicy(request.Access.Policy),
+		"access_level":    "user",
 		"invocation_type": firstNonEmpty(request.InvocationType, "chat_tool"),
 		"note":            "This list is already filtered by guild tool policy, role tool access, user permissions, and configured integrations. Tools not returned here are not callable in this context.",
+	}
+	if canSeeAdminTools {
+		response["access_level"] = "admin"
+		response["access_notice"] = "This caller has admin-level Panda tool access in this context."
 	}
 	if adminToolsHidden {
 		response["admin_tools_hidden"] = true
 		response["admin_tools_notice"] = hiddenAdminToolsNotice()
+	}
+	if normalizeToolPolicy(request.Access.Policy) == ToolPolicyAdminOnly && !canSeeAdminTools {
+		response["user_tools_notice"] = "Normal chat and any listed web search tool are available. Broader tools are disabled for users right now; an admin can enable broader tool access for this server later."
 	}
 	return response, nil
 }
@@ -1451,14 +1521,22 @@ func confirmationArguments(action string, preview map[string]any) map[string]str
 	switch action {
 	case "knowledge.delete":
 		return stringArguments(preview, "document_id")
+	case "budget_limit.set":
+		return stringArguments(preview, "scope", "subject_id", "limit", "window_seconds")
 	case "budget_limit.remove":
 		return stringArguments(preview, "scope", "subject_id")
+	case "role_permission.add":
+		return stringArguments(preview, "role_id", "permission")
 	case "role_permission.remove":
 		return stringArguments(preview, "role_id", "permission")
 	case "role_profile.add", "role_profile.remove":
 		return stringArguments(preview, "role_id", "profile")
 	case "member_role.add", "member_role.remove":
 		return stringArguments(preview, "user_id", "role_id")
+	case "tool_access.add", "tool_access.remove":
+		return stringArguments(preview, "tool_name", "role_id")
+	case "channel_rule.set":
+		return stringArguments(preview, "channel_id", "rule")
 	case "channel_rule.remove":
 		return stringArguments(preview, "channel_id")
 	case "composed_tool.approve", "composed_tool.rollback":
@@ -1472,8 +1550,12 @@ func confirmationCopy(action string, arguments map[string]string) (string, strin
 	switch action {
 	case "knowledge.delete":
 		return fmt.Sprintf("Panda prepared deletion of knowledge document `%s`.", arguments["document_id"]), "Delete knowledge"
+	case "budget_limit.set":
+		return fmt.Sprintf("Panda prepared a `%s` budget limit of `%s` request(s) per `%s` seconds for `%s`.", arguments["scope"], arguments["limit"], arguments["window_seconds"], firstNonEmpty(arguments["subject_id"], "global")), "Set limit"
 	case "budget_limit.remove":
 		return fmt.Sprintf("Panda prepared removal of the `%s` budget limit for `%s`.", arguments["scope"], firstNonEmpty(arguments["subject_id"], "global")), "Remove limit"
+	case "role_permission.add":
+		return fmt.Sprintf("Panda prepared grant of `%s` to role `%s`.", arguments["permission"], arguments["role_id"]), "Grant permission"
 	case "role_permission.remove":
 		return fmt.Sprintf("Panda prepared removal of `%s` from role `%s`.", arguments["permission"], arguments["role_id"]), "Remove permission"
 	case "role_profile.add":
@@ -1484,6 +1566,12 @@ func confirmationCopy(action string, arguments map[string]string) (string, strin
 		return fmt.Sprintf("Panda prepared assignment of role `%s` to user `%s`.", arguments["role_id"], arguments["user_id"]), "Assign role"
 	case "member_role.remove":
 		return fmt.Sprintf("Panda prepared removal of role `%s` from user `%s`.", arguments["role_id"], arguments["user_id"]), "Remove role"
+	case "tool_access.add":
+		return fmt.Sprintf("Panda prepared tool access for `%s` on role `%s`.", arguments["tool_name"], arguments["role_id"]), "Allow tool"
+	case "tool_access.remove":
+		return fmt.Sprintf("Panda prepared removal of tool access for `%s` from role `%s`.", arguments["tool_name"], arguments["role_id"]), "Remove tool access"
+	case "channel_rule.set":
+		return fmt.Sprintf("Panda prepared `%s` channel access rule for `%s`.", arguments["rule"], arguments["channel_id"]), "Set rule"
 	case "channel_rule.remove":
 		return fmt.Sprintf("Panda prepared removal of the channel access rule for `%s`.", arguments["channel_id"]), "Remove rule"
 	case "composed_tool.approve":

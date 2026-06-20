@@ -185,7 +185,7 @@ func TestClassifyNaturalMessageUsesLLMDecision(t *testing.T) {
 
 func TestNaturalTriggerPromptCoversDirectCapabilityQuestionWithoutMention(t *testing.T) {
 	messages := naturalTriggerMessages(NaturalMessageRequest{
-		Content:      "hey panda what can you do?",
+		Content:      "what can you do panda",
 		BotMentioned: false,
 	})
 	if len(messages) != 2 {
@@ -196,14 +196,43 @@ func TestNaturalTriggerPromptCoversDirectCapabilityQuestionWithoutMention(t *tes
 		"asks about Panda's capabilities/tools",
 		"Do not require an @mention",
 		"naturally addresses Panda by name",
+		"word Panda appears anywhere",
 	} {
 		if !strings.Contains(system, want) {
 			t.Fatalf("natural trigger prompt missing %q:\n%s", want, system)
 		}
 	}
 	user := messages[1].Content
-	if !strings.Contains(user, "Bot mentioned: false") || !strings.Contains(user, "hey panda what can you do?") {
+	if !strings.Contains(user, "Bot mentioned: false") || !strings.Contains(user, "what can you do panda") {
 		t.Fatalf("natural trigger input missing direct-address evidence:\n%s", user)
+	}
+}
+
+func TestClassifyNaturalMessageRetriesInvalidJSON(t *testing.T) {
+	ctx := context.Background()
+	client := &fakeClient{responses: []llm.ChatResponse{
+		{Content: `**Decision** yes, respond`},
+		{Content: `{"respond":true,"prompt":"what can you do"}`},
+	}}
+	service, _ := newTestService(t, client)
+
+	decision, err := service.ClassifyNaturalMessage(ctx, NaturalMessageRequest{
+		GuildID:   "guild-1",
+		UserID:    "user-1",
+		ChannelID: "channel-1",
+		Content:   "what can you do panda",
+	})
+	if err != nil {
+		t.Fatalf("ClassifyNaturalMessage: %v", err)
+	}
+	if !decision.Respond || decision.Prompt != "what can you do" {
+		t.Fatalf("unexpected decision: %+v", decision)
+	}
+	if len(client.requests) != 2 {
+		t.Fatalf("expected initial classification and retry, got %d", len(client.requests))
+	}
+	if !strings.Contains(joinMessages(client.requests[1].Messages), "Your previous response was not strict JSON") {
+		t.Fatalf("retry request missing repair instruction: %+v", client.requests[1])
 	}
 }
 
@@ -467,7 +496,45 @@ func TestAskListsActualAvailableToolNamesInPrompt(t *testing.T) {
 	}
 }
 
-func TestAskCapabilityQuestionCanUseListToolsWhenPolicyOff(t *testing.T) {
+func TestToolAvailabilityMessageExplainsAdminOnlyPolicyForNormalUsers(t *testing.T) {
+	message := toolAvailabilityMessage([]llm.Tool{{
+		Type: "function",
+		Function: llm.ToolFunction{
+			Name:       "panda_list_tools",
+			Parameters: []byte(`{"type":"object"}`),
+		},
+	}}, tools.ToolAccess{
+		Policy:      tools.ToolPolicyAdminOnly,
+		Permissions: map[string]struct{}{admin.PermissionAssistantUse: {}},
+	})
+	if !strings.Contains(message, "normal chat and any listed web search tool are still available") || !strings.Contains(message, "broader tools are disabled for users right now") {
+		t.Fatalf("expected admin-only notice, got %s", message)
+	}
+}
+
+func TestToolAvailabilityMessageLabelsAdminAccess(t *testing.T) {
+	message := toolAvailabilityMessage([]llm.Tool{{
+		Type: "function",
+		Function: llm.ToolFunction{
+			Name:       "panda_list_tools",
+			Parameters: []byte(`{"type":"object"}`),
+		},
+	}}, tools.ToolAccess{
+		Policy: tools.ToolPolicyAdminOnly,
+		Permissions: map[string]struct{}{
+			admin.PermissionAssistantUse:     {},
+			admin.PermissionAdminConfigWrite: {},
+		},
+	})
+	if !strings.Contains(message, "admin-level Panda tool access") {
+		t.Fatalf("expected admin access notice, got %s", message)
+	}
+	if strings.Contains(message, "broader tools are disabled for users right now") {
+		t.Fatalf("admin-scoped prompt should not include regular-user admin-only notice: %s", message)
+	}
+}
+
+func TestAskCapabilityQuestionCanUseListToolsWhenDefaultAdminOnly(t *testing.T) {
 	ctx := context.Background()
 	client := &fakeClient{responses: []llm.ChatResponse{
 		{
@@ -517,7 +584,7 @@ func TestAskCapabilityQuestionCanUseListToolsWhenPolicyOff(t *testing.T) {
 		t.Fatalf("expected panda_list_tools in first model request, got %+v", client.requests[0].Tools)
 	}
 	joined := joinMessages(client.requests[1].Messages)
-	for _, want := range []string{`"policy":"off"`, `"name":"panda_list_tools"`, `"count":1`} {
+	for _, want := range []string{`"policy":"admin_only"`, `"name":"panda_list_tools"`, `"count":1`, `"user_tools_notice"`} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("expected tool-list result to contain %s, got %s", want, joined)
 		}

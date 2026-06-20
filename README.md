@@ -32,7 +32,7 @@ When `DISCORD_GUILD_ID` is set for fast local command registration, that guild m
 
 Set `DISCORD_PUBLIC_KEY` from the Discord Developer Portal to enable signed Discord webhook events at `POST /discord/webhook-events`. Subscribe that endpoint to `APPLICATION_AUTHORIZED` events to enforce owner-only guild installs: Panda records the authorizing user as the guild's Panda owner when they match Discord's `guild.owner_id`; if a non-owner authorizes the app, Panda records the denial, audits it, and leaves the guild.
 
-To enable public web search, set `BRAVE_SEARCH_API_KEY`. Panda exposes Brave Search to the model as the read-only `web.search` tool when the key is configured, the guild tool policy allows read tools, and the caller has `assistant.web_search` permission. The optional `brave_search.base_url` setting defaults to `https://api.search.brave.com/res/v1`.
+To enable public web search, set `BRAVE_SEARCH_API_KEY`. Panda exposes Brave Search to the model as the read-only `web.search` tool when the key is configured and the guild tool policy allows web reads. Web search is available to everyone by default; admins can restrict it later by mapping `assistant.web_search` to specific roles. The optional `brave_search.base_url` setting defaults to `https://api.search.brave.com/res/v1`.
 
 For queue-only processing without Discord or HTTP, run `go run ./cmd/worker`.
 
@@ -77,13 +77,13 @@ Panda listens to normal Discord messages that contain the word `Panda`, then use
 
 Guild config is created automatically the first time an admin changes Panda settings. The installing owner can use `/admin role` to choose any Discord role as Panda's admin or moderator role profile; for example, a server role named `Pickle` can be configured as the Panda moderator role. `/admin member-role` assigns those Discord roles to users. Role mappings are enforced when at least one `assistant.use` role is configured. Channel rules support explicit allow lists and deny rules; owners, guild administrators, and the configured Panda admin role bypass assistant-use policy checks.
 
-Tool access has two layers: `tool_policy` sets the server-wide ceiling for tool classes, and `/admin tool` can restrict individual native or composed tools to specific roles. Native tools keep their underlying permissions, so allowing a role to use an admin tool does not grant admin access. Composed tools are admin-only for regular members until a role is explicitly allowed for that composed tool; composed tools that wrap native admin tools remain admin-only.
+Tool access has two layers: `tool_policy` sets the server-wide ceiling for tool classes, defaulting to `admin_only`, and `/admin tool` can restrict individual native or composed tools to specific roles. Regular members can still chat with Panda and use configured web search by asking Panda; broader native and composed tools stay admin-only until enabled. Native tools keep their underlying permissions, so allowing a role to use an admin tool does not grant admin access. Composed tools that wrap native admin tools remain admin-only.
 
 Usage reports, request budgets, server knowledge, role profiles and permissions, Discord role assignment, channel rules, memory consent, moderation guidance, and composed-tool management are available through Panda chat/tools instead of direct slash commands.
 
-When a chat-triggered tool prepares a destructive admin removal or a composed-tool approval/rollback, Panda renders a Discord confirmation button tied to the requesting user. Clicking it executes the reviewed server-side action only after fresh permission checks.
+When a chat-triggered tool prepares a privilege-changing admin add, set, removal, or composed-tool approval/rollback, Panda renders a Discord confirmation button tied to the requesting user. Clicking it executes the reviewed server-side action only after fresh permission checks.
 
-Server knowledge is opt-in. User-specific memory consent is separate and defaults off.
+Server knowledge is available by default for admin-managed documents. User-specific memory consent is separate and defaults off.
 
 Large summarize requests from Discord are queued as durable background jobs after permission, context, rate-limit, and budget checks. Panda updates the deferred Discord response when the job finishes; `/metrics` and `/ops health` expose queue depth for operators.
 

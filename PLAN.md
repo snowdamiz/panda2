@@ -121,7 +121,7 @@ Every tool must declare:
 
 - Short-term context lives in an in-process TTL cache with SQLite persistence only when needed for recovery.
 - Long-term conversation metadata lives in SQLite.
-- Guild knowledge entries are opt-in and admin-managed.
+- Guild knowledge entries are admin-managed and available by default for explicit knowledge documents.
 - User-specific memory is off by default and requires clear consent.
 - Store embeddings only for explicit knowledge documents or saved summaries, not all Discord traffic.
 - Provide export and delete flows for guild and user memory.
@@ -550,7 +550,7 @@ These are assumptions in this plan beyond Go, Fiber, GORM-if-useful, SQLite-if-n
 - SQLite local disk storage is acceptable for the first production deployment.
 - Local filesystem storage is acceptable for temporary attachment processing, with raw attachment persistence disabled by default.
 - Redis, PostgreSQL, S3-compatible object storage, and external vector databases are deferred scale options.
-- Memory and knowledge indexing are opt-in. The bot does not index entire Discord history by default.
+- Memory and knowledge indexing only covers explicit knowledge documents, saved summaries, or consented user memory. The bot does not index entire Discord history by default.
 - Moderator features produce suggestions, summaries, and drafts. The bot does not auto-ban, auto-kick, or auto-delete without an explicit later decision.
 - Usage budgets are enforced inside the bot rather than through a full billing system.
 - The first Fly.io deployment is single-region and starts with one primary Machine attached to one persistent Fly Volume.

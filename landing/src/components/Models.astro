@@ -1,0 +1,59 @@
+---
+import { consoleFallbacks, consoleSettings, modelOptions, siteMeta } from '../data/landing';
+---
+
+<section class="section models-section" id="models">
+  <div class="shell models-layout">
+    <div class="models-copy reveal">
+      <p class="kicker kicker-dark">OpenRouter at the core</p>
+      <h2>Pick the mind<br />behind Panda.</h2>
+      <p>
+        Use automatic routing or choose the model that fits your server. Change the primary model,
+        temperature, response length, and fallbacks without rebuilding the bot.
+      </p>
+      <a class="text-link" href={siteMeta.commandsUrl} target="_blank" rel="noreferrer">
+        See admin commands <span>↗</span>
+      </a>
+    </div>
+
+    <div class="model-console reveal">
+      <div class="console-header">
+        <span>MODEL ROUTER</span>
+        <span class="console-live"><i></i> READY</span>
+      </div>
+      <div class="console-primary">
+        <div>
+          <small>PRIMARY MODEL</small>
+          <strong data-console-model>{modelOptions[0].slug}</strong>
+        </div>
+        <button type="button" data-cycle-model aria-label="Cycle through demo models">
+          CHANGE
+          <svg viewBox="0 0 18 18" aria-hidden="true"><path d="M5 3h8v8M13 3 4 12M13 15H5V7" /></svg>
+        </button>
+      </div>
+      <div class="console-fallbacks">
+        {
+          consoleFallbacks.map((fallback) => (
+            <div class="route-line">
+              <span>{fallback.number}</span>
+              <b data-route-primary={fallback.primary ? true : undefined}>{fallback.label}</b>
+              <em>{fallback.state}</em>
+            </div>
+          ))
+        }
+      </div>
+      <div class="console-settings">
+        {
+          consoleSettings.map((setting) => (
+            <div>
+              <span>{setting.label}</span>
+              <b>{setting.value}</b>
+              <i class={setting.meterClass}></i>
+            </div>
+          ))
+        }
+      </div>
+      <div class="console-command"><span>$</span> /admin model <i class="cursor"></i></div>
+    </div>
+  </div>
+</section>

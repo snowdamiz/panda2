@@ -120,6 +120,52 @@ func TestOpenRouterToolsKeepsMetadataAvailableWhenPolicyOff(t *testing.T) {
 	}
 }
 
+func TestOpenRouterToolsAdminOnlyGatesRegularUsers(t *testing.T) {
+	registry, err := NewDefaultRegistry()
+	if err != nil {
+		t.Fatalf("NewDefaultRegistry: %v", err)
+	}
+
+	regularTools := registry.OpenRouterToolsForAccess(ToolAccess{
+		Policy: ToolPolicyAdminOnly,
+		Permissions: map[string]struct{}{
+			admin.PermissionAssistantUse:       {},
+			admin.PermissionAssistantWebSearch: {},
+		},
+	})
+	regularNames := toolNames(regularTools)
+	if !regularNames["panda_list_tools"] || !regularNames["web_search"] || regularNames["discord_fetch_message"] {
+		t.Fatalf("admin_only should expose metadata and web search to regular users, got %+v", regularNames)
+	}
+
+	adminTools := registry.OpenRouterToolsForAccess(ToolAccess{
+		Policy: ToolPolicyAdminOnly,
+		Permissions: map[string]struct{}{
+			admin.PermissionAssistantUse:       {},
+			admin.PermissionAssistantWebSearch: {},
+			admin.PermissionAdminConfigRead:    {},
+		},
+	})
+	adminNames := toolNames(adminTools)
+	if !adminNames["web_search"] || !adminNames["read_config"] {
+		t.Fatalf("admin_only should allow admin-scoped tool access, got %+v", adminNames)
+	}
+}
+
+func TestOpenRouterToolsHonorsIncludeInModelContext(t *testing.T) {
+	registry, err := NewDefaultRegistry()
+	if err != nil {
+		t.Fatalf("NewDefaultRegistry: %v", err)
+	}
+	tools := registry.OpenRouterToolsForAccess(ToolAccess{
+		Policy:      ToolPolicyModerator,
+		Permissions: map[string]struct{}{admin.PermissionModerationUse: {}},
+	})
+	if toolNames(tools)["draft_moderator_note"] {
+		t.Fatalf("draft_moderator_note should not be exposed to the model tool list")
+	}
+}
+
 func TestOpenRouterToolsKeepsBotAdminManagementAvailableWhenPolicyOff(t *testing.T) {
 	registry, err := NewDefaultRegistry()
 	if err != nil {
@@ -200,6 +246,128 @@ func TestMustGetUnknownTool(t *testing.T) {
 	}
 }
 
+func TestReadConfigCannotReadOtherGuildsWithoutOwnerOps(t *testing.T) {
+	registry, err := NewDefaultRegistry()
+	if err != nil {
+		t.Fatalf("NewDefaultRegistry: %v", err)
+	}
+	executor := NewExecutor(registry, nil, fakeConfigReaderByGuild{
+		"guild-1": {GuildID: "guild-1", DefaultModel: "model-one", AssistantEnabled: true, MemoryEnabled: true, ToolPolicy: ToolPolicyAdminOnly},
+		"guild-2": {GuildID: "guild-2", DefaultModel: "model-two", AssistantEnabled: true, MemoryEnabled: true, ToolPolicy: ToolPolicyAdminOnly},
+	})
+
+	denied, err := executor.Execute(context.Background(), ExecutionRequest{
+		GuildID: "guild-1",
+		ActorID: "admin",
+		Access:  testAccess(ToolPolicyOff, admin.PermissionAdminConfigRead),
+		Call: llm.ToolCall{
+			ID:   "call-read-config-denied",
+			Type: "function",
+			Function: llm.ToolCallFunction{
+				Name:      "read_config",
+				Arguments: `{"guild_id":"guild-2"}`,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Execute read_config denied: %v", err)
+	}
+	if !strings.Contains(denied.Message.Content, "current guild") || strings.Contains(denied.Message.Content, "model-two") {
+		t.Fatalf("expected cross-guild read denial, got %+v", denied.Message)
+	}
+
+	allowed, err := executor.Execute(context.Background(), ExecutionRequest{
+		GuildID: "guild-1",
+		ActorID: "owner",
+		Access:  testAccess(ToolPolicyOwnerOps, admin.PermissionAdminConfigRead, admin.PermissionOwnerOps),
+		Call: llm.ToolCall{
+			ID:   "call-read-config-owner",
+			Type: "function",
+			Function: llm.ToolCallFunction{
+				Name:      "read_config",
+				Arguments: `{"guild_id":"guild-2"}`,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Execute read_config owner: %v", err)
+	}
+	if !strings.Contains(allowed.Message.Content, `"guild_id":"guild-2"`) || !strings.Contains(allowed.Message.Content, "model-two") {
+		t.Fatalf("expected owner cross-guild read, got %+v", allowed.Message)
+	}
+}
+
+func TestDiscordReadToolsAreScopedToCurrentChannelForNormalUsers(t *testing.T) {
+	registry, err := NewDefaultRegistry()
+	if err != nil {
+		t.Fatalf("NewDefaultRegistry: %v", err)
+	}
+	executor := NewExecutor(registry, nil, nil).WithContextReader(fakeToolContextReader{})
+
+	denied, err := executor.Execute(context.Background(), ExecutionRequest{
+		GuildID:   "guild-1",
+		ChannelID: "channel-1",
+		ActorID:   "user-1",
+		Access:    testAccess(ToolPolicyReadOnly, admin.PermissionAssistantUse),
+		Call: llm.ToolCall{
+			ID:   "call-cross-channel",
+			Type: "function",
+			Function: llm.ToolCallFunction{
+				Name:      "discord_fetch_message",
+				Arguments: `{"channel_id":"channel-2","message_id":"message-1"}`,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Execute denied Discord read: %v", err)
+	}
+	if !strings.Contains(denied.Message.Content, "outside the current channel") {
+		t.Fatalf("expected cross-channel denial, got %+v", denied.Message)
+	}
+
+	allowed, err := executor.Execute(context.Background(), ExecutionRequest{
+		GuildID:   "guild-1",
+		ChannelID: "channel-1",
+		ActorID:   "user-1",
+		Access:    testAccess(ToolPolicyReadOnly, admin.PermissionAssistantUse),
+		Call: llm.ToolCall{
+			ID:   "call-current-channel",
+			Type: "function",
+			Function: llm.ToolCallFunction{
+				Name:      "discord_fetch_message",
+				Arguments: `{"channel_id":"channel-1","message_id":"message-1"}`,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Execute current-channel Discord read: %v", err)
+	}
+	if !strings.Contains(allowed.Message.Content, "Fetched Discord context") {
+		t.Fatalf("expected current-channel read, got %+v", allowed.Message)
+	}
+
+	adminRead, err := executor.Execute(context.Background(), ExecutionRequest{
+		GuildID:   "guild-1",
+		ChannelID: "channel-1",
+		ActorID:   "admin",
+		Access:    testAccess(ToolPolicyReadOnly, admin.PermissionAssistantUse, admin.PermissionAdminConfigRead),
+		Call: llm.ToolCall{
+			ID:   "call-admin-cross-channel",
+			Type: "function",
+			Function: llm.ToolCallFunction{
+				Name:      "discord_fetch_message",
+				Arguments: `{"channel_id":"channel-2","message_id":"message-1"}`,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Execute admin Discord read: %v", err)
+	}
+	if !strings.Contains(adminRead.Message.Content, "Fetched Discord context") {
+		t.Fatalf("expected admin cross-channel read, got %+v", adminRead.Message)
+	}
+}
+
 type fakeKnowledgeSearch struct{}
 
 func (fakeKnowledgeSearch) Search(context.Context, string, string, int) ([]repository.KnowledgeSearchResult, error) {
@@ -233,6 +401,13 @@ type fakeConfigReader struct{}
 
 func (fakeConfigReader) Get(context.Context, string) (store.GuildConfig, bool, error) {
 	return store.GuildConfig{GuildID: "guild-1", DefaultModel: "provider/model", AssistantEnabled: true, MemoryEnabled: true, ToolPolicy: "read_only", MaxResponseTokens: 900}, true, nil
+}
+
+type fakeConfigReaderByGuild map[string]store.GuildConfig
+
+func (f fakeConfigReaderByGuild) Get(_ context.Context, guildID string) (store.GuildConfig, bool, error) {
+	config, ok := f[guildID]
+	return config, ok, nil
 }
 
 type fakeToolContextReader struct{}
@@ -508,8 +683,9 @@ func TestExecutorRunsFetchMessageTool(t *testing.T) {
 	}
 	executor := NewExecutor(registry, nil, nil).WithContextReader(fakeToolContextReader{})
 	result, err := executor.Execute(context.Background(), ExecutionRequest{
-		GuildID: "guild-1",
-		Access:  testAccess(ToolPolicyReadOnly, admin.PermissionAssistantUse),
+		GuildID:   "guild-1",
+		ChannelID: "channel-1",
+		Access:    testAccess(ToolPolicyReadOnly, admin.PermissionAssistantUse),
 		Call: llm.ToolCall{
 			ID:   "call-message",
 			Type: "function",
@@ -748,8 +924,11 @@ func TestExecutorRunsAdminServiceTools(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Execute tool access add: %v", err)
 	}
-	if !strings.Contains(toolAccess.Message.Content, "web.search") || !strings.Contains(toolAccess.Message.Content, "role-search") {
-		t.Fatalf("unexpected tool access result: %+v", toolAccess)
+	if !strings.Contains(toolAccess.Message.Content, `"confirmation_required":true`) || !strings.Contains(toolAccess.Message.Content, "web.search") || !strings.Contains(toolAccess.Message.Content, "role-search") {
+		t.Fatalf("unexpected tool access confirmation result: %+v", toolAccess)
+	}
+	if toolAccess.Confirmation == nil || toolAccess.Confirmation.Action != "tool_access.add" || toolAccess.Confirmation.Arguments["tool_name"] != "web.search" {
+		t.Fatalf("expected tool access confirmation, got %+v", toolAccess.Confirmation)
 	}
 }
 
@@ -835,6 +1014,65 @@ func TestExecutorAdminRemovalToolsRequireConfirmation(t *testing.T) {
 	}
 	if result.Confirmation == nil || result.Confirmation.Action != "channel_rule.remove" || result.Confirmation.Arguments["channel_id"] != "channel-1" {
 		t.Fatalf("expected channel-rule confirmation artifact, got %+v", result.Confirmation)
+	}
+}
+
+func TestExecutorAdminMutationToolsRequireConfirmation(t *testing.T) {
+	registry, err := NewDefaultRegistry()
+	if err != nil {
+		t.Fatalf("NewDefaultRegistry: %v", err)
+	}
+	executor := NewExecutor(registry, nil, nil).WithAdminOperations(newToolAdminService(t))
+
+	for _, tc := range []struct {
+		name           string
+		tool           string
+		arguments      string
+		expectedAction string
+	}{
+		{
+			name:           "budget set",
+			tool:           "panda_manage_budget_limit",
+			arguments:      `{"action":"set","scope":"guild","limit":12,"window":"1h"}`,
+			expectedAction: "budget_limit.set",
+		},
+		{
+			name:           "role permission add",
+			tool:           "panda_manage_role_permission",
+			arguments:      `{"action":"add","role_id":"100000000000000001","permission":"assistant.web_search"}`,
+			expectedAction: "role_permission.add",
+		},
+		{
+			name:           "channel rule allow",
+			tool:           "panda_manage_channel_rule",
+			arguments:      `{"action":"allow","channel_id":"channel-1"}`,
+			expectedAction: "channel_rule.set",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			result, err := executor.Execute(context.Background(), ExecutionRequest{
+				GuildID: "guild-1",
+				ActorID: "admin",
+				Access:  testAccess(ToolPolicyWriteConfirmed, admin.PermissionAdminConfigWrite),
+				Call: llm.ToolCall{
+					ID:   "call-" + strings.ReplaceAll(tc.name, " ", "-"),
+					Type: "function",
+					Function: llm.ToolCallFunction{
+						Name:      tc.tool,
+						Arguments: tc.arguments,
+					},
+				},
+			})
+			if err != nil {
+				t.Fatalf("Execute: %v", err)
+			}
+			if !strings.Contains(result.Message.Content, `"confirmation_required":true`) {
+				t.Fatalf("expected confirmation payload, got %+v", result.Message)
+			}
+			if result.Confirmation == nil || result.Confirmation.Action != tc.expectedAction {
+				t.Fatalf("expected %s confirmation, got %+v", tc.expectedAction, result.Confirmation)
+			}
+		})
 	}
 }
 

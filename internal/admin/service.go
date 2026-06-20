@@ -58,7 +58,7 @@ const (
 	minMaxResponseTokens   = 64
 	maxMaxResponseTokens   = 4000
 	maxInstructionChars    = 4000
-	defaultModelToolPolicy = "off"
+	defaultModelToolPolicy = "admin_only"
 )
 
 var allPermissionNames = []string{
@@ -860,13 +860,7 @@ func (s *Service) CanWriteSoul(ctx context.Context, request AssistantAccessReque
 	if request.GuildID == "" {
 		return false, nil
 	}
-	for _, permission := range []string{PermissionAssistantSoulWrite, PermissionModerationUse, PermissionToolComposeDraft} {
-		allowed, err := s.canUsePermission(ctx, request.GuildID, request.RoleIDs, permission, false)
-		if err != nil || allowed {
-			return allowed, err
-		}
-	}
-	return false, nil
+	return s.canUsePermission(ctx, request.GuildID, request.RoleIDs, PermissionAssistantSoulWrite, false)
 }
 
 func (s *Service) CanReadUsage(ctx context.Context, request AssistantAccessRequest) (bool, error) {
@@ -1065,6 +1059,16 @@ func IsPermissionNameAllowed(permission string) bool {
 
 func AllPermissionNames() []string {
 	return append([]string{}, allPermissionNames...)
+}
+
+func GuildControlPermissionNames() []string {
+	names := make([]string, 0, len(allPermissionNames))
+	for _, permission := range allPermissionNames {
+		if permission != PermissionOwnerOps {
+			names = append(names, permission)
+		}
+	}
+	return names
 }
 
 func cleanInstruction(value, field string) (string, error) {

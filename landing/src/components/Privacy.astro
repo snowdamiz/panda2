@@ -1,0 +1,31 @@
+---
+import { privacyItems, siteMeta } from '../data/landing';
+---
+
+<section class="section privacy-section" id="privacy">
+  <div class="privacy-orb" aria-hidden="true"></div>
+  <div class="shell privacy-layout">
+    <div class="privacy-copy reveal">
+      <p class="kicker">Privacy from first principles</p>
+      <h2>Memory should be invited,<br />not assumed.</h2>
+      <p>
+        Panda defaults to minimal retention. Server knowledge is opt-in, user memory requires
+        separate consent, and raw Discord content is treated as untrusted context.
+      </p>
+      <a class="button button-light" href={siteMeta.architectureUrl} target="_blank" rel="noreferrer">
+        Read the architecture
+      </a>
+    </div>
+    <div class="privacy-list reveal">
+      {
+        privacyItems.map((item) => (
+          <div>
+            <span class="privacy-icon">{item.icon}</span>
+            <p><b>{item.title}</b><small>{item.detail}</small></p>
+            <em>{item.state}</em>
+          </div>
+        ))
+      }
+    </div>
+  </div>
+</section>

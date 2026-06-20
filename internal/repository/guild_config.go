@@ -25,9 +25,9 @@ func (r *GuildConfigRepository) EnsureDefault(ctx context.Context, guildID, defa
 		FallbackModels:    "[]",
 		Temperature:       0.3,
 		MaxResponseTokens: 900,
-		ToolPolicy:        "off",
+		ToolPolicy:        "admin_only",
 		AssistantEnabled:  true,
-		MemoryEnabled:     false,
+		MemoryEnabled:     true,
 		CreatedAt:         now,
 		UpdatedAt:         now,
 	}

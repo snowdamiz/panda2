@@ -275,14 +275,14 @@ func naturalMessageFallbackPrompt(message string, options map[string]string) (st
 	if truthyOption(options["bot_mentioned"]) || truthyOption(options["reply_author_is_bot"]) {
 		return message, true
 	}
-	if !directlyAddressesPanda(message) {
-		return "", false
+	if directlyAddressesPanda(message) {
+		prompt := stripLeadingPandaWakePhrase(message)
+		if prompt == "" {
+			prompt = message
+		}
+		return prompt, true
 	}
-	prompt := stripLeadingPandaWakePhrase(message)
-	if prompt == "" {
-		prompt = message
-	}
-	return prompt, true
+	return "", false
 }
 
 func directlyAddressesPanda(message string) bool {
@@ -948,6 +948,37 @@ func (r *Router) HandleToolConfirmation(ctx context.Context, request ToolConfirm
 			return toolConfirmationError(err, "Knowledge document could not be deleted.", "That knowledge document was not found.")
 		}
 		return Response{Content: fmt.Sprintf("Deleted knowledge document `%d`.", documentID), Ephemeral: true}
+	case toolActionBudgetLimitSet:
+		scope := strings.ToLower(strings.TrimSpace(request.Options["scope"]))
+		if !validBudgetScope(scope) {
+			return Response{Content: "That budget-limit confirmation is invalid.", Ephemeral: true}
+		}
+		if scope == repository.BudgetScopeGlobal {
+			if !request.Request.IsOwner {
+				return Response{Content: "Only a bot owner can set global limits.", Ephemeral: true}
+			}
+		} else if denied := r.ensureToolConfirmationPermission(ctx, request.Request, r.admin.CanWriteConfig, "You do not have permission to manage limits."); denied.Content != "" {
+			return denied
+		}
+		subjectID := strings.TrimSpace(request.Options["subject_id"])
+		if scope == repository.BudgetScopeGuild && subjectID == "" {
+			subjectID = request.Request.GuildID
+		}
+		limit := intOption(request.Options["limit"], 0)
+		windowSeconds := intOption(request.Options["window_seconds"], 0)
+		if limit <= 0 || windowSeconds <= 0 {
+			return Response{Content: "That budget-limit confirmation is invalid.", Ephemeral: true}
+		}
+		saved, err := r.admin.SetBudgetLimit(ctx, request.Request.GuildID, request.Request.UserID, store.BudgetLimit{
+			Scope:         scope,
+			SubjectID:     subjectID,
+			Limit:         limit,
+			WindowSeconds: windowSeconds,
+		})
+		if err != nil {
+			return Response{Content: "Budget limit could not be saved.", Ephemeral: true}
+		}
+		return Response{Content: fmt.Sprintf("Set `%s` budget limit for `%s` to %d request(s) per %d seconds.", saved.Scope, firstNonEmpty(saved.SubjectID, "global"), saved.Limit, saved.WindowSeconds), Ephemeral: true}
 	case toolActionBudgetLimitRemove:
 		scope := strings.ToLower(strings.TrimSpace(request.Options["scope"]))
 		if !validBudgetScope(scope) {
@@ -968,6 +999,19 @@ func (r *Router) HandleToolConfirmation(ctx context.Context, request ToolConfirm
 			return toolConfirmationError(err, "Budget limit could not be removed.", "That budget limit was not found.")
 		}
 		return Response{Content: fmt.Sprintf("Removed `%s` budget limit for `%s`.", scope, firstNonEmpty(subjectID, "global")), Ephemeral: true}
+	case toolActionRolePermissionAdd:
+		if denied := r.ensureToolConfirmationPermission(ctx, request.Request, r.admin.CanWriteConfig, "You do not have permission to manage role permissions."); denied.Content != "" {
+			return denied
+		}
+		roleID := strings.TrimSpace(request.Options["role_id"])
+		permission := strings.TrimSpace(request.Options["permission"])
+		if roleID == "" || !admin.IsPermissionNameAllowed(permission) {
+			return Response{Content: "That role-permission confirmation is invalid.", Ephemeral: true}
+		}
+		if _, err := r.admin.AddRolePermission(ctx, request.Request.GuildID, request.Request.UserID, roleID, permission); err != nil {
+			return Response{Content: "Role permission could not be saved.", Ephemeral: true}
+		}
+		return Response{Content: fmt.Sprintf("Granted `%s` to role `%s`.", permission, roleID), Ephemeral: true}
 	case toolActionRolePermissionRemove:
 		if denied := r.ensureToolConfirmationPermission(ctx, request.Request, r.admin.CanWriteConfig, "You do not have permission to manage role permissions."); denied.Content != "" {
 			return denied
@@ -1035,6 +1079,39 @@ func (r *Router) HandleToolConfirmation(ctx context.Context, request ToolConfirm
 			return Response{Content: "Discord role could not be removed. Check Panda's Manage Roles permission and role hierarchy.", Ephemeral: true}
 		}
 		return Response{Content: fmt.Sprintf("Removed role `%s` from user `%s`.", memberRequest.RoleID, memberRequest.UserID), Ephemeral: true}
+	case toolActionToolAccessAdd, toolActionToolAccessRemove:
+		if denied := r.ensureToolConfirmationPermission(ctx, request.Request, r.admin.CanWriteConfig, "You do not have permission to manage tool access."); denied.Content != "" {
+			return denied
+		}
+		toolName := strings.TrimSpace(request.Options["tool_name"])
+		roleID := strings.TrimSpace(request.Options["role_id"])
+		if toolName == "" || roleID == "" {
+			return Response{Content: "That tool-access confirmation is invalid.", Ephemeral: true}
+		}
+		if request.Action == toolActionToolAccessAdd {
+			if _, err := r.admin.AddToolRole(ctx, request.Request.GuildID, request.Request.UserID, toolName, roleID); err != nil {
+				return Response{Content: "Tool access could not be saved.", Ephemeral: true}
+			}
+			return Response{Content: fmt.Sprintf("Allowed `%s` for role `%s`.", toolName, roleID), Ephemeral: true}
+		}
+		if err := r.admin.RemoveToolRole(ctx, request.Request.GuildID, request.Request.UserID, toolName, roleID); err != nil {
+			return toolConfirmationError(err, "Tool access could not be removed.", "That tool access rule was not found.")
+		}
+		return Response{Content: fmt.Sprintf("Removed `%s` access for role `%s`.", toolName, roleID), Ephemeral: true}
+	case toolActionChannelRuleSet:
+		if denied := r.ensureToolConfirmationPermission(ctx, request.Request, r.admin.CanWriteConfig, "You do not have permission to manage channel rules."); denied.Content != "" {
+			return denied
+		}
+		channelID := strings.TrimSpace(request.Options["channel_id"])
+		rule := strings.ToLower(strings.TrimSpace(request.Options["rule"]))
+		if channelID == "" || (rule != "allow" && rule != "deny") {
+			return Response{Content: "That channel-rule confirmation is invalid.", Ephemeral: true}
+		}
+		saved, err := r.admin.SetChannelRule(ctx, request.Request.GuildID, request.Request.UserID, channelID, rule)
+		if err != nil {
+			return Response{Content: "Channel rule could not be saved.", Ephemeral: true}
+		}
+		return Response{Content: fmt.Sprintf("Set `%s` channel access rule for `%s`.", saved.Rule, saved.ChannelID), Ephemeral: true}
 	case toolActionChannelRuleRemove:
 		if denied := r.ensureToolConfirmationPermission(ctx, request.Request, r.admin.CanWriteConfig, "You do not have permission to manage channel rules."); denied.Content != "" {
 			return denied
@@ -1267,7 +1344,11 @@ func (r *Router) allowedToolPermissions(ctx context.Context, request Request) ma
 	if r.admin != nil {
 		hasControl, err := r.admin.HasGuildControl(ctx, assistantAccessRequest(request))
 		if err == nil && hasControl {
-			return permissionsFromNames(admin.AllPermissionNames())
+			permissions := permissionsFromNames(admin.GuildControlPermissionNames())
+			if request.IsOwner {
+				permissions[admin.PermissionOwnerOps] = struct{}{}
+			}
+			return permissions
 		}
 	}
 	permissions := map[string]struct{}{}

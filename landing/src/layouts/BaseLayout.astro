@@ -1,0 +1,93 @@
+---
+import { siteMeta } from '../data/landing';
+import '../styles/global.css';
+
+interface Props {
+  title?: string;
+  description?: string;
+}
+
+const {
+  title = siteMeta.title,
+  description = siteMeta.description,
+} = Astro.props;
+
+const siteUrl = Astro.site ?? new URL(siteMeta.siteUrl);
+const canonicalUrl = new URL(Astro.url.pathname, siteUrl).toString();
+const imageUrl = new URL(siteMeta.ogImagePath, siteUrl).toString();
+const structuredData = [
+  {
+    '@context': 'https://schema.org',
+    '@type': 'WebSite',
+    name: siteMeta.name,
+    url: siteUrl.toString(),
+    description,
+    inLanguage: 'en-US',
+    publisher: {
+      '@type': 'Organization',
+      name: siteMeta.name,
+      url: siteUrl.toString(),
+      sameAs: [siteMeta.repositoryUrl],
+    },
+  },
+  {
+    '@context': 'https://schema.org',
+    '@type': 'SoftwareApplication',
+    name: siteMeta.name,
+    applicationCategory: 'CommunicationApplication',
+    operatingSystem: 'Server',
+    description,
+    url: siteUrl.toString(),
+    codeRepository: siteMeta.repositoryUrl,
+    isAccessibleForFree: true,
+    offers: {
+      '@type': 'Offer',
+      price: '0',
+      priceCurrency: 'USD',
+    },
+  },
+];
+---
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#050505" />
+    <meta name="description" content={description} />
+    <meta name="robots" content="index,follow,max-image-preview:large,max-snippet:-1,max-video-preview:-1" />
+    <meta name="application-name" content={siteMeta.name} />
+    <meta name="keywords" content={siteMeta.keywords.join(', ')} />
+    <link rel="canonical" href={canonicalUrl} />
+    <meta property="og:title" content={siteMeta.ogTitle} />
+    <meta property="og:description" content={siteMeta.ogDescription} />
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content={siteMeta.name} />
+    <meta property="og:locale" content={siteMeta.locale} />
+    <meta property="og:url" content={canonicalUrl} />
+    <meta property="og:image" content={imageUrl} />
+    <meta property="og:image:secure_url" content={imageUrl} />
+    <meta property="og:image:type" content="image/svg+xml" />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta property="og:image:alt" content="Panda Discord intelligence landing page preview" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content={siteMeta.ogTitle} />
+    <meta name="twitter:description" content={siteMeta.ogDescription} />
+    <meta name="twitter:image" content={imageUrl} />
+    <meta name="twitter:image:alt" content="Panda Discord intelligence landing page preview" />
+    <title>{title}</title>
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link rel="manifest" href="/site.webmanifest" />
+    <script type="application/ld+json" is:inline set:html={JSON.stringify(structuredData)} />
+  </head>
+  <body>
+    <a class="skip-link" href="#main">Skip to content</a>
+    <div class="page-noise" aria-hidden="true"></div>
+    <slot />
+    <script>
+      import '../scripts/landing';
+    </script>
+  </body>
+</html>

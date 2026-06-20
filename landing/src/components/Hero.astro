@@ -1,0 +1,142 @@
+---
+import PandaFace from './PandaFace.astro';
+import { heroMeta, marqueeItems, modelOptions, siteMeta } from '../data/landing';
+---
+
+<section class="hero" id="top">
+  <div class="hero-grid" aria-hidden="true"></div>
+  <div class="shell hero-layout">
+    <div class="hero-copy reveal">
+      <div class="eyebrow"><span></span> Open-source Discord intelligence</div>
+      <h1>Your server,<br /><em>with a better brain.</em></h1>
+      <p class="hero-lede">
+        Panda brings the LLM you choose through OpenRouter into Discord—grounded in your
+        community, governed by your roles, and private by design.
+      </p>
+      <div class="hero-actions">
+        <a class="button button-light" href={siteMeta.setupUrl} target="_blank" rel="noreferrer">
+          Deploy Panda
+          <svg viewBox="0 0 18 18" aria-hidden="true"><path d="M4 9h10M10 5l4 4-4 4" /></svg>
+        </a>
+        <a class="button button-ghost" href="#demo">See it in Discord</a>
+      </div>
+      <div class="hero-meta" aria-label="Technology stack">
+        {
+          heroMeta.map((item, index) => (
+            <>
+              <span>{item}</span>
+              {index < heroMeta.length - 1 && <i></i>}
+            </>
+          ))
+        }
+      </div>
+    </div>
+
+    <div class="hero-stage reveal reveal-delay" id="demo">
+      <div class="orbit orbit-one" aria-hidden="true"></div>
+      <div class="orbit orbit-two" aria-hidden="true"></div>
+      <div class="discord-window">
+        <div class="window-topbar">
+          <div class="window-channel">
+            <span class="hash">#</span>
+            <span>product-lab</span>
+          </div>
+          <div class="window-actions" aria-hidden="true">
+            <span></span><span></span><span></span>
+          </div>
+        </div>
+
+        <div class="model-bar">
+          <span class="model-status"><i></i> Panda is online</span>
+          <button
+            class="model-switch"
+            type="button"
+            data-model-button
+            aria-label="Change demo model"
+            aria-controls="model-menu"
+            aria-haspopup="menu"
+          >
+            <span class="model-label">MODEL</span>
+            <span data-model-name>{modelOptions[0].label}</span>
+            <svg viewBox="0 0 16 16" aria-hidden="true"><path d="m5 6 3 3 3-3" /></svg>
+          </button>
+          <div class="model-menu" id="model-menu" role="menu" data-model-menu hidden>
+            {
+              modelOptions.map((model) => (
+                <button
+                  type="button"
+                  data-model={model.label}
+                  data-provider={model.provider}
+                  role="menuitem"
+                >
+                  {model.label}
+                  {model.badge && <span>{model.badge}</span>}
+                </button>
+              ))
+            }
+          </div>
+        </div>
+
+        <div class="chat-body">
+          <article class="message message-user">
+            <div class="avatar avatar-user" aria-hidden="true">S</div>
+            <div class="message-content">
+              <div class="message-author">snow <time>Today at 10:42 AM</time></div>
+              <p>
+                <strong>Panda</strong>, summarize the launch thread and turn the open questions into
+                action items.
+              </p>
+            </div>
+          </article>
+
+          <article class="message message-panda">
+            <div class="avatar avatar-panda" aria-hidden="true">
+              <PandaFace />
+            </div>
+            <div class="message-content">
+              <div class="message-author">Panda <span class="bot-tag">APP</span> <time>Today at 10:42 AM</time></div>
+              <div class="typing-line" data-typing-line>
+                <span class="typing-dot"></span><span class="typing-dot"></span><span class="typing-dot"></span>
+              </div>
+              <div class="panda-response" data-panda-response>
+                <p>The launch is on track. Three decisions still need owners:</p>
+                <ol>
+                  <li><span>Finalize onboarding copy</span><small>Owner needed · #launch</small></li>
+                  <li><span>Confirm fallback model limits</span><small>Assigned to Maya · #infra</small></li>
+                  <li><span>Schedule moderator walkthrough</span><small>Due Friday · #community</small></li>
+                </ol>
+                <div class="response-footer">
+                  <span data-model-provider>{modelOptions[0].provider}</span>
+                  <span>3 sources</span>
+                  <span>1.8s</span>
+                </div>
+              </div>
+            </div>
+          </article>
+        </div>
+
+        <div class="composer">
+          <button type="button" aria-label="Add attachment">+</button>
+          <span>Message #product-lab</span>
+          <div class="composer-icons" aria-hidden="true"><i></i><i></i></div>
+        </div>
+      </div>
+
+      <div class="floating-chip chip-context"><span>↳</span> Thread context</div>
+      <div class="floating-chip chip-private"><span>◉</span> Memory: opt-in</div>
+    </div>
+  </div>
+
+  <div class="hero-marquee" aria-label="Product capabilities">
+    <div class="marquee-track">
+      {
+        [...marqueeItems, ...marqueeItems].map((item, index) => (
+          <>
+            <span aria-hidden={index >= marqueeItems.length ? 'true' : undefined}>{item}</span>
+            <i aria-hidden={index >= marqueeItems.length ? 'true' : undefined}>✦</i>
+          </>
+        ))
+      }
+    </div>
+  </div>
+</section>

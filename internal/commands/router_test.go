@@ -253,7 +253,6 @@ func TestRouterHelpShowsOnlyAllowedElevatedGuidanceToModerators(t *testing.T) {
 	}
 	for _, want := range []string{
 		"**Moderator tools**",
-		"- `/admin soul soul:<text> dry_run:<bool>` - personality/tone; omit `soul` for modal",
 		"Moderation guidance",
 	} {
 		if !strings.Contains(response.Content, want) {
@@ -263,6 +262,7 @@ func TestRouterHelpShowsOnlyAllowedElevatedGuidanceToModerators(t *testing.T) {
 	for _, hidden := range []string{
 		"`/admin role`",
 		"`/admin model`",
+		"`/admin soul`",
 		"Composed tools",
 		"`/tool draft`",
 		"Role/channel access",
@@ -830,6 +830,20 @@ func TestToolConfirmationIDRestoresScopedRequest(t *testing.T) {
 	if !ok || request.Action != toolActionComposedToolApprove || request.Options["tool_name"] != "builder_welcome" || request.Options["version"] != "2" {
 		t.Fatalf("unexpected composed confirmation request: request=%+v ok=%t", request, ok)
 	}
+
+	budget := ToolConfirmationFromAssistant("admin", &assistant.InteractionConfirmation{
+		Action:       toolActionBudgetLimitSet,
+		Arguments:    map[string]string{"scope": "guild", "subject_id": "guild-1", "limit": "12", "window_seconds": "3600"},
+		ConfirmLabel: "Set limit",
+		Danger:       true,
+	})
+	if budget == nil || budget.ID == "" {
+		t.Fatalf("expected budget confirmation id, got %+v", budget)
+	}
+	request, ok = RequestFromToolConfirmationID(budget.ID, Request{UserID: "admin"})
+	if !ok || request.Action != toolActionBudgetLimitSet || request.Options["limit"] != "12" || request.Options["window_seconds"] != "3600" {
+		t.Fatalf("unexpected budget confirmation request: request=%+v ok=%t", request, ok)
+	}
 }
 
 func TestHandleToolConfirmationRemovesChannelRule(t *testing.T) {
@@ -857,6 +871,31 @@ func TestHandleToolConfirmationRemovesChannelRule(t *testing.T) {
 	}
 	if len(rules) != 0 {
 		t.Fatalf("expected channel rule to be removed, got %+v", rules)
+	}
+}
+
+func TestHandleToolConfirmationSetsChannelRule(t *testing.T) {
+	router := newTestRouter(t, &fakeLLM{}, 20)
+
+	response := router.HandleToolConfirmation(context.Background(), ToolConfirmationRequest{
+		Request: Request{
+			GuildID:      "guild-1",
+			ChannelID:    "channel-1",
+			UserID:       "admin",
+			IsGuildAdmin: true,
+		},
+		Action:  toolActionChannelRuleSet,
+		Options: map[string]string{"channel_id": "channel-2", "rule": "allow"},
+	})
+	if !response.Ephemeral || !strings.Contains(response.Content, "Set `allow` channel access rule") || response.Confirmation != nil {
+		t.Fatalf("unexpected tool confirmation response: %+v", response)
+	}
+	rules, err := router.admin.ListChannelRules(context.Background(), "guild-1")
+	if err != nil {
+		t.Fatalf("list channel rules: %v", err)
+	}
+	if len(rules) != 1 || rules[0].ChannelID != "channel-2" || rules[0].Rule != "allow" {
+		t.Fatalf("unexpected channel rules: %+v", rules)
 	}
 }
 
@@ -1123,6 +1162,72 @@ func TestNaturalMessageAdminGetsManagementToolsWhenPolicyOff(t *testing.T) {
 	}
 }
 
+func TestNaturalMessageClassifiesTrailingPandaMention(t *testing.T) {
+	client := &fakeLLM{responses: []llm.ChatResponse{
+		{Content: `{"respond":true,"prompt":"what can you do"}`},
+		{Content: "chat fixture"},
+	}}
+	router := newTestRouter(t, client, 5)
+
+	response := router.HandleNaturalMessage(context.Background(), Request{
+		UserID:    "user-1",
+		GuildID:   "guild-1",
+		ChannelID: "channel-1",
+		Options:   map[string]string{"message": "what can you do panda"},
+	})
+	if response.Content != "chat fixture" {
+		t.Fatalf("unexpected natural message response: %+v", response)
+	}
+	if len(client.requests) != 2 {
+		t.Fatalf("expected trigger and chat LLM requests, got %d", len(client.requests))
+	}
+	if !strings.Contains(joinRequestMessages(client.requests[0]), "what can you do panda") {
+		t.Fatalf("expected exact message in classifier request, got:\n%s", joinRequestMessages(client.requests[0]))
+	}
+}
+
+func TestGuildControlDoesNotGrantOwnerOpsTools(t *testing.T) {
+	router := newTestRouter(t, &fakeLLM{}, 5)
+
+	adminPermissions := router.allowedToolPermissions(context.Background(), Request{
+		UserID:       "admin",
+		GuildID:      "guild-1",
+		IsGuildAdmin: true,
+	})
+	if _, ok := adminPermissions[admin.PermissionAdminConfigWrite]; !ok {
+		t.Fatalf("expected guild admin to receive admin config permission: %+v", adminPermissions)
+	}
+	if _, ok := adminPermissions[admin.PermissionOwnerOps]; ok {
+		t.Fatalf("guild admin must not receive owner ops permission: %+v", adminPermissions)
+	}
+
+	ownerPermissions := router.allowedToolPermissions(context.Background(), Request{
+		UserID:  "owner",
+		GuildID: "guild-1",
+		IsOwner: true,
+	})
+	if _, ok := ownerPermissions[admin.PermissionOwnerOps]; !ok {
+		t.Fatalf("expected bot owner to receive owner ops permission: %+v", ownerPermissions)
+	}
+}
+
+func TestRegularUserGetsWebSearchPermissionByDefault(t *testing.T) {
+	router := newTestRouter(t, &fakeLLM{}, 5)
+
+	permissions := router.allowedToolPermissions(context.Background(), Request{
+		UserID:    "user-1",
+		GuildID:   "guild-1",
+		ChannelID: "channel-1",
+		RoleIDs:   []string{"member"},
+	})
+	if _, ok := permissions[admin.PermissionAssistantWebSearch]; !ok {
+		t.Fatalf("regular users should get web search permission by default: %+v", permissions)
+	}
+	if _, ok := permissions[admin.PermissionAdminConfigWrite]; ok {
+		t.Fatalf("regular users should not get admin config write by default: %+v", permissions)
+	}
+}
+
 func TestNaturalMessageDoesNotRespondWhenTriggerDeclines(t *testing.T) {
 	client := &fakeLLM{response: llm.ChatResponse{Content: `{"respond":false,"prompt":""}`}}
 	router := newTestRouter(t, client, 5)
@@ -1144,6 +1249,7 @@ func TestNaturalMessageDoesNotRespondWhenTriggerDeclines(t *testing.T) {
 func TestNaturalMessageFallsBackToChatWhenTriggerParsingFailsForDirectAddress(t *testing.T) {
 	client := &fakeLLM{responses: []llm.ChatResponse{
 		{Content: `**Decision** yes, respond`},
+		{Content: `**Still invalid**`},
 		{Content: "chat fixture"},
 	}}
 	router := newTestRouter(t, client, 5)
@@ -1157,11 +1263,11 @@ func TestNaturalMessageFallsBackToChatWhenTriggerParsingFailsForDirectAddress(t 
 	if response.Content != "chat fixture" {
 		t.Fatalf("expected fallback chat response, got %+v", response)
 	}
-	if len(client.requests) != 2 {
-		t.Fatalf("expected trigger request and fallback chat request, got %d", len(client.requests))
+	if len(client.requests) != 3 {
+		t.Fatalf("expected trigger request, trigger retry, and fallback chat request, got %d", len(client.requests))
 	}
-	if !strings.Contains(joinRequestMessages(client.requests[1]), "what can you do?") {
-		t.Fatalf("fallback chat request should strip wake phrase, got %+v", client.requests[1])
+	if !strings.Contains(joinRequestMessages(client.requests[2]), "what can you do?") {
+		t.Fatalf("fallback chat request should strip wake phrase, got %+v", client.requests[2])
 	}
 }
 
@@ -1194,8 +1300,8 @@ func TestNaturalMessageFallbackIgnoresNonAddressedPandaTopic(t *testing.T) {
 	if response.Content != "" {
 		t.Fatalf("expected no response, got %+v", response)
 	}
-	if len(client.requests) != 1 {
-		t.Fatalf("expected only trigger LLM request, got %d", len(client.requests))
+	if len(client.requests) != 2 {
+		t.Fatalf("expected trigger LLM request and retry, got %d", len(client.requests))
 	}
 }
 

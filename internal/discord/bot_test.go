@@ -13,6 +13,7 @@ import (
 	"unicode/utf8"
 
 	disgoDiscord "github.com/disgoorg/disgo/discord"
+	"github.com/disgoorg/disgo/events"
 	"github.com/disgoorg/disgo/rest"
 	"github.com/disgoorg/snowflake/v2"
 	"github.com/sn0w/panda2/internal/commands"
@@ -32,6 +33,14 @@ type fakeTypingSender struct {
 	mu    sync.Mutex
 	calls []snowflake.ID
 	err   error
+}
+
+type fakeGuildGetter struct {
+	guildID    snowflake.ID
+	withCounts bool
+	calls      int
+	guild      *disgoDiscord.RestGuild
+	err        error
 }
 
 type syncedGuildCommands struct {
@@ -71,6 +80,13 @@ func (f *fakeTypingSender) count() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return len(f.calls)
+}
+
+func (f *fakeGuildGetter) GetGuild(guildID snowflake.ID, withCounts bool, _ ...rest.RequestOpt) (*disgoDiscord.RestGuild, error) {
+	f.calls++
+	f.guildID = guildID
+	f.withCounts = withCounts
+	return f.guild, f.err
 }
 
 func (f *fakeCommandSyncer) SetGlobalCommands(applicationID snowflake.ID, commands []disgoDiscord.ApplicationCommandCreate, _ ...rest.RequestOpt) ([]disgoDiscord.ApplicationCommand, error) {
@@ -215,6 +231,9 @@ func TestContainsPandaWordUsesStandaloneWord(t *testing.T) {
 }
 
 func TestShouldHandleNaturalMessageAllowsRepliesToPandaWithoutWakeWord(t *testing.T) {
+	if !shouldHandleNaturalMessage("what can you do panda", nil) {
+		t.Fatal("expected trailing Panda mention to be handled")
+	}
 	if !shouldHandleNaturalMessage("can you list those by tool name", map[string]string{"reply_author_is_bot": "true"}) {
 		t.Fatal("expected reply to Panda to be handled without wake word")
 	}
@@ -421,6 +440,7 @@ func TestAdminToolCommandIncludesAccessOptions(t *testing.T) {
 
 func TestGuildOwnerCountsAsGuildAdmin(t *testing.T) {
 	ownerID := snowflake.MustParse("100000000000000001")
+	guildID := snowflake.MustParse("200000000000000001")
 	guild := disgoDiscord.Guild{OwnerID: ownerID}
 	if !userOwnsGuild(ownerID, guild, true) {
 		t.Fatal("expected guild owner to count as guild admin")
@@ -430,6 +450,35 @@ func TestGuildOwnerCountsAsGuildAdmin(t *testing.T) {
 	}
 	if userOwnsGuild(ownerID, guild, false) {
 		t.Fatal("expected uncached guild to not count as owned")
+	}
+
+	getter := &fakeGuildGetter{guild: &disgoDiscord.RestGuild{Guild: guild}}
+	if !userOwnsGuildFromREST(getter, guildID, ownerID) {
+		t.Fatal("expected REST guild owner lookup to count as guild admin")
+	}
+	if getter.calls != 1 || getter.guildID != guildID || getter.withCounts {
+		t.Fatalf("unexpected REST lookup metadata: calls=%d guildID=%s withCounts=%t", getter.calls, getter.guildID, getter.withCounts)
+	}
+	if userOwnsGuildFromREST(getter, guildID, snowflake.MustParse("100000000000000002")) {
+		t.Fatal("expected REST lookup to reject non-owner")
+	}
+}
+
+func TestMessageEventGuildIDFallsBackToMessageGuildID(t *testing.T) {
+	wrapperGuildID := snowflake.MustParse("200000000000000001")
+	messageGuildID := snowflake.MustParse("200000000000000002")
+
+	if got := messageEventGuildID(&events.MessageCreate{GenericMessage: &events.GenericMessage{
+		GuildID: &wrapperGuildID,
+		Message: disgoDiscord.Message{GuildID: &messageGuildID},
+	}}); got == nil || *got != wrapperGuildID {
+		t.Fatalf("expected wrapper guild id, got %v", got)
+	}
+
+	if got := messageEventGuildID(&events.MessageCreate{GenericMessage: &events.GenericMessage{
+		Message: disgoDiscord.Message{GuildID: &messageGuildID},
+	}}); got == nil || *got != messageGuildID {
+		t.Fatalf("expected message guild id fallback, got %v", got)
 	}
 }
 

@@ -24,14 +24,14 @@ var migrations = []Migration{
 				applied_at DATETIME NOT NULL
 			)`,
 			`CREATE TABLE IF NOT EXISTS guild_configs (
-				guild_id TEXT PRIMARY KEY,
-				default_model TEXT NOT NULL,
-				system_prompt_overlay TEXT NOT NULL DEFAULT '',
-				assistant_enabled INTEGER NOT NULL DEFAULT 1,
-				memory_enabled INTEGER NOT NULL DEFAULT 0,
-				created_at DATETIME NOT NULL,
-				updated_at DATETIME NOT NULL
-			)`,
+					guild_id TEXT PRIMARY KEY,
+					default_model TEXT NOT NULL,
+					system_prompt_overlay TEXT NOT NULL DEFAULT '',
+					assistant_enabled INTEGER NOT NULL DEFAULT 1,
+					memory_enabled INTEGER NOT NULL DEFAULT 1,
+					created_at DATETIME NOT NULL,
+					updated_at DATETIME NOT NULL
+				)`,
 			`CREATE TABLE IF NOT EXISTS usage_events (
 				id INTEGER PRIMARY KEY AUTOINCREMENT,
 				guild_id TEXT,
@@ -305,7 +305,7 @@ var migrations = []Migration{
 			`ALTER TABLE guild_configs ADD COLUMN fallback_models TEXT NOT NULL DEFAULT '[]'`,
 			`ALTER TABLE guild_configs ADD COLUMN temperature REAL NOT NULL DEFAULT 0.3`,
 			`ALTER TABLE guild_configs ADD COLUMN max_response_tokens INTEGER NOT NULL DEFAULT 900`,
-			`ALTER TABLE guild_configs ADD COLUMN tool_policy TEXT NOT NULL DEFAULT 'off'`,
+			`ALTER TABLE guild_configs ADD COLUMN tool_policy TEXT NOT NULL DEFAULT 'admin_only'`,
 		},
 	},
 	{
@@ -463,6 +463,18 @@ var migrations = []Migration{
 			`CREATE INDEX IF NOT EXISTS idx_guild_tool_roles_guild_id ON guild_tool_roles(guild_id)`,
 			`CREATE INDEX IF NOT EXISTS idx_guild_tool_roles_tool_name ON guild_tool_roles(tool_name)`,
 			`CREATE INDEX IF NOT EXISTS idx_guild_tool_roles_role_id ON guild_tool_roles(role_id)`,
+		},
+	},
+	{
+		Version: 12,
+		Name:    "admin_only_tools_memory_on_defaults",
+		SQL: []string{
+			`UPDATE guild_configs
+					SET tool_policy = CASE WHEN tool_policy = 'off' THEN 'admin_only' ELSE tool_policy END,
+						memory_enabled = CASE WHEN memory_enabled = 0 THEN 1 ELSE memory_enabled END,
+						updated_at = CURRENT_TIMESTAMP
+					WHERE created_at = updated_at
+						AND (tool_policy = 'off' OR memory_enabled = 0)`,
 		},
 	},
 }

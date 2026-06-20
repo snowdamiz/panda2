@@ -1,0 +1,34 @@
+---
+import { workflowSteps } from '../data/landing';
+---
+
+<section class="section section-light workflow-section">
+  <div class="shell">
+    <div class="workflow-heading reveal">
+      <p class="kicker">The whole flow</p>
+      <h2>From mention to useful answer.</h2>
+    </div>
+    <div class="workflow-grid">
+      {
+        workflowSteps.map((step) => (
+          <article class="workflow-step reveal">
+            <span class="step-number">{step.number}</span>
+            <div class:list={['step-icon', { 'nodes-icon': step.icon === 'nodes' }]} aria-hidden={step.icon !== 'mention' ? 'true' : undefined}>
+              {step.icon === 'mention' && <span>@</span>}
+              {step.icon === 'nodes' && (
+                <>
+                  <i></i><i></i><i></i><b></b><b></b>
+                </>
+              )}
+              {step.icon === 'check' && (
+                <svg viewBox="0 0 40 40" aria-hidden="true"><path d="m8 20 8 8 16-16" /></svg>
+              )}
+            </div>
+            <h3>{step.title}</h3>
+            <p>{step.body}</p>
+          </article>
+        ))
+      }
+    </div>
+  </div>
+</section>

@@ -124,8 +124,9 @@ func TestSetSoulPersistsAndSoulWritersAreDelegated(t *testing.T) {
 		name       string
 		roleID     string
 		permission string
+		allowed    bool
 	}{
-		{name: "explicit soul writer", roleID: "role-soul", permission: PermissionAssistantSoulWrite},
+		{name: "explicit soul writer", roleID: "role-soul", permission: PermissionAssistantSoulWrite, allowed: true},
 		{name: "moderator", roleID: "role-mod", permission: PermissionModerationUse},
 		{name: "creator", roleID: "role-creator", permission: PermissionToolComposeDraft},
 	} {
@@ -134,8 +135,11 @@ func TestSetSoulPersistsAndSoulWritersAreDelegated(t *testing.T) {
 				t.Fatalf("AddRolePermission: %v", err)
 			}
 			allowed, err := service.CanWriteSoul(ctx, AssistantAccessRequest{GuildID: "guild-1", RoleIDs: []string{tc.roleID}})
-			if err != nil || !allowed {
-				t.Fatalf("expected soul writer access, allowed=%t err=%v", allowed, err)
+			if err != nil {
+				t.Fatalf("CanWriteSoul: %v", err)
+			}
+			if allowed != tc.allowed {
+				t.Fatalf("unexpected soul writer access, allowed=%t want=%t", allowed, tc.allowed)
 			}
 		})
 	}
@@ -264,6 +268,43 @@ func TestRoleProfilesGrantExpectedAccess(t *testing.T) {
 	allowed, err = service.CanUseModeration(ctx, AssistantAccessRequest{GuildID: "guild-1", RoleIDs: []string{"role-pickle"}})
 	if err != nil || allowed {
 		t.Fatalf("expected removed moderator profile to stop granting moderation, allowed=%t err=%v", allowed, err)
+	}
+}
+
+func TestWebSearchAccessDefaultsOpenUntilMapped(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(ctx, "file::memory:?cache=shared")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer db.Close()
+
+	service := NewService(
+		repository.NewGuildConfigRepository(db.DB),
+		repository.NewUsageRepository(db.DB),
+		repository.NewAuditRepository(db.DB),
+		memory.NewService(repository.NewKnowledgeRepository(db.DB)),
+		repository.NewAccessRepository(db.DB),
+		repository.NewBudgetRepository(db.DB),
+		nil,
+		"openrouter/auto",
+	)
+
+	allowed, err := service.CanUseWebSearch(ctx, AssistantAccessRequest{GuildID: "guild-1", RoleIDs: []string{"anyone"}})
+	if err != nil || !allowed {
+		t.Fatalf("expected unmapped web search to be available to everyone, allowed=%t err=%v", allowed, err)
+	}
+
+	if _, err := service.AddRolePermission(ctx, "guild-1", "admin", "role-search", PermissionAssistantWebSearch); err != nil {
+		t.Fatalf("AddRolePermission: %v", err)
+	}
+	allowed, err = service.CanUseWebSearch(ctx, AssistantAccessRequest{GuildID: "guild-1", RoleIDs: []string{"anyone"}})
+	if err != nil || allowed {
+		t.Fatalf("expected explicit web search mapping to restrict other roles, allowed=%t err=%v", allowed, err)
+	}
+	allowed, err = service.CanUseWebSearch(ctx, AssistantAccessRequest{GuildID: "guild-1", RoleIDs: []string{"role-search"}})
+	if err != nil || !allowed {
+		t.Fatalf("expected mapped role to retain web search, allowed=%t err=%v", allowed, err)
 	}
 }
 

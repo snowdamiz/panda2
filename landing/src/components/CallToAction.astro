@@ -1,0 +1,24 @@
+---
+import PandaFace from './PandaFace.astro';
+import { siteMeta } from '../data/landing';
+---
+
+<section class="cta-section">
+  <div class="cta-grid" aria-hidden="true"></div>
+  <div class="shell cta-inner reveal">
+    <div class="cta-mark" aria-hidden="true">
+      <PandaFace variant="cta" />
+    </div>
+    <p class="kicker kicker-dark">Your server. Your model. Your rules.</p>
+    <h2>Give your community<br />a mind of its own.</h2>
+    <p>Self-host Panda, connect Discord and OpenRouter, then choose the intelligence that fits.</p>
+    <div class="cta-actions">
+      <a class="button button-dark" href={siteMeta.setupUrl} target="_blank" rel="noreferrer">
+        Start deploying <span>→</span>
+      </a>
+      <a class="button button-outline-dark" href={siteMeta.repositoryUrl} target="_blank" rel="noreferrer">
+        Explore the source
+      </a>
+    </div>
+  </div>
+</section>

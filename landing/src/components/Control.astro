@@ -1,0 +1,68 @@
+---
+import { commandRows, commandViews, controlPoints } from '../data/landing';
+
+const initialCommandView = commandViews[0];
+---
+
+<section class="section control-section" id="control">
+  <div class="shell control-layout">
+    <div class="control-panel reveal">
+      <div class="panel-rail">
+        <div class="mini-panda" aria-hidden="true">P</div>
+        <span class="rail-dot active"></span><span class="rail-dot"></span><span class="rail-dot"></span><span class="rail-dot"></span>
+      </div>
+      <div class="panel-body">
+        <div class="panel-head">
+          <div><small>PANDA CONTROL</small><strong>Admin console</strong></div>
+          <span>LIVE IN DISCORD</span>
+        </div>
+        <div class="command-list">
+          {
+            commandRows.map((row, index) => (
+              <button
+                type="button"
+                class:list={['command-row', { active: index === 0 }]}
+                data-command-row
+                data-command={row.key}
+                aria-pressed={index === 0 ? 'true' : 'false'}
+              >
+                <span class="command-symbol">{row.symbol}</span>
+                <span><b>{row.command}</b><small>{row.description}</small></span>
+                <em>{row.order}</em>
+              </button>
+            ))
+          }
+        </div>
+        <div class="command-detail" data-command-detail>
+          <span class="detail-label">CURRENT CONFIGURATION</span>
+          {
+            initialCommandView.values.map(([label, value]) => (
+              <div class="detail-value"><small>{label}</small><b>{value}</b></div>
+            ))
+          }
+          <div class="detail-status"><i></i> {initialCommandView.status}</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="control-copy reveal">
+      <p class="kicker kicker-dark">No dashboard required</p>
+      <h2>The control plane<br />lives in Discord.</h2>
+      <p>
+        Admins configure Panda where the team already is. Delegate access to a custom role,
+        define channel rules, inspect usage, and audit sensitive changes without maintaining
+        another web app.
+      </p>
+      <div class="control-points">
+        {
+          controlPoints.map((point) => (
+            <div>
+              <span>{point.number}</span>
+              <p><b>{point.lead}</b> {point.body}</p>
+            </div>
+          ))
+        }
+      </div>
+    </div>
+  </div>
+</section>

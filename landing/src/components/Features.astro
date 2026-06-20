@@ -1,0 +1,87 @@
+---
+import { featureCards, policyRows } from '../data/landing';
+
+const [contextFeature, routingFeature, knowledgeFeature, toolsFeature] = featureCards;
+---
+
+<section class="section section-light" id="features">
+  <div class="shell">
+    <div class="section-heading reveal">
+      <div>
+        <p class="kicker">Built for real communities</p>
+        <h2>One assistant.<br />Every kind of work.</h2>
+      </div>
+      <p>
+        Panda is more than a chat box. It understands Discord context, works inside threads,
+        uses only approved tools, and keeps admins in control.
+      </p>
+    </div>
+
+    <div class="feature-grid">
+      <article class="feature-card feature-card-wide reveal">
+        <div class="feature-index">{contextFeature.index}</div>
+        <div class="feature-visual context-visual" aria-hidden="true">
+          <div class="context-line line-a"><span></span><b></b><b></b></div>
+          <div class="context-line line-b"><span></span><b></b></div>
+          <div class="context-line line-c active"><span></span><b></b><b></b><b></b></div>
+          <div class="context-line line-d"><span></span><b></b></div>
+          <div class="context-bracket"></div>
+          <div class="context-label">PERMITTED CONTEXT</div>
+        </div>
+        <div class="feature-copy">
+          <h3>{contextFeature.title}</h3>
+          <p>{contextFeature.body}</p>
+        </div>
+      </article>
+
+      <article class="feature-card reveal">
+        <div class="feature-index">{routingFeature.index}</div>
+        <div class="feature-icon" aria-hidden="true">
+          <svg viewBox="0 0 48 48">
+            <path d="M8 34 24 8l16 26H8Z" />
+            <circle cx="24" cy="27" r="5" />
+            <path d="M24 18v4" />
+          </svg>
+        </div>
+        <div class="feature-copy">
+          <h3>{routingFeature.title}</h3>
+          <p>{routingFeature.body}</p>
+        </div>
+      </article>
+
+      <article class="feature-card reveal">
+        <div class="feature-index">{knowledgeFeature.index}</div>
+        <div class="feature-icon" aria-hidden="true">
+          <svg viewBox="0 0 48 48">
+            <rect x="8" y="11" width="32" height="26" rx="4" />
+            <path d="M15 18h18M15 24h12M15 30h15" />
+            <circle cx="35" cy="30" r="5" />
+          </svg>
+        </div>
+        <div class="feature-copy">
+          <h3>{knowledgeFeature.title}</h3>
+          <p>{knowledgeFeature.body}</p>
+        </div>
+      </article>
+
+      <article class="feature-card feature-card-wide feature-card-dark reveal">
+        <div class="feature-index">{toolsFeature.index}</div>
+        <div class="feature-copy">
+          <h3>{toolsFeature.title}</h3>
+          <p>{toolsFeature.body}</p>
+        </div>
+        <div class="policy-stack" aria-hidden="true">
+          {
+            policyRows.map((row) => (
+              <div class="policy-row">
+                <span>{row.tool}</span>
+                <b>{row.role}</b>
+                <i class:list={{ on: row.enabled }}></i>
+              </div>
+            ))
+          }
+        </div>
+      </article>
+    </div>
+  </div>
+</section>

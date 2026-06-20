@@ -169,6 +169,9 @@ func (r *Registry) OpenRouterTools(permissions map[string]struct{}) []llm.Tool {
 func (r *Registry) OpenRouterToolsForAccess(access ToolAccess) []llm.Tool {
 	var result []llm.Tool
 	for _, definition := range r.Definitions() {
+		if !definition.IncludeInModelContext {
+			continue
+		}
 		if definition.AvailableTo(access) {
 			result = append(result, definition.OpenRouterTool())
 		}
@@ -217,7 +220,7 @@ func (d Definition) AvailableTo(access ToolAccess) bool {
 			d.ToolClass == ToolClassMetadata ||
 			(d.ToolClass == ToolClassModerationWrite && d.RequiresConfirmation)
 	case ToolPolicyAdminOnly:
-		return d.ToolClass == ToolClassAdminRead || d.ToolClass == ToolClassDiscordRead || d.ToolClass == ToolClassWebRead || d.ToolClass == ToolClassMetadata
+		return d.ToolClass == ToolClassWebRead || (hasAdminPolicyAccess(access) && d.ToolClass != ToolClassOwnerOps)
 	case ToolPolicyModerator:
 		return d.ToolClass == ToolClassDiscordRead ||
 			d.ToolClass == ToolClassMemory ||
@@ -248,6 +251,17 @@ func (d Definition) AvailableTo(access ToolAccess) bool {
 	default:
 		return false
 	}
+}
+
+func hasAdminPolicyAccess(access ToolAccess) bool {
+	return access.HasAnyPermission(
+		admin.PermissionAdminConfigRead,
+		admin.PermissionAdminConfigWrite,
+		admin.PermissionAdminUsageRead,
+		admin.PermissionAdminAuditRead,
+		admin.PermissionAdminMemoryManage,
+		admin.PermissionOwnerOps,
+	)
 }
 
 func (access ToolAccess) AllowsDefinition(definition Definition) bool {
@@ -439,7 +453,7 @@ func DefaultDefinitions() []Definition {
 			Description:           "Read bot configuration visible to the current user.",
 			RequiredPermission:    admin.PermissionAdminConfigRead,
 			ToolClass:             ToolClassAdminRead,
-			InputSchema:           objectSchema("guild_id"),
+			InputSchema:           objectSchema(),
 			OutputSchema:          objectSchema("config"),
 			Timeout:               time.Second,
 			Redaction:             RedactSecrets,
@@ -488,7 +502,7 @@ func DefaultDefinitions() []Definition {
 		},
 		{
 			Name:                  "panda.manage_budget_limit",
-			Description:           "List, set, or prepare removal of Panda request budget windows.",
+			Description:           "List or prepare setting/removal of Panda request budget windows.",
 			RequiredPermission:    admin.PermissionAdminConfigWrite,
 			ToolClass:             ToolClassAdminWrite,
 			InputSchema:           actionSchema([]string{"action"}, "action", "scope", "subject_id", "limit", "window", "dry_run"),
@@ -548,7 +562,7 @@ func DefaultDefinitions() []Definition {
 		},
 		{
 			Name:                  "panda.manage_tool_access",
-			Description:           "List, add, or remove role-specific access for native and composed Panda tools.",
+			Description:           "List or prepare adding/removing role-specific access for native and composed Panda tools.",
 			RequiredPermission:    admin.PermissionAdminConfigWrite,
 			ToolClass:             ToolClassAdminWrite,
 			InputSchema:           actionSchema([]string{"action"}, "action", "tool_name", "role_id", "dry_run"),
@@ -557,6 +571,7 @@ func DefaultDefinitions() []Definition {
 			Redaction:             RedactSecrets,
 			Audit:                 AuditOnUse,
 			IncludeInModelContext: true,
+			RequiresConfirmation:  true,
 			SupportsDryRun:        true,
 			BypassToolPolicy:      true,
 		},
@@ -578,7 +593,7 @@ func DefaultDefinitions() []Definition {
 		},
 		{
 			Name:                  "panda.manage_channel_rule",
-			Description:           "List, allow, deny, or prepare removal of Panda channel allow/deny rules.",
+			Description:           "List or prepare allow/deny/removal of Panda channel access rules.",
 			RequiredPermission:    admin.PermissionAdminConfigWrite,
 			ToolClass:             ToolClassAdminWrite,
 			InputSchema:           actionSchema([]string{"action"}, "action", "channel_id", "dry_run"),

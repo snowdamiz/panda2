@@ -56,6 +56,10 @@ type typingSender interface {
 	SendTyping(channelID snowflake.ID, opts ...rest.RequestOpt) error
 }
 
+type guildGetter interface {
+	GetGuild(guildID snowflake.ID, withCounts bool, opts ...rest.RequestOpt) (*disgoDiscord.RestGuild, error)
+}
+
 type commandSyncer interface {
 	SetGlobalCommands(applicationID snowflake.ID, commands []disgoDiscord.ApplicationCommandCreate, opts ...rest.RequestOpt) ([]disgoDiscord.ApplicationCommand, error)
 	SetGuildCommands(applicationID snowflake.ID, guildID snowflake.ID, commands []disgoDiscord.ApplicationCommandCreate, opts ...rest.RequestOpt) ([]disgoDiscord.ApplicationCommand, error)
@@ -1095,8 +1099,8 @@ func (b *Bot) onMessageCreate(event *events.MessageCreate) {
 	}
 
 	guildID := ""
-	if event.GuildID != nil {
-		guildID = event.GuildID.String()
+	if eventGuildID := messageEventGuildID(event); eventGuildID != nil {
+		guildID = eventGuildID.String()
 	}
 	options := map[string]string{"message": content}
 	if messageMentionsUser(event.Message, b.client.ID().String()) {
@@ -1323,7 +1327,7 @@ func (b *Bot) isGuildAdmin(event *events.ApplicationCommandInteractionCreate) bo
 		return true
 	}
 	guild, ok := event.Guild()
-	return userOwnsGuild(event.User().ID, guild, ok)
+	return b.userOwnsEventGuild(event.User().ID, guild, ok, event.GuildID())
 }
 
 func (b *Bot) isComponentGuildAdmin(event *events.ComponentInteractionCreate) bool {
@@ -1331,7 +1335,7 @@ func (b *Bot) isComponentGuildAdmin(event *events.ComponentInteractionCreate) bo
 		return true
 	}
 	guild, ok := event.Guild()
-	return userOwnsGuild(event.User().ID, guild, ok)
+	return b.userOwnsEventGuild(event.User().ID, guild, ok, event.GuildID())
 }
 
 func (b *Bot) isModalGuildAdmin(event *events.ModalSubmitInteractionCreate) bool {
@@ -1339,16 +1343,47 @@ func (b *Bot) isModalGuildAdmin(event *events.ModalSubmitInteractionCreate) bool
 		return true
 	}
 	guild, ok := event.Guild()
-	return userOwnsGuild(event.User().ID, guild, ok)
+	return b.userOwnsEventGuild(event.User().ID, guild, ok, event.GuildID())
 }
 
 func (b *Bot) isMessageGuildOwner(event *events.MessageCreate, userID snowflake.ID) bool {
+	if event == nil {
+		return false
+	}
 	guild, ok := event.Guild()
-	return userOwnsGuild(userID, guild, ok)
+	return b.userOwnsEventGuild(userID, guild, ok, messageEventGuildID(event))
+}
+
+func messageEventGuildID(event *events.MessageCreate) *snowflake.ID {
+	if event == nil || event.GenericMessage == nil {
+		return nil
+	}
+	if event.GuildID != nil {
+		return event.GuildID
+	}
+	return event.Message.GuildID
+}
+
+func (b *Bot) userOwnsEventGuild(userID snowflake.ID, guild disgoDiscord.Guild, ok bool, guildID *snowflake.ID) bool {
+	if userOwnsGuild(userID, guild, ok) {
+		return true
+	}
+	if guildID == nil || b.client == nil || b.client.Rest == nil {
+		return false
+	}
+	return userOwnsGuildFromREST(b.client.Rest, *guildID, userID)
 }
 
 func userOwnsGuild(userID snowflake.ID, guild disgoDiscord.Guild, ok bool) bool {
-	return ok && guild.OwnerID == userID
+	return ok && userID != 0 && guild.OwnerID == userID
+}
+
+func userOwnsGuildFromREST(getter guildGetter, guildID, userID snowflake.ID) bool {
+	if getter == nil || guildID == 0 || userID == 0 {
+		return false
+	}
+	guild, err := getter.GetGuild(guildID, false)
+	return err == nil && guild != nil && guild.OwnerID == userID
 }
 
 func memberIsGuildAdmin(member *disgoDiscord.ResolvedMember) bool {

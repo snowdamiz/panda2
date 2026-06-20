@@ -8,3 +8,6 @@
 *.db
 *.db-*
 coverage.out
+/landing/.astro/
+/landing/dist/
+/landing/node_modules/
