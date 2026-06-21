@@ -13,12 +13,13 @@ import (
 )
 
 const (
-	configPathEnv      = "PANDA_CONFIG"
-	envFilePathEnv     = "PANDA_ENV_FILE"
-	defaultConfigPath  = "panda.config.json"
-	defaultEnvFilePath = ".env"
-	defaultDevDataDir  = "data"
-	defaultProdDataDir = "/data"
+	configPathEnv          = "PANDA_CONFIG"
+	envFilePathEnv         = "PANDA_ENV_FILE"
+	defaultConfigPath      = "panda.config.json"
+	defaultEnvFilePath     = ".env"
+	defaultDevDataDir      = "data"
+	defaultProdDataDir     = "/data"
+	defaultOpenRouterModel = "deepseek/deepseek-v4-flash"
 )
 
 type Config struct {
@@ -210,7 +211,7 @@ func (c Config) IsOwner(userID string) bool {
 func defaultConfig() Config {
 	return Config{
 		OpenRouterBaseURL:                        "https://openrouter.ai/api/v1",
-		OpenRouterModel:                          "openrouter/auto",
+		OpenRouterModel:                          defaultOpenRouterModel,
 		OpenRouterAppTitle:                       "Panda Assistant",
 		OpenRouterCircuitBreakerFailureThreshold: 5,
 		OpenRouterCircuitBreakerCooldown:         30 * time.Second,
