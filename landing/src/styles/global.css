@@ -1,17 +1,10 @@
+@import "tailwindcss";
+@import "../design/tokens.css";
+
 :root {
-  --ink: #050505;
-  --ink-soft: #111111;
-  --paper: #f2f1eb;
-  --paper-bright: #faf9f4;
-  --white: #ffffff;
-  --muted: #a6a6a1;
-  --line-dark: rgba(255, 255, 255, 0.14);
-  --line-light: rgba(5, 5, 5, 0.14);
-  --shell: min(1240px, calc(100vw - 48px));
-  --radius-lg: 32px;
-  --radius-md: 22px;
-  --radius-sm: 14px;
-  --ease: cubic-bezier(.2, .75, .2, 1);
+  --radius-lg: var(--radius-card);
+  --radius-md: var(--radius-md-panel);
+  --radius-sm: var(--radius-content);
 }
 
 * {
@@ -19,20 +12,13 @@
 }
 
 html {
-  scroll-behavior: smooth;
-  background: var(--ink);
+  @apply scroll-smooth bg-ink;
 }
 
 body {
-  margin: 0;
-  min-width: 320px;
-  color: var(--paper-bright);
-  background: var(--ink);
-  font-family: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+  @apply m-0 min-w-80 overflow-x-hidden bg-ink text-paper-bright font-sans antialiased;
   font-size: 16px;
   line-height: 1.5;
-  overflow-x: hidden;
-  -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
 }
 
@@ -49,25 +35,24 @@ select {
 }
 
 button {
-  color: inherit;
+  @apply text-inherit;
 }
 
 a {
-  color: inherit;
-  text-decoration: none;
+  @apply text-inherit no-underline;
 }
 
 svg {
-  display: block;
+  @apply block;
 }
 
 ::selection {
-  color: var(--ink);
-  background: var(--paper-bright);
+  color: var(--color-ink);
+  background: var(--color-paper-bright);
 }
 
 .shell {
-  width: var(--shell);
+  width: var(--layout-shell);
   margin-inline: auto;
 }
 
@@ -77,9 +62,9 @@ svg {
   left: 12px;
   z-index: 999;
   padding: 10px 14px;
-  color: var(--ink);
-  background: var(--paper-bright);
-  border-radius: 8px;
+  color: var(--color-ink);
+  background: var(--color-paper-bright);
+  border-radius: var(--radius-md);
   transform: translateY(-160%);
   transition: transform .2s ease;
 }
@@ -109,7 +94,7 @@ svg {
 }
 
 .site-header.scrolled {
-  background: rgba(5, 5, 5, .84);
+  background: color-mix(in oklab, var(--color-ink) 84%, transparent);
   border-color: var(--line-dark);
   -webkit-backdrop-filter: blur(18px);
   backdrop-filter: blur(18px);
@@ -134,7 +119,9 @@ svg {
 .brand-mark {
   width: 36px;
   height: 36px;
-  color: var(--paper-bright);
+  display: block;
+  flex: 0 0 auto;
+  object-fit: contain;
 }
 
 .desktop-nav {
@@ -147,7 +134,7 @@ svg {
 .desktop-nav a,
 .nav-github {
   position: relative;
-  color: rgba(250, 249, 244, .66);
+  color: color-mix(in oklab, var(--color-paper-bright) 66%, transparent);
   font-size: .76rem;
   font-weight: 650;
   letter-spacing: .1em;
@@ -162,15 +149,15 @@ svg {
   right: 100%;
   bottom: -8px;
   height: 1px;
-  background: var(--paper-bright);
-  transition: right .25s var(--ease);
+  background: var(--color-paper-bright);
+  transition: right .25s var(--ease-fluid);
 }
 
 .desktop-nav a:hover,
 .desktop-nav a:focus-visible,
 .nav-github:hover,
 .nav-github:focus-visible {
-  color: var(--paper-bright);
+  color: var(--color-paper-bright);
 }
 
 .desktop-nav a:hover::after,
@@ -218,7 +205,7 @@ svg {
 .menu-button span {
   width: 17px;
   height: 1px;
-  background: var(--paper-bright);
+  background: var(--color-paper-bright);
   transition: transform .25s ease;
 }
 
@@ -231,12 +218,12 @@ svg {
 }
 
 .mobile-nav {
-  width: var(--shell);
+  width: var(--layout-shell);
   margin: 0 auto 18px;
   padding: 12px;
   border: 1px solid var(--line-dark);
-  border-radius: 18px;
-  background: rgba(16, 16, 16, .98);
+  border-radius: var(--radius-nav);
+  background: color-mix(in oklab, var(--color-panel-850) 98%, transparent);
 }
 
 .mobile-nav:not([hidden]) {
@@ -246,7 +233,7 @@ svg {
 .mobile-nav a {
   padding: 14px 12px;
   border-bottom: 1px solid var(--line-dark);
-  color: rgba(250, 249, 244, .75);
+  color: color-mix(in oklab, var(--color-paper-bright) 75%, transparent);
   font-size: .8rem;
   font-weight: 650;
   letter-spacing: .08em;
@@ -255,7 +242,7 @@ svg {
 
 .mobile-nav a:last-child {
   border-bottom: 0;
-  color: var(--paper-bright);
+  color: var(--color-paper-bright);
 }
 
 .hero {
@@ -275,7 +262,7 @@ svg {
   right: -230px;
   z-index: -2;
   border-radius: 50%;
-  background: radial-gradient(circle, rgba(255,255,255,.11), rgba(255,255,255,0) 68%);
+  background: radial-gradient(circle, color-mix(in oklab, var(--color-white) 11%, transparent), transparent 68%);
   filter: blur(4px);
 }
 
@@ -287,7 +274,7 @@ svg {
   bottom: 30px;
   left: -360px;
   z-index: -2;
-  border: 1px solid rgba(255,255,255,.08);
+  border: 1px solid color-mix(in oklab, var(--color-white) 8%, transparent);
   border-radius: 50%;
 }
 
@@ -297,7 +284,7 @@ svg {
   inset: 0;
   z-index: -3;
   opacity: .2;
-  background-image: linear-gradient(rgba(255,255,255,.08) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,.08) 1px, transparent 1px);
+  background-image: linear-gradient(color-mix(in oklab, var(--color-white) 8%, transparent) 1px, transparent 1px), linear-gradient(90deg, color-mix(in oklab, var(--color-white) 8%, transparent) 1px, transparent 1px);
   background-size: 72px 72px;
   -webkit-mask-image: linear-gradient(to bottom, black, transparent 76%);
   mask-image: linear-gradient(to bottom, black, transparent 76%);
@@ -332,15 +319,15 @@ svg {
 }
 
 .eyebrow {
-  color: rgba(250, 249, 244, .58);
+  color: color-mix(in oklab, var(--color-paper-bright) 58%, transparent);
 }
 
 .eyebrow span {
   width: 8px;
   height: 8px;
   border-radius: 50%;
-  background: var(--paper-bright);
-  box-shadow: 0 0 0 5px rgba(255,255,255,.08);
+  background: var(--color-paper-bright);
+  box-shadow: var(--shadow-eyebrow-dot);
 }
 
 .hero h1,
@@ -358,8 +345,8 @@ svg {
 }
 
 .hero h1 em {
-  color: rgba(250, 249, 244, .38);
-  font-family: Georgia, "Times New Roman", serif;
+  color: color-mix(in oklab, var(--color-paper-bright) 38%, transparent);
+  font-family: var(--font-serif);
   font-size: .91em;
   font-weight: 400;
   letter-spacing: -.055em;
@@ -368,7 +355,7 @@ svg {
 .hero-lede {
   max-width: 620px;
   margin: 34px 0 0;
-  color: rgba(250, 249, 244, .6);
+  color: color-mix(in oklab, var(--color-paper-bright) 60%, transparent);
   font-size: clamp(1rem, 1.35vw, 1.16rem);
   line-height: 1.7;
 }
@@ -390,12 +377,12 @@ svg {
   justify-content: center;
   gap: 14px;
   border: 1px solid transparent;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   font-size: .76rem;
   font-weight: 760;
   letter-spacing: .09em;
   text-transform: uppercase;
-  transition: transform .22s var(--ease), background .22s ease, color .22s ease, border-color .22s ease;
+  transition: transform .22s var(--ease-fluid), background .22s ease, color .22s ease, border-color .22s ease;
 }
 
 .button:hover,
@@ -414,42 +401,42 @@ svg {
 }
 
 .button-light {
-  color: var(--ink);
-  background: var(--paper-bright);
+  color: var(--color-ink);
+  background: var(--color-paper-bright);
 }
 
 .button-light:hover,
 .button-light:focus-visible {
-  background: var(--white);
+  background: var(--color-white);
 }
 
 .button-ghost {
-  color: var(--paper-bright);
+  color: var(--color-paper-bright);
   border-color: var(--line-dark);
-  background: rgba(255,255,255,.02);
+  background: color-mix(in oklab, var(--color-white) 2%, transparent);
 }
 
 .button-ghost:hover,
 .button-ghost:focus-visible {
-  border-color: rgba(255,255,255,.34);
-  background: rgba(255,255,255,.06);
+  border-color: color-mix(in oklab, var(--color-white) 34%, transparent);
+  background: color-mix(in oklab, var(--color-white) 6%, transparent);
 }
 
 .button-dark {
-  color: var(--paper-bright);
-  background: var(--ink);
+  color: var(--color-paper-bright);
+  background: var(--color-ink);
 }
 
 .button-outline-dark {
-  color: var(--ink);
-  border-color: rgba(5,5,5,.28);
+  color: var(--color-ink);
+  border-color: color-mix(in oklab, var(--color-ink) 28%, transparent);
   background: transparent;
 }
 
 .button-outline-dark:hover,
 .button-outline-dark:focus-visible {
-  background: rgba(5,5,5,.05);
-  border-color: var(--ink);
+  background: color-mix(in oklab, var(--color-ink) 5%, transparent);
+  border-color: var(--color-ink);
 }
 
 .hero-meta {
@@ -458,8 +445,8 @@ svg {
   flex-wrap: wrap;
   gap: 11px;
   margin-top: 34px;
-  color: rgba(250, 249, 244, .35);
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  color: color-mix(in oklab, var(--color-paper-bright) 35%, transparent);
+  font-family: var(--font-mono);
   font-size: .67rem;
   letter-spacing: .08em;
   text-transform: uppercase;
@@ -469,7 +456,7 @@ svg {
   width: 3px;
   height: 3px;
   border-radius: 50%;
-  background: rgba(250, 249, 244, .32);
+  background: color-mix(in oklab, var(--color-paper-bright) 32%, transparent);
 }
 
 .hero-stage {
@@ -481,7 +468,7 @@ svg {
 
 .orbit {
   position: absolute;
-  border: 1px solid rgba(255,255,255,.1);
+  border: 1px solid color-mix(in oklab, var(--color-white) 10%, transparent);
   border-radius: 50%;
   pointer-events: none;
 }
@@ -494,8 +481,8 @@ svg {
   width: 7px;
   height: 7px;
   border-radius: 50%;
-  background: rgba(255,255,255,.72);
-  box-shadow: 0 0 18px rgba(255,255,255,.34);
+  background: color-mix(in oklab, var(--color-white) 72%, transparent);
+  box-shadow: var(--shadow-orbit-dot);
 }
 
 .orbit-one {
@@ -525,18 +512,18 @@ svg {
   width: min(100%, 610px);
   margin-inline: auto;
   overflow: visible;
-  border: 1px solid rgba(255,255,255,.15);
-  border-radius: 24px;
-  background: #101010;
-  box-shadow: 0 42px 110px rgba(0,0,0,.52), inset 0 1px rgba(255,255,255,.04);
+  border: 1px solid color-mix(in oklab, var(--color-white) 15%, transparent);
+  border-radius: var(--radius-panel);
+  background: var(--color-panel-850);
+  box-shadow: var(--shadow-discord);
   transform: rotateY(-5deg) rotateX(2deg);
   transform-origin: center;
-  transition: transform .45s var(--ease), box-shadow .45s ease;
+  transition: transform .45s var(--ease-fluid), box-shadow .45s ease;
 }
 
 .hero-stage:hover .discord-window {
   transform: rotateY(-1deg) rotateX(0);
-  box-shadow: 0 48px 120px rgba(0,0,0,.62), inset 0 1px rgba(255,255,255,.05);
+  box-shadow: var(--shadow-discord-hover);
 }
 
 .window-topbar {
@@ -545,22 +532,22 @@ svg {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  border-bottom: 1px solid rgba(255,255,255,.08);
-  background: #131313;
-  border-radius: 24px 24px 0 0;
+  border-bottom: 1px solid color-mix(in oklab, var(--color-white) 8%, transparent);
+  background: var(--color-panel-800);
+  border-radius: var(--radius-panel) var(--radius-panel) 0 0;
 }
 
 .window-channel {
   display: flex;
   align-items: center;
   gap: 9px;
-  color: rgba(255,255,255,.9);
+  color: color-mix(in oklab, var(--color-white) 90%, transparent);
   font-size: .85rem;
   font-weight: 680;
 }
 
 .window-channel .hash {
-  color: rgba(255,255,255,.3);
+  color: color-mix(in oklab, var(--color-white) 30%, transparent);
   font-size: 1.25rem;
   font-weight: 400;
 }
@@ -573,8 +560,8 @@ svg {
 .window-actions span {
   width: 16px;
   height: 16px;
-  border: 1px solid rgba(255,255,255,.18);
-  border-radius: 5px;
+  border: 1px solid color-mix(in oklab, var(--color-white) 18%, transparent);
+  border-radius: var(--radius-xs);
 }
 
 .model-bar {
@@ -584,15 +571,15 @@ svg {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  border-bottom: 1px solid rgba(255,255,255,.07);
-  background: #0d0d0d;
+  border-bottom: 1px solid color-mix(in oklab, var(--color-white) 7%, transparent);
+  background: var(--color-panel-875);
 }
 
 .model-status {
   display: flex;
   align-items: center;
   gap: 8px;
-  color: rgba(255,255,255,.4);
+  color: color-mix(in oklab, var(--color-white) 40%, transparent);
   font-size: .65rem;
   font-weight: 650;
   letter-spacing: .08em;
@@ -605,8 +592,8 @@ svg {
   width: 6px;
   height: 6px;
   border-radius: 50%;
-  background: #dfdfd8;
-  box-shadow: 0 0 0 4px rgba(255,255,255,.08);
+  background: var(--color-status);
+  box-shadow: var(--shadow-live-dot);
 }
 
 .model-switch {
@@ -615,10 +602,10 @@ svg {
   display: flex;
   align-items: center;
   gap: 8px;
-  border: 1px solid rgba(255,255,255,.12);
-  border-radius: 9px;
-  color: rgba(255,255,255,.8);
-  background: rgba(255,255,255,.035);
+  border: 1px solid color-mix(in oklab, var(--color-white) 12%, transparent);
+  border-radius: var(--radius-control);
+  color: color-mix(in oklab, var(--color-white) 80%, transparent);
+  background: color-mix(in oklab, var(--color-white) 3.5%, transparent);
   cursor: pointer;
   font-size: .68rem;
   font-weight: 650;
@@ -629,13 +616,13 @@ svg {
 .model-switch:hover,
 .model-switch:focus-visible,
 .model-switch[aria-expanded="true"] {
-  border-color: rgba(255,255,255,.28);
-  background: rgba(255,255,255,.06);
+  border-color: color-mix(in oklab, var(--color-white) 28%, transparent);
+  background: color-mix(in oklab, var(--color-white) 6%, transparent);
 }
 
 .model-switch .model-label {
-  color: rgba(255,255,255,.28);
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: color-mix(in oklab, var(--color-white) 28%, transparent);
+  font-family: var(--font-mono);
   font-size: .56rem;
   letter-spacing: .09em;
 }
@@ -659,15 +646,15 @@ svg {
   z-index: 12;
   width: 214px;
   padding: 7px;
-  border: 1px solid rgba(255,255,255,.15);
-  border-radius: 12px;
-  background: #171717;
-  box-shadow: 0 18px 50px rgba(0,0,0,.55);
+  border: 1px solid color-mix(in oklab, var(--color-white) 15%, transparent);
+  border-radius: var(--radius-menu);
+  background: var(--color-panel-750);
+  box-shadow: var(--shadow-menu);
 }
 
 .model-menu:not([hidden]) {
   display: grid;
-  animation: menuIn .18s var(--ease);
+  animation: menuIn .18s var(--ease-fluid);
 }
 
 @keyframes menuIn {
@@ -681,8 +668,8 @@ svg {
   align-items: center;
   justify-content: space-between;
   border: 0;
-  border-radius: 7px;
-  color: rgba(255,255,255,.72);
+  border-radius: var(--radius-sm);
+  color: color-mix(in oklab, var(--color-white) 72%, transparent);
   background: transparent;
   cursor: pointer;
   font-size: .7rem;
@@ -691,12 +678,12 @@ svg {
 
 .model-menu button:hover,
 .model-menu button:focus-visible {
-  color: var(--white);
-  background: rgba(255,255,255,.07);
+  color: var(--color-white);
+  background: color-mix(in oklab, var(--color-white) 7%, transparent);
 }
 
 .model-menu button span {
-  color: rgba(255,255,255,.28);
+  color: color-mix(in oklab, var(--color-white) 28%, transparent);
   font-size: .52rem;
   letter-spacing: .06em;
   text-transform: uppercase;
@@ -705,7 +692,7 @@ svg {
 .chat-body {
   min-height: 380px;
   padding: 28px 22px 22px;
-  background: #101010;
+  background: var(--color-panel-850);
 }
 
 .message {
@@ -729,30 +716,18 @@ svg {
 }
 
 .avatar-user {
-  color: #161616;
-  background: #cfcfc8;
+  color: var(--color-avatar-user-fg);
+  background: var(--color-avatar-user-bg);
 }
 
 .avatar-panda {
-  border: 1px solid rgba(255,255,255,.16);
-  background: #f2f1eb;
+  border: 1px solid color-mix(in oklab, var(--color-white) 16%, transparent);
+  background: var(--color-paper);
 }
 
-.avatar-panda svg {
+.avatar-logo {
   width: 28px;
   height: 28px;
-  fill: #111;
-}
-
-.avatar-panda .face {
-  fill: #f2f1eb;
-}
-
-.avatar-panda path {
-  fill: none;
-  stroke: #111;
-  stroke-width: 1.6;
-  stroke-linecap: round;
 }
 
 .message-content {
@@ -763,22 +738,22 @@ svg {
   display: flex;
   align-items: center;
   gap: 7px;
-  color: rgba(255,255,255,.88);
+  color: color-mix(in oklab, var(--color-white) 88%, transparent);
   font-size: .73rem;
   font-weight: 720;
 }
 
 .message-author time {
-  color: rgba(255,255,255,.25);
+  color: color-mix(in oklab, var(--color-white) 25%, transparent);
   font-size: .59rem;
   font-weight: 500;
 }
 
 .bot-tag {
   padding: 2px 4px;
-  border-radius: 3px;
-  color: #121212;
-  background: #d8d8d2;
+  border-radius: var(--radius-2xs);
+  color: var(--color-tag-fg);
+  background: var(--color-tag-bg);
   font-size: .45rem;
   line-height: 1.3;
   letter-spacing: .06em;
@@ -786,13 +761,13 @@ svg {
 
 .message-content > p {
   margin: 7px 0 0;
-  color: rgba(255,255,255,.58);
+  color: color-mix(in oklab, var(--color-white) 58%, transparent);
   font-size: .78rem;
   line-height: 1.62;
 }
 
 .message-content > p strong {
-  color: rgba(255,255,255,.9);
+  color: color-mix(in oklab, var(--color-white) 90%, transparent);
 }
 
 .panda-response {
@@ -807,7 +782,7 @@ svg {
 
 .panda-response > p {
   margin: 0 0 12px;
-  color: rgba(255,255,255,.62);
+  color: color-mix(in oklab, var(--color-white) 62%, transparent);
   font-size: .76rem;
   line-height: 1.58;
 }
@@ -829,9 +804,9 @@ svg {
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  border: 1px solid rgba(255,255,255,.08);
-  border-radius: 8px;
-  background: rgba(255,255,255,.025);
+  border: 1px solid color-mix(in oklab, var(--color-white) 8%, transparent);
+  border-radius: var(--radius-md);
+  background: color-mix(in oklab, var(--color-white) 2.5%, transparent);
   counter-increment: response-list;
 }
 
@@ -839,19 +814,19 @@ svg {
   content: counter(response-list, decimal-leading-zero);
   position: absolute;
   left: 11px;
-  color: rgba(255,255,255,.28);
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: color-mix(in oklab, var(--color-white) 28%, transparent);
+  font-family: var(--font-mono);
   font-size: .56rem;
 }
 
 .panda-response li span {
-  color: rgba(255,255,255,.74);
+  color: color-mix(in oklab, var(--color-white) 74%, transparent);
   font-size: .67rem;
 }
 
 .panda-response li small {
   flex: 0 0 auto;
-  color: rgba(255,255,255,.28);
+  color: color-mix(in oklab, var(--color-white) 28%, transparent);
   font-size: .54rem;
 }
 
@@ -860,9 +835,9 @@ svg {
   padding-top: 10px;
   display: flex;
   gap: 14px;
-  border-top: 1px solid rgba(255,255,255,.07);
-  color: rgba(255,255,255,.25);
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  border-top: 1px solid color-mix(in oklab, var(--color-white) 7%, transparent);
+  color: color-mix(in oklab, var(--color-white) 25%, transparent);
+  font-family: var(--font-mono);
   font-size: .51rem;
   letter-spacing: .04em;
   text-transform: uppercase;
@@ -884,7 +859,7 @@ svg {
   width: 5px;
   height: 5px;
   border-radius: 50%;
-  background: rgba(255,255,255,.45);
+  background: color-mix(in oklab, var(--color-white) 45%, transparent);
   animation: typing 1s ease-in-out infinite;
 }
 
@@ -903,10 +878,10 @@ svg {
   display: flex;
   align-items: center;
   gap: 12px;
-  border: 1px solid rgba(255,255,255,.08);
-  border-radius: 12px;
-  color: rgba(255,255,255,.24);
-  background: rgba(255,255,255,.035);
+  border: 1px solid color-mix(in oklab, var(--color-white) 8%, transparent);
+  border-radius: var(--radius-menu);
+  color: color-mix(in oklab, var(--color-white) 24%, transparent);
+  background: color-mix(in oklab, var(--color-white) 3.5%, transparent);
   font-size: .68rem;
 }
 
@@ -918,8 +893,8 @@ svg {
   place-items: center;
   border: 0;
   border-radius: 50%;
-  color: #111;
-  background: rgba(255,255,255,.55);
+  color: var(--color-ink-soft);
+  background: color-mix(in oklab, var(--color-white) 55%, transparent);
   font-size: 1rem;
   line-height: 1;
   cursor: pointer;
@@ -937,7 +912,7 @@ svg {
 .composer-icons i {
   width: 16px;
   height: 16px;
-  border: 1px solid rgba(255,255,255,.16);
+  border: 1px solid color-mix(in oklab, var(--color-white) 16%, transparent);
   border-radius: 50%;
 }
 
@@ -948,11 +923,11 @@ svg {
   display: flex;
   align-items: center;
   gap: 8px;
-  border: 1px solid rgba(255,255,255,.15);
-  border-radius: 999px;
-  color: rgba(255,255,255,.62);
-  background: rgba(12,12,12,.88);
-  box-shadow: 0 18px 40px rgba(0,0,0,.35);
+  border: 1px solid color-mix(in oklab, var(--color-white) 15%, transparent);
+  border-radius: var(--radius-pill);
+  color: color-mix(in oklab, var(--color-white) 62%, transparent);
+  background: color-mix(in oklab, var(--color-panel-900) 88%, transparent);
+  box-shadow: var(--shadow-chip);
   -webkit-backdrop-filter: blur(12px);
   backdrop-filter: blur(12px);
   font-size: .61rem;
@@ -961,7 +936,7 @@ svg {
 }
 
 .floating-chip span {
-  color: var(--paper-bright);
+  color: var(--color-paper-bright);
 }
 
 .chip-context {
@@ -988,7 +963,7 @@ svg {
   overflow: hidden;
   border-top: 1px solid var(--line-dark);
   border-bottom: 1px solid var(--line-dark);
-  background: #090909;
+  background: var(--color-panel-950);
 }
 
 .marquee-track {
@@ -1001,14 +976,14 @@ svg {
 }
 
 .marquee-track span {
-  color: rgba(250,249,244,.46);
+  color: color-mix(in oklab, var(--color-paper-bright) 46%, transparent);
   font-size: .69rem;
   font-weight: 750;
   letter-spacing: .17em;
 }
 
 .marquee-track i {
-  color: rgba(250,249,244,.18);
+  color: color-mix(in oklab, var(--color-paper-bright) 18%, transparent);
   font-style: normal;
 }
 
@@ -1022,8 +997,8 @@ svg {
 }
 
 .section-light {
-  color: var(--ink);
-  background: var(--paper);
+  color: var(--color-ink);
+  background: var(--color-paper);
 }
 
 .section-heading {
@@ -1035,11 +1010,11 @@ svg {
 }
 
 .kicker {
-  color: rgba(5,5,5,.44);
+  color: color-mix(in oklab, var(--color-ink) 44%, transparent);
 }
 
 .kicker-dark {
-  color: rgba(250,249,244,.42);
+  color: color-mix(in oklab, var(--color-paper-bright) 42%, transparent);
 }
 
 .section-heading h2,
@@ -1053,7 +1028,7 @@ svg {
 .section-heading > p {
   max-width: 470px;
   margin: 0 0 8px;
-  color: rgba(5,5,5,.58);
+  color: color-mix(in oklab, var(--color-ink) 58%, transparent);
   font-size: 1rem;
   line-height: 1.8;
 }
@@ -1074,14 +1049,14 @@ svg {
   justify-content: space-between;
   border: 1px solid var(--line-light);
   border-radius: var(--radius-lg);
-  background: rgba(255,255,255,.22);
-  transition: transform .35s var(--ease), box-shadow .35s ease, border-color .35s ease;
+  background: color-mix(in oklab, var(--color-white) 22%, transparent);
+  transition: transform .35s var(--ease-fluid), box-shadow .35s ease, border-color .35s ease;
 }
 
 .feature-card:hover {
   transform: translateY(-5px);
-  border-color: rgba(5,5,5,.24);
-  box-shadow: 0 24px 60px rgba(5,5,5,.08);
+  border-color: color-mix(in oklab, var(--color-ink) 24%, transparent);
+  box-shadow: var(--shadow-feature-hover);
 }
 
 .feature-card-wide {
@@ -1095,8 +1070,8 @@ svg {
 
 .feature-index {
   align-self: start;
-  color: rgba(5,5,5,.32);
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: color-mix(in oklab, var(--color-ink) 32%, transparent);
+  font-family: var(--font-mono);
   font-size: .64rem;
   letter-spacing: .08em;
 }
@@ -1121,7 +1096,7 @@ svg {
 .feature-copy p {
   max-width: 500px;
   margin: 0;
-  color: rgba(5,5,5,.53);
+  color: color-mix(in oklab, var(--color-ink) 53%, transparent);
   font-size: .93rem;
   line-height: 1.75;
 }
@@ -1140,9 +1115,9 @@ svg {
   flex-direction: column;
   justify-content: center;
   gap: 16px;
-  border-radius: 24px;
-  background: #111;
-  box-shadow: inset 0 0 0 1px rgba(255,255,255,.08);
+  border-radius: var(--radius-panel);
+  background: var(--color-ink-soft);
+  box-shadow: var(--shadow-context-inset);
 }
 
 .context-visual::before {
@@ -1150,7 +1125,7 @@ svg {
   position: absolute;
   inset: 0;
   opacity: .35;
-  background-image: linear-gradient(rgba(255,255,255,.05) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,.05) 1px, transparent 1px);
+  background-image: linear-gradient(color-mix(in oklab, var(--color-white) 5%, transparent) 1px, transparent 1px), linear-gradient(90deg, color-mix(in oklab, var(--color-white) 5%, transparent) 1px, transparent 1px);
   background-size: 26px 26px;
   border-radius: inherit;
 }
@@ -1163,33 +1138,33 @@ svg {
   display: flex;
   align-items: center;
   gap: 9px;
-  border: 1px solid rgba(255,255,255,.08);
-  border-radius: 11px;
-  background: rgba(255,255,255,.025);
+  border: 1px solid color-mix(in oklab, var(--color-white) 8%, transparent);
+  border-radius: var(--radius-chip);
+  background: color-mix(in oklab, var(--color-white) 2.5%, transparent);
   opacity: .44;
   transform-origin: left center;
 }
 
 .context-line.active {
   opacity: 1;
-  border-color: rgba(255,255,255,.23);
-  background: rgba(255,255,255,.07);
+  border-color: color-mix(in oklab, var(--color-white) 23%, transparent);
+  background: color-mix(in oklab, var(--color-white) 7%, transparent);
   transform: translateX(-12px) scale(1.03);
-  box-shadow: 0 14px 30px rgba(0,0,0,.22);
+  box-shadow: var(--shadow-context-active);
 }
 
 .context-line span {
   width: 26px;
   height: 26px;
   border-radius: 50%;
-  background: rgba(255,255,255,.16);
+  background: color-mix(in oklab, var(--color-white) 16%, transparent);
 }
 
 .context-line b {
   width: 20%;
   height: 5px;
-  border-radius: 99px;
-  background: rgba(255,255,255,.17);
+  border-radius: var(--radius-pill);
+  background: color-mix(in oklab, var(--color-white) 17%, transparent);
 }
 
 .context-line b:nth-child(2) { width: 34%; }
@@ -1203,9 +1178,9 @@ svg {
   z-index: 2;
   width: 12px;
   height: 155px;
-  border-top: 1px solid rgba(255,255,255,.55);
-  border-right: 1px solid rgba(255,255,255,.55);
-  border-bottom: 1px solid rgba(255,255,255,.55);
+  border-top: 1px solid color-mix(in oklab, var(--color-white) 55%, transparent);
+  border-right: 1px solid color-mix(in oklab, var(--color-white) 55%, transparent);
+  border-bottom: 1px solid color-mix(in oklab, var(--color-white) 55%, transparent);
 }
 
 .context-label {
@@ -1213,7 +1188,7 @@ svg {
   right: -45px;
   top: 180px;
   z-index: 2;
-  color: rgba(255,255,255,.46);
+  color: color-mix(in oklab, var(--color-white) 46%, transparent);
   font-size: .49rem;
   font-weight: 700;
   letter-spacing: .12em;
@@ -1228,37 +1203,37 @@ svg {
   place-items: center;
   border: 1px solid var(--line-light);
   border-radius: 50%;
-  background: rgba(255,255,255,.35);
-  box-shadow: 0 0 0 18px rgba(5,5,5,.025), 0 0 0 36px rgba(5,5,5,.014);
+  background: color-mix(in oklab, var(--color-white) 35%, transparent);
+  box-shadow: var(--shadow-feature-halo);
 }
 
 .feature-icon svg {
   width: 50px;
   height: 50px;
   fill: none;
-  stroke: var(--ink);
+  stroke: var(--color-ink);
   stroke-width: 1.4;
   stroke-linecap: round;
   stroke-linejoin: round;
 }
 
 .feature-card-dark {
-  color: var(--paper-bright);
-  background: #0d0d0d;
-  border-color: #0d0d0d;
+  color: var(--color-paper-bright);
+  background: var(--color-panel-875);
+  border-color: var(--color-panel-875);
 }
 
 .feature-card-dark:hover {
-  border-color: #0d0d0d;
-  box-shadow: 0 28px 70px rgba(5,5,5,.2);
+  border-color: var(--color-panel-875);
+  box-shadow: var(--shadow-feature-dark-hover);
 }
 
 .feature-card-dark .feature-index {
-  color: rgba(255,255,255,.3);
+  color: color-mix(in oklab, var(--color-white) 30%, transparent);
 }
 
 .feature-card-dark .feature-copy p {
-  color: rgba(255,255,255,.5);
+  color: color-mix(in oklab, var(--color-white) 50%, transparent);
 }
 
 .policy-stack {
@@ -1276,19 +1251,19 @@ svg {
   grid-template-columns: 1fr auto 34px;
   align-items: center;
   gap: 18px;
-  border: 1px solid rgba(255,255,255,.11);
-  border-radius: 13px;
-  background: rgba(255,255,255,.035);
+  border: 1px solid color-mix(in oklab, var(--color-white) 11%, transparent);
+  border-radius: var(--radius-row);
+  background: color-mix(in oklab, var(--color-white) 3.5%, transparent);
 }
 
 .policy-row span {
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-family: var(--font-mono);
   font-size: .72rem;
-  color: rgba(255,255,255,.72);
+  color: color-mix(in oklab, var(--color-white) 72%, transparent);
 }
 
 .policy-row b {
-  color: rgba(255,255,255,.28);
+  color: color-mix(in oklab, var(--color-white) 28%, transparent);
   font-size: .55rem;
   letter-spacing: .11em;
 }
@@ -1297,8 +1272,8 @@ svg {
   position: relative;
   width: 33px;
   height: 18px;
-  border-radius: 99px;
-  background: rgba(255,255,255,.1);
+  border-radius: var(--radius-pill);
+  background: color-mix(in oklab, var(--color-white) 10%, transparent);
 }
 
 .policy-row i::after {
@@ -1309,22 +1284,22 @@ svg {
   width: 12px;
   height: 12px;
   border-radius: 50%;
-  background: rgba(255,255,255,.35);
+  background: color-mix(in oklab, var(--color-white) 35%, transparent);
 }
 
 .policy-row i.on {
-  background: rgba(255,255,255,.75);
+  background: color-mix(in oklab, var(--color-white) 75%, transparent);
 }
 
 .policy-row i.on::after {
   left: 18px;
-  background: #111;
+  background: var(--color-ink-soft);
 }
 
 .models-section {
   overflow: hidden;
-  color: var(--paper-bright);
-  background: var(--ink);
+  color: var(--color-paper-bright);
+  background: var(--color-ink);
 }
 
 .models-section::before {
@@ -1334,9 +1309,9 @@ svg {
   height: 780px;
   right: -250px;
   top: -250px;
-  border: 1px solid rgba(255,255,255,.07);
+  border: 1px solid color-mix(in oklab, var(--color-white) 7%, transparent);
   border-radius: 50%;
-  box-shadow: 0 0 0 110px rgba(255,255,255,.018), 0 0 0 220px rgba(255,255,255,.01);
+  box-shadow: var(--shadow-model-orbit);
 }
 
 .models-layout {
@@ -1350,7 +1325,7 @@ svg {
 .models-copy > p:not(.kicker) {
   max-width: 480px;
   margin: 30px 0 0;
-  color: rgba(250,249,244,.53);
+  color: color-mix(in oklab, var(--color-paper-bright) 53%, transparent);
   line-height: 1.8;
 }
 
@@ -1359,7 +1334,7 @@ svg {
   display: inline-flex;
   align-items: center;
   gap: 12px;
-  color: rgba(250,249,244,.82);
+  color: color-mix(in oklab, var(--color-paper-bright) 82%, transparent);
   font-size: .72rem;
   font-weight: 720;
   letter-spacing: .1em;
@@ -1378,10 +1353,10 @@ svg {
 .model-console {
   position: relative;
   overflow: hidden;
-  border: 1px solid rgba(255,255,255,.14);
-  border-radius: 24px;
-  background: #0c0c0c;
-  box-shadow: 0 42px 100px rgba(0,0,0,.45);
+  border: 1px solid color-mix(in oklab, var(--color-white) 14%, transparent);
+  border-radius: var(--radius-panel);
+  background: var(--color-panel-900);
+  box-shadow: var(--shadow-console);
 }
 
 .model-console::before {
@@ -1390,7 +1365,7 @@ svg {
   inset: 0;
   pointer-events: none;
   opacity: .25;
-  background-image: linear-gradient(rgba(255,255,255,.04) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,.04) 1px, transparent 1px);
+  background-image: linear-gradient(color-mix(in oklab, var(--color-white) 4%, transparent) 1px, transparent 1px), linear-gradient(90deg, color-mix(in oklab, var(--color-white) 4%, transparent) 1px, transparent 1px);
   background-size: 28px 28px;
 }
 
@@ -1409,9 +1384,9 @@ svg {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  border-bottom: 1px solid rgba(255,255,255,.1);
-  color: rgba(255,255,255,.35);
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  border-bottom: 1px solid color-mix(in oklab, var(--color-white) 10%, transparent);
+  color: color-mix(in oklab, var(--color-white) 35%, transparent);
+  font-family: var(--font-mono);
   font-size: .58rem;
   letter-spacing: .13em;
 }
@@ -1420,7 +1395,7 @@ svg {
   display: flex;
   align-items: center;
   gap: 9px;
-  color: rgba(255,255,255,.55);
+  color: color-mix(in oklab, var(--color-white) 55%, transparent);
 }
 
 .console-primary {
@@ -1430,14 +1405,14 @@ svg {
   align-items: center;
   justify-content: space-between;
   gap: 24px;
-  border-bottom: 1px solid rgba(255,255,255,.1);
+  border-bottom: 1px solid color-mix(in oklab, var(--color-white) 10%, transparent);
 }
 
 .console-primary small,
 .detail-value small {
   display: block;
   margin-bottom: 8px;
-  color: rgba(255,255,255,.3);
+  color: color-mix(in oklab, var(--color-white) 30%, transparent);
   font-size: .52rem;
   font-weight: 700;
   letter-spacing: .13em;
@@ -1447,8 +1422,8 @@ svg {
   display: block;
   max-width: 510px;
   overflow: hidden;
-  color: rgba(255,255,255,.92);
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: color-mix(in oklab, var(--color-white) 92%, transparent);
+  font-family: var(--font-mono);
   font-size: clamp(1.2rem, 2.4vw, 2.3rem);
   font-weight: 500;
   letter-spacing: -.04em;
@@ -1462,10 +1437,10 @@ svg {
   display: flex;
   align-items: center;
   gap: 9px;
-  border: 1px solid rgba(255,255,255,.17);
-  border-radius: 9px;
-  color: rgba(255,255,255,.68);
-  background: rgba(255,255,255,.04);
+  border: 1px solid color-mix(in oklab, var(--color-white) 17%, transparent);
+  border-radius: var(--radius-control);
+  color: color-mix(in oklab, var(--color-white) 68%, transparent);
+  background: color-mix(in oklab, var(--color-white) 4%, transparent);
   cursor: pointer;
   font-size: .57rem;
   font-weight: 700;
@@ -1475,8 +1450,8 @@ svg {
 
 .console-primary button:hover,
 .console-primary button:focus-visible {
-  border-color: rgba(255,255,255,.34);
-  background: rgba(255,255,255,.08);
+  border-color: color-mix(in oklab, var(--color-white) 34%, transparent);
+  background: color-mix(in oklab, var(--color-white) 8%, transparent);
 }
 
 .console-primary button svg {
@@ -1492,7 +1467,7 @@ svg {
 .console-fallbacks {
   padding: 16px 30px;
   display: grid;
-  border-bottom: 1px solid rgba(255,255,255,.1);
+  border-bottom: 1px solid color-mix(in oklab, var(--color-white) 10%, transparent);
 }
 
 .route-line {
@@ -1500,8 +1475,8 @@ svg {
   display: grid;
   grid-template-columns: 42px 1fr auto;
   align-items: center;
-  border-bottom: 1px solid rgba(255,255,255,.07);
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  border-bottom: 1px solid color-mix(in oklab, var(--color-white) 7%, transparent);
+  font-family: var(--font-mono);
 }
 
 .route-line:last-child {
@@ -1510,21 +1485,21 @@ svg {
 
 .route-line span,
 .route-line em {
-  color: rgba(255,255,255,.25);
+  color: color-mix(in oklab, var(--color-white) 25%, transparent);
   font-size: .52rem;
   font-style: normal;
   letter-spacing: .08em;
 }
 
 .route-line b {
-  color: rgba(255,255,255,.58);
+  color: color-mix(in oklab, var(--color-white) 58%, transparent);
   font-size: .65rem;
   font-weight: 500;
   letter-spacing: .06em;
 }
 
 .route-line:first-child b {
-  color: rgba(255,255,255,.9);
+  color: color-mix(in oklab, var(--color-white) 90%, transparent);
 }
 
 .console-settings {
@@ -1536,15 +1511,15 @@ svg {
 
 .console-settings > div {
   padding: 17px 15px;
-  border: 1px solid rgba(255,255,255,.08);
-  border-radius: 10px;
-  background: rgba(255,255,255,.025);
+  border: 1px solid color-mix(in oklab, var(--color-white) 8%, transparent);
+  border-radius: var(--radius-tile);
+  background: color-mix(in oklab, var(--color-white) 2.5%, transparent);
 }
 
 .console-settings span {
   display: block;
   margin-bottom: 12px;
-  color: rgba(255,255,255,.25);
+  color: color-mix(in oklab, var(--color-white) 25%, transparent);
   font-size: .48rem;
   font-weight: 700;
   letter-spacing: .1em;
@@ -1553,8 +1528,8 @@ svg {
 .console-settings b {
   display: block;
   min-height: 28px;
-  color: rgba(255,255,255,.65);
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: color-mix(in oklab, var(--color-white) 65%, transparent);
+  font-family: var(--font-mono);
   font-size: .6rem;
   font-weight: 500;
 }
@@ -1565,7 +1540,7 @@ svg {
   height: 2px;
   margin-top: 12px;
   overflow: hidden;
-  background: rgba(255,255,255,.09);
+  background: color-mix(in oklab, var(--color-white) 9%, transparent);
 }
 
 .console-settings i::after {
@@ -1573,7 +1548,7 @@ svg {
   position: absolute;
   inset: 0 auto 0 0;
   width: 0;
-  background: rgba(255,255,255,.65);
+  background: color-mix(in oklab, var(--color-white) 65%, transparent);
 }
 
 .console-command {
@@ -1582,21 +1557,21 @@ svg {
   display: flex;
   align-items: center;
   gap: 12px;
-  border-top: 1px solid rgba(255,255,255,.1);
-  color: rgba(255,255,255,.47);
-  background: rgba(255,255,255,.025);
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  border-top: 1px solid color-mix(in oklab, var(--color-white) 10%, transparent);
+  color: color-mix(in oklab, var(--color-white) 47%, transparent);
+  background: color-mix(in oklab, var(--color-white) 2.5%, transparent);
+  font-family: var(--font-mono);
   font-size: .64rem;
 }
 
 .console-command > span {
-  color: rgba(255,255,255,.25);
+  color: color-mix(in oklab, var(--color-white) 25%, transparent);
 }
 
 .cursor {
   width: 6px;
   height: 12px;
-  background: rgba(255,255,255,.6);
+  background: color-mix(in oklab, var(--color-white) 60%, transparent);
   animation: blink 1s steps(2, start) infinite;
 }
 
@@ -1635,8 +1610,8 @@ svg {
 }
 
 .step-number {
-  color: rgba(5,5,5,.32);
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: color-mix(in oklab, var(--color-ink) 32%, transparent);
+  font-family: var(--font-mono);
   font-size: .62rem;
 }
 
@@ -1646,14 +1621,14 @@ svg {
   margin: 80px auto 64px;
   display: grid;
   place-items: center;
-  border: 1px solid rgba(5,5,5,.16);
+  border: 1px solid color-mix(in oklab, var(--color-ink) 16%, transparent);
   border-radius: 50%;
-  background: rgba(255,255,255,.22);
-  box-shadow: 0 0 0 18px rgba(5,5,5,.02), 0 0 0 36px rgba(5,5,5,.01);
+  background: color-mix(in oklab, var(--color-white) 22%, transparent);
+  box-shadow: var(--shadow-step-halo);
 }
 
 .step-icon > span {
-  font-family: Georgia, serif;
+  font-family: var(--font-serif);
   font-size: 2.8rem;
   line-height: 1;
 }
@@ -1662,7 +1637,7 @@ svg {
   width: 50px;
   height: 50px;
   fill: none;
-  stroke: var(--ink);
+  stroke: var(--color-ink);
   stroke-width: 1.4;
   stroke-linecap: round;
   stroke-linejoin: round;
@@ -1677,7 +1652,7 @@ svg {
   width: 12px;
   height: 12px;
   border-radius: 50%;
-  background: var(--ink);
+  background: var(--color-ink);
 }
 
 .nodes-icon i:nth-child(1) { top: 24px; left: 50px; }
@@ -1688,7 +1663,7 @@ svg {
   position: absolute;
   width: 38px;
   height: 1px;
-  background: var(--ink);
+  background: var(--color-ink);
   transform-origin: left;
 }
 
@@ -1704,15 +1679,15 @@ svg {
 
 .workflow-step p {
   margin: 0;
-  color: rgba(5,5,5,.52);
+  color: color-mix(in oklab, var(--color-ink) 52%, transparent);
   font-size: .89rem;
   line-height: 1.7;
 }
 
 .control-section {
   overflow: hidden;
-  color: var(--paper-bright);
-  background: #0b0b0b;
+  color: var(--color-paper-bright);
+  background: var(--color-panel-925);
 }
 
 .control-section::before {
@@ -1720,7 +1695,7 @@ svg {
   position: absolute;
   inset: 0;
   opacity: .2;
-  background-image: radial-gradient(rgba(255,255,255,.12) .8px, transparent .8px);
+  background-image: radial-gradient(color-mix(in oklab, var(--color-white) 12%, transparent) .8px, transparent .8px);
   background-size: 16px 16px;
   -webkit-mask-image: linear-gradient(90deg, black, transparent 68%);
   mask-image: linear-gradient(90deg, black, transparent 68%);
@@ -1739,10 +1714,10 @@ svg {
   display: grid;
   grid-template-columns: 72px 1fr;
   overflow: hidden;
-  border: 1px solid rgba(255,255,255,.13);
-  border-radius: 26px;
-  background: #101010;
-  box-shadow: 0 42px 110px rgba(0,0,0,.46);
+  border: 1px solid color-mix(in oklab, var(--color-white) 13%, transparent);
+  border-radius: var(--radius-console);
+  background: var(--color-panel-850);
+  box-shadow: var(--shadow-control-panel);
 }
 
 .panel-rail {
@@ -1751,8 +1726,8 @@ svg {
   align-items: center;
   flex-direction: column;
   gap: 26px;
-  border-right: 1px solid rgba(255,255,255,.09);
-  background: #0b0b0b;
+  border-right: 1px solid color-mix(in oklab, var(--color-white) 9%, transparent);
+  background: var(--color-panel-925);
 }
 
 .mini-panda {
@@ -1761,9 +1736,9 @@ svg {
   margin-bottom: 16px;
   display: grid;
   place-items: center;
-  border-radius: 10px;
-  color: #101010;
-  background: var(--paper-bright);
+  border-radius: var(--radius-tile);
+  color: var(--color-panel-850);
+  background: var(--color-paper-bright);
   font-size: .68rem;
   font-weight: 850;
 }
@@ -1772,19 +1747,19 @@ svg {
   position: relative;
   width: 9px;
   height: 9px;
-  border: 1px solid rgba(255,255,255,.28);
+  border: 1px solid color-mix(in oklab, var(--color-white) 28%, transparent);
   border-radius: 50%;
 }
 
 .rail-dot.active {
-  background: rgba(255,255,255,.8);
+  background: color-mix(in oklab, var(--color-white) 80%, transparent);
 }
 
 .rail-dot.active::before {
   content: "";
   position: absolute;
   inset: -9px;
-  border: 1px solid rgba(255,255,255,.1);
+  border: 1px solid color-mix(in oklab, var(--color-white) 10%, transparent);
   border-radius: 50%;
 }
 
@@ -1800,7 +1775,7 @@ svg {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  border-bottom: 1px solid rgba(255,255,255,.09);
+  border-bottom: 1px solid color-mix(in oklab, var(--color-white) 9%, transparent);
 }
 
 .panel-head small,
@@ -1810,7 +1785,7 @@ svg {
 
 .panel-head small {
   margin-bottom: 7px;
-  color: rgba(255,255,255,.28);
+  color: color-mix(in oklab, var(--color-white) 28%, transparent);
   font-size: .49rem;
   letter-spacing: .12em;
 }
@@ -1822,9 +1797,9 @@ svg {
 
 .panel-head > span {
   padding: 6px 9px;
-  border: 1px solid rgba(255,255,255,.11);
-  border-radius: 999px;
-  color: rgba(255,255,255,.36);
+  border: 1px solid color-mix(in oklab, var(--color-white) 11%, transparent);
+  border-radius: var(--radius-pill);
+  color: color-mix(in oklab, var(--color-white) 36%, transparent);
   font-size: .46rem;
   letter-spacing: .1em;
 }
@@ -1844,8 +1819,8 @@ svg {
   align-items: center;
   gap: 13px;
   border: 1px solid transparent;
-  border-radius: 11px;
-  color: rgba(255,255,255,.48);
+  border-radius: var(--radius-chip);
+  color: color-mix(in oklab, var(--color-white) 48%, transparent);
   background: transparent;
   cursor: pointer;
   text-align: left;
@@ -1854,14 +1829,14 @@ svg {
 
 .command-row:hover,
 .command-row:focus-visible {
-  color: rgba(255,255,255,.78);
-  background: rgba(255,255,255,.03);
+  color: color-mix(in oklab, var(--color-white) 78%, transparent);
+  background: color-mix(in oklab, var(--color-white) 3%, transparent);
 }
 
 .command-row.active {
-  color: rgba(255,255,255,.92);
-  border-color: rgba(255,255,255,.13);
-  background: rgba(255,255,255,.055);
+  color: color-mix(in oklab, var(--color-white) 92%, transparent);
+  border-color: color-mix(in oklab, var(--color-white) 13%, transparent);
+  background: color-mix(in oklab, var(--color-white) 5.5%, transparent);
   transform: translateX(4px);
 }
 
@@ -1870,9 +1845,9 @@ svg {
   height: 30px;
   display: grid;
   place-items: center;
-  border: 1px solid rgba(255,255,255,.12);
-  border-radius: 8px;
-  font-family: Georgia, serif;
+  border: 1px solid color-mix(in oklab, var(--color-white) 12%, transparent);
+  border-radius: var(--radius-md);
+  font-family: var(--font-serif);
 }
 
 .command-row b,
@@ -1882,19 +1857,19 @@ svg {
 
 .command-row b {
   margin-bottom: 4px;
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-family: var(--font-mono);
   font-size: .68rem;
   font-weight: 500;
 }
 
 .command-row small {
-  color: rgba(255,255,255,.27);
+  color: color-mix(in oklab, var(--color-white) 27%, transparent);
   font-size: .55rem;
 }
 
 .command-row em {
-  color: rgba(255,255,255,.18);
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: color-mix(in oklab, var(--color-white) 18%, transparent);
+  font-family: var(--font-mono);
   font-size: .5rem;
   font-style: normal;
 }
@@ -1904,9 +1879,9 @@ svg {
   display: grid;
   grid-template-columns: 1fr 1fr 1.2fr;
   gap: 14px;
-  border: 1px solid rgba(255,255,255,.11);
-  border-radius: 14px;
-  background: rgba(255,255,255,.035);
+  border: 1px solid color-mix(in oklab, var(--color-white) 11%, transparent);
+  border-radius: var(--radius-content);
+  background: color-mix(in oklab, var(--color-white) 3.5%, transparent);
   transition: opacity .18s ease, transform .18s ease;
 }
 
@@ -1917,7 +1892,7 @@ svg {
 
 .detail-label {
   grid-column: 1 / -1;
-  color: rgba(255,255,255,.25);
+  color: color-mix(in oklab, var(--color-white) 25%, transparent);
   font-size: .47rem;
   font-weight: 700;
   letter-spacing: .12em;
@@ -1926,8 +1901,8 @@ svg {
 .detail-value b {
   display: block;
   overflow: hidden;
-  color: rgba(255,255,255,.68);
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: color-mix(in oklab, var(--color-white) 68%, transparent);
+  font-family: var(--font-mono);
   font-size: .58rem;
   font-weight: 500;
   text-overflow: ellipsis;
@@ -1940,15 +1915,15 @@ svg {
   display: flex;
   align-items: center;
   gap: 10px;
-  border-top: 1px solid rgba(255,255,255,.08);
-  color: rgba(255,255,255,.3);
+  border-top: 1px solid color-mix(in oklab, var(--color-white) 8%, transparent);
+  color: color-mix(in oklab, var(--color-white) 30%, transparent);
   font-size: .54rem;
 }
 
 .control-copy > p:not(.kicker) {
   max-width: 500px;
   margin: 30px 0 0;
-  color: rgba(250,249,244,.5);
+  color: color-mix(in oklab, var(--color-paper-bright) 50%, transparent);
   line-height: 1.8;
 }
 
@@ -1963,35 +1938,35 @@ svg {
   grid-template-columns: 42px 1fr;
   align-items: start;
   gap: 8px;
-  border-top: 1px solid rgba(255,255,255,.1);
+  border-top: 1px solid color-mix(in oklab, var(--color-white) 10%, transparent);
 }
 
 .control-points > div:last-child {
-  border-bottom: 1px solid rgba(255,255,255,.1);
+  border-bottom: 1px solid color-mix(in oklab, var(--color-white) 10%, transparent);
 }
 
 .control-points span {
-  color: rgba(255,255,255,.25);
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: color-mix(in oklab, var(--color-white) 25%, transparent);
+  font-family: var(--font-mono);
   font-size: .57rem;
 }
 
 .control-points p {
   margin: 0;
-  color: rgba(255,255,255,.44);
+  color: color-mix(in oklab, var(--color-white) 44%, transparent);
   font-size: .83rem;
   line-height: 1.6;
 }
 
 .control-points b {
-  color: rgba(255,255,255,.82);
+  color: color-mix(in oklab, var(--color-white) 82%, transparent);
   font-weight: 650;
 }
 
 .privacy-section {
   overflow: hidden;
-  color: var(--paper-bright);
-  background: #050505;
+  color: var(--color-paper-bright);
+  background: var(--color-ink);
 }
 
 .privacy-orb {
@@ -2000,10 +1975,10 @@ svg {
   height: 820px;
   left: -260px;
   top: 50%;
-  border: 1px solid rgba(255,255,255,.08);
+  border: 1px solid color-mix(in oklab, var(--color-white) 8%, transparent);
   border-radius: 50%;
   transform: translateY(-50%);
-  box-shadow: 0 0 0 100px rgba(255,255,255,.018), 0 0 0 200px rgba(255,255,255,.01);
+  box-shadow: var(--shadow-privacy-orbit);
 }
 
 .privacy-orb::before,
@@ -2015,13 +1990,13 @@ svg {
 
 .privacy-orb::before {
   inset: 180px;
-  border: 1px dashed rgba(255,255,255,.11);
+  border: 1px dashed color-mix(in oklab, var(--color-white) 11%, transparent);
 }
 
 .privacy-orb::after {
   inset: 340px;
-  background: rgba(255,255,255,.05);
-  box-shadow: 0 0 80px rgba(255,255,255,.05);
+  background: color-mix(in oklab, var(--color-white) 5%, transparent);
+  box-shadow: var(--shadow-privacy-core);
 }
 
 .privacy-layout {
@@ -2035,7 +2010,7 @@ svg {
 .privacy-copy > p:not(.kicker) {
   max-width: 560px;
   margin: 30px 0 0;
-  color: rgba(250,249,244,.5);
+  color: color-mix(in oklab, var(--color-paper-bright) 50%, transparent);
   line-height: 1.8;
 }
 
@@ -2046,7 +2021,7 @@ svg {
 .privacy-list {
   position: relative;
   display: grid;
-  border-top: 1px solid rgba(255,255,255,.12);
+  border-top: 1px solid color-mix(in oklab, var(--color-white) 12%, transparent);
 }
 
 .privacy-list > div {
@@ -2055,7 +2030,7 @@ svg {
   grid-template-columns: 48px 1fr auto;
   align-items: center;
   gap: 18px;
-  border-bottom: 1px solid rgba(255,255,255,.12);
+  border-bottom: 1px solid color-mix(in oklab, var(--color-white) 12%, transparent);
 }
 
 .privacy-icon {
@@ -2063,10 +2038,10 @@ svg {
   height: 38px;
   display: grid;
   place-items: center;
-  border: 1px solid rgba(255,255,255,.13);
+  border: 1px solid color-mix(in oklab, var(--color-white) 13%, transparent);
   border-radius: 50%;
-  color: rgba(255,255,255,.7);
-  font-family: Georgia, serif;
+  color: color-mix(in oklab, var(--color-white) 70%, transparent);
+  font-family: var(--font-serif);
 }
 
 .privacy-list p {
@@ -2080,19 +2055,19 @@ svg {
 
 .privacy-list b {
   margin-bottom: 5px;
-  color: rgba(255,255,255,.82);
+  color: color-mix(in oklab, var(--color-white) 82%, transparent);
   font-size: .86rem;
   font-weight: 650;
 }
 
 .privacy-list small {
-  color: rgba(255,255,255,.3);
+  color: color-mix(in oklab, var(--color-white) 30%, transparent);
   font-size: .63rem;
 }
 
 .privacy-list em {
-  color: rgba(255,255,255,.28);
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: color-mix(in oklab, var(--color-white) 28%, transparent);
+  font-family: var(--font-mono);
   font-size: .51rem;
   font-style: normal;
   letter-spacing: .1em;
@@ -2102,14 +2077,14 @@ svg {
   position: relative;
   overflow: hidden;
   padding: 150px 0;
-  color: var(--ink);
-  background: var(--paper);
+  color: var(--color-ink);
+  background: var(--color-paper);
 }
 
 .cta-grid {
   z-index: 0;
   opacity: .16;
-  background-image: linear-gradient(rgba(5,5,5,.16) 1px, transparent 1px), linear-gradient(90deg, rgba(5,5,5,.16) 1px, transparent 1px);
+  background-image: linear-gradient(color-mix(in oklab, var(--color-ink) 16%, transparent) 1px, transparent 1px), linear-gradient(90deg, color-mix(in oklab, var(--color-ink) 16%, transparent) 1px, transparent 1px);
   -webkit-mask-image: radial-gradient(circle at 50% 50%, black, transparent 70%);
   mask-image: radial-gradient(circle at 50% 50%, black, transparent 70%);
 }
@@ -2126,27 +2101,15 @@ svg {
   margin: 0 auto 36px;
   display: grid;
   place-items: center;
-  border: 1px solid rgba(5,5,5,.16);
-  border-radius: 32px;
-  background: rgba(255,255,255,.3);
-  box-shadow: 0 0 0 18px rgba(5,5,5,.025), 0 0 0 36px rgba(5,5,5,.012);
+  border: 1px solid color-mix(in oklab, var(--color-ink) 16%, transparent);
+  border-radius: var(--radius-card);
+  background: color-mix(in oklab, var(--color-white) 30%, transparent);
+  box-shadow: var(--shadow-cta-halo);
 }
 
-.cta-mark svg {
+.cta-logo {
   width: 80px;
   height: 80px;
-  fill: var(--ink);
-}
-
-.cta-mark .cta-face {
-  fill: var(--paper);
-}
-
-.cta-mark path {
-  fill: none;
-  stroke: var(--ink);
-  stroke-width: 4;
-  stroke-linecap: round;
 }
 
 .cta-inner .kicker {
@@ -2160,7 +2123,7 @@ svg {
 .cta-inner > p:not(.kicker) {
   max-width: 620px;
   margin: 28px auto 0;
-  color: rgba(5,5,5,.55);
+  color: color-mix(in oklab, var(--color-ink) 55%, transparent);
   font-size: 1rem;
   line-height: 1.75;
 }
@@ -2171,9 +2134,9 @@ svg {
 
 .site-footer {
   padding: 74px 0 24px;
-  border-top: 1px solid rgba(255,255,255,.09);
-  color: var(--paper-bright);
-  background: var(--ink);
+  border-top: 1px solid color-mix(in oklab, var(--color-white) 9%, transparent);
+  color: var(--color-paper-bright);
+  background: var(--color-ink);
 }
 
 .footer-grid {
@@ -2189,7 +2152,7 @@ svg {
 
 .footer-grid > div:first-child > p {
   margin: 0;
-  color: rgba(250,249,244,.35);
+  color: color-mix(in oklab, var(--color-paper-bright) 35%, transparent);
   font-size: .78rem;
   line-height: 1.7;
 }
@@ -2209,30 +2172,30 @@ svg {
 
 .footer-links small {
   margin-bottom: 5px;
-  color: rgba(250,249,244,.25);
+  color: color-mix(in oklab, var(--color-paper-bright) 25%, transparent);
   font-size: .55rem;
   font-weight: 700;
   letter-spacing: .12em;
 }
 
 .footer-links a {
-  color: rgba(250,249,244,.54);
+  color: color-mix(in oklab, var(--color-paper-bright) 54%, transparent);
   font-size: .76rem;
   transition: color .2s ease;
 }
 
 .footer-links a:hover,
 .footer-links a:focus-visible {
-  color: var(--paper-bright);
+  color: var(--color-paper-bright);
 }
 
 .footer-bottom {
   padding-top: 22px;
   display: flex;
   justify-content: space-between;
-  border-top: 1px solid rgba(255,255,255,.09);
-  color: rgba(250,249,244,.24);
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  border-top: 1px solid color-mix(in oklab, var(--color-white) 9%, transparent);
+  color: color-mix(in oklab, var(--color-paper-bright) 24%, transparent);
+  font-family: var(--font-mono);
   font-size: .55rem;
   letter-spacing: .06em;
   text-transform: uppercase;
@@ -2241,7 +2204,7 @@ svg {
 .reveal {
   opacity: 0;
   transform: translateY(24px);
-  transition: opacity .75s var(--ease), transform .75s var(--ease);
+  transition: opacity .75s var(--ease-fluid), transform .75s var(--ease-fluid);
 }
 
 .reveal.revealed {
@@ -2407,8 +2370,8 @@ svg {
 
 @media (max-width: 720px) {
   :root {
-    --shell: calc(100vw - 28px);
-    --radius-lg: 24px;
+    --layout-shell: calc(100vw - 28px);
+    --radius-lg: var(--radius-panel);
   }
 
   .nav-shell {
@@ -2449,12 +2412,12 @@ svg {
   }
 
   .discord-window {
-    border-radius: 18px;
+    border-radius: var(--radius-nav);
   }
 
   .window-topbar {
     height: 58px;
-    border-radius: 18px 18px 0 0;
+    border-radius: var(--radius-nav) var(--radius-nav) 0 0;
   }
 
   .model-bar {
@@ -2600,7 +2563,7 @@ svg {
     padding: 0 16px;
     flex-direction: row;
     border-right: 0;
-    border-bottom: 1px solid rgba(255,255,255,.09);
+    border-bottom: 1px solid color-mix(in oklab, var(--color-white) 9%, transparent);
   }
 
   .mini-panda {

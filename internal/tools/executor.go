@@ -125,6 +125,12 @@ type ExecutionRequest struct {
 type ExecutionResult struct {
 	Message      llm.Message
 	Confirmation *InteractionConfirmation
+	SourceLinks  []SourceLink
+}
+
+type SourceLink struct {
+	Title string
+	URL   string
 }
 
 type DynamicToolListRequest struct {
@@ -359,6 +365,7 @@ func (e *Executor) Execute(ctx context.Context, request ExecutionRequest) (Execu
 			Content:    security.RedactSecrets(string(data)),
 		},
 		Confirmation: confirmation,
+		SourceLinks:  sourceLinksFromPayload(definition.Name, payload),
 	}, nil
 }
 
@@ -388,13 +395,14 @@ func (e *Executor) executeDiscordTool(ctx context.Context, definition Definition
 	if err := enforceDiscordReadScope(definition, request, arguments); err != nil {
 		return nil, err
 	}
+	discordPermissions := effectiveDiscordPermissions(definition, arguments)
 	dryRun := boolArgument(arguments, "dry_run")
 	if definition.SupportsDryRun && dryRun {
 		return map[string]any{
 			"dry_run":               true,
 			"tool":                  definition.Name,
 			"requires_confirmation": definition.RequiresConfirmation,
-			"discord_permissions":   definition.DiscordPermissions,
+			"discord_permissions":   discordPermissions,
 			"preview":               safePreviewArguments(arguments),
 		}, nil
 	}
@@ -403,7 +411,7 @@ func (e *Executor) executeDiscordTool(ctx context.Context, definition Definition
 			"confirmation_required": true,
 			"tool":                  definition.Name,
 			"message":               "This Discord write is prepared as a dry-run only from the model tool loop. Use an explicit Discord confirmation flow before execution.",
-			"discord_permissions":   definition.DiscordPermissions,
+			"discord_permissions":   discordPermissions,
 			"preview":               safePreviewArguments(arguments),
 		}, nil
 	}
@@ -416,8 +424,44 @@ func (e *Executor) executeDiscordTool(ctx context.Context, definition Definition
 		Arguments:   arguments,
 		DryRun:      dryRun,
 		MaxLimit:    definition.MaxLimit,
-		Permissions: definition.DiscordPermissions,
+		Permissions: discordPermissions,
 	})
+}
+
+func effectiveDiscordPermissions(definition Definition, arguments map[string]any) []string {
+	permissions := append([]string(nil), definition.DiscordPermissions...)
+	if definition.Name != "discord.create_thread" || !boolArgument(arguments, "private") {
+		return permissions
+	}
+	return replaceDiscordPermission(permissions, "CREATE_PUBLIC_THREADS", "CREATE_PRIVATE_THREADS")
+}
+
+func replaceDiscordPermission(permissions []string, oldValue, newValue string) []string {
+	result := make([]string, 0, len(permissions)+1)
+	replaced := false
+	hasNewValue := false
+	for _, permission := range permissions {
+		switch permission {
+		case oldValue:
+			replaced = true
+			if !hasNewValue {
+				result = append(result, newValue)
+				hasNewValue = true
+			}
+		case newValue:
+			replaced = true
+			if !hasNewValue {
+				result = append(result, permission)
+				hasNewValue = true
+			}
+		default:
+			result = append(result, permission)
+		}
+	}
+	if !replaced {
+		result = append(result, newValue)
+	}
+	return result
 }
 
 func enforceDiscordReadScope(definition Definition, request ExecutionRequest, arguments map[string]any) error {
@@ -618,6 +662,33 @@ func (e *Executor) searchWeb(ctx context.Context, arguments string) (any, error)
 		"more_results_available": response.MoreResultsAvailable,
 		"results":                results,
 	}, nil
+}
+
+func sourceLinksFromPayload(toolName string, payload any) []SourceLink {
+	if toolName != "web.search" {
+		return nil
+	}
+	root, ok := payload.(map[string]any)
+	if !ok {
+		return nil
+	}
+	results, ok := root["results"].([]map[string]any)
+	if !ok {
+		return nil
+	}
+	links := make([]SourceLink, 0, len(results))
+	for _, result := range results {
+		url := strings.TrimSpace(fmt.Sprint(result["url"]))
+		if url == "" || url == "<nil>" {
+			continue
+		}
+		title := strings.TrimSpace(fmt.Sprint(result["title"]))
+		if title == "<nil>" {
+			title = ""
+		}
+		links = append(links, SourceLink{Title: title, URL: url})
+	}
+	return links
 }
 
 func (e *Executor) summarizeTextFile(ctx context.Context, guildID string, arguments string) (any, error) {
@@ -1307,6 +1378,9 @@ func (e *Executor) listAvailableTools(ctx context.Context, request ExecutionRequ
 	}
 	includeSchemas := boolArgument(args, "include_schemas")
 	canSeeAdminTools := canSeeAdminToolDetails(request.Access)
+	if !canSeeAdminTools {
+		return e.listUserCapabilities(ctx, request, kind, includeSchemas)
+	}
 	adminToolsHidden := false
 
 	nativeTools := []map[string]any{}
@@ -1404,8 +1478,159 @@ func (e *Executor) listAvailableTools(ctx context.Context, request ExecutionRequ
 	return response, nil
 }
 
+func (e *Executor) listUserCapabilities(ctx context.Context, request ExecutionRequest, kind string, includeSchemas bool) (any, error) {
+	nativeDefinitions := map[string]Definition{}
+	adminToolsHidden := false
+	if kind == "all" || kind == "native" {
+		for _, definition := range e.registry.Definitions() {
+			executable := e.canExecute(definition.Name)
+			adminTool := isAdminToolDefinition(definition)
+			if adminTool && executable {
+				adminToolsHidden = true
+			}
+			if !definition.AvailableTo(request.Access) || !executable || adminTool {
+				continue
+			}
+			nativeDefinitions[definition.Name] = definition
+		}
+	}
+
+	nativeCapabilities := userNativeCapabilities(nativeDefinitions)
+	composedCapabilities := []map[string]any{}
+	if (kind == "all" || kind == "composed") && e.dynamic != nil {
+		dynamicTools, err := e.dynamic.OpenRouterTools(ctx, DynamicToolListRequest{
+			GuildID:        request.GuildID,
+			ChannelID:      request.ChannelID,
+			ActorID:        request.ActorID,
+			Access:         request.Access,
+			InvocationType: request.InvocationType,
+		})
+		if err != nil {
+			return nil, err
+		}
+		for _, tool := range dynamicTools {
+			name := strings.TrimSpace(tool.Function.Name)
+			if name == "" {
+				continue
+			}
+			composedCapabilities = append(composedCapabilities, map[string]any{
+				"kind":        "composed_capability",
+				"name":        name,
+				"label":       name,
+				"description": firstNonEmpty(strings.TrimSpace(tool.Function.Description), "Run an approved custom Panda workflow."),
+			})
+		}
+	}
+
+	items := make([]map[string]any, 0, len(nativeCapabilities)+len(composedCapabilities))
+	items = append(items, nativeCapabilities...)
+	items = append(items, composedCapabilities...)
+	sort.Slice(items, func(i, j int) bool {
+		leftKind := fmt.Sprint(items[i]["kind"])
+		rightKind := fmt.Sprint(items[j]["kind"])
+		if leftKind == rightKind {
+			return fmt.Sprint(items[i]["name"]) < fmt.Sprint(items[j]["name"])
+		}
+		return leftKind < rightKind
+	})
+
+	response := map[string]any{
+		"tools":           items,
+		"capabilities":    items,
+		"count":           len(items),
+		"native_count":    len(nativeCapabilities),
+		"composed_count":  len(composedCapabilities),
+		"kind":            kind,
+		"policy":          normalizeToolPolicy(request.Access.Policy),
+		"access_level":    "user",
+		"presentation":    "capabilities",
+		"invocation_type": firstNonEmpty(request.InvocationType, "chat_tool"),
+		"note":            "This user-facing list summarizes what Panda can help with in this context. Low-level built-in tool names, schemas, and admin-only details are hidden from non-admin users.",
+	}
+	if includeSchemas {
+		response["schemas_hidden"] = true
+		response["schemas_notice"] = "Input and output schemas are shown only to admins; regular users get capability summaries."
+	}
+	if adminToolsHidden {
+		response["admin_tools_hidden"] = true
+		response["admin_tools_notice"] = hiddenAdminToolsNotice()
+	}
+	if normalizeToolPolicy(request.Access.Policy) == ToolPolicyAdminOnly {
+		response["user_tools_notice"] = "Normal chat and any listed web search capability are available. Broader tools are disabled for users right now; an admin can enable broader access later."
+	}
+	return response, nil
+}
+
+func userNativeCapabilities(definitions map[string]Definition) []map[string]any {
+	has := func(names ...string) bool {
+		for _, name := range names {
+			if _, ok := definitions[name]; ok {
+				return true
+			}
+		}
+		return false
+	}
+	capabilities := []map[string]any{}
+	add := func(name, label, description string, requiresConfirmation bool) {
+		capabilities = append(capabilities, map[string]any{
+			"kind":                  "native_capability",
+			"name":                  name,
+			"label":                 label,
+			"description":           description,
+			"requires_confirmation": requiresConfirmation,
+		})
+	}
+
+	if has("discord.fetch_message", "discord.fetch_messages", "discord.fetch_thread_context", "discord.fetch_reply_chain", "discord.channel_activity_summary") {
+		add("answer_from_visible_discord_context", "Answer using visible Discord context", "Read or summarize recent messages, reply chains, and thread context Panda can see when needed.", false)
+	}
+	if has("discord.get_guild", "discord.list_channels", "discord.get_channel", "discord.list_roles", "discord.get_role", "discord.get_member", "discord.list_pins", "discord.list_active_threads", "discord.list_archived_threads", "discord.list_scheduled_events", "discord.list_emojis", "discord.list_stickers", "discord.list_soundboard_sounds") {
+		add("look_up_server_context", "Look up server context", "Use visible channel, role, member, pin, thread, event, emoji, sticker, or soundboard metadata to answer questions.", false)
+	}
+	if has("web.search") {
+		add("search_the_web", "Search the web", "Look up current public information and answer with source links.", false)
+	}
+	if has("summarize_text_file") {
+		add("summarize_uploaded_files", "Summarize uploaded files", "Summarize extracted text from safe uploaded text or PDF files.", false)
+	}
+	if has("search_knowledge") {
+		add("search_server_knowledge", "Search server knowledge", "Search admin-managed Panda knowledge for relevant server context.", false)
+	}
+	if has("manage_memory_consent") {
+		add("manage_memory_consent", "Manage memory consent", "Read or update your own Panda memory consent for this server.", false)
+	}
+	if has("generate_workflow_json") {
+		add("draft_workflow_json", "Draft workflow JSON", "Generate structured workflow JSON without taking action.", false)
+	}
+	if has("discord.create_thread") {
+		add("start_threads_with_confirmation", "Start threads with confirmation", "Prepare a new Discord thread from a channel or message, then wait for explicit confirmation before creating it.", true)
+	}
+	if has("discord.send_message", "discord.reply_message") {
+		add("send_messages_with_confirmation", "Send or reply with confirmation", "Prepare a Panda message or reply, then wait for explicit confirmation before posting.", true)
+	}
+	if has("discord.edit_own_message", "discord.delete_own_message") {
+		add("manage_panda_messages_with_confirmation", "Manage Panda's own messages with confirmation", "Prepare edits or deletions for Panda-authored messages only, then wait for explicit confirmation.", true)
+	}
+	if has("discord.add_reaction", "discord.remove_own_reaction") {
+		add("manage_reactions_with_confirmation", "Manage reactions with confirmation", "Prepare adding or removing Panda's own reaction on visible messages, then wait for explicit confirmation.", true)
+	}
+	if has("discord.pin_message", "discord.unpin_message") {
+		add("manage_pins_with_confirmation", "Manage pins with confirmation", "Prepare pinning or unpinning a visible message, then wait for explicit confirmation.", true)
+	}
+	if has("discord.rename_thread", "discord.archive_thread", "discord.add_thread_member", "discord.remove_thread_member") {
+		add("manage_threads_with_confirmation", "Manage threads with confirmation", "Prepare thread renames, archive changes, or member changes, then wait for explicit confirmation.", true)
+	}
+	if has("discord.timeout_member", "discord.remove_timeout", "discord.kick_member", "discord.ban_member", "discord.unban_member", "discord.bulk_ban_members", "discord.add_member_role", "discord.remove_member_role", "discord.set_member_nick", "discord.delete_message", "discord.bulk_delete_messages", "discord.set_channel_slowmode", "discord.lock_thread") {
+		add("moderation_actions_with_confirmation", "Moderation actions with confirmation", "Prepare configured moderation actions, then wait for explicit confirmation before execution.", true)
+	}
+	if has("panda.list_tools") {
+		add("current_capabilities", "Show current capabilities", "Summarize the Panda capabilities available to you in this channel.", false)
+	}
+	return capabilities
+}
+
 func hiddenAdminToolsNotice() string {
-	return "There are also a lot of super secret admin tools, but their names and details are hidden unless your role can use them."
+	return "Additional admin-only tools exist, but their names and details are hidden unless your role can use them."
 }
 
 func canSeeAdminToolDetails(access ToolAccess) bool {

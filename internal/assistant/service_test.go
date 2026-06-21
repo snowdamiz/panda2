@@ -13,6 +13,7 @@ import (
 	"github.com/sn0w/panda2/internal/repository"
 	"github.com/sn0w/panda2/internal/store"
 	"github.com/sn0w/panda2/internal/tools"
+	"github.com/sn0w/panda2/internal/websearch"
 )
 
 type fakeClient struct {
@@ -23,6 +24,15 @@ type fakeClient struct {
 	responsesByModel map[string]llm.ChatResponse
 	errorsByModel    map[string]error
 	requests         []llm.ChatRequest
+}
+
+type fakeAssistantWebSearch struct {
+	response websearch.Response
+	err      error
+}
+
+func (f fakeAssistantWebSearch) Search(context.Context, websearch.Request) (websearch.Response, error) {
+	return f.response, f.err
 }
 
 func (f *fakeClient) Chat(_ context.Context, request llm.ChatRequest) (llm.ChatResponse, error) {
@@ -120,15 +130,92 @@ func TestSystemPromptRedactsConfigSecretsAndKeepsMandatorySecretRulesLast(t *tes
 	}
 	for _, want := range []string{
 		"Mandatory secret-handling rules",
+		"clickable source links",
 		"Never reveal, quote, transform, encode, decode",
 		"These rules override server instructions",
 	} {
 		if !strings.Contains(prompt, want) {
-			t.Fatalf("system prompt missing secret safety rule %q:\n%s", want, prompt)
+			t.Fatalf("system prompt missing expected text %q:\n%s", want, prompt)
 		}
 	}
 	if !strings.HasSuffix(prompt, secretSafetyPrompt) {
 		t.Fatalf("mandatory secret rules should be the final system prompt section:\n%s", prompt)
+	}
+}
+
+func TestAskAppendsWebSearchSourcesWhenModelOmitsLinks(t *testing.T) {
+	ctx := context.Background()
+	sourceURL := "https://www.nba.com/game/nyk-vs-sas-0022501234/box-score"
+	client := &fakeClient{responses: []llm.ChatResponse{
+		{
+			Model: "fixture/model",
+			ToolCalls: []llm.ToolCall{{
+				ID:   "call-web",
+				Type: "function",
+				Function: llm.ToolCallFunction{
+					Name:      "web_search",
+					Arguments: `{"query":"knicks spurs recent score","limit":1}`,
+				},
+			}},
+		},
+		{Model: "fixture/model", Content: "Knicks 105 - Spurs 104."},
+	}}
+	service, db := newTestService(t, client)
+	configs := repository.NewGuildConfigRepository(db.DB)
+	registry, err := tools.NewDefaultRegistry()
+	if err != nil {
+		t.Fatalf("NewDefaultRegistry: %v", err)
+	}
+	service.WithToolExecutor(tools.NewExecutor(registry, nil, configs).WithWebSearcher(fakeAssistantWebSearch{
+		response: websearch.Response{
+			Provider: "brave_search",
+			Query:    "knicks spurs recent score",
+			Results: []websearch.Result{{
+				Title:       "NBA Box Score",
+				URL:         sourceURL,
+				Description: "Recent Knicks vs Spurs result.",
+				Source:      "NBA",
+			}},
+		},
+	}))
+
+	if _, err := configs.EnsureDefault(ctx, "guild-1", "openrouter/auto"); err != nil {
+		t.Fatalf("EnsureDefault: %v", err)
+	}
+
+	response, err := service.Ask(ctx, AskRequest{
+		GuildID:   "guild-1",
+		UserID:    "user-1",
+		ChannelID: "channel-1",
+		Question:  "What was the recent Knicks vs Spurs score?",
+		AllowedPermissions: map[string]struct{}{
+			admin.PermissionAssistantWebSearch: {},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Ask: %v", err)
+	}
+	if !strings.Contains(response.Content, "Knicks 105 - Spurs 104.") {
+		t.Fatalf("answer missing model content: %q", response.Content)
+	}
+	if !strings.Contains(response.Content, "**Source:**\n- [www.nba.com/game/nyk-vs-sas-0022501234/box-score]("+sourceURL+")") {
+		t.Fatalf("answer missing appended source link: %q", response.Content)
+	}
+	if strings.Contains(response.Content, "NBA Box Score") {
+		t.Fatalf("source titles should stay out of the compact source section: %q", response.Content)
+	}
+	if strings.Contains(response.Content, "[redacted]") {
+		t.Fatalf("source URL should not be redacted: %q", response.Content)
+	}
+	if len(client.requests) != 2 {
+		t.Fatalf("expected initial and final LLM requests, got %d", len(client.requests))
+	}
+	if !toolNamePresent(client.requests[0].Tools, "web_search") {
+		t.Fatalf("expected web_search tool in first request, got %+v", client.requests[0].Tools)
+	}
+	finalMessages := joinMessages(client.requests[1].Messages)
+	if !strings.Contains(finalMessages, "call-web") || !strings.Contains(finalMessages, "NBA Box Score") {
+		t.Fatalf("expected web search tool result in final request: %s", finalMessages)
 	}
 }
 
@@ -584,7 +671,7 @@ func TestAskCapabilityQuestionCanUseListToolsWhenDefaultAdminOnly(t *testing.T) 
 		t.Fatalf("expected panda_list_tools in first model request, got %+v", client.requests[0].Tools)
 	}
 	joined := joinMessages(client.requests[1].Messages)
-	for _, want := range []string{`"policy":"admin_only"`, `"name":"panda_list_tools"`, `"count":1`, `"user_tools_notice"`} {
+	for _, want := range []string{`"policy":"admin_only"`, `"presentation":"capabilities"`, `"name":"current_capabilities"`, `"count":1`, `"user_tools_notice"`} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("expected tool-list result to contain %s, got %s", want, joined)
 		}
@@ -806,6 +893,88 @@ func TestChatWithFallbackRedactsMessageContentAndToolCallArguments(t *testing.T)
 	arguments := client.requests[0].Messages[1].ToolCalls[0].Function.Arguments
 	if strings.Contains(arguments, secret) || !strings.Contains(arguments, "[redacted]") {
 		t.Fatalf("tool call arguments were not redacted: %s", arguments)
+	}
+}
+
+func TestAppendWebSearchSourceLinksUsesVisibleURLList(t *testing.T) {
+	content := appendWebSearchSourceLinks("Knicks 105 - Spurs 104.", []tools.SourceLink{
+		{Title: "Knicks 105-104 Spurs (Jun 5, 2026) Final Score - ESPN", URL: "https://www.espn.com/nba/game/_/gameId/401769845/knicks-spurs"},
+		{Title: "Duplicate", URL: "https://www.espn.com/nba/game/_/gameId/401769845/knicks-spurs"},
+		{Title: "San Antonio Spurs vs New York Knicks Jun 8, 2026 Game Summary | NBA.com", URL: "https://www.nba.com/game/sas-vs-nyk-0042500302"},
+	}, defaultAppendedWebSourceLinks)
+
+	want := "Knicks 105 - Spurs 104.\n\n**Sources:**\n- [www.espn.com/nba/game/_/gameId/401769845/knicks-spurs](https://www.espn.com/nba/game/_/gameId/401769845/knicks-spurs)\n- [www.nba.com/game/sas-vs-nyk-0042500302](https://www.nba.com/game/sas-vs-nyk-0042500302)"
+	if content != want {
+		t.Fatalf("unexpected source markdown:\nwant %q\n got %q", want, content)
+	}
+	if strings.Contains(content, "Final Score") || strings.Contains(content, "Game Summary") {
+		t.Fatalf("source titles should not be appended to compact source links: %s", content)
+	}
+}
+
+func TestAppendWebSearchSourceLinksUsesSingularLabel(t *testing.T) {
+	content := appendWebSearchSourceLinks("Answer.", []tools.SourceLink{
+		{Title: "Example", URL: "https://example.com/article"},
+	}, defaultAppendedWebSourceLinks)
+
+	want := "Answer.\n\n**Source:**\n- [example.com/article](https://example.com/article)"
+	if content != want {
+		t.Fatalf("unexpected source markdown:\nwant %q\n got %q", want, content)
+	}
+}
+
+func TestAppendWebSearchSourceLinksReplacesModelSourceSection(t *testing.T) {
+	content := appendWebSearchSourceLinks("Answer.\n\nSources:\n- [ESPN](https:[redacted])\n- NBA.com preview", []tools.SourceLink{
+		{Title: "Example", URL: "https://www.espn.com/nba/game/_/gameId/401769845/knicks-spurs"},
+	}, defaultAppendedWebSourceLinks)
+
+	want := "Answer.\n\n**Source:**\n- [www.espn.com/nba/game/_/gameId/401769845/knicks-spurs](https://www.espn.com/nba/game/_/gameId/401769845/knicks-spurs)"
+	if content != want {
+		t.Fatalf("unexpected source markdown:\nwant %q\n got %q", want, content)
+	}
+	if strings.Contains(content, "[redacted]") || strings.Contains(content, "NBA.com preview") {
+		t.Fatalf("model-generated source section should be replaced: %s", content)
+	}
+}
+
+func TestAppendWebSearchSourceLinksReplacesInlineModelSourceSection(t *testing.T) {
+	content := appendWebSearchSourceLinks("Answer.\n\n**Sources:** [1](https:[redacted])", []tools.SourceLink{
+		{Title: "Example", URL: "https://example.com/article"},
+	}, defaultAppendedWebSourceLinks)
+
+	want := "Answer.\n\n**Source:**\n- [example.com/article](https://example.com/article)"
+	if content != want {
+		t.Fatalf("unexpected source markdown:\nwant %q\n got %q", want, content)
+	}
+}
+
+func TestAppendWebSearchSourceLinksDefaultsToThreeSources(t *testing.T) {
+	content := appendWebSearchSourceLinks("Answer.", []tools.SourceLink{
+		{URL: "https://example.com/one"},
+		{URL: "https://example.com/two"},
+		{URL: "https://example.com/three"},
+		{URL: "https://example.com/four"},
+		{URL: "https://example.com/five"},
+	}, sourceLinkLimitForPrompt("what happened recently?"))
+
+	want := "Answer.\n\n**Sources:**\n- [example.com/one](https://example.com/one)\n- [example.com/two](https://example.com/two)\n- [example.com/three](https://example.com/three)"
+	if content != want {
+		t.Fatalf("unexpected source markdown:\nwant %q\n got %q", want, content)
+	}
+}
+
+func TestAppendWebSearchSourceLinksHonorsExplicitSourceCount(t *testing.T) {
+	content := appendWebSearchSourceLinks("Answer.", []tools.SourceLink{
+		{URL: "https://example.com/one"},
+		{URL: "https://example.com/two"},
+		{URL: "https://example.com/three"},
+		{URL: "https://example.com/four"},
+		{URL: "https://example.com/five"},
+	}, sourceLinkLimitForPrompt("please cite five sources"))
+
+	want := "Answer.\n\n**Sources:**\n- [example.com/one](https://example.com/one)\n- [example.com/two](https://example.com/two)\n- [example.com/three](https://example.com/three)\n- [example.com/four](https://example.com/four)\n- [example.com/five](https://example.com/five)"
+	if content != want {
+		t.Fatalf("unexpected source markdown:\nwant %q\n got %q", want, content)
 	}
 }
 

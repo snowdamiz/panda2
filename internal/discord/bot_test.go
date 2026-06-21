@@ -578,6 +578,34 @@ func TestResponsePartOnlyRendersComponentsWhenRequested(t *testing.T) {
 	}
 }
 
+func TestResponseMessageCreatesSuppressEmbeds(t *testing.T) {
+	response := commands.Response{Content: "Source: https://example.com/article"}
+
+	interactionMessage := messageCreateFromResponsePart(response, response.Content, true)
+	if !interactionMessage.Flags.Has(disgoDiscord.MessageFlagSuppressEmbeds) {
+		t.Fatalf("expected interaction message to suppress embeds, got flags %v", interactionMessage.Flags)
+	}
+
+	channelMessage := channelMessageCreateFromResponsePart(response, response.Content, true)
+	if !channelMessage.Flags.Has(disgoDiscord.MessageFlagSuppressEmbeds) {
+		t.Fatalf("expected channel message to suppress embeds, got flags %v", channelMessage.Flags)
+	}
+}
+
+func TestResponseMessageUpdatesSuppressEmbeds(t *testing.T) {
+	response := commands.Response{Content: "Source: https://example.com/article"}
+
+	webhookUpdate := webhookMessageUpdateFromResponsePart(response, response.Content, true)
+	if webhookUpdate.Flags == nil || !webhookUpdate.Flags.Has(disgoDiscord.MessageFlagSuppressEmbeds) {
+		t.Fatalf("expected webhook update to suppress embeds, got flags %v", webhookUpdate.Flags)
+	}
+
+	messageUpdate := messageUpdateFromResponse(response)
+	if messageUpdate.Flags == nil || !messageUpdate.Flags.Has(disgoDiscord.MessageFlagSuppressEmbeds) {
+		t.Fatalf("expected message update to suppress embeds, got flags %v", messageUpdate.Flags)
+	}
+}
+
 func TestChannelMessageCreateWithReferenceRepliesWithoutPingingInvoker(t *testing.T) {
 	channelID := snowflake.MustParse("100000000000000002")
 	messageID := snowflake.MustParse("100000000000000003")

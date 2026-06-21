@@ -1,6 +1,7 @@
 ---
-import PandaFace from './PandaFace.astro';
+import LogoMark from './LogoMark.astro';
 import { heroMeta, marqueeItems, modelOptions, siteMeta } from '../data/landing';
+import Button from './ui/Button.astro';
 ---
 
 <section class="hero" id="top">
@@ -14,11 +15,10 @@ import { heroMeta, marqueeItems, modelOptions, siteMeta } from '../data/landing'
         community, governed by your roles, and private by design.
       </p>
       <div class="hero-actions">
-        <a class="button button-light" href={siteMeta.setupUrl} target="_blank" rel="noreferrer">
+        <Button href={siteMeta.repositoryUrl} external>
           Deploy Panda
           <svg viewBox="0 0 18 18" aria-hidden="true"><path d="M4 9h10M10 5l4 4-4 4" /></svg>
-        </a>
-        <a class="button button-ghost" href="#demo">See it in Discord</a>
+        </Button>
       </div>
       <div class="hero-meta" aria-label="Technology stack">
         {
@@ -91,7 +91,7 @@ import { heroMeta, marqueeItems, modelOptions, siteMeta } from '../data/landing'
 
           <article class="message message-panda">
             <div class="avatar avatar-panda" aria-hidden="true">
-              <PandaFace />
+              <LogoMark class="avatar-logo" loading="eager" size={30} />
             </div>
             <div class="message-content">
               <div class="message-author">Panda <span class="bot-tag">APP</span> <time>Today at 10:42 AM</time></div>

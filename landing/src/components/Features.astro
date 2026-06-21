@@ -1,5 +1,6 @@
 ---
 import { featureCards, policyRows } from '../data/landing';
+import Kicker from './ui/Kicker.astro';
 
 const [contextFeature, routingFeature, knowledgeFeature, toolsFeature] = featureCards;
 ---
@@ -8,7 +9,7 @@ const [contextFeature, routingFeature, knowledgeFeature, toolsFeature] = feature
   <div class="shell">
     <div class="section-heading reveal">
       <div>
-        <p class="kicker">Built for real communities</p>
+        <Kicker>Built for real communities</Kicker>
         <h2>One assistant.<br />Every kind of work.</h2>
       </div>
       <p>

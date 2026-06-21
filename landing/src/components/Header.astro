@@ -1,14 +1,11 @@
 ---
-import BrandMark from './BrandMark.astro';
 import { navLinks, siteMeta } from '../data/landing';
+import BrandLink from './ui/BrandLink.astro';
 ---
 
 <header class="site-header" data-header>
   <div class="shell nav-shell">
-    <a class="brand" href="#top" aria-label="Panda home">
-      <BrandMark />
-      <span>PANDA</span>
-    </a>
+    <BrandLink />
 
     <nav class="desktop-nav" aria-label="Primary navigation">
       {navLinks.map((link) => <a href={link.href}>{link.label}</a>)}

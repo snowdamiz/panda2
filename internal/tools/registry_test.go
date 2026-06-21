@@ -92,6 +92,25 @@ func TestOpenRouterToolsFiltersByPermission(t *testing.T) {
 	if !names["discord_fetch_message"] || !names["panda_list_tools"] || names["generate_workflow_json"] {
 		t.Fatalf("unexpected read-only tools: %+v", names)
 	}
+	writeTools := registry.OpenRouterToolsForAccess(ToolAccess{
+		Policy:      ToolPolicyWriteConfirmed,
+		Permissions: map[string]struct{}{admin.PermissionAssistantUse: {}},
+	})
+	writeNames := toolNames(writeTools)
+	if !writeNames["discord_send_message"] || writeNames["discord_create_thread"] {
+		t.Fatalf("plain assistant use should not expose thread creation, got %+v", writeNames)
+	}
+	threadTools := registry.OpenRouterToolsForAccess(ToolAccess{
+		Policy: ToolPolicyWriteConfirmed,
+		Permissions: map[string]struct{}{
+			admin.PermissionAssistantUse:        {},
+			admin.PermissionAssistantUseThreads: {},
+		},
+	})
+	threadNames := toolNames(threadTools)
+	if !threadNames["discord_create_thread"] {
+		t.Fatalf("thread permission should expose thread creation, got %+v", threadNames)
+	}
 	for _, tool := range tools {
 		if tool.Type != "function" || tool.Function.Name == "" || len(tool.Function.Parameters) == 0 {
 			t.Fatalf("unexpected OpenRouter tool: %+v", tool)
@@ -674,6 +693,9 @@ func TestExecutorRunsWebSearchTool(t *testing.T) {
 	if message.Role != "tool" || message.ToolCallID != "call-web" || !strings.Contains(message.Content, "sqlite.org") || !strings.Contains(message.Content, "brave_search") {
 		t.Fatalf("unexpected tool message: %+v", message)
 	}
+	if len(result.SourceLinks) != 1 || result.SourceLinks[0].Title != "SQLite Release History" || result.SourceLinks[0].URL != "https://sqlite.org/changes.html" {
+		t.Fatalf("unexpected web source links: %+v", result.SourceLinks)
+	}
 }
 
 func TestExecutorRunsFetchMessageTool(t *testing.T) {
@@ -817,6 +839,58 @@ func TestExecutorWriteToolRequiresDryRunOrConfirmation(t *testing.T) {
 	message = result.Message
 	if !strings.Contains(message.Content, `"confirmation_required":true`) || provider.calls != 0 {
 		t.Fatalf("write should require confirmation without provider execution: message=%+v calls=%d", message, provider.calls)
+	}
+}
+
+func TestExecutorCreatePrivateThreadUsesPrivateThreadPermission(t *testing.T) {
+	registry, err := NewDefaultRegistry()
+	if err != nil {
+		t.Fatalf("NewDefaultRegistry: %v", err)
+	}
+	provider := &fakeDiscordProvider{}
+	executor := NewExecutor(registry, nil, nil).WithDiscordToolProvider(provider)
+	access := testAccess(ToolPolicyWriteConfirmed, admin.PermissionAssistantUse, admin.PermissionAssistantUseThreads)
+
+	preview, err := executor.Execute(context.Background(), ExecutionRequest{
+		GuildID: "guild-1",
+		Access:  access,
+		Call: llm.ToolCall{
+			ID:   "call-private-thread-preview",
+			Type: "function",
+			Function: llm.ToolCallFunction{
+				Name:      "discord_create_thread",
+				Arguments: `{"channel_id":"channel-1","name":"Support follow-up","private":true,"dry_run":true}`,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Execute preview: %v", err)
+	}
+	if !strings.Contains(preview.Message.Content, "CREATE_PRIVATE_THREADS") || strings.Contains(preview.Message.Content, "CREATE_PUBLIC_THREADS") {
+		t.Fatalf("private thread preview should use private thread permission: %s", preview.Message.Content)
+	}
+
+	_, err = executor.Execute(context.Background(), ExecutionRequest{
+		GuildID:              "guild-1",
+		Access:               access,
+		AllowConfirmedWrites: true,
+		Call: llm.ToolCall{
+			ID:   "call-private-thread-confirmed",
+			Type: "function",
+			Function: llm.ToolCallFunction{
+				Name:      "discord_create_thread",
+				Arguments: `{"channel_id":"channel-1","name":"Support follow-up","private":true}`,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Execute confirmed: %v", err)
+	}
+	if provider.calls != 1 || len(provider.requests) != 1 {
+		t.Fatalf("expected one provider call, calls=%d requests=%d", provider.calls, len(provider.requests))
+	}
+	if strings.Join(provider.requests[0].Permissions, ",") != "CREATE_PRIVATE_THREADS" {
+		t.Fatalf("confirmed private thread should use private permission, got %+v", provider.requests[0].Permissions)
 	}
 }
 
@@ -1150,7 +1224,7 @@ func TestExecutorListsNativeAndComposedTools(t *testing.T) {
 		GuildID:        "guild-1",
 		ActorID:        "user-1",
 		InvocationType: "chat_tool",
-		Access:         testAccess(ToolPolicyReadOnly, admin.PermissionAssistantUse, admin.PermissionToolComposeInvoke),
+		Access:         testAccess(ToolPolicyReadOnly, admin.PermissionAssistantUse, admin.PermissionAdminConfigRead, admin.PermissionToolComposeInvoke),
 		Call: llm.ToolCall{
 			ID:   "call-list",
 			Type: "function",
@@ -1200,12 +1274,12 @@ func TestExecutorListToolsHidesAdminToolsFromNormalUsers(t *testing.T) {
 		t.Fatalf("Execute: %v", err)
 	}
 	content := result.Message.Content
-	for _, want := range []string{`"name":"discord_fetch_message"`, `"name":"panda_list_tools"`, `"admin_tools_hidden":true`, "super secret admin tools"} {
+	for _, want := range []string{`"presentation":"capabilities"`, `"name":"answer_from_visible_discord_context"`, `"name":"current_capabilities"`, `"admin_tools_hidden":true`, "Additional admin-only tools exist"} {
 		if !strings.Contains(content, want) {
 			t.Fatalf("expected normal user tool listing to contain %s, got %s", want, content)
 		}
 	}
-	for _, hidden := range []string{"read_config", "panda_manage_tool_access", "discord_modify_channel_permissions", "admin.config.write", "admin_read", "admin_write"} {
+	for _, hidden := range []string{"discord_fetch_message", "native_name", "input_schema", "read_config", "panda_manage_tool_access", "discord_modify_channel_permissions", "admin.config.write", "admin_read", "admin_write"} {
 		if strings.Contains(content, hidden) {
 			t.Fatalf("normal user tool listing leaked admin detail %q: %s", hidden, content)
 		}

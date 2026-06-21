@@ -5,6 +5,8 @@
   "type": "module",
   "scripts": {
     "dev": "astro dev",
+    "lint": "npm run lint:tokens",
+    "lint:tokens": "node scripts/lint-design-tokens.mjs",
     "check": "astro check",
     "build": "astro build",
     "preview": "astro preview"
@@ -14,6 +16,8 @@
   },
   "devDependencies": {
     "@astrojs/check": "0.9.9",
+    "@tailwindcss/vite": "4.3.1",
+    "tailwindcss": "4.3.1",
     "typescript": "6.0.3"
   }
 }

@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -229,7 +231,7 @@ func (s *Service) Chat(ctx context.Context, request AskRequest) (AskResponse, er
 	messages = append(messages, llm.Message{Role: "user", Content: sanitizePromptInput(request.Question)})
 
 	start := time.Now()
-	response, confirmations, err := s.completeWithTools(ctx, config, request.RequestID, request.UserID, request.ChannelID, request.AllowedPermissions, request.AllowedTools, request.RestrictedTools, request.RequireExplicitComposedTools, llm.ChatRequest{
+	response, confirmations, sourceLinks, err := s.completeWithTools(ctx, config, request.RequestID, request.UserID, request.ChannelID, request.AllowedPermissions, request.AllowedTools, request.RestrictedTools, request.RequireExplicitComposedTools, llm.ChatRequest{
 		Messages:    messages,
 		Temperature: temperatureFromConfig(config, "chat"),
 		MaxTokens:   maxTokensFromConfig(config, "chat"),
@@ -240,7 +242,7 @@ func (s *Service) Chat(ctx context.Context, request AskRequest) (AskResponse, er
 		return AskResponse{}, err
 	}
 
-	content := security.SanitizeDiscordContent(response.Content)
+	content := finalizeAssistantContent(response.Content, sourceLinks, sourceLinkLimitForPrompt(request.Question))
 	_ = s.conversations.AppendMessage(ctx, store.AssistantMessage{
 		ConversationID: conversation.ID,
 		GuildID:        request.GuildID,
@@ -306,7 +308,7 @@ func (s *Service) complete(ctx context.Context, request TaskRequest) (AskRespons
 	}
 
 	start := time.Now()
-	response, confirmations, err := s.completeWithTools(ctx, config, request.RequestID, request.UserID, request.ChannelID, request.AllowedPermissions, request.AllowedTools, request.RestrictedTools, request.RequireExplicitComposedTools, llm.ChatRequest{
+	response, confirmations, sourceLinks, err := s.completeWithTools(ctx, config, request.RequestID, request.UserID, request.ChannelID, request.AllowedPermissions, request.AllowedTools, request.RestrictedTools, request.RequireExplicitComposedTools, llm.ChatRequest{
 		Messages:    s.taskMessages(ctx, config, request),
 		Temperature: temperatureFromConfig(config, request.Command),
 		MaxTokens:   maxTokensFromConfig(config, request.Command),
@@ -323,7 +325,7 @@ func (s *Service) complete(ctx context.Context, request TaskRequest) (AskRespons
 		return AskResponse{}, err
 	}
 
-	content := security.SanitizeDiscordContent(response.Content)
+	content := finalizeAssistantContent(response.Content, sourceLinks, sourceLinkLimitForPrompt(request.Input))
 	return AskResponse{Content: content, Model: response.Model, Usage: response.Usage, Confirmation: firstConfirmation(confirmations)}, nil
 }
 
@@ -456,7 +458,7 @@ func (s *Service) guildConfig(ctx context.Context, guildID string) (store.GuildC
 	return config, true, nil
 }
 
-func (s *Service) completeWithTools(ctx context.Context, config store.GuildConfig, requestID, actorID, channelID string, allowedPermissions, allowedTools, restrictedTools map[string]struct{}, requireExplicitComposedTools bool, request llm.ChatRequest) (llm.ChatResponse, []InteractionConfirmation, error) {
+func (s *Service) completeWithTools(ctx context.Context, config store.GuildConfig, requestID, actorID, channelID string, allowedPermissions, allowedTools, restrictedTools map[string]struct{}, requireExplicitComposedTools bool, request llm.ChatRequest) (llm.ChatResponse, []InteractionConfirmation, []tools.SourceLink, error) {
 	access := toolAccess(config, allowedPermissions, allowedTools, restrictedTools, requireExplicitComposedTools)
 	if s.toolExecutor != nil && len(access.Permissions) > 0 {
 		request.Tools = s.toolExecutor.OpenRouterToolsForRequest(ctx, tools.DynamicToolListRequest{
@@ -470,7 +472,7 @@ func (s *Service) completeWithTools(ctx context.Context, config store.GuildConfi
 	request.Messages = append(request.Messages, llm.Message{Role: "system", Content: toolAvailabilityMessage(request.Tools, access)})
 	response, err := s.chatWithFallback(ctx, config, request)
 	if err != nil || len(response.ToolCalls) == 0 || s.toolExecutor == nil {
-		return response, nil, err
+		return response, nil, nil, err
 	}
 
 	messages := append([]llm.Message{}, request.Messages...)
@@ -480,6 +482,7 @@ func (s *Service) completeWithTools(ctx context.Context, config store.GuildConfi
 		ToolCalls: response.ToolCalls,
 	})
 	var confirmations []InteractionConfirmation
+	var sourceLinks []tools.SourceLink
 	for _, call := range response.ToolCalls {
 		result, err := s.toolExecutor.Execute(ctx, tools.ExecutionRequest{
 			GuildID:        config.GuildID,
@@ -500,12 +503,13 @@ func (s *Service) completeWithTools(ctx context.Context, config store.GuildConfi
 		} else if result.Confirmation != nil {
 			confirmations = append(confirmations, confirmationFromTool(*result.Confirmation))
 		}
+		sourceLinks = append(sourceLinks, result.SourceLinks...)
 		messages = append(messages, sanitizeToolMessage(message))
 	}
 	request.Messages = messages
 	request.Tools = nil
 	finalResponse, err := s.chatWithFallback(ctx, config, request)
-	return finalResponse, confirmations, err
+	return finalResponse, confirmations, sourceLinks, err
 }
 
 func sanitizeToolMessage(message llm.Message) llm.Message {
@@ -515,6 +519,183 @@ func sanitizeToolMessage(message llm.Message) llm.Message {
 		message.ToolCalls[index].Function.Arguments = security.RedactSecrets(message.ToolCalls[index].Function.Arguments)
 	}
 	return message
+}
+
+const defaultAppendedWebSourceLinks = 3
+const maxAppendedWebSourceLinks = 10
+
+func finalizeAssistantContent(content string, sourceLinks []tools.SourceLink, sourceLimit int) string {
+	return appendWebSearchSourceLinks(security.SanitizeDiscordContent(content), sourceLinks, sourceLimit)
+}
+
+func appendWebSearchSourceLinks(content string, sourceLinks []tools.SourceLink, sourceLimit int) string {
+	content = stripTrailingSourceSection(strings.TrimSpace(content))
+	sources := webSearchSourceLinksForFooter(sourceLinks, sourceLimit)
+	if len(sources) == 0 {
+		return content
+	}
+	if content != "" {
+		content += "\n\n"
+	}
+	label := "Sources:"
+	if len(sources) == 1 {
+		label = "Source:"
+	}
+	parts := make([]string, 0, len(sources))
+	for _, source := range sources {
+		parts = append(parts, fmt.Sprintf("- [%s](%s)", markdownSourceLabel(source.URL), markdownSourceURL(source.URL)))
+	}
+	return content + "**" + label + "**\n" + strings.Join(parts, "\n")
+}
+
+func webSearchSourceLinksForFooter(sourceLinks []tools.SourceLink, sourceLimit int) []tools.SourceLink {
+	sourceLimit = normalizeSourceLinkLimit(sourceLimit)
+	seen := map[string]struct{}{}
+	sources := make([]tools.SourceLink, 0, len(sourceLinks))
+	for _, source := range sourceLinks {
+		source.URL = strings.TrimSpace(source.URL)
+		if !validWebSourceURL(source.URL) {
+			continue
+		}
+		key := strings.TrimRight(source.URL, "/")
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		sources = append(sources, source)
+		if len(sources) >= sourceLimit {
+			break
+		}
+	}
+	return sources
+}
+
+func normalizeSourceLinkLimit(limit int) int {
+	if limit <= 0 {
+		return defaultAppendedWebSourceLinks
+	}
+	if limit > maxAppendedWebSourceLinks {
+		return maxAppendedWebSourceLinks
+	}
+	return limit
+}
+
+func sourceLinkLimitForPrompt(prompt string) int {
+	fields := strings.FieldsFunc(strings.ToLower(prompt), func(r rune) bool {
+		return (r < 'a' || r > 'z') && (r < '0' || r > '9')
+	})
+	for index, field := range fields {
+		if !sourceLimitNoun(field) {
+			continue
+		}
+		for back := index - 1; back >= 0 && back >= index-4; back-- {
+			if fields[back] == "more" || fields[back] == "additional" {
+				return maxAppendedWebSourceLinks
+			}
+			if count, ok := parseSourceLimitCount(fields[back]); ok {
+				return normalizeSourceLinkLimit(count)
+			}
+		}
+	}
+	return defaultAppendedWebSourceLinks
+}
+
+func sourceLimitNoun(value string) bool {
+	switch value {
+	case "source", "sources", "citation", "citations", "link", "links":
+		return true
+	default:
+		return false
+	}
+}
+
+func parseSourceLimitCount(value string) (int, bool) {
+	if parsed, err := strconv.Atoi(value); err == nil {
+		return parsed, true
+	}
+	switch value {
+	case "one":
+		return 1, true
+	case "two":
+		return 2, true
+	case "three":
+		return 3, true
+	case "four":
+		return 4, true
+	case "five":
+		return 5, true
+	case "six":
+		return 6, true
+	case "seven":
+		return 7, true
+	case "eight":
+		return 8, true
+	case "nine":
+		return 9, true
+	case "ten":
+		return 10, true
+	default:
+		return 0, false
+	}
+}
+
+func stripTrailingSourceSection(content string) string {
+	lines := strings.Split(strings.TrimSpace(content), "\n")
+	for index := len(lines) - 1; index >= 0; index-- {
+		if !sourceHeadingLine(lines[index]) {
+			continue
+		}
+		return strings.TrimSpace(strings.Join(lines[:index], "\n"))
+	}
+	return content
+}
+
+func sourceHeadingLine(line string) bool {
+	line = strings.TrimSpace(line)
+	line = strings.ReplaceAll(line, "**", "")
+	line = strings.Trim(line, "*_ ")
+	line = strings.ToLower(line)
+	return line == "source:" ||
+		line == "sources:" ||
+		strings.HasPrefix(line, "source: ") ||
+		strings.HasPrefix(line, "sources: ")
+}
+
+func validWebSourceURL(rawURL string) bool {
+	if rawURL == "" || strings.ContainsAny(rawURL, " \t\r\n<>") {
+		return false
+	}
+	parsed, err := url.Parse(rawURL)
+	if err != nil || parsed.Host == "" {
+		return false
+	}
+	return strings.EqualFold(parsed.Scheme, "https") || strings.EqualFold(parsed.Scheme, "http")
+}
+
+func markdownSourceURL(rawURL string) string {
+	return strings.NewReplacer("(", "%28", ")", "%29").Replace(rawURL)
+}
+
+func markdownSourceLabel(rawURL string) string {
+	parsed, err := url.Parse(rawURL)
+	if err != nil || parsed.Host == "" {
+		return escapeMarkdownSourceLabel(rawURL)
+	}
+	display := parsed.Host + parsed.EscapedPath()
+	if parsed.RawQuery != "" {
+		display += "?" + parsed.RawQuery
+	}
+	if parsed.Fragment != "" {
+		display += "#" + parsed.Fragment
+	}
+	if display == parsed.Host+"/" {
+		display = parsed.Host
+	}
+	return escapeMarkdownSourceLabel(display)
+}
+
+func escapeMarkdownSourceLabel(label string) string {
+	return strings.NewReplacer("[", `\[`, "]", `\]`).Replace(label)
 }
 
 func toolAvailabilityMessage(availableTools []llm.Tool, access tools.ToolAccess) string {

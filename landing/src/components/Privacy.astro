@@ -1,20 +1,22 @@
 ---
 import { privacyItems, siteMeta } from '../data/landing';
+import Button from './ui/Button.astro';
+import Kicker from './ui/Kicker.astro';
 ---
 
 <section class="section privacy-section" id="privacy">
   <div class="privacy-orb" aria-hidden="true"></div>
   <div class="shell privacy-layout">
     <div class="privacy-copy reveal">
-      <p class="kicker">Privacy from first principles</p>
+      <Kicker>Privacy from first principles</Kicker>
       <h2>Memory should be invited,<br />not assumed.</h2>
       <p>
         Panda defaults to minimal retention. Server knowledge is opt-in, user memory requires
         separate consent, and raw Discord content is treated as untrusted context.
       </p>
-      <a class="button button-light" href={siteMeta.architectureUrl} target="_blank" rel="noreferrer">
+      <Button href={siteMeta.architectureUrl} external>
         Read the architecture
-      </a>
+      </Button>
     </div>
     <div class="privacy-list reveal">
       {

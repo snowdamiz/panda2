@@ -1,5 +1,6 @@
 ---
 import { commandRows, commandViews, controlPoints } from '../data/landing';
+import Kicker from './ui/Kicker.astro';
 
 const initialCommandView = commandViews[0];
 ---
@@ -46,7 +47,7 @@ const initialCommandView = commandViews[0];
     </div>
 
     <div class="control-copy reveal">
-      <p class="kicker kicker-dark">No dashboard required</p>
+      <Kicker tone="paper">No dashboard required</Kicker>
       <h2>The control plane<br />lives in Discord.</h2>
       <p>
         Admins configure Panda where the team already is. Delegate access to a custom role,

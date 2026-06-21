@@ -365,7 +365,7 @@ func DefaultDefinitions() []Definition {
 		discordWrite("discord.delete_own_message", "Dry-run or confirmed delete of a Panda-authored message only.", []string{"channel_id", "message_id"}, "MANAGE_MESSAGES"),
 		discordWrite("discord.add_reaction", "Dry-run or confirmed add reaction to a visible message.", []string{"channel_id", "message_id", "emoji"}, "ADD_REACTIONS", "READ_MESSAGE_HISTORY"),
 		discordWrite("discord.remove_own_reaction", "Dry-run or confirmed remove Panda's own reaction from a message.", []string{"channel_id", "message_id", "emoji"}, "READ_MESSAGE_HISTORY"),
-		discordWrite("discord.create_thread", "Dry-run or confirmed thread creation.", []string{"channel_id", "name"}, "CREATE_PUBLIC_THREADS"),
+		threadWrite("discord.create_thread", "Dry-run or confirmed thread creation.", []string{"channel_id", "name"}, "CREATE_PUBLIC_THREADS"),
 		discordWrite("discord.rename_thread", "Dry-run or confirmed thread rename.", []string{"thread_id", "name"}, "MANAGE_THREADS"),
 		discordWrite("discord.archive_thread", "Dry-run or confirmed thread archive/unarchive.", []string{"thread_id"}, "MANAGE_THREADS"),
 		discordWrite("discord.add_thread_member", "Dry-run or confirmed add a member to a thread.", []string{"thread_id", "user_id"}, "MANAGE_THREADS"),
@@ -413,7 +413,7 @@ func DefaultDefinitions() []Definition {
 		},
 		{
 			Name:                  "web.search",
-			Description:           "Search the public web with Brave Search and return ranked URLs, titles, and snippets for current-information answers.",
+			Description:           "Search the public web with Brave Search and return ranked URLs, titles, and snippets for current-information answers. Final answers based on this tool should include source links.",
 			RequiredPermission:    admin.PermissionAssistantWebSearch,
 			ToolClass:             ToolClassWebRead,
 			InputSchema:           webSearchSchema(),
@@ -804,6 +804,12 @@ func discordWrite(name, description string, required []string, permissions ...st
 		DiscordPermissions:    permissions,
 		IncludeInModelContext: true,
 	}
+}
+
+func threadWrite(name, description string, required []string, permissions ...string) Definition {
+	definition := discordWrite(name, description, required, permissions...)
+	definition.RequiredPermission = admin.PermissionAssistantUseThreads
+	return definition
 }
 
 func moderationWrite(name, description string, required []string, permissions ...string) Definition {

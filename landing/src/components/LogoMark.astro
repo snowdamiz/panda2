@@ -1,0 +1,25 @@
+---
+interface Props {
+  alt?: string;
+  class?: string;
+  loading?: 'eager' | 'lazy';
+  size?: number;
+}
+
+const {
+  alt = '',
+  class: className = 'logo-mark',
+  loading = 'lazy',
+  size = 1024,
+} = Astro.props;
+---
+
+<img
+  class={className}
+  src="/icon-logo.svg"
+  alt={alt}
+  width={size}
+  height={size}
+  loading={loading}
+  decoding="async"
+/>

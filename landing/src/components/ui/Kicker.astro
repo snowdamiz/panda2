@@ -1,0 +1,12 @@
+---
+interface Props {
+  tone?: 'ink' | 'paper';
+  class?: string;
+}
+
+const { tone = 'ink', class: className = '' } = Astro.props;
+---
+
+<p class:list={['kicker', { 'kicker-dark': tone === 'paper' }, className]}>
+  <slot />
+</p>

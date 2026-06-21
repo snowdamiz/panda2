@@ -865,7 +865,7 @@ func messageCreateFromResponse(response commands.Response) disgoDiscord.MessageC
 }
 
 func messageCreateFromResponsePart(response commands.Response, content string, includeComponents bool) disgoDiscord.MessageCreate {
-	message := disgoDiscord.NewMessageCreate().WithContent(content).WithEphemeral(response.Ephemeral)
+	message := disgoDiscord.NewMessageCreate().WithContent(content).WithEphemeral(response.Ephemeral).WithSuppressEmbeds(true)
 	if includeComponents {
 		message = message.WithComponents(componentsFromResponse(response)...)
 	}
@@ -881,7 +881,7 @@ func channelMessageCreateFromResponsePart(response commands.Response, content st
 }
 
 func channelMessageCreateFromResponsePartWithReference(response commands.Response, content string, includeComponents bool, reference *disgoDiscord.MessageReference) disgoDiscord.MessageCreate {
-	message := disgoDiscord.NewMessageCreate().WithContent(content)
+	message := disgoDiscord.NewMessageCreate().WithContent(content).WithSuppressEmbeds(true)
 	if includeComponents {
 		message = message.WithComponents(componentsFromResponse(response)...)
 	}
@@ -926,7 +926,7 @@ func webhookMessageUpdateFromResponse(response commands.Response) disgoDiscord.M
 }
 
 func webhookMessageUpdateFromResponsePart(response commands.Response, content string, includeComponents bool) disgoDiscord.MessageUpdate {
-	message := disgoDiscord.NewMessageUpdate().WithContent(content)
+	message := disgoDiscord.NewMessageUpdate().WithContent(content).WithSuppressEmbeds(true)
 	if includeComponents {
 		message = message.WithComponents(componentsFromResponse(response)...)
 	}
@@ -934,7 +934,10 @@ func webhookMessageUpdateFromResponsePart(response commands.Response, content st
 }
 
 func messageUpdateFromResponse(response commands.Response) disgoDiscord.MessageUpdate {
-	return disgoDiscord.NewMessageUpdate().WithContent(firstDiscordContentChunk(response.Content)).WithComponents(componentsFromResponse(response)...)
+	return disgoDiscord.NewMessageUpdate().
+		WithContent(firstDiscordContentChunk(response.Content)).
+		WithSuppressEmbeds(true).
+		WithComponents(componentsFromResponse(response)...)
 }
 
 func (b *Bot) updateInteractionResponse(applicationID snowflake.ID, token string, response commands.Response) error {

@@ -1,0 +1,22 @@
+---
+import LogoMark from '../LogoMark.astro';
+
+interface Props {
+  href?: string;
+  label?: string;
+  class?: string;
+  ariaLabel?: string;
+}
+
+const {
+  href = '#top',
+  label = 'PANDA',
+  class: className = '',
+  ariaLabel = 'Panda home',
+} = Astro.props;
+---
+
+<a class:list={['brand', className]} href={href} aria-label={ariaLabel}>
+  <LogoMark class="brand-mark" loading="eager" />
+  <span>{label}</span>
+</a>

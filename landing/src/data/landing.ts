@@ -12,7 +12,7 @@ export const siteMeta = {
     'https://github.com/snowdamiz/panda2/blob/main/PLAN.md#safety-privacy-and-abuse-controls',
   operationsUrl: 'https://github.com/snowdamiz/panda2/blob/main/OPERATIONS.md',
   siteUrl: 'https://panda2-landing.fly.dev',
-  ogImagePath: '/og-image.svg',
+  ogImagePath: '/og-image.png',
   locale: 'en_US',
   name: 'Panda',
   keywords: [
