@@ -388,8 +388,8 @@ func TestComposedToolApprovedVersionsAreImmutable(t *testing.T) {
 	repo := NewComposedToolRepository(db.DB)
 	record, err := repo.CreateDraft(ctx, store.ComposedTool{
 		GuildID:   "guild-1",
-		ToolID:    "guild-1:builder_welcome",
-		Name:      "builder_welcome",
+		ToolID:    "guild-1:member_welcome",
+		Name:      "member_welcome",
 		Status:    "pending_approval",
 		CreatedBy: "moderator-1",
 	}, store.ComposedToolVersion{
@@ -401,7 +401,7 @@ func TestComposedToolApprovedVersionsAreImmutable(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateDraft: %v", err)
 	}
-	if _, err := repo.ApproveVersion(ctx, "guild-1", "builder_welcome", 1, "admin-1"); err != nil {
+	if _, err := repo.ApproveVersion(ctx, "guild-1", "member_welcome", 1, "admin-1"); err != nil {
 		t.Fatalf("ApproveVersion: %v", err)
 	}
 	if err := repo.UpdateDraftVersion(ctx, record.Version.ID, `{"mutated":true}`, `{}`, `{}`); err == nil {
@@ -409,7 +409,7 @@ func TestComposedToolApprovedVersionsAreImmutable(t *testing.T) {
 	}
 
 	next, err := repo.AddDraftVersion(ctx, record.Tool.ID, store.ComposedToolVersion{
-		SpecJSON:           `{"schema_version":1,"name":"builder_welcome"}`,
+		SpecJSON:           `{"schema_version":1,"name":"member_welcome"}`,
 		ValidationJSON:     `{"valid":true}`,
 		ToolDefinitionJSON: `{"type":"function"}`,
 		CreatedBy:          "moderator-1",
@@ -420,7 +420,7 @@ func TestComposedToolApprovedVersionsAreImmutable(t *testing.T) {
 	if next.VersionNumber != 2 {
 		t.Fatalf("expected version 2, got %d", next.VersionNumber)
 	}
-	tool, ok, err := repo.GetByName(ctx, "guild-1", "builder_welcome")
+	tool, ok, err := repo.GetByName(ctx, "guild-1", "member_welcome")
 	if err != nil || !ok {
 		t.Fatalf("GetByName: ok=%t err=%v", ok, err)
 	}

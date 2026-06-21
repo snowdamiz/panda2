@@ -171,8 +171,11 @@ func ValidateSpec(spec Spec, registry *tools.Registry) ValidationReport {
 			if strings.TrimSpace(invocation.EventType) == "" {
 				addError("event invocation requires event_type")
 			}
-			if invocation.EventType == "guild.member.role_added" && strings.TrimSpace(invocation.Filters["role_id"]) == "" {
-				addError("guild.member.role_added invocation requires filters.role_id")
+			if !SupportsEventType(invocation.EventType) {
+				addError("event invocation type %q is not supported", invocation.EventType)
+			}
+			if (invocation.EventType == EventGuildMemberRoleAdded || invocation.EventType == EventGuildMemberRoleRemoved) && strings.TrimSpace(invocation.Filters["role_id"]) == "" {
+				addError("%s invocation requires filters.role_id", invocation.EventType)
 			}
 		}
 		if (mode == InvocationEvent || mode == InvocationScheduled) && len(report.Writes) > 0 && spec.Safety.RequiresConfirmationOnWrite {

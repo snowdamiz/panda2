@@ -32,21 +32,30 @@ func (b *Bot) ToolProvider(events *repository.DiscordEventRepository) *ToolProvi
 }
 
 func (b *Bot) recordDiscordEvent(ctx context.Context, event store.DiscordEvent) {
-	if b == nil || b.events == nil || strings.TrimSpace(event.GuildID) == "" {
+	if b == nil || strings.TrimSpace(event.GuildID) == "" {
 		return
 	}
-	if _, err := b.events.Record(ctx, event); err != nil {
-		discordEventDrops.Add(1)
-		logger := b.logger
-		if logger == nil {
-			logger = slog.Default()
+	recorded := event
+	if b.events != nil {
+		saved, err := b.events.Record(ctx, event)
+		if err != nil {
+			discordEventDrops.Add(1)
+			logger := b.logger
+			if logger == nil {
+				logger = slog.Default()
+			}
+			logger.Debug("failed to record discord event", slog.Any("err", err), slog.String("event_type", event.EventType))
+		} else {
+			recorded = saved
 		}
-		logger.Debug("failed to record discord event", slog.Any("err", err), slog.String("event_type", event.EventType))
+	}
+	if composed.SupportsEventType(event.EventType) {
+		b.enqueueComposedEvent(ctx, recorded, metadataMap(event.Metadata))
 	}
 }
 
 func (b *Bot) onGuildMessageUpdate(event *events.GuildMessageUpdate) {
-	b.recordMessageEvent(context.Background(), "message_update", event.Message)
+	b.recordMessageEvent(context.Background(), composed.EventMessageUpdated, event.Message)
 }
 
 func (b *Bot) onGuildMessageDelete(event *events.GuildMessageDelete) {
@@ -54,18 +63,18 @@ func (b *Bot) onGuildMessageDelete(event *events.GuildMessageDelete) {
 		GuildID:   event.GuildID.String(),
 		ChannelID: event.ChannelID.String(),
 		MessageID: event.MessageID.String(),
-		EventType: "message_delete",
+		EventType: composed.EventMessageDeleted,
 		Summary:   "Message deleted",
 		Metadata:  metadataJSON(map[string]string{"message_id": event.MessageID.String()}),
 	})
 }
 
 func (b *Bot) onGuildMessageReactionAdd(event *events.GuildMessageReactionAdd) {
-	b.recordReactionEvent("reaction_add", event.GuildID, event.ChannelID, event.MessageID, event.UserID, event.Emoji.Reaction())
+	b.recordReactionEvent(composed.EventReactionAdded, event.GuildID, event.ChannelID, event.MessageID, event.UserID, event.Emoji.Reaction())
 }
 
 func (b *Bot) onGuildMessageReactionRemove(event *events.GuildMessageReactionRemove) {
-	b.recordReactionEvent("reaction_remove", event.GuildID, event.ChannelID, event.MessageID, event.UserID, event.Emoji.Reaction())
+	b.recordReactionEvent(composed.EventReactionRemoved, event.GuildID, event.ChannelID, event.MessageID, event.UserID, event.Emoji.Reaction())
 }
 
 func (b *Bot) onGuildMessageReactionRemoveAll(event *events.GuildMessageReactionRemoveAll) {
@@ -73,7 +82,7 @@ func (b *Bot) onGuildMessageReactionRemoveAll(event *events.GuildMessageReaction
 		GuildID:   event.GuildID.String(),
 		ChannelID: event.ChannelID.String(),
 		MessageID: event.MessageID.String(),
-		EventType: "reaction_remove_all",
+		EventType: composed.EventReactionsRemovedAll,
 		Summary:   "All reactions removed from message",
 	})
 }
@@ -83,37 +92,37 @@ func (b *Bot) onGuildMessageReactionRemoveEmoji(event *events.GuildMessageReacti
 		GuildID:   event.GuildID.String(),
 		ChannelID: event.ChannelID.String(),
 		MessageID: event.MessageID.String(),
-		EventType: "reaction_remove_emoji",
+		EventType: composed.EventReactionEmojiRemoved,
 		Summary:   "All reactions for one emoji removed from message",
 		Metadata:  metadataJSON(map[string]string{"emoji": event.Emoji.Reaction()}),
 	})
 }
 
 func (b *Bot) onGuildMessagePollVoteAdd(event *events.GuildMessagePollVoteAdd) {
-	b.recordPollVoteEvent("poll_vote_add", event.GuildID, event.ChannelID, event.MessageID, event.UserID, event.AnswerID)
+	b.recordPollVoteEvent(composed.EventPollVoteAdded, event.GuildID, event.ChannelID, event.MessageID, event.UserID, event.AnswerID)
 }
 
 func (b *Bot) onGuildMessagePollVoteRemove(event *events.GuildMessagePollVoteRemove) {
-	b.recordPollVoteEvent("poll_vote_remove", event.GuildID, event.ChannelID, event.MessageID, event.UserID, event.AnswerID)
+	b.recordPollVoteEvent(composed.EventPollVoteRemoved, event.GuildID, event.ChannelID, event.MessageID, event.UserID, event.AnswerID)
 }
 
 func (b *Bot) onGuildChannelCreate(event *events.GuildChannelCreate) {
-	b.recordChannelEvent("channel_create", event.GuildID, event.ChannelID, event.Channel.Name())
+	b.recordChannelEvent(composed.EventChannelCreated, event.GuildID, event.ChannelID, event.Channel.Name())
 }
 
 func (b *Bot) onGuildChannelUpdate(event *events.GuildChannelUpdate) {
-	b.recordChannelEvent("channel_update", event.GuildID, event.ChannelID, event.Channel.Name())
+	b.recordChannelEvent(composed.EventChannelUpdated, event.GuildID, event.ChannelID, event.Channel.Name())
 }
 
 func (b *Bot) onGuildChannelDelete(event *events.GuildChannelDelete) {
-	b.recordChannelEvent("channel_delete", event.GuildID, event.ChannelID, event.Channel.Name())
+	b.recordChannelEvent(composed.EventChannelDeleted, event.GuildID, event.ChannelID, event.Channel.Name())
 }
 
 func (b *Bot) onGuildChannelPinsUpdate(event *events.GuildChannelPinsUpdate) {
 	b.recordDiscordEvent(context.Background(), store.DiscordEvent{
 		GuildID:   event.GuildID.String(),
 		ChannelID: event.ChannelID.String(),
-		EventType: "channel_pins_update",
+		EventType: composed.EventChannelPinsUpdated,
 		Summary:   "Channel pins updated",
 		Metadata: metadataJSON(map[string]string{
 			"last_pin_at": timePtrValue(event.NewLastPinTimestamp),
@@ -122,15 +131,15 @@ func (b *Bot) onGuildChannelPinsUpdate(event *events.GuildChannelPinsUpdate) {
 }
 
 func (b *Bot) onThreadCreate(event *events.ThreadCreate) {
-	b.recordThreadEvent("thread_create", event.GuildID, event.ThreadID, event.Thread.Name())
+	b.recordThreadEvent(composed.EventThreadCreated, event.GuildID, event.ThreadID, event.Thread.Name())
 }
 
 func (b *Bot) onThreadUpdate(event *events.ThreadUpdate) {
-	b.recordThreadEvent("thread_update", event.GuildID, event.ThreadID, event.Thread.Name())
+	b.recordThreadEvent(composed.EventThreadUpdated, event.GuildID, event.ThreadID, event.Thread.Name())
 }
 
 func (b *Bot) onThreadDelete(event *events.ThreadDelete) {
-	b.recordThreadEvent("thread_delete", event.GuildID, event.ThreadID, event.Thread.Name())
+	b.recordThreadEvent(composed.EventThreadDeleted, event.GuildID, event.ThreadID, event.Thread.Name())
 }
 
 func (b *Bot) onThreadMemberUpdate(event *events.ThreadMemberUpdate) {
@@ -138,9 +147,13 @@ func (b *Bot) onThreadMemberUpdate(event *events.ThreadMemberUpdate) {
 		GuildID:   event.GuildID.String(),
 		ChannelID: event.ThreadID.String(),
 		UserID:    event.ThreadMemberID.String(),
-		EventType: "thread_member_update",
+		EventType: composed.EventThreadMemberUpdated,
 		Summary:   "Thread member updated",
 	})
+}
+
+func (b *Bot) onGuildMemberJoin(event *events.GuildMemberJoin) {
+	b.recordMemberEvent(context.Background(), composed.EventGuildMemberJoined, event.GuildID, event.Member)
 }
 
 func (b *Bot) onGuildMemberUpdate(event *events.GuildMemberUpdate) {
@@ -149,35 +162,35 @@ func (b *Bot) onGuildMemberUpdate(event *events.GuildMemberUpdate) {
 		if _, existed := oldRoles[roleID]; existed {
 			continue
 		}
-		b.recordMemberRoleEvent(context.Background(), "guild.member.role_added", event.GuildID, event.Member.User.ID, roleID)
+		b.recordMemberRoleEvent(context.Background(), composed.EventGuildMemberRoleAdded, event.GuildID, event.Member.User.ID, roleID)
 	}
 	newRoles := snowflakeSet(event.Member.RoleIDs)
 	for _, roleID := range event.OldMember.RoleIDs {
 		if _, exists := newRoles[roleID]; exists {
 			continue
 		}
-		b.recordMemberRoleEvent(context.Background(), "guild.member.role_removed", event.GuildID, event.Member.User.ID, roleID)
+		b.recordMemberRoleEvent(context.Background(), composed.EventGuildMemberRoleRemoved, event.GuildID, event.Member.User.ID, roleID)
 	}
 }
 
 func (b *Bot) onRoleCreate(event *events.RoleCreate) {
-	b.recordRoleEvent("role_create", event.GuildID, event.RoleID, event.Role.Name)
+	b.recordRoleEvent(composed.EventRoleCreated, event.GuildID, event.RoleID, event.Role.Name)
 }
 
 func (b *Bot) onRoleUpdate(event *events.RoleUpdate) {
-	b.recordRoleEvent("role_update", event.GuildID, event.RoleID, event.Role.Name)
+	b.recordRoleEvent(composed.EventRoleUpdated, event.GuildID, event.RoleID, event.Role.Name)
 }
 
 func (b *Bot) onRoleDelete(event *events.RoleDelete) {
-	b.recordRoleEvent("role_delete", event.GuildID, event.RoleID, event.Role.Name)
+	b.recordRoleEvent(composed.EventRoleDeleted, event.GuildID, event.RoleID, event.Role.Name)
 }
 
 func (b *Bot) onGuildBan(event *events.GuildBan) {
-	b.recordGuildUserEvent("guild_ban", event.GuildID, event.User.ID, "User banned")
+	b.recordGuildUserEvent(composed.EventGuildBan, event.GuildID, event.User.ID, "User banned")
 }
 
 func (b *Bot) onGuildUnban(event *events.GuildUnban) {
-	b.recordGuildUserEvent("guild_unban", event.GuildID, event.User.ID, "User unbanned")
+	b.recordGuildUserEvent(composed.EventGuildUnban, event.GuildID, event.User.ID, "User unbanned")
 }
 
 func (b *Bot) onInviteCreate(event *events.InviteCreate) {
@@ -188,7 +201,7 @@ func (b *Bot) onInviteCreate(event *events.InviteCreate) {
 	b.recordDiscordEvent(context.Background(), store.DiscordEvent{
 		GuildID:   guildID,
 		ChannelID: event.ChannelID.String(),
-		EventType: "invite_create",
+		EventType: composed.EventInviteCreated,
 		Summary:   "Invite created",
 		Metadata:  metadataJSON(map[string]string{"code": event.Code}),
 	})
@@ -202,7 +215,7 @@ func (b *Bot) onInviteDelete(event *events.InviteDelete) {
 	b.recordDiscordEvent(context.Background(), store.DiscordEvent{
 		GuildID:   guildID,
 		ChannelID: event.ChannelID.String(),
-		EventType: "invite_delete",
+		EventType: composed.EventInviteDeleted,
 		Summary:   "Invite deleted",
 		Metadata:  metadataJSON(map[string]string{"code": event.Code}),
 	})
@@ -212,21 +225,21 @@ func (b *Bot) onWebhooksUpdate(event *events.WebhooksUpdate) {
 	b.recordDiscordEvent(context.Background(), store.DiscordEvent{
 		GuildID:   event.GuildId.String(),
 		ChannelID: event.ChannelID.String(),
-		EventType: "webhooks_update",
+		EventType: composed.EventWebhooksUpdated,
 		Summary:   "Channel webhooks updated",
 	})
 }
 
 func (b *Bot) onAutoModerationRuleCreate(event *events.AutoModerationRuleCreate) {
-	b.recordAutoModerationRuleEvent("auto_moderation_rule_create", event.GuildID, event.ID, event.Name)
+	b.recordAutoModerationRuleEvent(composed.EventAutoModerationCreated, event.GuildID, event.ID, event.Name)
 }
 
 func (b *Bot) onAutoModerationRuleUpdate(event *events.AutoModerationRuleUpdate) {
-	b.recordAutoModerationRuleEvent("auto_moderation_rule_update", event.GuildID, event.ID, event.Name)
+	b.recordAutoModerationRuleEvent(composed.EventAutoModerationUpdated, event.GuildID, event.ID, event.Name)
 }
 
 func (b *Bot) onAutoModerationRuleDelete(event *events.AutoModerationRuleDelete) {
-	b.recordAutoModerationRuleEvent("auto_moderation_rule_delete", event.GuildID, event.ID, event.Name)
+	b.recordAutoModerationRuleEvent(composed.EventAutoModerationDeleted, event.GuildID, event.ID, event.Name)
 }
 
 func (b *Bot) onAutoModerationActionExecution(event *events.AutoModerationActionExecution) {
@@ -243,7 +256,7 @@ func (b *Bot) onAutoModerationActionExecution(event *events.AutoModerationAction
 		ChannelID: channelID,
 		UserID:    event.UserID.String(),
 		MessageID: messageID,
-		EventType: "auto_moderation_action",
+		EventType: composed.EventAutoModerationAction,
 		Summary:   "Auto moderation action executed",
 		Metadata: metadataJSON(map[string]string{
 			"rule_id":      event.RuleID.String(),
@@ -253,23 +266,23 @@ func (b *Bot) onAutoModerationActionExecution(event *events.AutoModerationAction
 }
 
 func (b *Bot) onGuildScheduledEventCreate(event *events.GuildScheduledEventCreate) {
-	b.recordScheduledEvent("scheduled_event_create", event.GuildScheduled.GuildID, event.GuildScheduled.ID, event.GuildScheduled.Name)
+	b.recordScheduledEvent(composed.EventScheduledCreated, event.GuildScheduled.GuildID, event.GuildScheduled.ID, event.GuildScheduled.Name)
 }
 
 func (b *Bot) onGuildScheduledEventUpdate(event *events.GuildScheduledEventUpdate) {
-	b.recordScheduledEvent("scheduled_event_update", event.GuildScheduled.GuildID, event.GuildScheduled.ID, event.GuildScheduled.Name)
+	b.recordScheduledEvent(composed.EventScheduledUpdated, event.GuildScheduled.GuildID, event.GuildScheduled.ID, event.GuildScheduled.Name)
 }
 
 func (b *Bot) onGuildScheduledEventDelete(event *events.GuildScheduledEventDelete) {
-	b.recordScheduledEvent("scheduled_event_delete", event.GuildScheduled.GuildID, event.GuildScheduled.ID, event.GuildScheduled.Name)
+	b.recordScheduledEvent(composed.EventScheduledDeleted, event.GuildScheduled.GuildID, event.GuildScheduled.ID, event.GuildScheduled.Name)
 }
 
 func (b *Bot) onGuildScheduledEventUserAdd(event *events.GuildScheduledEventUserAdd) {
-	b.recordScheduledEventUser("scheduled_event_user_add", event.GuildID, event.GuildScheduledEventID, event.UserID)
+	b.recordScheduledEventUser(composed.EventScheduledUserAdded, event.GuildID, event.GuildScheduledEventID, event.UserID)
 }
 
 func (b *Bot) onGuildScheduledEventUserRemove(event *events.GuildScheduledEventUserRemove) {
-	b.recordScheduledEventUser("scheduled_event_user_remove", event.GuildID, event.GuildScheduledEventID, event.UserID)
+	b.recordScheduledEventUser(composed.EventScheduledUserRemoved, event.GuildID, event.GuildScheduledEventID, event.UserID)
 }
 
 func (b *Bot) onGuildVoiceStateUpdate(event *events.GuildVoiceStateUpdate) {
@@ -487,6 +500,22 @@ func (b *Bot) recordRoleEvent(eventType string, guildID, roleID snowflake.ID, na
 	})
 }
 
+func (b *Bot) recordMemberEvent(ctx context.Context, eventType string, guildID snowflake.ID, member disgoDiscord.Member) {
+	metadata := map[string]string{
+		"username":       member.User.Username,
+		"effective_name": member.EffectiveName(),
+		"user_is_bot":    fmt.Sprintf("%t", member.User.Bot),
+	}
+	event := store.DiscordEvent{
+		GuildID:   guildID.String(),
+		UserID:    member.User.ID.String(),
+		EventType: eventType,
+		Summary:   "Member joined",
+		Metadata:  metadataJSON(metadata),
+	}
+	b.recordDiscordEvent(ctx, event)
+}
+
 func (b *Bot) recordMemberRoleEvent(ctx context.Context, eventType string, guildID, userID, roleID snowflake.ID) {
 	roleName := b.roleName(guildID, roleID)
 	metadata := map[string]string{"role_id": roleID.String()}
@@ -500,23 +529,7 @@ func (b *Bot) recordMemberRoleEvent(ctx context.Context, eventType string, guild
 		Summary:   "Member role changed",
 		Metadata:  metadataJSON(metadata),
 	}
-	recorded := event
-	if b.events != nil {
-		var err error
-		recorded, err = b.events.Record(ctx, event)
-		if err != nil {
-			discordEventDrops.Add(1)
-			logger := b.logger
-			if logger == nil {
-				logger = slog.Default()
-			}
-			logger.Debug("failed to record discord member role event", slog.Any("err", err), slog.String("event_type", event.EventType))
-		}
-	}
-	b.enqueueComposedEvent(ctx, recorded, map[string]string{
-		"role_id":   roleID.String(),
-		"role_name": roleName,
-	})
+	b.recordDiscordEvent(ctx, event)
 }
 
 func (b *Bot) enqueueComposedEvent(ctx context.Context, event store.DiscordEvent, metadata map[string]string) {
@@ -588,7 +601,7 @@ func (b *Bot) recordScheduledEvent(eventType string, guildID, scheduledEventID s
 		GuildID:   guildID.String(),
 		EventType: eventType,
 		Summary:   "Scheduled event changed",
-		Metadata:  metadataJSON(map[string]string{"event_id": scheduledEventID.String(), "name": name}),
+		Metadata:  metadataJSON(map[string]string{"scheduled_event_id": scheduledEventID.String(), "name": name}),
 	})
 }
 
@@ -598,7 +611,7 @@ func (b *Bot) recordScheduledEventUser(eventType string, guildID, scheduledEvent
 		UserID:    userID.String(),
 		EventType: eventType,
 		Summary:   "Scheduled event user activity",
-		Metadata:  metadataJSON(map[string]string{"event_id": scheduledEventID.String()}),
+		Metadata:  metadataJSON(map[string]string{"scheduled_event_id": scheduledEventID.String()}),
 	})
 }
 
@@ -611,6 +624,17 @@ func metadataJSON(values map[string]string) string {
 		return "{}"
 	}
 	return string(data)
+}
+
+func metadataMap(raw string) map[string]string {
+	values := map[string]string{}
+	if strings.TrimSpace(raw) == "" {
+		return values
+	}
+	if err := json.Unmarshal([]byte(raw), &values); err != nil {
+		return map[string]string{}
+	}
+	return values
 }
 
 func snowflakeSet(ids []snowflake.ID) map[snowflake.ID]struct{} {

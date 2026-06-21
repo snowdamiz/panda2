@@ -2,6 +2,8 @@ package composed
 
 import (
 	"encoding/json"
+	"sort"
+	"strings"
 	"time"
 )
 
@@ -42,7 +44,98 @@ const (
 
 	EventJobKind = "composed_tool.event"
 	RunJobKind   = "composed_tool.run"
+
+	EventGuildMemberJoined      = "guild.member.joined"
+	EventGuildMemberRoleAdded   = "guild.member.role_added"
+	EventGuildMemberRoleRemoved = "guild.member.role_removed"
+
+	EventMessageUpdated        = "message_update"
+	EventMessageDeleted        = "message_delete"
+	EventReactionAdded         = "reaction_add"
+	EventReactionRemoved       = "reaction_remove"
+	EventReactionsRemovedAll   = "reaction_remove_all"
+	EventReactionEmojiRemoved  = "reaction_remove_emoji"
+	EventPollVoteAdded         = "poll_vote_add"
+	EventPollVoteRemoved       = "poll_vote_remove"
+	EventChannelCreated        = "channel_create"
+	EventChannelUpdated        = "channel_update"
+	EventChannelDeleted        = "channel_delete"
+	EventChannelPinsUpdated    = "channel_pins_update"
+	EventThreadCreated         = "thread_create"
+	EventThreadUpdated         = "thread_update"
+	EventThreadDeleted         = "thread_delete"
+	EventThreadMemberUpdated   = "thread_member_update"
+	EventRoleCreated           = "role_create"
+	EventRoleUpdated           = "role_update"
+	EventRoleDeleted           = "role_delete"
+	EventGuildBan              = "guild_ban"
+	EventGuildUnban            = "guild_unban"
+	EventInviteCreated         = "invite_create"
+	EventInviteDeleted         = "invite_delete"
+	EventWebhooksUpdated       = "webhooks_update"
+	EventAutoModerationCreated = "auto_moderation_rule_create"
+	EventAutoModerationUpdated = "auto_moderation_rule_update"
+	EventAutoModerationDeleted = "auto_moderation_rule_delete"
+	EventAutoModerationAction  = "auto_moderation_action"
+	EventScheduledCreated      = "scheduled_event_create"
+	EventScheduledUpdated      = "scheduled_event_update"
+	EventScheduledDeleted      = "scheduled_event_delete"
+	EventScheduledUserAdded    = "scheduled_event_user_add"
+	EventScheduledUserRemoved  = "scheduled_event_user_remove"
 )
+
+var supportedEventTypes = map[string]struct{}{
+	EventGuildMemberJoined:      {},
+	EventGuildMemberRoleAdded:   {},
+	EventGuildMemberRoleRemoved: {},
+	EventMessageUpdated:         {},
+	EventMessageDeleted:         {},
+	EventReactionAdded:          {},
+	EventReactionRemoved:        {},
+	EventReactionsRemovedAll:    {},
+	EventReactionEmojiRemoved:   {},
+	EventPollVoteAdded:          {},
+	EventPollVoteRemoved:        {},
+	EventChannelCreated:         {},
+	EventChannelUpdated:         {},
+	EventChannelDeleted:         {},
+	EventChannelPinsUpdated:     {},
+	EventThreadCreated:          {},
+	EventThreadUpdated:          {},
+	EventThreadDeleted:          {},
+	EventThreadMemberUpdated:    {},
+	EventRoleCreated:            {},
+	EventRoleUpdated:            {},
+	EventRoleDeleted:            {},
+	EventGuildBan:               {},
+	EventGuildUnban:             {},
+	EventInviteCreated:          {},
+	EventInviteDeleted:          {},
+	EventWebhooksUpdated:        {},
+	EventAutoModerationCreated:  {},
+	EventAutoModerationUpdated:  {},
+	EventAutoModerationDeleted:  {},
+	EventAutoModerationAction:   {},
+	EventScheduledCreated:       {},
+	EventScheduledUpdated:       {},
+	EventScheduledDeleted:       {},
+	EventScheduledUserAdded:     {},
+	EventScheduledUserRemoved:   {},
+}
+
+func SupportsEventType(eventType string) bool {
+	_, ok := supportedEventTypes[strings.TrimSpace(eventType)]
+	return ok
+}
+
+func SupportedEventTypes() []string {
+	types := make([]string, 0, len(supportedEventTypes))
+	for eventType := range supportedEventTypes {
+		types = append(types, eventType)
+	}
+	sort.Strings(types)
+	return types
+}
 
 type Spec struct {
 	SchemaVersion int              `json:"schema_version"`
@@ -154,16 +247,17 @@ type TranscriptEntry struct {
 }
 
 type DraftRequest struct {
-	GuildID      string
-	ActorID      string
-	Text         string
-	SpecJSON     string
-	RoleID       string
-	RoleName     string
-	ChannelID    string
-	ChannelName  string
-	WelcomeText  string
-	DefaultModel string
+	GuildID         string
+	ActorID         string
+	Text            string
+	SpecJSON        string
+	RoleID          string
+	RoleName        string
+	ChannelID       string
+	ChannelName     string
+	SourceChannelID string
+	WelcomeText     string
+	DefaultModel    string
 }
 
 type DraftResult struct {

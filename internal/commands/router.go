@@ -245,7 +245,7 @@ func elevatedHelpMessage(access helpAccess) string {
 			builder.WriteString("- `/admin enable dry_run:<bool>` / `/admin disable confirm:<token> dry_run:<bool>`\n")
 		}
 		if access.soul {
-			builder.WriteString("- `/admin soul soul:<text> dry_run:<bool>` - personality/tone; omit `soul` for modal\n")
+			builder.WriteString("- `/admin soul soul:<text>` - personality/tone; natural chat can brainstorm/set\n")
 		}
 	}
 
@@ -286,13 +286,19 @@ func (r *Router) HandleNaturalMessage(ctx context.Context, request Request) Resp
 	if message == "" {
 		return Response{}
 	}
-	if denied := r.ensureAssistantAllowed(ctx, request); denied.Content != "" {
+	if !r.canHandleNaturalMessage(ctx, request) {
 		return Response{}
 	}
 	if response, ok := r.handleNaturalMusic(ctx, request, message); ok {
 		return response
 	}
 	if response, ok := handleNaturalPoll(message); ok {
+		return response
+	}
+	if response, ok := r.handleNaturalSoul(ctx, request, message); ok {
+		return response
+	}
+	if response, ok := r.handleNaturalAutomation(ctx, request, message); ok {
 		return response
 	}
 	decision, err := r.assistant.ClassifyNaturalMessage(ctx, assistant.NaturalMessageRequest{
@@ -313,7 +319,7 @@ func (r *Router) HandleNaturalMessage(ctx context.Context, request Request) Resp
 				request.Options = map[string]string{}
 			}
 			request.Options["question"] = prompt
-			return r.handleChatMode(ctx, request, false)
+			return r.handleChatModeWithAccess(ctx, request, false, true)
 		}
 		return Response{}
 	}
@@ -325,7 +331,30 @@ func (r *Router) HandleNaturalMessage(ctx context.Context, request Request) Resp
 		request.Options = map[string]string{}
 	}
 	request.Options["question"] = decision.Prompt
-	return r.handleChatMode(ctx, request, false)
+	return r.handleChatModeWithAccess(ctx, request, false, true)
+}
+
+func (r *Router) canHandleNaturalMessage(ctx context.Context, request Request) bool {
+	if r.admin == nil {
+		return false
+	}
+	accessRequest := assistantAccessRequest(request)
+	allowed, err := r.admin.CanUseAssistant(ctx, accessRequest)
+	if err != nil {
+		return false
+	}
+	if allowed {
+		return true
+	}
+	return r.canWriteSoul(ctx, request)
+}
+
+func (r *Router) canWriteSoul(ctx context.Context, request Request) bool {
+	if r.admin == nil {
+		return false
+	}
+	allowed, err := r.admin.CanWriteSoul(ctx, assistantAccessRequest(request))
+	return err == nil && allowed
 }
 
 func (r *Router) handleNaturalMusic(ctx context.Context, request Request, message string) (Response, bool) {
@@ -646,6 +675,260 @@ func cleanNaturalPollQuestion(value string) string {
 
 func cleanNaturalPollAnswer(value string) string {
 	return strings.TrimSpace(strings.Trim(value, " \t\r\n,;:.?!"))
+}
+
+func (r *Router) handleNaturalSoul(ctx context.Context, request Request, message string) (Response, bool) {
+	soul, ok := naturalSoulSetInstruction(message)
+	if !ok {
+		return Response{}, false
+	}
+	if request.GuildID == "" {
+		return Response{Content: "Soul updates must be run inside a Discord server.", Ephemeral: true}, true
+	}
+	allowed, err := r.admin.CanWriteSoul(ctx, assistantAccessRequest(request))
+	if err != nil {
+		return Response{Content: "Permission lookup failed. Please try again later.", Ephemeral: true}, true
+	}
+	if !allowed {
+		return Response{Content: "Only the Panda owner, server owner or administrator, or a delegated soul writer can update Panda's soul.", Ephemeral: true}, true
+	}
+	config, err := r.admin.SetSoul(ctx, request.GuildID, request.UserID, soul)
+	if err != nil {
+		return Response{Content: "Soul update failed.", Ephemeral: true}, true
+	}
+	return Response{Content: fmt.Sprintf("Agent soul updated (%d characters).", len(config.AgentSoul)), Ephemeral: true}, true
+}
+
+var naturalSoulSetPrefixes = []string{
+	"set your soul to",
+	"set its soul to",
+	"set panda's soul to",
+	"set panda soul to",
+	"set the soul to",
+	"set soul to",
+	"update your soul to",
+	"update its soul to",
+	"update panda's soul to",
+	"update panda soul to",
+	"update the soul to",
+	"update soul to",
+	"change your soul to",
+	"change its soul to",
+	"change panda's soul to",
+	"change panda soul to",
+	"change the soul to",
+	"change soul to",
+	"make your soul",
+	"make its soul",
+	"make panda's soul",
+	"make panda soul",
+	"make the soul",
+	"make soul",
+	"apply this soul",
+	"save this soul as",
+	"save this soul",
+	"use this soul as",
+	"use this soul",
+}
+
+func naturalSoulSetInstruction(message string) (string, bool) {
+	message = stripLeadingDiscordMention(strings.TrimSpace(message))
+	message = stripLeadingPandaWakePhrase(message)
+	message = strings.TrimSpace(strings.TrimLeft(message, " \t\r\n,;:.-"))
+	if message == "" {
+		return "", false
+	}
+	lower := strings.ToLower(message)
+	for _, prefix := range naturalSoulSetPrefixes {
+		if !strings.HasPrefix(lower, prefix) {
+			continue
+		}
+		soul := strings.TrimSpace(message[len(prefix):])
+		soul = strings.TrimSpace(strings.TrimLeft(soul, " \t\r\n,;:.-"))
+		soul = strings.Trim(soul, " \t\r\n\"'`")
+		return soul, soul != ""
+	}
+	return "", false
+}
+
+func (r *Router) handleNaturalAutomation(ctx context.Context, request Request, message string) (Response, bool) {
+	instruction, ok := naturalAutomationInstruction(message)
+	if !ok {
+		return Response{}, false
+	}
+	if request.GuildID == "" {
+		return Response{Content: "Composed automations must be drafted inside a Discord server.", Ephemeral: true}, true
+	}
+	if r.composed == nil {
+		return Response{Content: "Composed automations are not configured for this runtime.", Ephemeral: true}, true
+	}
+	allowed, err := r.admin.CanDraftComposedTool(ctx, assistantAccessRequest(request))
+	if err != nil {
+		return Response{Content: "Permission lookup failed. Please try again later.", Ephemeral: true}, true
+	}
+	if !allowed {
+		return Response{Content: "Only the Panda owner, server owner or administrator, or a delegated tool drafter can draft composed automations.", Ephemeral: true}, true
+	}
+	if limited := r.allowUser(request.UserID); limited.Content != "" {
+		return limited, true
+	}
+	if denied := r.ensureBudgetAvailable(ctx, request); denied.Content != "" {
+		return denied, true
+	}
+
+	targetChannelID := firstChannelMentionID(instruction)
+	result, err := r.composed.Draft(ctx, composed.DraftRequest{
+		GuildID:         request.GuildID,
+		ActorID:         request.UserID,
+		Text:            instruction,
+		ChannelID:       targetChannelID,
+		SourceChannelID: request.ChannelID,
+	})
+	if err != nil {
+		slog.Warn("natural automation draft failed", slog.Any("err", err), slog.String("guild_id", request.GuildID), slog.String("channel_id", request.ChannelID), slog.String("request_id", request.RequestID))
+		return Response{Content: "I tried to draft that automation, but the composed-tool draft failed. Please try again or provide the target channel as a Discord channel mention.", Ephemeral: true}, true
+	}
+	return responseFromComposedDraft(request.UserID, result), true
+}
+
+func naturalAutomationInstruction(message string) (string, bool) {
+	message = stripLeadingDiscordMention(strings.TrimSpace(message))
+	message = stripLeadingPandaWakePhrase(message)
+	message = strings.TrimSpace(strings.TrimLeft(message, " \t\r\n,;:.-"))
+	if message == "" {
+		return "", false
+	}
+	lower := strings.ToLower(message)
+	words := messageWords(message)
+	if startsEventAutomation(lower) && hasAutomationTriggerWord(words) && hasAutomationActionWord(words) {
+		return message, true
+	}
+	if strings.Contains(lower, "automation") || strings.Contains(lower, "composed tool") || strings.Contains(lower, "workflow") {
+		if hasAutomationSetupWord(words) && (hasAutomationTriggerWord(words) || strings.Contains(lower, " when ")) {
+			return message, true
+		}
+	}
+	return "", false
+}
+
+func startsEventAutomation(lower string) bool {
+	for _, prefix := range []string{"when ", "whenever ", "anytime ", "if "} {
+		if strings.HasPrefix(lower, prefix) {
+			return true
+		}
+	}
+	return strings.Contains(lower, " when ") || strings.Contains(lower, " whenever ")
+}
+
+func hasAutomationSetupWord(words []string) bool {
+	for _, word := range words {
+		switch word {
+		case "set", "setup", "create", "make", "build", "draft", "add", "configure":
+			return true
+		}
+	}
+	return false
+}
+
+func hasAutomationTriggerWord(words []string) bool {
+	for _, word := range words {
+		switch word {
+		case "role", "roles", "member", "members", "user", "users", "channel", "channels", "thread", "threads",
+			"reaction", "reactions", "poll", "vote", "votes", "invite", "invites", "webhook", "webhooks",
+			"ban", "banned", "unban", "unbanned", "moderation", "automod", "scheduled", "event", "joins", "joined",
+			"created", "updated", "deleted", "added", "removed":
+			return true
+		}
+	}
+	return false
+}
+
+func hasAutomationActionWord(words []string) bool {
+	for _, word := range words {
+		switch word {
+		case "send", "post", "announce", "message", "notify", "reply", "dm", "create", "add", "remove", "delete", "update", "pin", "unpin", "archive":
+			return true
+		}
+	}
+	return false
+}
+
+func firstChannelMentionID(message string) string {
+	for {
+		start := strings.Index(message, "<#")
+		if start < 0 {
+			return ""
+		}
+		rest := message[start+2:]
+		end := strings.Index(rest, ">")
+		if end < 0 {
+			return ""
+		}
+		candidate := strings.TrimSpace(rest[:end])
+		if candidate != "" && allDigits(candidate) {
+			return candidate
+		}
+		message = rest[end+1:]
+	}
+}
+
+func allDigits(value string) bool {
+	if value == "" {
+		return false
+	}
+	for _, char := range value {
+		if char < '0' || char > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+func responseFromComposedDraft(userID string, result composed.DraftResult) Response {
+	version := result.Version
+	if version <= 0 {
+		version = 1
+	}
+	content := fmt.Sprintf("Drafted `%s` version %d for approval.", result.Tool, version)
+	if triggers := composedDraftTriggers(result.Spec); len(triggers) > 0 {
+		content += "\nTrigger: " + strings.Join(triggers, ", ")
+	}
+	if len(result.Validation.Writes) > 0 {
+		content += "\nWrites: " + strings.Join(result.Validation.Writes, ", ")
+	}
+	if result.Validation.RiskLevel != "" {
+		content += "\nRisk: `" + result.Validation.RiskLevel + "`."
+	}
+	pending := &assistant.InteractionConfirmation{
+		Action:       toolActionComposedToolApprove,
+		Arguments:    map[string]string{"tool_name": result.Tool, "version": strconv.Itoa(version)},
+		Summary:      fmt.Sprintf("Panda prepared approval of `%s` version `%d`.", result.Tool, version),
+		ConfirmLabel: "Approve tool",
+		Danger:       true,
+	}
+	response := Response{
+		Content:      appendConfirmationNotice(content, pending.Summary),
+		Confirmation: ToolConfirmationFromAssistant(userID, pending),
+		Presentation: Presentation{Title: "Composed automation drafted", Accent: AccentDanger},
+	}
+	return response
+}
+
+func composedDraftTriggers(spec composed.Spec) []string {
+	var triggers []string
+	for _, invocation := range spec.Invocations {
+		if !composedInvocationEnabled(invocation) {
+			continue
+		}
+		if invocation.Type == composed.InvocationEvent && strings.TrimSpace(invocation.EventType) != "" {
+			triggers = append(triggers, "`"+strings.TrimSpace(invocation.EventType)+"`")
+		}
+	}
+	return triggers
+}
+
+func composedInvocationEnabled(invocation composed.InvocationSpec) bool {
+	return invocation.Enabled == nil || *invocation.Enabled
 }
 
 func sentenceCase(value string) string {
@@ -1302,12 +1585,18 @@ func (r *Router) handleChat(ctx context.Context, request Request) Response {
 }
 
 func (r *Router) handleChatMode(ctx context.Context, request Request, threaded bool) Response {
+	return r.handleChatModeWithAccess(ctx, request, threaded, false)
+}
+
+func (r *Router) handleChatModeWithAccess(ctx context.Context, request Request, threaded bool, allowSoulWriter bool) Response {
 	question := strings.TrimSpace(request.Options["question"])
 	if question == "" {
 		return Response{Content: "Please include a message.", Ephemeral: true}
 	}
 	if denied := r.ensureAssistantAllowed(ctx, request); denied.Content != "" {
-		return denied
+		if !allowSoulWriter || !r.canWriteSoul(ctx, request) {
+			return denied
+		}
 	}
 	if threaded && r.threads != nil && request.GuildID != "" {
 		if denied := r.ensureThreadsAllowed(ctx, request); denied.Content != "" {
@@ -1954,10 +2243,9 @@ func assistantError(err error) Response {
 
 func responseFromAssistantAnswer(userID string, answer assistant.AskResponse, threadID, threadName string) Response {
 	response := Response{
-		Content:      answer.Content,
-		ThreadID:     threadID,
-		ThreadName:   threadName,
-		Presentation: Presentation{Title: "Panda replied", Accent: AccentDefault},
+		Content:    answer.Content,
+		ThreadID:   threadID,
+		ThreadName: threadName,
 	}
 	if confirmation := ToolConfirmationFromAssistant(userID, answer.Confirmation); confirmation != nil {
 		response.Confirmation = confirmation

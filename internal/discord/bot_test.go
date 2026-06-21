@@ -17,6 +17,7 @@ import (
 	"github.com/disgoorg/disgo/rest"
 	"github.com/disgoorg/snowflake/v2"
 	"github.com/sn0w/panda2/internal/commands"
+	"github.com/sn0w/panda2/internal/composed"
 	"github.com/sn0w/panda2/internal/config"
 	"github.com/sn0w/panda2/internal/polls"
 	"github.com/sn0w/panda2/internal/store"
@@ -28,6 +29,10 @@ type fakeAttachmentRecorder struct {
 
 type fakeInteractionJobQueue struct {
 	jobs []store.Job
+}
+
+type fakeDiscordEventRecorder struct {
+	records []store.DiscordEvent
 }
 
 type fakeTypingSender struct {
@@ -68,6 +73,13 @@ func (f *fakeInteractionJobQueue) Enqueue(_ context.Context, job store.Job) (sto
 	job.ID = uint(len(f.jobs) + 1)
 	f.jobs = append(f.jobs, job)
 	return job, nil
+}
+
+func (f *fakeDiscordEventRecorder) Record(_ context.Context, event store.DiscordEvent) (store.DiscordEvent, error) {
+	event.ID = uint(len(f.records) + 1)
+	event.CreatedAt = time.Date(2026, 6, 21, 8, 0, 0, 0, time.UTC)
+	f.records = append(f.records, event)
+	return event, nil
 }
 
 func (f *fakeTypingSender) SendTyping(channelID snowflake.ID, _ ...rest.RequestOpt) error {
@@ -369,6 +381,80 @@ func TestQueueBackgroundInteractionStoresPayload(t *testing.T) {
 	}
 	if payload.ApplicationID != applicationID.String() || payload.Token != "token-1" || payload.Task.Command != "summarize" || payload.Task.Input != "long text" {
 		t.Fatalf("unexpected payload: %+v", payload)
+	}
+}
+
+func TestGuildMemberJoinEnqueuesComposedEvent(t *testing.T) {
+	queue := &fakeInteractionJobQueue{}
+	recorder := &fakeDiscordEventRecorder{}
+	bot := (&Bot{}).WithDiscordEventRecorder(recorder).WithJobQueue(queue)
+	guildID := snowflake.MustParse("100000000000000001")
+	userID := snowflake.MustParse("100000000000000002")
+
+	bot.onGuildMemberJoin(&events.GuildMemberJoin{
+		GenericGuildMember: &events.GenericGuildMember{
+			GuildID: guildID,
+			Member: disgoDiscord.Member{
+				User: disgoDiscord.User{ID: userID, Username: "snow"},
+			},
+		},
+	})
+
+	if len(recorder.records) != 1 || recorder.records[0].EventType != composed.EventGuildMemberJoined || recorder.records[0].UserID != userID.String() {
+		t.Fatalf("expected recorded member join event, got %+v", recorder.records)
+	}
+	if len(queue.jobs) != 1 || queue.jobs[0].Kind != composed.EventJobKind || queue.jobs[0].GuildID != guildID.String() {
+		t.Fatalf("expected composed event job, got %+v", queue.jobs)
+	}
+	var payload composed.EventJobPayload
+	if err := json.Unmarshal([]byte(queue.jobs[0].Payload), &payload); err != nil {
+		t.Fatalf("decode composed event payload: %v", err)
+	}
+	if payload.EventType != composed.EventGuildMemberJoined || payload.UserID != userID.String() || payload.Metadata["username"] != "snow" {
+		t.Fatalf("unexpected composed event payload: %+v", payload)
+	}
+}
+
+func TestSupportedDiscordEventEnqueuesComposedEvent(t *testing.T) {
+	queue := &fakeInteractionJobQueue{}
+	recorder := &fakeDiscordEventRecorder{}
+	bot := (&Bot{}).WithDiscordEventRecorder(recorder).WithJobQueue(queue)
+	guildID := snowflake.MustParse("100000000000000001")
+	channelID := snowflake.MustParse("100000000000000002")
+
+	bot.recordChannelEvent(composed.EventChannelCreated, guildID, channelID, "announcements")
+
+	if len(recorder.records) != 1 || recorder.records[0].EventType != composed.EventChannelCreated {
+		t.Fatalf("expected recorded channel event, got %+v", recorder.records)
+	}
+	if len(queue.jobs) != 1 || queue.jobs[0].Kind != composed.EventJobKind {
+		t.Fatalf("expected composed event job, got %+v", queue.jobs)
+	}
+	var payload composed.EventJobPayload
+	if err := json.Unmarshal([]byte(queue.jobs[0].Payload), &payload); err != nil {
+		t.Fatalf("decode composed event payload: %v", err)
+	}
+	if payload.EventType != composed.EventChannelCreated || payload.ChannelID != channelID.String() || payload.Metadata["name"] != "announcements" {
+		t.Fatalf("unexpected composed event payload: %+v", payload)
+	}
+}
+
+func TestUnsupportedDiscordEventDoesNotEnqueueComposedEvent(t *testing.T) {
+	queue := &fakeInteractionJobQueue{}
+	recorder := &fakeDiscordEventRecorder{}
+	bot := (&Bot{}).WithDiscordEventRecorder(recorder).WithJobQueue(queue)
+
+	bot.recordDiscordEvent(context.Background(), store.DiscordEvent{
+		GuildID:   "guild-1",
+		EventType: "message_create",
+		Summary:   "Message activity",
+	})
+
+	if len(recorder.records) != 1 {
+		t.Fatalf("expected unsupported event to remain recorded, got %+v", recorder.records)
+	}
+	if len(queue.jobs) != 0 {
+		t.Fatalf("unsupported event should not enqueue composed job, got %+v", queue.jobs)
 	}
 }
 
@@ -714,7 +800,7 @@ func TestResponseMessageCreatesPandaEmbed(t *testing.T) {
 }
 
 func TestResponseMessageUpdatesPandaEmbed(t *testing.T) {
-	response := commands.Response{Content: "Source: https://example.com/article", Presentation: commands.Presentation{Title: "Panda replied"}}
+	response := commands.Response{Content: "Source: https://example.com/article", Presentation: commands.Presentation{Title: "Reference"}}
 
 	webhookUpdate := webhookMessageUpdateFromResponsePart(response, response.Content, true)
 	if webhookUpdate.Content == nil || *webhookUpdate.Content != "" {
@@ -733,44 +819,75 @@ func TestResponseMessageUpdatesPandaEmbed(t *testing.T) {
 	}
 }
 
-func TestResponseMessageInfersPresentationForPlainResponses(t *testing.T) {
+func TestPlainResponseDoesNotInferPresentation(t *testing.T) {
 	tests := []struct {
-		name      string
-		content   string
-		wantTitle string
-		wantColor int
+		name    string
+		content string
 	}{
 		{
-			name:      "admin success",
-			content:   "Assigned `Pickle` (`role-pickle`) to `Snow` (`user-target`).",
-			wantTitle: "Done",
-			wantColor: successEmbedColor,
+			name:    "admin success",
+			content: "Assigned `Pickle` (`role-pickle`) to `Snow` (`user-target`).",
 		},
 		{
-			name:      "permission warning",
-			content:   "You do not have permission to use Panda here.",
-			wantTitle: "Heads up",
-			wantColor: warningEmbedColor,
+			name:    "permission warning",
+			content: "You do not have permission to use Panda here.",
 		},
 		{
-			name:      "ops info",
-			content:   "Health: sqlite=ok discord=ok shards=ok openrouter=ok queued_jobs=0 guild_configs=1 draining=false incident=false data_dir=`data`.",
-			wantTitle: "Ops health",
-			wantColor: infoEmbedColor,
+			name:    "ops info",
+			content: "Health: sqlite=ok discord=ok shards=ok openrouter=ok queued_jobs=0 guild_configs=1 draining=false incident=false data_dir=`data`.",
 		},
 	}
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			message := messageCreateFromResponse(commands.Response{Content: test.content})
-			if len(message.Embeds) != 1 {
-				t.Fatalf("expected inferred embed, got %+v", message.Embeds)
+			if message.Content != test.content || len(message.Embeds) != 0 {
+				t.Fatalf("expected plain content without inferred embed, got %+v", message)
 			}
-			embed := message.Embeds[0]
-			if embed.Title != test.wantTitle || embed.Color != test.wantColor || embed.Description != test.content {
-				t.Fatalf("unexpected inferred embed: %+v", embed)
+			if !message.Flags.Has(disgoDiscord.MessageFlagSuppressEmbeds) {
+				t.Fatalf("expected plain content to suppress external embeds, got flags %v", message.Flags)
 			}
 		})
+	}
+}
+
+func TestPlainWebhookUpdateClearsPreviousEmbeds(t *testing.T) {
+	update := webhookMessageUpdateFromResponse(commands.Response{Content: "final answer"})
+
+	if update.Content == nil || *update.Content != "final answer" {
+		t.Fatalf("expected plain update content, got %+v", update.Content)
+	}
+	if update.Embeds == nil || len(*update.Embeds) != 0 {
+		t.Fatalf("expected update to clear existing embeds, got %+v", update.Embeds)
+	}
+	if update.Flags == nil || !update.Flags.Has(disgoDiscord.MessageFlagSuppressEmbeds) {
+		t.Fatalf("expected plain update to suppress external embeds, got flags %v", update.Flags)
+	}
+}
+
+func TestMusicPresentationCreatesStrategicEmbed(t *testing.T) {
+	response := commands.Response{
+		Content: "Playing **Digital Love** `5:01`.",
+		Presentation: commands.Presentation{
+			Title:  "Now playing",
+			Accent: commands.AccentMusic,
+			URL:    "https://example.com/track",
+			Fields: []commands.Field{
+				{Name: "Duration", Value: "5:01", Inline: true},
+			},
+		},
+	}
+
+	message := messageCreateFromResponse(response)
+	if message.Content != "" || len(message.Embeds) != 1 || message.Flags.Has(disgoDiscord.MessageFlagSuppressEmbeds) {
+		t.Fatalf("expected music card embed, got %+v", message)
+	}
+	embed := message.Embeds[0]
+	if embed.Title != "Now playing" || embed.Color != musicEmbedColor || embed.Description != response.Content || embed.URL != "https://example.com/track" {
+		t.Fatalf("unexpected music embed: %+v", embed)
+	}
+	if len(embed.Fields) != 1 || embed.Fields[0].Name != "Duration" || embed.Fields[0].Value != "5:01" {
+		t.Fatalf("expected music field, got %+v", embed.Fields)
 	}
 }
 

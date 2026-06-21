@@ -134,6 +134,7 @@ func New(cfg config.Config, router *commands.Router, logger *slog.Logger) (*Bot,
 		bot.WithEventListenerFunc(instance.onThreadUpdate),
 		bot.WithEventListenerFunc(instance.onThreadDelete),
 		bot.WithEventListenerFunc(instance.onThreadMemberUpdate),
+		bot.WithEventListenerFunc(instance.onGuildMemberJoin),
 		bot.WithEventListenerFunc(instance.onGuildMemberUpdate),
 		bot.WithEventListenerFunc(instance.onRoleCreate),
 		bot.WithEventListenerFunc(instance.onRoleUpdate),
@@ -1134,7 +1135,7 @@ func webhookMessageUpdateFromResponsePart(response commands.Response, content st
 	if embed, ok := embedFromResponsePart(response, content); ok {
 		message = message.WithContent("").WithEmbeds(embed).WithSuppressEmbeds(false)
 	} else {
-		message = message.WithContent(content).WithSuppressEmbeds(true)
+		message = message.WithContent(content).WithEmbeds().WithSuppressEmbeds(true)
 	}
 	if includeComponents {
 		message = message.WithComponents(componentsFromResponse(response)...)
@@ -1233,6 +1234,9 @@ func discordSplitIndex(runes []rune, limit int) int {
 }
 
 func embedFromResponsePart(response commands.Response, content string) (disgoDiscord.Embed, bool) {
+	if !presentationHasExplicitDisplay(response.Presentation) {
+		return disgoDiscord.Embed{}, false
+	}
 	description := strings.TrimSpace(content)
 	presentation := responsePresentation(response.Presentation, description)
 	title := strings.TrimSpace(presentation.Title)
@@ -1266,13 +1270,10 @@ func embedFromResponsePart(response commands.Response, content string) (disgoDis
 }
 
 func responsePresentation(presentation commands.Presentation, content string) commands.Presentation {
-	if presentationHasExplicitDisplay(presentation) {
-		if strings.TrimSpace(presentation.Title) == "" && strings.TrimSpace(content) != "" {
-			presentation.Title = "Panda"
-		}
-		return presentation
+	if strings.TrimSpace(presentation.Title) == "" && strings.TrimSpace(content) != "" {
+		presentation.Title = "Panda"
 	}
-	return inferredPresentation(content)
+	return presentation
 }
 
 func presentationHasExplicitDisplay(presentation commands.Presentation) bool {
@@ -1281,65 +1282,6 @@ func presentationHasExplicitDisplay(presentation commands.Presentation) bool {
 		strings.TrimSpace(presentation.Footer) != "" ||
 		presentation.Accent != commands.AccentDefault ||
 		len(presentation.Fields) > 0
-}
-
-func inferredPresentation(content string) commands.Presentation {
-	trimmed := strings.TrimSpace(content)
-	if trimmed == "" {
-		return commands.Presentation{}
-	}
-	lower := strings.ToLower(trimmed)
-	switch {
-	case strings.HasPrefix(trimmed, "Health:"):
-		return commands.Presentation{Title: "Ops health", Accent: commands.AccentInfo}
-	case strings.HasPrefix(trimmed, "Configured guilds:"):
-		return commands.Presentation{Title: "Configured guilds", Accent: commands.AccentInfo}
-	case strings.HasPrefix(trimmed, "Recent audit events:"):
-		return commands.Presentation{Title: "Audit log", Accent: commands.AccentInfo}
-	case strings.HasPrefix(trimmed, "Panda role profiles:"):
-		return commands.Presentation{Title: "Role profiles", Accent: commands.AccentInfo}
-	case strings.HasPrefix(trimmed, "Tool access rules:"):
-		return commands.Presentation{Title: "Tool access", Accent: commands.AccentInfo}
-	case strings.HasPrefix(lower, "incident mode:"):
-		return commands.Presentation{Title: "Incident mode", Accent: commands.AccentInfo}
-	case strings.Contains(lower, "failed") || strings.Contains(lower, "could not") || strings.Contains(lower, "invalid"):
-		return commands.Presentation{Title: "Something went wrong", Accent: commands.AccentDanger}
-	case strings.Contains(lower, "permission") || strings.Contains(lower, "only ") || strings.Contains(lower, "must ") || strings.Contains(lower, "provide ") || strings.Contains(lower, "choose ") || strings.Contains(lower, "please ") || strings.Contains(lower, "not configured") || strings.Contains(lower, "not found") || strings.Contains(lower, "disabled") || strings.Contains(lower, "exhausted") || strings.Contains(lower, "too quickly"):
-		return commands.Presentation{Title: "Heads up", Accent: commands.AccentWarning}
-	case looksLikeSuccess(lower):
-		return commands.Presentation{Title: "Done", Accent: commands.AccentSuccess}
-	default:
-		return commands.Presentation{Title: "Panda", Accent: commands.AccentDefault}
-	}
-}
-
-func looksLikeSuccess(lower string) bool {
-	for _, prefix := range []string{
-		"assigned ",
-		"allowed ",
-		"approved ",
-		"cleared ",
-		"deleted ",
-		"granted ",
-		"model settings updated",
-		"prompt updated",
-		"queue worker",
-		"removed ",
-		"role `",
-		"runtime config reload check passed",
-		"server prompt updated",
-		"set ",
-		"soul updated",
-		"agent soul updated",
-		"assistant responses are enabled",
-		"assistant responses are disabled",
-		"updated ",
-	} {
-		if strings.HasPrefix(lower, prefix) {
-			return true
-		}
-	}
-	return strings.Contains(lower, " updated.") || strings.Contains(lower, " saved.")
 }
 
 func embedFieldsFromResponse(fields []commands.Field) []disgoDiscord.EmbedField {

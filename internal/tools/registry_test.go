@@ -546,7 +546,7 @@ func TestExecutorRunsComposedToolManager(t *testing.T) {
 			Type: "function",
 			Function: llm.ToolCallFunction{
 				Name:      "panda_manage_composed_tool",
-				Arguments: `{"action":"draft","request":"Create a welcome tool","dry_run":true}`,
+				Arguments: `{"action":"draft","request":"Create a member-join automation","dry_run":true}`,
 			},
 		},
 	})
@@ -557,7 +557,7 @@ func TestExecutorRunsComposedToolManager(t *testing.T) {
 		t.Fatalf("expected composed manager request, got %d", len(manager.requests))
 	}
 	request := manager.requests[0]
-	if request.Action != "draft" || request.Text != "Create a welcome tool" || !request.DryRun {
+	if request.Action != "draft" || request.Text != "Create a member-join automation" || !request.DryRun {
 		t.Fatalf("unexpected composed manager request: %+v", request)
 	}
 	if !strings.Contains(result.Message.Content, `"action":"draft"`) || !strings.Contains(result.Message.Content, `"dry_run":true`) {
@@ -1253,9 +1253,9 @@ func TestExecutorListsNativeAndComposedTools(t *testing.T) {
 		WithDynamicToolProvider(fakeDynamicProvider{tools: []llm.Tool{{
 			Type: "function",
 			Function: llm.ToolFunction{
-				Name:        "builder_welcome",
-				Description: "Welcomes builders.",
-				Parameters:  objectSchema("user_id", "role_id"),
+				Name:        "member_welcome",
+				Description: "Welcomes new members.",
+				Parameters:  objectSchema("user_id"),
 			},
 		}}})
 	result, err := executor.Execute(context.Background(), ExecutionRequest{
@@ -1276,7 +1276,7 @@ func TestExecutorListsNativeAndComposedTools(t *testing.T) {
 		t.Fatalf("Execute: %v", err)
 	}
 	content := result.Message.Content
-	for _, want := range []string{`"native_name":"discord.fetch_message"`, `"name":"discord_channel_activity_summary"`, `"name":"panda_list_tools"`, `"kind":"composed"`, `"name":"builder_welcome"`, `"input_schema"`} {
+	for _, want := range []string{`"native_name":"discord.fetch_message"`, `"name":"discord_channel_activity_summary"`, `"name":"panda_list_tools"`, `"kind":"composed"`, `"name":"member_welcome"`, `"input_schema"`} {
 		if !strings.Contains(content, want) {
 			t.Fatalf("expected tool listing to contain %s, got %s", want, content)
 		}

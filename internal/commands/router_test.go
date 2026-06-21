@@ -9,6 +9,7 @@ import (
 
 	"github.com/sn0w/panda2/internal/admin"
 	"github.com/sn0w/panda2/internal/assistant"
+	"github.com/sn0w/panda2/internal/composed"
 	"github.com/sn0w/panda2/internal/config"
 	contextsvc "github.com/sn0w/panda2/internal/context"
 	"github.com/sn0w/panda2/internal/llm"
@@ -152,13 +153,17 @@ func newTestRouter(t *testing.T, client *fakeLLM, limit int) *Router {
 	if err != nil {
 		t.Fatalf("tool registry: %v", err)
 	}
-	assistantService.WithToolExecutor(tools.NewExecutor(registry, memoryService, configs).WithAdminOperations(adminService))
+	toolExecutor := tools.NewExecutor(registry, memoryService, configs).WithAdminOperations(adminService)
+	composedService := composed.NewService(repository.NewComposedToolRepository(db.DB), registry, toolExecutor, client, "openrouter/auto")
+	toolExecutor.WithDynamicToolProvider(composedService)
+	toolExecutor.WithComposedToolManager(composedService)
+	assistantService.WithToolExecutor(toolExecutor)
 	return NewRouter(
 		adminService,
 		assistantService,
 		opsService,
 		ratelimit.New(limit, time.Minute),
-	)
+	).WithComposedService(composedService)
 }
 
 func TestRouterPing(t *testing.T) {
@@ -256,7 +261,7 @@ func TestRouterHelpShowsAdminGuidanceToGuildAdmins(t *testing.T) {
 		"- `/admin prompt prompt:<text> dry_run:<bool>` - server instructions; omit `prompt` for modal",
 		"- `/admin audit` - recent privileged changes",
 		"- `/admin enable dry_run:<bool>` / `/admin disable confirm:<token> dry_run:<bool>`",
-		"- `/admin soul soul:<text> dry_run:<bool>` - personality/tone; omit `soul` for modal",
+		"- `/admin soul soul:<text>` - personality/tone; natural chat can brainstorm/set",
 		"**Moderator tools**",
 		"**Composed tools**",
 		"- Ask Panda to draft or preview new server tools.",
@@ -996,7 +1001,7 @@ func TestToolConfirmationIDRestoresScopedRequest(t *testing.T) {
 
 	approve := ToolConfirmationFromAssistant("admin", &assistant.InteractionConfirmation{
 		Action:       toolActionComposedToolApprove,
-		Arguments:    map[string]string{"tool_name": "builder_welcome", "version": "2"},
+		Arguments:    map[string]string{"tool_name": "member_welcome", "version": "2"},
 		ConfirmLabel: "Approve tool",
 		Danger:       true,
 	})
@@ -1004,7 +1009,7 @@ func TestToolConfirmationIDRestoresScopedRequest(t *testing.T) {
 		t.Fatalf("expected composed tool confirmation id, got %+v", approve)
 	}
 	request, ok = RequestFromToolConfirmationID(approve.ID, Request{UserID: "admin"})
-	if !ok || request.Action != toolActionComposedToolApprove || request.Options["tool_name"] != "builder_welcome" || request.Options["version"] != "2" {
+	if !ok || request.Action != toolActionComposedToolApprove || request.Options["tool_name"] != "member_welcome" || request.Options["version"] != "2" {
 		t.Fatalf("unexpected composed confirmation request: request=%+v ok=%t", request, ok)
 	}
 
@@ -1188,7 +1193,7 @@ func TestChatUsesAssistantService(t *testing.T) {
 		ChannelID: "channel-1",
 		Options:   map[string]string{"question": "continue"},
 	})
-	if response.Content != "chat fixture" {
+	if response.Content != "chat fixture" || response.Presentation.Title != "" {
 		t.Fatalf("unexpected chat response: %+v", response)
 	}
 }
@@ -1276,6 +1281,97 @@ func TestNaturalMessageUsesInlineChat(t *testing.T) {
 	}
 }
 
+func TestNaturalMessageSetsSoulDirectlyWithoutLLM(t *testing.T) {
+	client := &fakeLLM{response: llm.ChatResponse{Content: "ok"}}
+	router := newTestRouter(t, client, 20)
+
+	response := router.HandleNaturalMessage(context.Background(), Request{
+		UserID:       "admin",
+		GuildID:      "guild-1",
+		ChannelID:    "channel-1",
+		IsGuildAdmin: true,
+		Options: map[string]string{
+			"message": "Panda set your soul to Be crystalline and kind.",
+		},
+	})
+	if !response.Ephemeral || !strings.Contains(response.Content, "Agent soul updated") {
+		t.Fatalf("expected direct natural soul update, got %+v", response)
+	}
+	if len(client.requests) != 0 {
+		t.Fatalf("direct natural soul update should not call LLM, got %d request(s)", len(client.requests))
+	}
+
+	ask := router.Handle(context.Background(), Request{
+		Command:   "ask",
+		UserID:    "user-1",
+		GuildID:   "guild-1",
+		ChannelID: "channel-1",
+		Options:   map[string]string{"question": "hi"},
+	})
+	if ask.Content != "ok" {
+		t.Fatalf("unexpected ask response: %+v", ask)
+	}
+	if len(client.requests) != 1 || !strings.Contains(joinRequestMessages(client.requests[0]), "crystalline and kind") {
+		t.Fatalf("agent soul missing from ask request: %+v", client.requests)
+	}
+}
+
+func TestNaturalMessageDraftsEventAutomationWithoutChatToolChoice(t *testing.T) {
+	const channelID = "100000000000000123"
+	client := &fakeLLM{response: llm.ChatResponse{Content: `{
+		"schema_version": 1,
+		"name": "role_announcement",
+		"description": "Posts an announcement when a Discord role is created.",
+		"input_schema": {"type":"object","additionalProperties":false,"properties":{"role_id":{"type":"string"},"name":{"type":"string"}},"required":["role_id"]},
+		"output_schema": {"type":"object","additionalProperties":false,"properties":{"sent":{"type":"boolean"},"message_id":{"type":"string"}},"required":["sent"]},
+		"runner": {"type":"deterministic","system_prompt":"Post only the approved role announcement.","temperature":0.2,"max_tokens":300,"tool_allowlist":["discord.send_message"]},
+		"steps": [{"id":"send_message","type":"tool_call","tool":"discord.send_message","arguments":{"channel_name":"bot-test","content_template":"A new role was created: {{name}} ({{role_id}}).","allowed_mentions":{"users":false,"roles":false,"everyone":false}}}],
+		"invocations": [{"type":"event","event_type":"role_create"},{"type":"chat_tool"}],
+		"safety": {"requires_approval":true,"requires_confirmation_on_write":false,"max_nested_depth":2,"cooldown_seconds":30,"max_runs_per_hour":20,"dedupe_window_seconds":300}
+	}`}}
+	router := newTestRouter(t, client, 20)
+
+	response := router.HandleNaturalMessage(context.Background(), Request{
+		UserID:       "admin",
+		GuildID:      "guild-1",
+		ChannelID:    "source-channel",
+		IsGuildAdmin: true,
+		Options: map[string]string{
+			"message": "panda when a new role is created, post a short announcement in <#" + channelID + ">",
+		},
+	})
+	if response.Confirmation == nil || !strings.Contains(response.Content, "Drafted `role_announcement` version 1") || !strings.Contains(response.Content, "`role_create`") {
+		t.Fatalf("expected natural automation draft confirmation, got %+v", response)
+	}
+	if len(client.requests) != 1 {
+		t.Fatalf("natural automation drafting should bypass classifier/chat tool choice, got %d LLM request(s)", len(client.requests))
+	}
+	if !strings.Contains(joinRequestMessages(client.requests[0]), "when a new role is created") {
+		t.Fatalf("expected draft request to include automation instruction, got:\n%s", joinRequestMessages(client.requests[0]))
+	}
+
+	confirmationRequest, ok := RequestFromToolConfirmationID(response.Confirmation.ID, Request{
+		UserID:       "admin",
+		GuildID:      "guild-1",
+		ChannelID:    "source-channel",
+		IsGuildAdmin: true,
+	})
+	if !ok || confirmationRequest.Action != toolActionComposedToolApprove || confirmationRequest.Options["tool_name"] != "role_announcement" {
+		t.Fatalf("unexpected automation confirmation request: request=%+v ok=%t", confirmationRequest, ok)
+	}
+	approved := router.HandleToolConfirmation(context.Background(), confirmationRequest)
+	if !strings.Contains(approved.Content, "Approved `role_announcement` version 1") {
+		t.Fatalf("expected composed automation approval, got %+v", approved)
+	}
+	spec, ok, err := router.composed.ExportSpec(context.Background(), "guild-1", "role_announcement")
+	if err != nil || !ok {
+		t.Fatalf("export approved spec: ok=%t err=%v", ok, err)
+	}
+	if got := spec.Steps[0].Arguments["channel_id"]; got != channelID {
+		t.Fatalf("expected channel mention to resolve to channel_id %s, got %+v", channelID, got)
+	}
+}
+
 func TestNaturalMessageCreatesNativePollWithoutLLM(t *testing.T) {
 	client := &fakeLLM{}
 	router := newTestRouter(t, client, 5)
@@ -1322,6 +1418,40 @@ func TestNaturalMessageCreatesNativePollFromExplicitOptions(t *testing.T) {
 	}
 	if response.Poll.Question != "Where should lunch be?" || len(response.Poll.Answers) != 3 {
 		t.Fatalf("unexpected poll: %+v", response.Poll)
+	}
+}
+
+func TestNaturalMessageSoulWriterCanBrainstormWithoutAssistantUse(t *testing.T) {
+	ctx := context.Background()
+	client := &fakeLLM{responses: []llm.ChatResponse{
+		{Content: `{"respond":true,"prompt":"let's brainstorm your soul before setting it"}`},
+		{Content: "Let's shape a few options."},
+	}}
+	router := newTestRouter(t, client, 20)
+	if _, err := router.admin.AddRolePermission(ctx, "guild-1", "admin", "role-chat", admin.PermissionAssistantUse); err != nil {
+		t.Fatalf("AddRolePermission assistant use: %v", err)
+	}
+	if _, err := router.admin.AddRolePermission(ctx, "guild-1", "admin", "role-soul", admin.PermissionAssistantSoulWrite); err != nil {
+		t.Fatalf("AddRolePermission soul write: %v", err)
+	}
+
+	response := router.HandleNaturalMessage(ctx, Request{
+		UserID:    "soul-writer",
+		GuildID:   "guild-1",
+		ChannelID: "channel-1",
+		RoleIDs:   []string{"role-soul"},
+		Options: map[string]string{
+			"message": "Panda let's brainstorm your soul before setting it",
+		},
+	})
+	if response.Content != "Let's shape a few options." {
+		t.Fatalf("unexpected natural soul brainstorm response: %+v", response)
+	}
+	if len(client.requests) != 2 {
+		t.Fatalf("expected trigger and chat LLM requests, got %d", len(client.requests))
+	}
+	if !requestToolNames(client.requests[1])["panda_manage_soul"] {
+		t.Fatalf("expected soul management tool for delegated soul writer, got %+v", client.requests[1].Tools)
 	}
 }
 
@@ -1379,7 +1509,7 @@ func TestNaturalMessageAdminGetsManagementToolsWhenPolicyOff(t *testing.T) {
 		t.Fatalf("expected trigger and chat LLM requests, got %d", len(client.requests))
 	}
 	names := requestToolNames(client.requests[1])
-	for _, want := range []string{"panda_list_tools", "read_config", "panda_manage_tool_access", "panda_manage_channel_rule", "generate_workflow_json"} {
+	for _, want := range []string{"panda_list_tools", "read_config", "panda_manage_soul", "panda_manage_tool_access", "panda_manage_composed_tool", "panda_manage_channel_rule", "generate_workflow_json"} {
 		if !names[want] {
 			t.Fatalf("expected %s in admin natural-message tools, got %+v", want, names)
 		}

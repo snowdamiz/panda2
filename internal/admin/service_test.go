@@ -399,7 +399,7 @@ func TestToolRoleAccessIsRoleScoped(t *testing.T) {
 	if _, err := service.AddToolRole(ctx, "guild-1", "admin", "Web.Search", "role-search"); err != nil {
 		t.Fatalf("AddToolRole: %v", err)
 	}
-	if _, err := service.AddToolRole(ctx, "guild-1", "admin", "builder_welcome", "role-builder"); err != nil {
+	if _, err := service.AddToolRole(ctx, "guild-1", "admin", "member_welcome", "role-member"); err != nil {
 		t.Fatalf("AddToolRole composed: %v", err)
 	}
 
@@ -407,7 +407,7 @@ func TestToolRoleAccessIsRoleScoped(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ToolRoleAccess: %v", err)
 	}
-	if strings.Join(access.RestrictedTools, ",") != "builder_welcome,web.search" {
+	if strings.Join(access.RestrictedTools, ",") != "member_welcome,web.search" {
 		t.Fatalf("unexpected restricted tools: %+v", access.RestrictedTools)
 	}
 	if len(access.AllowedTools) != 1 || access.AllowedTools[0] != "web.search" {
