@@ -93,6 +93,7 @@ type AssistantAccessRequest struct {
 
 type ModelSettings struct {
 	DefaultModel         string
+	ClassifierModel      string
 	FallbackModels       []string
 	FallbackModelsSet    bool
 	Temperature          float64
@@ -201,6 +202,15 @@ func (s *Service) ConfigureModel(ctx context.Context, guildID, actorID string, s
 		}
 		updates["default_model"] = defaultModel
 		meta["default_model"] = defaultModel
+	}
+
+	classifierModel := strings.TrimSpace(settings.ClassifierModel)
+	if classifierModel != "" {
+		if err := s.validateModel(ctx, classifierModel); err != nil {
+			return store.GuildConfig{}, err
+		}
+		updates["classifier_model"] = classifierModel
+		meta["classifier_model"] = classifierModel
 	}
 
 	if settings.FallbackModelsSet {

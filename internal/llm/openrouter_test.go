@@ -144,6 +144,55 @@ func TestOpenRouterChatSendsResponseFormat(t *testing.T) {
 	}
 }
 
+func TestOpenRouterChatSendsStructuredResponseFormat(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload chatCompletionRequest
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		if payload.ResponseFormat == nil || payload.ResponseFormat.Type != "json_schema" {
+			t.Fatalf("expected schema response format, got %+v", payload.ResponseFormat)
+		}
+		if payload.ResponseFormat.JSONSchema == nil || payload.ResponseFormat.JSONSchema.Name != "decision" || !payload.ResponseFormat.JSONSchema.Strict {
+			t.Fatalf("expected strict JSON schema, got %+v", payload.ResponseFormat.JSONSchema)
+		}
+		if payload.StructuredOutputs == nil || !*payload.StructuredOutputs {
+			t.Fatalf("expected structured_outputs flag, got %+v", payload.StructuredOutputs)
+		}
+		if payload.Provider == nil || !payload.Provider.RequireParameters || payload.Provider.AllowFallbacks == nil || *payload.Provider.AllowFallbacks {
+			t.Fatalf("structured response requests should require provider parameter support and disable provider fallback: %+v", payload.Provider)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id":    "gen-schema",
+			"model": "provider/model",
+			"choices": []map[string]any{{
+				"message": map[string]string{"role": "assistant", "content": `{"respond":true,"prompt":"play music"}`},
+			}},
+		})
+	}))
+	defer server.Close()
+
+	client := NewOpenRouterClient(OpenRouterConfig{APIKey: "key", BaseURL: server.URL})
+	response, err := client.Chat(context.Background(), ChatRequest{
+		Model:    "openrouter/auto",
+		Messages: []Message{{Role: "user", Content: "return JSON"}},
+		ResponseFormat: &ResponseFormat{
+			Type: "json_schema",
+			JSONSchema: &ResponseFormatSchema{
+				Name:   "decision",
+				Strict: true,
+				Schema: json.RawMessage(`{"type":"object","properties":{"respond":{"type":"boolean"},"prompt":{"type":"string"}},"required":["respond","prompt"],"additionalProperties":false}`),
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Chat returned error: %v", err)
+	}
+	if response.Content != `{"respond":true,"prompt":"play music"}` {
+		t.Fatalf("unexpected content %q", response.Content)
+	}
+}
+
 func TestOpenRouterChatWithoutKey(t *testing.T) {
 	client := NewOpenRouterClient(OpenRouterConfig{BaseURL: "http://127.0.0.1"})
 	_, err := client.Chat(context.Background(), ChatRequest{Messages: []Message{{Role: "user", Content: "hi"}}})

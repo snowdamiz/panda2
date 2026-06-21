@@ -1084,6 +1084,39 @@ func TestExecutorRawCreateRoleRendersConfirmationArtifact(t *testing.T) {
 	}
 }
 
+func TestExecutorCreatePollRendersConfirmationArtifact(t *testing.T) {
+	registry, err := NewDefaultRegistry()
+	if err != nil {
+		t.Fatalf("NewDefaultRegistry: %v", err)
+	}
+	provider := &fakeDiscordProvider{}
+	executor := NewExecutor(registry, nil, nil).WithDiscordToolProvider(provider)
+	result, err := executor.Execute(context.Background(), ExecutionRequest{
+		GuildID: "guild-1",
+		Access:  testAccess(ToolPolicyWriteConfirmed, admin.PermissionAssistantUse),
+		Call: llm.ToolCall{
+			ID:   "call-create-poll",
+			Type: "function",
+			Function: llm.ToolCallFunction{
+				Name:      "discord_create_poll",
+				Arguments: `{"channel_id":"channel-1","question":"Pick one?","answers":["Red","Blue"],"dry_run":true}`,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Execute create poll: %v", err)
+	}
+	if result.Confirmation == nil || result.Confirmation.Action != "discord_poll.create" || result.Confirmation.Arguments["question"] != "Pick one?" {
+		t.Fatalf("expected poll confirmation artifact, got %+v", result.Confirmation)
+	}
+	if !strings.Contains(result.Confirmation.Arguments["answers_json"], "Red") || result.Confirmation.Danger {
+		t.Fatalf("unexpected poll confirmation artifact: %+v", result.Confirmation)
+	}
+	if provider.calls != 0 {
+		t.Fatalf("raw create poll should not call provider before confirmation, got %d call(s)", provider.calls)
+	}
+}
+
 func TestExecutorCreatePrivateThreadUsesPrivateThreadPermission(t *testing.T) {
 	registry, err := NewDefaultRegistry()
 	if err != nil {

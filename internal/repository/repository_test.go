@@ -26,6 +26,9 @@ func TestGuildConfigEnsureDefaultIsIdempotent(t *testing.T) {
 	if config.DefaultModel != "openrouter/auto" {
 		t.Fatalf("unexpected model %q", config.DefaultModel)
 	}
+	if config.ClassifierModel != "" {
+		t.Fatalf("expected classifier model to default to empty, got %q", config.ClassifierModel)
+	}
 	if config.ToolPolicy != "admin_only" || !config.MemoryEnabled {
 		t.Fatalf("unexpected defaults: tool_policy=%q memory_enabled=%t", config.ToolPolicy, config.MemoryEnabled)
 	}

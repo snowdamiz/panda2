@@ -281,6 +281,7 @@ func (r *Router) handleAdminStatus(ctx context.Context, request Request) Respons
 		fmt.Sprintf("- assistant: `%t`", config.AssistantEnabled),
 		fmt.Sprintf("- memory: `%t`", config.MemoryEnabled),
 		fmt.Sprintf("- default model: `%s`", config.DefaultModel),
+		fmt.Sprintf("- classifier model: `%s`", classifierModelDisplay(config)),
 		fmt.Sprintf("- fallback models: `%d`", fallbackModelCount(config.FallbackModels)),
 		fmt.Sprintf("- tool policy: `%s`", config.ToolPolicy),
 		fmt.Sprintf("- discord: `%s`", discordStatus),

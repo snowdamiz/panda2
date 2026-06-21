@@ -97,6 +97,10 @@ func (c *OpenRouterClient) Chat(ctx context.Context, request ChatRequest) (ChatR
 			AllowFallbacks:    &allowFallbacks,
 		}
 	}
+	if request.ResponseFormat != nil && request.ResponseFormat.Type == "json_schema" {
+		structuredOutputs := true
+		payload.StructuredOutputs = &structuredOutputs
+	}
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return ChatResponse{}, err
@@ -377,13 +381,14 @@ func (b *circuitBreaker) recordFailure() {
 }
 
 type chatCompletionRequest struct {
-	Model          string               `json:"model"`
-	Messages       []Message            `json:"messages"`
-	Tools          []Tool               `json:"tools,omitempty"`
-	ResponseFormat *ResponseFormat      `json:"response_format,omitempty"`
-	Provider       *providerPreferences `json:"provider,omitempty"`
-	Temperature    float64              `json:"temperature,omitempty"`
-	MaxTokens      int                  `json:"max_tokens,omitempty"`
+	Model             string               `json:"model"`
+	Messages          []Message            `json:"messages"`
+	Tools             []Tool               `json:"tools,omitempty"`
+	ResponseFormat    *ResponseFormat      `json:"response_format,omitempty"`
+	StructuredOutputs *bool                `json:"structured_outputs,omitempty"`
+	Provider          *providerPreferences `json:"provider,omitempty"`
+	Temperature       float64              `json:"temperature,omitempty"`
+	MaxTokens         int                  `json:"max_tokens,omitempty"`
 }
 
 type providerPreferences struct {

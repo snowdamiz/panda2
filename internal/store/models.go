@@ -11,6 +11,7 @@ type SchemaMigration struct {
 type GuildConfig struct {
 	GuildID             string    `gorm:"primaryKey;size:32"`
 	DefaultModel        string    `gorm:"not null"`
+	ClassifierModel     string    `gorm:"not null;default:''"`
 	FallbackModels      string    `gorm:"not null;default:'[]'"`
 	Temperature         float64   `gorm:"not null;default:0.3"`
 	MaxResponseTokens   int       `gorm:"not null;default:900"`

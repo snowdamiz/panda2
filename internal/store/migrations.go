@@ -624,6 +624,13 @@ var migrations = []Migration{
 			`CREATE INDEX IF NOT EXISTS idx_music_playlists_created_by ON music_playlists(created_by)`,
 		},
 	},
+	{
+		Version: 16,
+		Name:    "guild_classifier_model",
+		SQL: []string{
+			`ALTER TABLE guild_configs ADD COLUMN classifier_model TEXT NOT NULL DEFAULT ''`,
+		},
+	},
 }
 
 func RunMigrations(db *gorm.DB) error {

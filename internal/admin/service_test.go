@@ -33,6 +33,7 @@ func TestConfigureModelPersistsFallbacksAndRuntimeSettings(t *testing.T) {
 		repository.NewBudgetRepository(db.DB),
 		fakeModels{valid: map[string]bool{
 			"provider/primary":    true,
+			"provider/classifier": true,
 			"provider/fallback-a": true,
 			"provider/fallback-b": true,
 		}},
@@ -41,6 +42,7 @@ func TestConfigureModelPersistsFallbacksAndRuntimeSettings(t *testing.T) {
 
 	config, err := service.ConfigureModel(ctx, "guild-1", "admin", ModelSettings{
 		DefaultModel:         "provider/primary",
+		ClassifierModel:      "provider/classifier",
 		FallbackModels:       []string{"provider/fallback-a", "provider/fallback-b", "provider/fallback-a"},
 		FallbackModelsSet:    true,
 		Temperature:          0.75,
@@ -53,7 +55,7 @@ func TestConfigureModelPersistsFallbacksAndRuntimeSettings(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ConfigureModel: %v", err)
 	}
-	if config.DefaultModel != "provider/primary" || config.Temperature != 0.75 || config.MaxResponseTokens != 1200 || config.ToolPolicy != "read_only" {
+	if config.DefaultModel != "provider/primary" || config.ClassifierModel != "provider/classifier" || config.Temperature != 0.75 || config.MaxResponseTokens != 1200 || config.ToolPolicy != "read_only" {
 		t.Fatalf("unexpected config: %+v", config)
 	}
 	if !strings.Contains(config.FallbackModels, "provider/fallback-a") || strings.Count(config.FallbackModels, "provider/fallback-a") != 1 {

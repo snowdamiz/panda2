@@ -678,7 +678,14 @@ func applicationCommands() []disgoDiscord.ApplicationCommandCreate {
 					Options: []disgoDiscord.ApplicationCommandOption{
 						disgoDiscord.ApplicationCommandOptionString{
 							Name:        "model",
-							Description: "OpenRouter model slug",
+							Description: "OpenRouter response model slug",
+							Required:    false,
+							MinLength:   &minQuestionLength,
+							MaxLength:   &maxQuestionLength,
+						},
+						disgoDiscord.ApplicationCommandOptionString{
+							Name:        "classifier_model",
+							Description: "OpenRouter classifier model slug",
 							Required:    false,
 							MinLength:   &minQuestionLength,
 							MaxLength:   &maxQuestionLength,
@@ -899,7 +906,7 @@ func (b *Bot) handleSlashCommand(event *events.ApplicationCommandInteractionCrea
 	if allowMultiselect, ok := data.OptBool("allow_multiselect"); ok && allowMultiselect {
 		request.Options["allow_multiselect"] = "true"
 	}
-	for _, name := range []string{"model", "fallback_models", "temperature", "max_response_tokens", "max_tokens", "tool_policy", "prompt", "soul", "action", "confirm", "tool_name", "profile", "text", "when", "every", "target", "id", "pack", "input_json", "loop_mode", "default_volume", "vote_skip_threshold"} {
+	for _, name := range []string{"model", "classifier_model", "fallback_models", "temperature", "max_response_tokens", "max_tokens", "tool_policy", "prompt", "soul", "action", "confirm", "tool_name", "profile", "text", "when", "every", "target", "id", "pack", "input_json", "loop_mode", "default_volume", "vote_skip_threshold"} {
 		if value, ok := data.OptString(name); ok {
 			request.Options[name] = value
 		}

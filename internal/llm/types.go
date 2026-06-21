@@ -38,7 +38,14 @@ type ChatRequest struct {
 }
 
 type ResponseFormat struct {
-	Type string `json:"type"`
+	Type       string                `json:"type"`
+	JSONSchema *ResponseFormatSchema `json:"json_schema,omitempty"`
+}
+
+type ResponseFormatSchema struct {
+	Name   string          `json:"name"`
+	Strict bool            `json:"strict,omitempty"`
+	Schema json.RawMessage `json:"schema"`
 }
 
 type Tool struct {

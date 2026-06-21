@@ -16,6 +16,7 @@ type Request struct {
 	GuildID        string
 	ChannelID      string
 	VoiceChannelID string
+	PreferredTool  string
 	UserID         string
 	RoleIDs        []string
 	IsGuildAdmin   bool

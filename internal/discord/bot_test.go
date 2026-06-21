@@ -499,7 +499,7 @@ func TestAdminModelCommandIncludesRuntimeOptions(t *testing.T) {
 			}
 		}
 	}
-	for _, name := range []string{"model", "fallback_models", "temperature", "max_response_tokens", "tool_policy"} {
+	for _, name := range []string{"model", "classifier_model", "fallback_models", "temperature", "max_response_tokens", "tool_policy"} {
 		if !optionNames[name] {
 			t.Fatalf("expected /admin model option %q", name)
 		}

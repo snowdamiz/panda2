@@ -1,13 +1,18 @@
 package commands
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/sn0w/panda2/internal/assistant"
 )
 
 const (
 	toolConfirmationPrefix = "p2t"
+	toolConfirmationTTL    = 30 * time.Minute
 
 	toolConfirmationOpKnowledgeDelete      = "kd"
 	toolConfirmationOpBudgetLimitSet       = "bs"
@@ -25,6 +30,7 @@ const (
 	toolConfirmationOpChannelRuleRemove    = "cr"
 	toolConfirmationOpComposedToolApprove  = "ca"
 	toolConfirmationOpComposedToolRollback = "cb"
+	toolConfirmationOpDiscordPollCreate    = "pc"
 	toolConfirmationEmptyValue             = "_"
 	toolActionKnowledgeDelete              = "knowledge.delete"
 	toolActionBudgetLimitSet               = "budget_limit.set"
@@ -42,6 +48,7 @@ const (
 	toolActionChannelRuleRemove            = "channel_rule.remove"
 	toolActionComposedToolApprove          = "composed_tool.approve"
 	toolActionComposedToolRollback         = "composed_tool.rollback"
+	toolActionDiscordPollCreate            = "discord_poll.create"
 )
 
 type ToolConfirmationRequest struct {
@@ -50,11 +57,46 @@ type ToolConfirmationRequest struct {
 	Options map[string]string
 }
 
+type pendingToolConfirmation struct {
+	userID    string
+	action    string
+	options   map[string]string
+	expiresAt time.Time
+}
+
+type pendingToolConfirmationStore struct {
+	mu    sync.Mutex
+	items map[string]pendingToolConfirmation
+}
+
+var pendingToolConfirmations = &pendingToolConfirmationStore{items: map[string]pendingToolConfirmation{}}
+
 func ToolConfirmationFromAssistant(userID string, pending *assistant.InteractionConfirmation) *Confirmation {
 	if pending == nil {
 		return nil
 	}
+	if pending.Action == toolActionDiscordPollCreate {
+		return confirmationFromPendingTool(userID, pending)
+	}
 	id := toolConfirmationID(userID, pending.Action, pending.Arguments)
+	if id == "" {
+		return nil
+	}
+	label := strings.TrimSpace(pending.ConfirmLabel)
+	if label == "" {
+		label = "Confirm"
+	}
+	return &Confirmation{
+		ID:           id,
+		ConfirmLabel: label,
+		CancelID:     ConfirmationCancelID,
+		CancelLabel:  "Cancel",
+		Danger:       pending.Danger,
+	}
+}
+
+func confirmationFromPendingTool(userID string, pending *assistant.InteractionConfirmation) *Confirmation {
+	id := pendingToolConfirmations.put(userID, pending.Action, pending.Arguments)
 	if id == "" {
 		return nil
 	}
@@ -79,6 +121,11 @@ func RequestFromToolConfirmationID(id string, base Request) (ToolConfirmationReq
 	request := ToolConfirmationRequest{
 		Request: base,
 		Options: map[string]string{},
+	}
+	if pending, ok := pendingToolConfirmations.take(id, base.UserID); ok {
+		request.Action = pending.action
+		request.Options = pending.options
+		return request, true
 	}
 	switch parts[1] {
 	case toolConfirmationOpKnowledgeDelete:
@@ -196,6 +243,63 @@ func RequestFromToolConfirmationID(id string, base Request) (ToolConfirmationReq
 		return ToolConfirmationRequest{}, false
 	}
 	return request, true
+}
+
+func (s *pendingToolConfirmationStore) put(userID, action string, options map[string]string) string {
+	token, ok := randomConfirmationToken()
+	if !ok {
+		return ""
+	}
+	id := strings.Join([]string{toolConfirmationPrefix, toolConfirmationOpDiscordPollCreate, cleanConfirmationPart(userID), token}, ":")
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.pruneLocked(time.Now())
+	s.items[id] = pendingToolConfirmation{
+		userID:    cleanConfirmationPart(userID),
+		action:    action,
+		options:   cloneConfirmationOptions(options),
+		expiresAt: time.Now().Add(toolConfirmationTTL),
+	}
+	return id
+}
+
+func (s *pendingToolConfirmationStore) take(id, userID string) (pendingToolConfirmation, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := time.Now()
+	s.pruneLocked(now)
+	item, ok := s.items[id]
+	if !ok || item.userID != cleanConfirmationPart(userID) || now.After(item.expiresAt) {
+		delete(s.items, id)
+		return pendingToolConfirmation{}, false
+	}
+	delete(s.items, id)
+	item.options = cloneConfirmationOptions(item.options)
+	return item, true
+}
+
+func (s *pendingToolConfirmationStore) pruneLocked(now time.Time) {
+	for id, item := range s.items {
+		if now.After(item.expiresAt) {
+			delete(s.items, id)
+		}
+	}
+}
+
+func randomConfirmationToken() (string, bool) {
+	var bytes [8]byte
+	if _, err := rand.Read(bytes[:]); err != nil {
+		return "", false
+	}
+	return hex.EncodeToString(bytes[:]), true
+}
+
+func cloneConfirmationOptions(options map[string]string) map[string]string {
+	clone := map[string]string{}
+	for key, value := range options {
+		clone[key] = value
+	}
+	return clone
 }
 
 func toolConfirmationID(userID, action string, arguments map[string]string) string {

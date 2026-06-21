@@ -108,12 +108,27 @@ func (f *fakeToolMusicManager) ManageMusic(_ context.Context, request tools.Musi
 	return map[string]any{"result": map[string]any{
 		"action":  request.Action,
 		"query":   request.Query,
+		"title":   "Now playing",
 		"content": "music handled",
+		"url":     "https://example.com/track",
+		"fields": []map[string]any{
+			{"name": "Duration", "value": "3:12", "inline": true},
+		},
+		"actions": []map[string]string{
+			{"label": "Open track", "url": "https://example.com/track"},
+		},
 	}}, nil
 }
 
 func (f *fakeCommandDiscordProvider) ExecuteDiscordTool(_ context.Context, request tools.DiscordToolRequest) (any, error) {
 	f.requests = append(f.requests, request)
+	if request.ToolName == "discord.create_poll" {
+		return map[string]any{
+			"created":    true,
+			"channel_id": request.Arguments["channel_id"],
+			"poll":       request.Arguments,
+		}, nil
+	}
 	return map[string]any{
 		"tool":      request.ToolName,
 		"arguments": request.Arguments,
@@ -194,7 +209,7 @@ func newTestRouter(t *testing.T, client *fakeLLM, limit int, configureExecutor .
 	jobs := repository.NewJobRepository(db.DB)
 	worker := queue.NewWorker(jobs, "test-worker")
 	opsService := ops.NewService(config.Config{DataDir: t.TempDir()}, db, configs, jobs, worker)
-	assistantService := assistant.NewService(client, usage, configs, memoryService, conversations, "openrouter/auto", nil)
+	assistantService := assistant.NewService(client, usage, configs, memoryService, conversations, "openrouter/auto", "", nil)
 	adminService := admin.NewService(configs, usage, audit, memoryService, access, budgets, nil, "openrouter/auto", members)
 	registry, err := tools.NewDefaultRegistry()
 	if err != nil {
@@ -217,7 +232,7 @@ func newTestRouter(t *testing.T, client *fakeLLM, limit int, configureExecutor .
 		assistantService,
 		opsService,
 		ratelimit.New(limit, time.Minute),
-	).WithComposedService(composedService).WithScheduler(schedulerService)
+	).WithComposedService(composedService).WithScheduler(schedulerService).WithToolExecutor(toolExecutor)
 }
 
 func seedScheduledComposedTool(t *testing.T, router *Router, guildID, actorID, name string) {
@@ -356,7 +371,7 @@ func TestRouterHelpShowsAdminGuidanceToGuildAdmins(t *testing.T) {
 		"- `/admin member-role action:add|remove user:@User role:@Role` - assign Discord roles to users",
 		"- `/admin tool action:list|add|remove tool_name:<tool> role:@Role` - role tool grants",
 		"- `/admin channel action:list|allow|deny|remove channel:#Channel`",
-		"- `/admin model model:<slug> fallback_models:<csv> temperature:<0-2> max_response_tokens:<64-4000> tool_policy:<policy> dry_run:<bool>`",
+		"- `/admin model model:<response> classifier_model:<classifier> ...` - model routing, fallbacks, temperature, tokens, and tools",
 		"- Policies: `off`, `read_only`, `assistive`, `admin_only`, `moderator`, `write_confirmed`, `owner_ops`",
 		"- `/admin prompt prompt:<text> dry_run:<bool>` - server instructions; omit `prompt` for modal",
 		"- `/admin audit` - recent privileged changes",
@@ -828,13 +843,14 @@ func TestAdminModelSetsRuntimeOptions(t *testing.T) {
 		IsGuildAdmin: true,
 		Options: map[string]string{
 			"model":               "provider/primary",
+			"classifier_model":    "provider/classifier",
 			"fallback_models":     "provider/fallback-a, provider/fallback-b",
 			"temperature":         "0.7",
 			"max_response_tokens": "1234",
 			"tool_policy":         "read_only",
 		},
 	})
-	if !strings.Contains(model.Content, "2 fallback") || !strings.Contains(model.Content, "0.70") || !strings.Contains(model.Content, "1234") || !strings.Contains(model.Content, "read_only") {
+	if !strings.Contains(model.Content, "classifier `provider/classifier`") || !strings.Contains(model.Content, "2 fallback") || !strings.Contains(model.Content, "0.70") || !strings.Contains(model.Content, "1234") || !strings.Contains(model.Content, "read_only") {
 		t.Fatalf("unexpected model settings response: %+v", model)
 	}
 
@@ -1515,6 +1531,50 @@ func TestChatUsesAssistantService(t *testing.T) {
 	}
 }
 
+func TestAssistantFeedbackEligible(t *testing.T) {
+	longAnswer := strings.Repeat("This is a substantial assistant answer with enough context to review. ", 9)
+	cases := []struct {
+		name    string
+		answer  assistant.AskResponse
+		content string
+		want    bool
+	}{
+		{
+			name:    "short plain answer",
+			content: "Queued that song.",
+		},
+		{
+			name:    "long plain answer",
+			content: longAnswer,
+			want:    true,
+		},
+		{
+			name:    "music card",
+			answer:  assistant.AskResponse{Card: &assistant.ToolCard{Title: "Now playing", Accent: "music"}},
+			content: longAnswer,
+		},
+		{
+			name:    "web search",
+			answer:  assistant.AskResponse{UsedWebSearch: true},
+			content: "Current result with source links.",
+			want:    true,
+		},
+		{
+			name:    "empty web search",
+			answer:  assistant.AskResponse{UsedWebSearch: true},
+			content: "   ",
+		},
+	}
+
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := assistantFeedbackEligible(tt.answer, tt.content); got != tt.want {
+				t.Fatalf("assistantFeedbackEligible() = %t, want %t", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestChatAddsRecentInvocationContext(t *testing.T) {
 	client := &fakeLLM{response: llm.ChatResponse{Content: "chat fixture"}}
 	router := newTestRouter(t, client, 5).WithContextService(contextsvc.NewService(fakeContextProvider{messages: []contextsvc.Message{
@@ -1841,8 +1901,11 @@ func TestNaturalMessageCreatesNativePollThroughAgentTool(t *testing.T) {
 			"bot_mentioned": "true",
 		},
 	})
-	if response.Content != "Prepared the poll." || response.Poll != nil {
-		t.Fatalf("expected model-rendered poll response, got %+v", response)
+	if response.Confirmation == nil || response.Confirmation.ConfirmLabel != "Send poll" {
+		t.Fatalf("expected poll send confirmation, got %+v", response)
+	}
+	if !strings.Contains(response.Content, "Panda prepared a native Discord poll") || response.Poll != nil {
+		t.Fatalf("expected poll confirmation response, got %+v", response)
 	}
 	if len(client.requests) != 3 {
 		t.Fatalf("expected classifier, poll tool call, and final response, got %d request(s)", len(client.requests))
@@ -1852,6 +1915,27 @@ func TestNaturalMessageCreatesNativePollThroughAgentTool(t *testing.T) {
 	}
 	if !strings.Contains(joinRequestMessages(client.requests[2]), "What will be better") {
 		t.Fatalf("expected poll tool result in final chat request, got:\n%s", joinRequestMessages(client.requests[2]))
+	}
+
+	confirmationRequest, ok := RequestFromToolConfirmationID(response.Confirmation.ID, Request{
+		RequestID:    "interaction-1",
+		UserID:       "admin",
+		GuildID:      "guild-1",
+		ChannelID:    "channel-1",
+		IsGuildAdmin: true,
+	})
+	if !ok {
+		t.Fatalf("expected confirmation id to decode: %s", response.Confirmation.ID)
+	}
+	confirmed := router.HandleToolConfirmation(context.Background(), confirmationRequest)
+	if confirmed.Content != "Sent the poll." {
+		t.Fatalf("expected confirmed poll send, got %+v", confirmed)
+	}
+	if len(discordProvider.requests) != 1 || discordProvider.requests[0].ToolName != "discord.create_poll" {
+		t.Fatalf("expected confirmed poll provider call, got %+v", discordProvider.requests)
+	}
+	if got := discordProvider.requests[0].Arguments["question"]; got != "What will be better: fable 5 or gpt 5.6?" {
+		t.Fatalf("unexpected confirmed poll arguments: %+v", discordProvider.requests[0].Arguments)
 	}
 }
 
@@ -1899,7 +1983,7 @@ func TestNaturalMessageCreatesReminderThroughAgentTool(t *testing.T) {
 
 func TestNaturalMessageManagesMusicThroughAgentTool(t *testing.T) {
 	client := &fakeLLM{responses: []llm.ChatResponse{
-		{Content: `{"respond":true,"prompt":"play ocean drive"}`},
+		{Content: `{"respond":true,"prompt":"play ocean drive","tool_name":"panda_manage_music"}`},
 		{ToolCalls: []llm.ToolCall{{
 			ID:   "call-music-play",
 			Type: "function",
@@ -1922,17 +2006,57 @@ func TestNaturalMessageManagesMusicThroughAgentTool(t *testing.T) {
 			"bot_mentioned": "true",
 		},
 	})
-	if response.Content != "Queued ocean drive." {
-		t.Fatalf("expected model-rendered music response, got %+v", response)
+	if response.Content != "music handled" || response.Presentation.Title != "Now playing" || response.Presentation.Accent != AccentMusic {
+		t.Fatalf("expected structured music card response, got %+v", response)
+	}
+	if response.Presentation.URL != "https://example.com/track" || len(response.Presentation.Fields) != 1 || len(response.Actions) != 1 {
+		t.Fatalf("expected music card details, got %+v", response)
 	}
 	if len(client.requests) != 3 {
 		t.Fatalf("expected classifier, music tool call, and final response, got %d request(s)", len(client.requests))
 	}
-	if !requestToolNames(client.requests[1])["panda_manage_music"] {
-		t.Fatalf("expected music tool for natural music request, got %+v", requestToolNames(client.requests[1]))
+	if names := requestToolNames(client.requests[1]); len(names) != 1 || !names["panda_manage_music"] {
+		t.Fatalf("expected only music tool for natural music request, got %+v", names)
+	}
+	if !strings.Contains(joinRequestMessages(client.requests[1]), "natural-message classifier selected the exposed `panda_manage_music` workflow") {
+		t.Fatalf("expected music tool instruction for natural music request, got:\n%s", joinRequestMessages(client.requests[1]))
 	}
 	if !strings.Contains(joinRequestMessages(client.requests[2]), "music handled") {
 		t.Fatalf("expected music tool result in final chat request, got:\n%s", joinRequestMessages(client.requests[2]))
+	}
+}
+
+func TestNaturalMessageExposesMusicWhenToolPolicyOff(t *testing.T) {
+	client := &fakeLLM{responses: []llm.ChatResponse{
+		{Content: `{"respond":true,"prompt":"play passport by mgk","tool_name":"panda_manage_music"}`},
+		{Content: "music tool unavailable"},
+	}}
+	router := newTestRouter(t, client, 5)
+	if _, err := router.admin.ConfigureModel(context.Background(), "guild-1", "admin", admin.ModelSettings{ToolPolicy: tools.ToolPolicyOff, ToolPolicySet: true}); err != nil {
+		t.Fatalf("ConfigureModel: %v", err)
+	}
+
+	response := router.HandleNaturalMessage(context.Background(), Request{
+		UserID:         "user-1",
+		GuildID:        "guild-1",
+		ChannelID:      "channel-1",
+		VoiceChannelID: "voice-1",
+		Options: map[string]string{
+			"message":       "panda play passport by mgk",
+			"bot_mentioned": "true",
+		},
+	})
+	if response.Content != "music tool unavailable" {
+		t.Fatalf("unexpected natural message response: %+v", response)
+	}
+	if len(client.requests) != 2 {
+		t.Fatalf("expected classifier and chat request, got %d request(s)", len(client.requests))
+	}
+	if names := requestToolNames(client.requests[1]); len(names) != 1 || !names["panda_manage_music"] {
+		t.Fatalf("expected only music tool with policy off, got %+v", names)
+	}
+	if !strings.Contains(joinRequestMessages(client.requests[1]), "natural-message classifier selected the exposed `panda_manage_music` workflow") {
+		t.Fatalf("expected music tool instruction with policy off, got:\n%s", joinRequestMessages(client.requests[1]))
 	}
 }
 

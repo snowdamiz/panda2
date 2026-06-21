@@ -44,7 +44,7 @@ Verified on 2026-06-21.
 Sources:
 
 - [OpenRouter pricing](https://openrouter.ai/pricing): pay-as-you-go has a 5.5% platform fee, input/output tokens are billed per model at posted rates, and fallback routing bills only the successful run.
-- [OpenRouter Models API](https://openrouter.ai/docs/api/api-reference/models/get-models): the API returns per-model `pricing.prompt` and `pricing.completion` fields. The current internal default returned by the live API at verification time: prompt `$0.00000009` per token, completion `$0.00000018` per token, cached input `$0.00000002` per token.
+- [OpenRouter Models API](https://openrouter.ai/docs/api/api-reference/models/get-models): the API returns per-model `pricing.prompt` and `pricing.completion` fields. The planned classifier model, `inclusionai/ling-2.6-flash`, returned by the live API at verification time: prompt `$0.00000001` per token, completion `$0.00000003` per token, cached input `$0.000000002` per token. The planned answer model, `inception/mercury-2`, returned prompt `$0.00000025` per token, completion `$0.00000075` per token, cached input `$0.000000025` per token.
 - [Brave Search API pricing](https://api-dashboard.search.brave.com/documentation/pricing): Search is `$5.00` per 1,000 requests and includes `$5` monthly credits.
 - [Fly.io pricing](https://fly.io/docs/about/pricing/) and [Fly cost management](https://fly.io/docs/about/cost-management/): started machines are usage-billed; Fly's examples put one shared-1x 256MB machine in `sjc` at `$2.32/month` full-time, and three shared-1x 1GB machines in `sjc` at `$20.37/month`.
 - [Stripe pricing](https://stripe.com/pricing): domestic online cards are `2.9% + 30c` per successful transaction.
@@ -52,10 +52,12 @@ Sources:
 
 Cost unit for planning:
 
-- One normal AI response is modeled as 5,000 input tokens plus 1,000 output tokens.
-- Raw model cost for that response is about `$0.00063`.
-- Use `$0.00079` as the planning cost after adding 25% buffer for natural-trigger classification, retries, provider platform fees, and prompt overhead.
-- That makes 1,000 normal AI responses cost about `$0.79`.
+- One user-visible AI response is modeled as one classifier call with `inclusionai/ling-2.6-flash` plus one answer call with `inception/mercury-2`.
+- Classifier call assumption: 1,000 input tokens plus 200 output tokens, raw cost about `$0.000016`.
+- Answer call assumption: 5,000 input tokens plus 1,000 output tokens, raw cost about `$0.00200`.
+- Combined raw model cost is about `$0.002016` per answered request.
+- Use `$0.0024192` as the planning cost after adding 20% buffer for retries, tool follow-up calls, provider platform fees, and prompt overhead.
+- That makes 1,000 user-visible AI responses cost about `$2.42`.
 - One Brave Search call costs `$0.005`.
 
 These assumptions should be replaced with measured p50, p90, and p99 production cost per response once real SaaS traffic exists. Pricing should be reviewed any time model/provider pricing changes by more than 20%.
@@ -66,16 +68,16 @@ Use the same public price through Discord Premium Apps and any off-platform chec
 
 | Plan | Price | Included AI responses | Included web searches | Knowledge storage | Retention | Target customer |
 | --- | ---: | ---: | ---: | ---: | ---: | --- |
-| Trial | `$0` for 14 days | 500 total | 25 total | 25 MB | 14 days | Evaluation only |
-| Starter | `$9/server/month` | 2,000/month | 100/month | 100 MB | 30 days | Small communities |
-| Plus | `$29/server/month` | 10,000/month | 500/month | 500 MB | 90 days | Active communities |
-| Pro | `$79/server/month` | 25,000/month | 1,000/month | 2 GB | 180 days | Large or work-heavy servers |
-| Business | `$199/server/month` | 75,000/month | 3,000/month | 10 GB | 365 days | High-volume teams |
+| Trial | `$0` for 14 days | 250 total | 20 total | 25 MB | 14 days | Evaluation only |
+| Starter | `$19/server/month` | 2,000/month | 100/month | 100 MB | 30 days | Small communities |
+| Plus | `$49/server/month` | 5,000/month | 400/month | 500 MB | 90 days | Active communities |
+| Pro | `$99/server/month` | 10,000/month | 1,000/month | 2 GB | 180 days | Large or work-heavy servers |
+| Business | `$249/server/month` | 25,000/month | 2,000/month | 10 GB | 365 days | High-volume teams |
 
 Overages:
 
 - Do not enable automatic overages by default.
-- Let admins buy usage packs before hard cutoff: `$5` for 2,500 AI responses, `$5` for 500 web searches, `$10` for 5 GB additional knowledge storage.
+- Let admins buy usage packs before hard cutoff: `$10` for 1,000 AI responses, `$5` for 500 web searches, `$10` for 5 GB additional knowledge storage.
 - Business can request invoice billing and custom limits after a usage review.
 - Free trials should never auto-convert without explicit payment approval.
 
@@ -83,10 +85,10 @@ Approximate gross margin using the conservative response unit:
 
 | Plan | Public price | AI cost | Search cost | Allocated infra | Stripe direct processing | Estimated direct cost | Direct gross margin | Estimated Discord net | Discord-channel margin |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| Starter | `$9` | `$1.57` | `$0.50` | `$0.50` | `$0.56` | `$3.14` | 65% | `$7.15` | 64% |
-| Plus | `$29` | `$7.87` | `$2.50` | `$1.25` | `$1.14` | `$12.77` | 56% | `$23.05` | 50% |
-| Pro | `$79` | `$19.69` | `$5.00` | `$3.00` | `$2.59` | `$30.28` | 62% | `$62.80` | 56% |
-| Business | `$199` | `$59.06` | `$15.00` | `$8.00` | `$6.07` | `$88.13` | 56% | `$158.19` | 48% |
+| Starter | `$19` | `$4.84` | `$0.50` | `$0.75` | `$0.85` | `$6.94` | 63% | `$15.10` | 60% |
+| Plus | `$49` | `$12.10` | `$2.00` | `$1.50` | `$1.72` | `$17.32` | 65% | `$38.95` | 60% |
+| Pro | `$99` | `$24.19` | `$5.00` | `$3.50` | `$3.17` | `$35.86` | 64% | `$78.70` | 58% |
+| Business | `$249` | `$60.48` | `$10.00` | `$8.00` | `$7.52` | `$86.00` | 65% | `$197.93` | 60% |
 
 The "Discord net" column uses Discord's representative 79.49% net from its monetization example. Actual payout can vary by taxes, processing, refunds, chargebacks, and growth-tier eligibility.
 

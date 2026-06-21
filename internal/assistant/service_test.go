@@ -72,7 +72,7 @@ func newTestService(t *testing.T, client *fakeClient) (*Service, *store.Store) {
 	knowledge := repository.NewKnowledgeRepository(db.DB)
 	memoryService := memory.NewService(knowledge)
 	conversations := repository.NewConversationRepository(db.DB)
-	return NewService(client, usage, configs, memoryService, conversations, "openrouter/auto", nil), db
+	return NewService(client, usage, configs, memoryService, conversations, "openrouter/auto", "", nil), db
 }
 
 func TestAskUsesGuildPromptAndMemory(t *testing.T) {
@@ -208,6 +208,9 @@ func TestAskAppendsWebSearchSourcesWhenModelOmitsLinks(t *testing.T) {
 	if strings.Contains(response.Content, "[redacted]") {
 		t.Fatalf("source URL should not be redacted: %q", response.Content)
 	}
+	if !response.UsedWebSearch {
+		t.Fatalf("web search responses should be marked for feedback eligibility: %+v", response)
+	}
 	if len(client.requests) != 2 {
 		t.Fatalf("expected initial and final LLM requests, got %d", len(client.requests))
 	}
@@ -265,12 +268,56 @@ func TestClassifyNaturalMessageUsesLLMDecision(t *testing.T) {
 	if len(client.requests) != 1 {
 		t.Fatalf("expected one trigger request, got %d", len(client.requests))
 	}
-	if client.requests[0].ResponseFormat == nil || client.requests[0].ResponseFormat.Type != "json_object" {
-		t.Fatalf("natural trigger should request JSON mode, got %+v", client.requests[0].ResponseFormat)
+	if !naturalTriggerRequestHasSchema(client.requests[0]) {
+		t.Fatalf("natural trigger should request strict schema output, got %+v", client.requests[0].ResponseFormat)
 	}
 	joined := joinMessages(client.requests[0].Messages)
 	if !strings.Contains(joined, "Bot mentioned: true") || !strings.Contains(joined, "Reply context") {
 		t.Fatalf("trigger metadata missing from request: %s", joined)
+	}
+}
+
+func TestConfiguredClassifierModelIsSeparateFromResponseModel(t *testing.T) {
+	ctx := context.Background()
+	client := &fakeClient{responses: []llm.ChatResponse{
+		{Content: `{"respond":true,"prompt":"answer this"}`},
+		{Content: "response answer"},
+	}}
+	service, db := newTestService(t, client)
+	configs := repository.NewGuildConfigRepository(db.DB)
+
+	if _, err := configs.EnsureDefault(ctx, "guild-1", "provider/response"); err != nil {
+		t.Fatalf("EnsureDefault: %v", err)
+	}
+	if _, err := configs.UpdateModelSettings(ctx, "guild-1", map[string]any{"classifier_model": "provider/classifier"}); err != nil {
+		t.Fatalf("UpdateModelSettings: %v", err)
+	}
+
+	decision, err := service.ClassifyNaturalMessage(ctx, NaturalMessageRequest{
+		GuildID:   "guild-1",
+		UserID:    "user-1",
+		ChannelID: "channel-1",
+		Content:   "Panda answer this",
+	})
+	if err != nil {
+		t.Fatalf("ClassifyNaturalMessage: %v", err)
+	}
+	if !decision.Respond || decision.Prompt != "answer this" {
+		t.Fatalf("unexpected decision: %+v", decision)
+	}
+
+	response, err := service.Ask(ctx, AskRequest{GuildID: "guild-1", UserID: "user-1", ChannelID: "channel-1", Question: decision.Prompt})
+	if err != nil {
+		t.Fatalf("Ask: %v", err)
+	}
+	if response.Content != "response answer" {
+		t.Fatalf("unexpected response: %+v", response)
+	}
+	if len(client.requests) != 2 {
+		t.Fatalf("expected classifier and response requests, got %d", len(client.requests))
+	}
+	if client.requests[0].Model != "provider/classifier" || client.requests[1].Model != "provider/response" {
+		t.Fatalf("expected separate classifier and response models, got %+v", client.requests)
 	}
 }
 
@@ -288,6 +335,7 @@ func TestNaturalTriggerPromptCoversDirectCapabilityQuestionWithoutMention(t *tes
 		"Do not require an @mention",
 		"naturally addresses Panda by name",
 		"word Panda appears anywhere",
+		"panda_manage_music",
 	} {
 		if !strings.Contains(system, want) {
 			t.Fatalf("natural trigger prompt missing %q:\n%s", want, system)
@@ -323,8 +371,8 @@ func TestClassifyNaturalMessageRetriesInvalidJSON(t *testing.T) {
 		t.Fatalf("expected initial classification and retry, got %d", len(client.requests))
 	}
 	for index, request := range client.requests {
-		if request.ResponseFormat == nil || request.ResponseFormat.Type != "json_object" {
-			t.Fatalf("natural trigger request %d should request JSON mode, got %+v", index, request.ResponseFormat)
+		if !naturalTriggerRequestHasSchema(request) {
+			t.Fatalf("natural trigger request %d should request strict schema output, got %+v", index, request.ResponseFormat)
 		}
 	}
 	if !strings.Contains(joinMessages(client.requests[1].Messages), "Your previous response was not strict JSON") {
@@ -351,12 +399,27 @@ func TestClassifyNaturalMessageCanDecline(t *testing.T) {
 	}
 }
 
+func naturalTriggerRequestHasSchema(request llm.ChatRequest) bool {
+	if request.ResponseFormat == nil || request.ResponseFormat.Type != "json_schema" || request.ResponseFormat.JSONSchema == nil {
+		return false
+	}
+	if request.ResponseFormat.JSONSchema.Name != "natural_message_decision" || !request.ResponseFormat.JSONSchema.Strict {
+		return false
+	}
+	schema := string(request.ResponseFormat.JSONSchema.Schema)
+	return strings.Contains(schema, `"respond"`) &&
+		strings.Contains(schema, `"prompt"`) &&
+		strings.Contains(schema, `"tool_name"`) &&
+		strings.Contains(schema, `"panda_manage_music"`) &&
+		strings.Contains(schema, `"additionalProperties": false`)
+}
+
 func TestParseNaturalMessageDecisionExtractsWrappedJSON(t *testing.T) {
-	decision, err := parseNaturalMessageDecision("**Decision**\n```json\n{\"respond\":true,\"prompt\":\"What can you do?\"}\n```")
+	decision, err := parseNaturalMessageDecision("**Decision**\n```json\n{\"respond\":true,\"prompt\":\"Play music\",\"tool_name\":\"panda_manage_music\"}\n```")
 	if err != nil {
 		t.Fatalf("parseNaturalMessageDecision: %v", err)
 	}
-	if !decision.Respond || decision.Prompt != "What can you do?" {
+	if !decision.Respond || decision.Prompt != "Play music" || decision.ToolName != "panda_manage_music" {
 		t.Fatalf("unexpected decision: %+v", decision)
 	}
 }
@@ -1003,6 +1066,9 @@ func TestAskExecutesKnowledgeSearchTool(t *testing.T) {
 	if response.Content != "Deploys happen Friday." {
 		t.Fatalf("unexpected response: %+v", response)
 	}
+	if response.UsedWebSearch {
+		t.Fatalf("knowledge search should not be marked as web search: %+v", response)
+	}
 	if len(client.requests) != 2 {
 		t.Fatalf("expected initial and final LLM requests, got %d", len(client.requests))
 	}
@@ -1019,9 +1085,9 @@ func TestChatWithFallbackRedactsMessageContentAndToolCallArguments(t *testing.T)
 	ctx := context.Background()
 	secret := "sk-abcdefghijklmnopqrstuvwxyz123456"
 	client := &fakeClient{response: llm.ChatResponse{Model: "fixture/model", Content: "ok"}}
-	service := NewService(client, nil, nil, nil, nil, "fixture/model", nil)
+	service := NewService(client, nil, nil, nil, nil, "fixture/model", "", nil)
 
-	_, err := service.chatWithFallback(ctx, store.GuildConfig{}, llm.ChatRequest{
+	_, err := service.chatWithFallback(ctx, store.GuildConfig{}, modelTaskResponse, llm.ChatRequest{
 		Messages: []llm.Message{
 			{Role: "system", Content: "Debug token " + secret},
 			{

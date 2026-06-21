@@ -132,11 +132,11 @@ func TestOpenRunsUsefulnessMigrationWhenLegacyVersionsExist(t *testing.T) {
 		}
 	}
 	var count int64
-	if err := opened.DB.Table("schema_migrations").Where("version = ? AND name = ?", 15, "bot_usefulness_layer").Count(&count).Error; err != nil {
-		t.Fatalf("lookup usefulness migration: %v", err)
+	if err := opened.DB.Table("schema_migrations").Where("version = ? AND name = ?", 16, "guild_classifier_model").Count(&count).Error; err != nil {
+		t.Fatalf("lookup classifier model migration: %v", err)
 	}
 	if count != 1 {
-		t.Fatalf("expected bot_usefulness_layer migration at version 15, got %d", count)
+		t.Fatalf("expected guild_classifier_model migration at version 16, got %d", count)
 	}
 }
 

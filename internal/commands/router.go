@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/sn0w/panda2/internal/admin"
 	"github.com/sn0w/panda2/internal/alerts"
@@ -45,6 +46,7 @@ type Router struct {
 	scheduler   *scheduler.Service
 	alerts      *alerts.Service
 	setup       SetupChecker
+	tools       *toolsvc.Executor
 	rateLimit   *ratelimit.Limiter
 }
 
@@ -123,6 +125,7 @@ const (
 const discordMessageContentLimit = 2000
 const invocationContextWindow = 2 * time.Minute
 const invocationContextLimit = 50
+const feedbackMinimumPlainTextRunes = 500
 
 func NewRouter(adminService *admin.Service, assistantService *assistant.Service, opsService *ops.Service, limiter *ratelimit.Limiter) *Router {
 	return &Router{admin: adminService, assistant: assistantService, ops: opsService, rateLimit: limiter}
@@ -180,6 +183,11 @@ func (r *Router) WithAlertService(alertService *alerts.Service) *Router {
 
 func (r *Router) WithSetupChecker(checker SetupChecker) *Router {
 	r.setup = checker
+	return r
+}
+
+func (r *Router) WithToolExecutor(executor *toolsvc.Executor) *Router {
+	r.tools = executor
 	return r
 }
 
@@ -288,7 +296,7 @@ func elevatedHelpMessage(access helpAccess) string {
 			builder.WriteString("- `/admin member-role action:add|remove user:@User role:@Role` - assign Discord roles to users\n")
 			builder.WriteString("- `/admin tool action:list|add|remove tool_name:<tool> role:@Role` - role tool grants\n")
 			builder.WriteString("- `/admin channel action:list|allow|deny|remove channel:#Channel`\n")
-			builder.WriteString("- `/admin model model:<slug> fallback_models:<csv> temperature:<0-2> max_response_tokens:<64-4000> tool_policy:<policy> dry_run:<bool>`\n")
+			builder.WriteString("- `/admin model model:<response> classifier_model:<classifier> ...` - model routing, fallbacks, temperature, tokens, and tools\n")
 			builder.WriteString("- Policies: `off`, `read_only`, `assistive`, `admin_only`, `moderator`, `write_confirmed`, `owner_ops`\n")
 			builder.WriteString("- `/admin prompt prompt:<text> dry_run:<bool>` - server instructions; omit `prompt` for modal\n")
 			builder.WriteString("- `/admin audit` - recent privileged changes\n")
@@ -361,6 +369,7 @@ func (r *Router) HandleNaturalMessage(ctx context.Context, request Request) Resp
 		request.Options = map[string]string{}
 	}
 	request.Options["question"] = decision.Prompt
+	request.PreferredTool = decision.ToolName
 	return r.handleChatModeWithAccess(ctx, request, false, true)
 }
 
@@ -808,7 +817,7 @@ func (r *Router) handleAdminModel(ctx context.Context, request Request) Response
 	if err != nil {
 		return Response{Content: "Model update failed.", Ephemeral: true}
 	}
-	return Response{Content: fmt.Sprintf("Model settings updated. Default `%s`, %d fallback model(s), temperature %.2f, max response %d tokens, tool policy `%s`.", config.DefaultModel, fallbackModelCount(config.FallbackModels), config.Temperature, config.MaxResponseTokens, config.ToolPolicy), Ephemeral: true}
+	return Response{Content: fmt.Sprintf("Model settings updated. Default `%s`, classifier `%s`, %d fallback model(s), temperature %.2f, max response %d tokens, tool policy `%s`.", config.DefaultModel, classifierModelDisplay(config), fallbackModelCount(config.FallbackModels), config.Temperature, config.MaxResponseTokens, config.ToolPolicy), Ephemeral: true}
 }
 
 func (r *Router) handleAdminPrompt(ctx context.Context, request Request) Response {
@@ -993,6 +1002,7 @@ func (r *Router) handleChatModeWithAccess(ctx context.Context, request Request, 
 		VoiceChannelID:               request.VoiceChannelID,
 		ThreadID:                     threadID,
 		Question:                     question,
+		PreferredTool:                request.PreferredTool,
 		InvocationContext:            invocationContext,
 		ReplyContent:                 request.Options["reply_text"],
 		ReplyMessageID:               request.Options["reply_message_id"],
@@ -1232,6 +1242,8 @@ func (r *Router) HandleToolConfirmation(ctx context.Context, request ToolConfirm
 			return discordRoleCreateErrorResponse(err)
 		}
 		return Response{Content: fmt.Sprintf("Created Discord role `%s` (`%s`).", role.Name, role.ID), Ephemeral: true}
+	case toolActionDiscordPollCreate:
+		return r.handleDiscordPollConfirmation(ctx, request)
 	case toolActionMemberRoleAdd, toolActionMemberRoleRemove:
 		if denied := r.ensureGuildControl(ctx, request.Request, "Only the Panda owner, server owner or administrator, or the current Panda admin role can assign Discord roles."); denied.Content != "" {
 			return denied
@@ -1342,6 +1354,79 @@ func (r *Router) HandleToolConfirmation(ctx context.Context, request ToolConfirm
 	default:
 		return Response{Content: "That confirmation is no longer supported.", Ephemeral: true}
 	}
+}
+
+func (r *Router) handleDiscordPollConfirmation(ctx context.Context, request ToolConfirmationRequest) Response {
+	if r.tools == nil {
+		return Response{Content: "Discord poll creation is not configured for this runtime.", Ephemeral: true}
+	}
+	arguments, err := discordPollConfirmationArguments(request.Options)
+	if err != nil {
+		return Response{Content: "That poll confirmation is invalid.", Ephemeral: true}
+	}
+	result, err := r.tools.Execute(ctx, toolsvc.ExecutionRequest{
+		GuildID:              request.Request.GuildID,
+		ChannelID:            request.Request.ChannelID,
+		ActorID:              request.Request.UserID,
+		RequestID:            request.Request.RequestID,
+		InvocationType:       "tool_confirmation",
+		RoleIDs:              append([]string(nil), request.Request.RoleIDs...),
+		IsGuildAdmin:         request.Request.IsGuildAdmin,
+		IsOwner:              request.Request.IsOwner,
+		Access:               r.toolAccess(ctx, request.Request, toolsvc.ToolPolicyWriteConfirmed),
+		AllowConfirmedWrites: true,
+		Call: llm.ToolCall{
+			ID:   "confirmed-discord-poll",
+			Type: "function",
+			Function: llm.ToolCallFunction{
+				Name:      "discord_create_poll",
+				Arguments: arguments,
+			},
+		},
+	})
+	if err != nil {
+		return Response{Content: "Poll could not be sent: " + err.Error(), Ephemeral: true, Presentation: Presentation{Title: "Poll not sent", Accent: AccentWarning}}
+	}
+	if !strings.Contains(result.Message.Content, `"created":true`) {
+		return Response{Content: "Poll could not be sent.", Ephemeral: true, Presentation: Presentation{Title: "Poll not sent", Accent: AccentWarning}}
+	}
+	return Response{Content: "Sent the poll.", Presentation: Presentation{Title: "Poll sent", Accent: AccentSuccess}}
+}
+
+func discordPollConfirmationArguments(options map[string]string) (string, error) {
+	channelID := strings.TrimSpace(options["channel_id"])
+	question := strings.TrimSpace(options["question"])
+	rawAnswers := strings.TrimSpace(options["answers_json"])
+	if channelID == "" || question == "" || rawAnswers == "" {
+		return "", fmt.Errorf("missing poll fields")
+	}
+	var answers any
+	if err := json.Unmarshal([]byte(rawAnswers), &answers); err != nil {
+		return "", err
+	}
+	arguments := map[string]any{
+		"channel_id": channelID,
+		"question":   question,
+		"answers":    answers,
+	}
+	if raw := strings.TrimSpace(options["duration_hours"]); raw != "" {
+		durationHours, err := strconv.Atoi(raw)
+		if err != nil {
+			return "", err
+		}
+		arguments["duration_hours"] = durationHours
+	}
+	if raw := strings.TrimSpace(options["allow_multiselect"]); raw != "" {
+		arguments["allow_multiselect"] = truthyOption(raw)
+	}
+	if content := strings.TrimSpace(options["content"]); content != "" {
+		arguments["content"] = content
+	}
+	data, err := json.Marshal(arguments)
+	if err != nil {
+		return "", err
+	}
+	return string(data), nil
 }
 
 func (r *Router) HandleFeedback(ctx context.Context, request FeedbackRequest) Response {
@@ -1654,6 +1739,11 @@ func (r *Router) responseFromAssistantAnswer(ctx context.Context, request Reques
 		ThreadID:   threadID,
 		ThreadName: threadName,
 	}
+	if answer.Card != nil {
+		response.Content = firstNonEmpty(answer.Card.Content, response.Content)
+		response.Presentation = presentationFromAssistantCard(answer.Card)
+		response.Actions = actionsFromAssistantCard(answer.Card)
+	}
 	if confirmation := ToolConfirmationFromAssistant(request.UserID, answer.Confirmation); confirmation != nil {
 		response.Confirmation = confirmation
 		response.Content = appendConfirmationNotice(response.Content, answer.Confirmation.Summary)
@@ -1663,17 +1753,18 @@ func (r *Router) responseFromAssistantAnswer(ctx context.Context, request Reques
 		}
 		return response
 	}
-	if r.feedback != nil && strings.TrimSpace(answer.Content) != "" {
+	if r.feedback != nil && assistantFeedbackEligible(answer, response.Content) {
 		target, err := r.feedback.CreateTarget(ctx, feedback.TargetRequest{
 			GuildID:   request.GuildID,
 			ChannelID: request.ChannelID,
 			UserID:    request.UserID,
 			Command:   firstNonEmpty(request.Command, "assistant"),
 			Model:     answer.Model,
-			Content:   answer.Content,
+			Content:   response.Content,
 			Metadata: map[string]string{
-				"request_id": request.RequestID,
-				"thread_id":  threadID,
+				"request_id":      request.RequestID,
+				"thread_id":       threadID,
+				"used_web_search": strconv.FormatBool(answer.UsedWebSearch),
 			},
 		})
 		if err == nil && target.ID != 0 {
@@ -1681,6 +1772,75 @@ func (r *Router) responseFromAssistantAnswer(ctx context.Context, request Reques
 		}
 	}
 	return response
+}
+
+func assistantFeedbackEligible(answer assistant.AskResponse, content string) bool {
+	content = strings.TrimSpace(content)
+	if content == "" {
+		return false
+	}
+	if answer.UsedWebSearch {
+		return true
+	}
+	if answer.Card != nil {
+		return false
+	}
+	return utf8.RuneCountInString(content) >= feedbackMinimumPlainTextRunes
+}
+
+func presentationFromAssistantCard(card *assistant.ToolCard) Presentation {
+	if card == nil {
+		return Presentation{}
+	}
+	return Presentation{
+		Title:  card.Title,
+		Accent: assistantCardAccent(card.Accent),
+		URL:    card.URL,
+		Fields: fieldsFromAssistantCard(card.Fields),
+	}
+}
+
+func assistantCardAccent(accent string) Accent {
+	switch strings.ToLower(strings.TrimSpace(accent)) {
+	case "music":
+		return AccentMusic
+	case "success":
+		return AccentSuccess
+	case "warning":
+		return AccentWarning
+	case "danger":
+		return AccentDanger
+	case "info":
+		return AccentInfo
+	default:
+		return AccentDefault
+	}
+}
+
+func fieldsFromAssistantCard(fields []assistant.ToolCardField) []Field {
+	result := make([]Field, 0, len(fields))
+	for _, field := range fields {
+		result = append(result, Field{
+			Name:   field.Name,
+			Value:  field.Value,
+			Inline: field.Inline,
+		})
+	}
+	return result
+}
+
+func actionsFromAssistantCard(card *assistant.ToolCard) []Action {
+	if card == nil {
+		return nil
+	}
+	actions := make([]Action, 0, len(card.Actions))
+	for _, action := range card.Actions {
+		actions = append(actions, Action{
+			Label: action.Label,
+			URL:   action.URL,
+		})
+	}
+	return actions
 }
 
 func appendConfirmationNotice(content, summary string) string {
@@ -1737,7 +1897,10 @@ func renderAudit(events []store.AuditEvent) string {
 }
 
 func modelSettingsFromOptions(options map[string]string) (admin.ModelSettings, error) {
-	settings := admin.ModelSettings{DefaultModel: strings.TrimSpace(options["model"])}
+	settings := admin.ModelSettings{
+		DefaultModel:    strings.TrimSpace(options["model"]),
+		ClassifierModel: strings.TrimSpace(options["classifier_model"]),
+	}
 
 	if raw, ok := options["fallback_models"]; ok {
 		settings.FallbackModelsSet = true
@@ -1775,6 +1938,9 @@ func renderModelSettingsDryRun(settings admin.ModelSettings) string {
 	if strings.TrimSpace(settings.DefaultModel) != "" {
 		parts = append(parts, fmt.Sprintf("default `%s`", settings.DefaultModel))
 	}
+	if strings.TrimSpace(settings.ClassifierModel) != "" {
+		parts = append(parts, fmt.Sprintf("classifier `%s`", settings.ClassifierModel))
+	}
 	if settings.FallbackModelsSet {
 		parts = append(parts, fmt.Sprintf("%d fallback model(s)", len(settings.FallbackModels)))
 	}
@@ -1791,6 +1957,10 @@ func renderModelSettingsDryRun(settings admin.ModelSettings) string {
 		return "No model setting changes were provided."
 	}
 	return strings.Join(parts, ", ") + "."
+}
+
+func classifierModelDisplay(config store.GuildConfig) string {
+	return firstNonEmpty(config.ClassifierModel, config.DefaultModel)
 }
 
 func dryRunRequested(request Request) bool {

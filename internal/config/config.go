@@ -13,13 +13,14 @@ import (
 )
 
 const (
-	configPathEnv          = "PANDA_CONFIG"
-	envFilePathEnv         = "PANDA_ENV_FILE"
-	defaultConfigPath      = "panda.config.json"
-	defaultEnvFilePath     = ".env"
-	defaultDevDataDir      = "data"
-	defaultProdDataDir     = "/data"
-	defaultOpenRouterModel = "deepseek/deepseek-v4-flash"
+	configPathEnv                    = "PANDA_CONFIG"
+	envFilePathEnv                   = "PANDA_ENV_FILE"
+	defaultConfigPath                = "panda.config.json"
+	defaultEnvFilePath               = ".env"
+	defaultDevDataDir                = "data"
+	defaultProdDataDir               = "/data"
+	defaultOpenRouterModel           = "inception/mercury-2"
+	defaultOpenRouterClassifierModel = "inclusionai/ling-2.6-flash"
 )
 
 type Config struct {
@@ -30,6 +31,7 @@ type Config struct {
 	OpenRouterAPIKey                         string
 	OpenRouterBaseURL                        string
 	OpenRouterModel                          string
+	OpenRouterClassifierModel                string
 	OpenRouterFallbackModels                 []string
 	OpenRouterEmbeddingModel                 string
 	OpenRouterAppURL                         string
@@ -68,13 +70,14 @@ type fileDiscordConfig struct {
 }
 
 type fileOpenRouterConfig struct {
-	BaseURL        string                   `json:"base_url"`
-	DefaultModel   string                   `json:"default_model"`
-	FallbackModels []string                 `json:"fallback_models"`
-	EmbeddingModel string                   `json:"embedding_model"`
-	AppURL         string                   `json:"app_url"`
-	AppTitle       string                   `json:"app_title"`
-	CircuitBreaker fileCircuitBreakerConfig `json:"circuit_breaker"`
+	BaseURL         string                   `json:"base_url"`
+	DefaultModel    string                   `json:"default_model"`
+	ClassifierModel string                   `json:"classifier_model"`
+	FallbackModels  []string                 `json:"fallback_models"`
+	EmbeddingModel  string                   `json:"embedding_model"`
+	AppURL          string                   `json:"app_url"`
+	AppTitle        string                   `json:"app_title"`
+	CircuitBreaker  fileCircuitBreakerConfig `json:"circuit_breaker"`
 }
 
 type fileCircuitBreakerConfig struct {
@@ -212,6 +215,7 @@ func defaultConfig() Config {
 	return Config{
 		OpenRouterBaseURL:                        "https://openrouter.ai/api/v1",
 		OpenRouterModel:                          defaultOpenRouterModel,
+		OpenRouterClassifierModel:                defaultOpenRouterClassifierModel,
 		OpenRouterAppTitle:                       "Panda Assistant",
 		OpenRouterCircuitBreakerFailureThreshold: 5,
 		OpenRouterCircuitBreakerCooldown:         30 * time.Second,
@@ -464,6 +468,9 @@ func applyFileConfig(cfg *Config, file fileConfig) error {
 	if value := strings.TrimSpace(file.OpenRouter.DefaultModel); value != "" {
 		cfg.OpenRouterModel = value
 	}
+	if value := strings.TrimSpace(file.OpenRouter.ClassifierModel); value != "" {
+		cfg.OpenRouterClassifierModel = value
+	}
 	if file.OpenRouter.FallbackModels != nil {
 		cfg.OpenRouterFallbackModels = normalizeList(file.OpenRouter.FallbackModels)
 	}
@@ -542,6 +549,7 @@ func applyEnvValues(cfg *Config, lookup func(string) (string, bool)) {
 	cfg.OpenRouterAPIKey = stringFromLookup(lookup, "OPENROUTER_API_KEY", cfg.OpenRouterAPIKey)
 	cfg.OpenRouterBaseURL = nonEmptyStringFromLookup(lookup, "OPENROUTER_BASE_URL", cfg.OpenRouterBaseURL)
 	cfg.OpenRouterModel = nonEmptyStringFromLookup(lookup, "OPENROUTER_DEFAULT_MODEL", cfg.OpenRouterModel)
+	cfg.OpenRouterClassifierModel = nonEmptyStringFromLookup(lookup, "OPENROUTER_CLASSIFIER_MODEL", cfg.OpenRouterClassifierModel)
 	if value, ok := csvListFromLookup(lookup, "OPENROUTER_FALLBACK_MODELS"); ok {
 		cfg.OpenRouterFallbackModels = value
 	}

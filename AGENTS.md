@@ -1,4 +1,5 @@
 - Dont test in the browser, leave that to the user
 - NEVER use worktrees or branches for work unless explicitly asked to
+- NO DETERMINISTIC FALLBACK EVER. Fix model/request formatting, tool wiring, or upstream structured output issues instead of bypassing LLM decisions with hard-coded intent fallbacks.
 - Never leave legacy code around. Confirm its legacy and always remove unless asked not to.
 - Do small on the fly refactors as you are working along the way when you notice inefficiencies in the code, code thats not DRY, etc. Keep it scoped to the area of work.

@@ -22,6 +22,7 @@ func (r *GuildConfigRepository) EnsureDefault(ctx context.Context, guildID, defa
 	config := store.GuildConfig{
 		GuildID:           guildID,
 		DefaultModel:      defaultModel,
+		ClassifierModel:   "",
 		FallbackModels:    "[]",
 		Temperature:       0.3,
 		MaxResponseTokens: 900,

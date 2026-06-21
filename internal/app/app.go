@@ -113,7 +113,7 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 	toolExecutor.WithComposedToolManager(composedService)
 	toolExecutor.WithScheduleManager(schedulerService)
 	toolExecutor.WithReminderManager(schedulerService)
-	assistantService := assistant.NewService(openRouter, usage, guildConfigs, memoryService, conversations, cfg.OpenRouterModel, cfg.OpenRouterFallbackModels).
+	assistantService := assistant.NewService(openRouter, usage, guildConfigs, memoryService, conversations, cfg.OpenRouterModel, cfg.OpenRouterClassifierModel, cfg.OpenRouterFallbackModels).
 		WithToolExecutor(toolExecutor).
 		WithCurator(curator)
 	router := commands.NewRouter(adminService, assistantService, opsService, ratelimit.New(cfg.UserRateLimit, cfg.UserRateLimitWindow)).
@@ -121,7 +121,8 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 		WithComposedService(composedService).
 		WithScheduler(schedulerService).
 		WithAlertService(alertService).
-		WithFeedbackService(feedbackService)
+		WithFeedbackService(feedbackService).
+		WithToolExecutor(toolExecutor)
 
 	discord, err := discordbot.New(cfg, router, logger)
 	if err != nil {

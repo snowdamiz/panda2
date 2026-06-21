@@ -68,6 +68,7 @@ func TestLoadConfigFile(t *testing.T) {
 		"openrouter": {
 			"base_url": "https://openrouter.example/api/v1",
 			"default_model": "provider/model",
+			"classifier_model": "provider/classifier",
 			"fallback_models": ["provider/fallback-a", "provider/fallback-b", "provider/fallback-a"],
 			"embedding_model": "provider/embed",
 			"app_url": "https://panda.example",
@@ -115,6 +116,9 @@ func TestLoadConfigFile(t *testing.T) {
 	if cfg.OpenRouterBaseURL != "https://openrouter.example/api/v1" || cfg.OpenRouterModel != "provider/model" {
 		t.Fatalf("unexpected OpenRouter routing config: base=%q model=%q", cfg.OpenRouterBaseURL, cfg.OpenRouterModel)
 	}
+	if cfg.OpenRouterClassifierModel != "provider/classifier" {
+		t.Fatalf("unexpected classifier model %q", cfg.OpenRouterClassifierModel)
+	}
 	if len(cfg.OpenRouterFallbackModels) != 2 || cfg.OpenRouterFallbackModels[0] != "provider/fallback-a" || cfg.OpenRouterFallbackModels[1] != "provider/fallback-b" {
 		t.Fatalf("unexpected fallback models %#v", cfg.OpenRouterFallbackModels)
 	}
@@ -154,6 +158,7 @@ func TestEnvOverridesConfigFile(t *testing.T) {
 		},
 		"openrouter": {
 			"default_model": "provider/from-file",
+			"classifier_model": "provider/classifier-file",
 			"fallback_models": ["provider/file-fallback"]
 		}
 	}`)
@@ -161,6 +166,7 @@ func TestEnvOverridesConfigFile(t *testing.T) {
 	t.Setenv("DISCORD_APPLICATION_ID", "app-from-env")
 	t.Setenv("DISCORD_PUBLIC_KEY", "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789")
 	t.Setenv("OPENROUTER_DEFAULT_MODEL", "provider/from-env")
+	t.Setenv("OPENROUTER_CLASSIFIER_MODEL", "provider/classifier-env")
 	t.Setenv("OPENROUTER_FALLBACK_MODELS", "provider/env-a,provider/env-b")
 	t.Setenv("BRAVE_SEARCH_API_KEY", "brave-key")
 	t.Setenv("BRAVE_SEARCH_BASE_URL", "https://brave-env.example/res/v1")
@@ -181,6 +187,9 @@ func TestEnvOverridesConfigFile(t *testing.T) {
 	}
 	if cfg.OpenRouterModel != "provider/from-env" {
 		t.Fatalf("expected env default model, got %q", cfg.OpenRouterModel)
+	}
+	if cfg.OpenRouterClassifierModel != "provider/classifier-env" {
+		t.Fatalf("expected env classifier model, got %q", cfg.OpenRouterClassifierModel)
 	}
 	if len(cfg.OpenRouterFallbackModels) != 2 || cfg.OpenRouterFallbackModels[0] != "provider/env-a" || cfg.OpenRouterFallbackModels[1] != "provider/env-b" {
 		t.Fatalf("expected env fallback models, got %#v", cfg.OpenRouterFallbackModels)
@@ -211,6 +220,7 @@ func TestLoadEnvFile(t *testing.T) {
 		},
 		"openrouter": {
 			"default_model": "provider/from-file",
+			"classifier_model": "provider/classifier-file",
 			"fallback_models": ["provider/file-fallback"]
 		},
 		"runtime": {
@@ -227,6 +237,7 @@ export DISCORD_APPLICATION_ID=app-from-env-file
 DISCORD_BOT_TOKEN="bot token"
 OPENROUTER_API_KEY='router key'
 OPENROUTER_DEFAULT_MODEL=provider/from-env-file
+OPENROUTER_CLASSIFIER_MODEL=provider/classifier-env-file
 OPENROUTER_FALLBACK_MODELS=provider/env-a, provider/env-b, provider/env-a
 OWNER_USER_IDS=100, 200, 100
 PORT=9099 # local port
@@ -245,6 +256,9 @@ USER_RATE_LIMIT_WINDOW=90s
 	}
 	if cfg.OpenRouterAPIKey != "router key" || cfg.OpenRouterModel != "provider/from-env-file" {
 		t.Fatalf("expected env file OpenRouter settings, key=%q model=%q", cfg.OpenRouterAPIKey, cfg.OpenRouterModel)
+	}
+	if cfg.OpenRouterClassifierModel != "provider/classifier-env-file" {
+		t.Fatalf("expected env file classifier model, got %q", cfg.OpenRouterClassifierModel)
 	}
 	if len(cfg.OpenRouterFallbackModels) != 2 || cfg.OpenRouterFallbackModels[0] != "provider/env-a" || cfg.OpenRouterFallbackModels[1] != "provider/env-b" {
 		t.Fatalf("expected env file fallback models, got %#v", cfg.OpenRouterFallbackModels)
@@ -273,12 +287,14 @@ func TestShellEnvOverridesEnvFile(t *testing.T) {
 	writeConfigFile(t, envPath, `
 DISCORD_APPLICATION_ID=app-from-env-file
 OPENROUTER_DEFAULT_MODEL=provider/from-env-file
+OPENROUTER_CLASSIFIER_MODEL=provider/classifier-env-file
 OWNER_USER_IDS=100
 `)
 	t.Setenv("PANDA_CONFIG", configPath)
 	t.Setenv("PANDA_ENV_FILE", envPath)
 	t.Setenv("DISCORD_APPLICATION_ID", "app-from-shell")
 	t.Setenv("OPENROUTER_DEFAULT_MODEL", "provider/from-shell")
+	t.Setenv("OPENROUTER_CLASSIFIER_MODEL", "provider/classifier-shell")
 	t.Setenv("OWNER_USER_IDS", "200")
 
 	cfg, _, err := Load()
@@ -290,6 +306,9 @@ OWNER_USER_IDS=100
 	}
 	if cfg.OpenRouterModel != "provider/from-shell" {
 		t.Fatalf("expected shell env default model, got %q", cfg.OpenRouterModel)
+	}
+	if cfg.OpenRouterClassifierModel != "provider/classifier-shell" {
+		t.Fatalf("expected shell env classifier model, got %q", cfg.OpenRouterClassifierModel)
 	}
 	if cfg.IsOwner("100") || !cfg.IsOwner("200") {
 		t.Fatalf("expected shell env owner ids to override env file ids, got %#v", cfg.OwnerUserIDs)
@@ -353,6 +372,7 @@ func clearConfigEnv(t *testing.T) {
 		"OPENROUTER_API_KEY",
 		"OPENROUTER_BASE_URL",
 		"OPENROUTER_DEFAULT_MODEL",
+		"OPENROUTER_CLASSIFIER_MODEL",
 		"OPENROUTER_FALLBACK_MODELS",
 		"OPENROUTER_EMBEDDING_MODEL",
 		"OPENROUTER_APP_URL",

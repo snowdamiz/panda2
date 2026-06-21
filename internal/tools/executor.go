@@ -497,6 +497,9 @@ func (e *Executor) executeDiscordTool(ctx context.Context, definition Definition
 	}
 	discordPermissions := effectiveDiscordPermissions(definition, arguments)
 	dryRun := boolArgument(arguments, "dry_run")
+	if definition.RequiresConfirmation && definition.Name == "discord.create_poll" && !request.AllowConfirmedWrites {
+		return confirmationRequired("discord_poll.create", safePreviewArguments(arguments)), nil
+	}
 	if definition.SupportsDryRun && dryRun {
 		return map[string]any{
 			"dry_run":               true,
@@ -853,6 +856,7 @@ func (e *Executor) readConfig(ctx context.Context, request ExecutionRequest, arg
 		"configured":          true,
 		"guild_id":            config.GuildID,
 		"default_model":       config.DefaultModel,
+		"classifier_model":    config.ClassifierModel,
 		"assistant_enabled":   config.AssistantEnabled,
 		"memory_enabled":      config.MemoryEnabled,
 		"tool_policy":         config.ToolPolicy,
@@ -2065,7 +2069,16 @@ func confirmationFromPayload(payload any) *InteractionConfirmation {
 		Arguments:    arguments,
 		Summary:      summary,
 		ConfirmLabel: label,
-		Danger:       true,
+		Danger:       confirmationDanger(action),
+	}
+}
+
+func confirmationDanger(action string) bool {
+	switch action {
+	case "discord_poll.create":
+		return false
+	default:
+		return true
 	}
 }
 
@@ -2085,6 +2098,8 @@ func confirmationArguments(action string, preview map[string]any) map[string]str
 		return stringArguments(preview, "role_id", "profile")
 	case "discord_role.create":
 		return stringArguments(preview, "name")
+	case "discord_poll.create":
+		return discordPollConfirmationArguments(preview)
 	case "member_role.add", "member_role.remove":
 		return stringArguments(preview, "user_id", "role_id")
 	case "tool_access.add", "tool_access.remove":
@@ -2098,6 +2113,38 @@ func confirmationArguments(action string, preview map[string]any) map[string]str
 	default:
 		return nil
 	}
+}
+
+func discordPollConfirmationArguments(preview map[string]any) map[string]string {
+	channelValue, channelOK := preview["channel_id"]
+	questionValue, questionOK := preview["question"]
+	if !channelOK || !questionOK || channelValue == nil || questionValue == nil {
+		return nil
+	}
+	channelID := strings.TrimSpace(fmt.Sprint(channelValue))
+	question := strings.TrimSpace(fmt.Sprint(questionValue))
+	if channelID == "" || question == "" {
+		return nil
+	}
+	result := map[string]string{
+		"channel_id": channelID,
+		"question":   question,
+	}
+	for _, name := range []string{"duration_hours", "allow_multiselect", "content"} {
+		if value, ok := preview[name]; ok && value != nil {
+			result[name] = strings.TrimSpace(fmt.Sprint(value))
+		}
+	}
+	answers, ok := preview["answers"]
+	if !ok || answers == nil {
+		return nil
+	}
+	data, err := json.Marshal(answers)
+	if err != nil || string(data) == "null" {
+		return nil
+	}
+	result["answers_json"] = string(data)
+	return result
 }
 
 func confirmationCopy(action string, arguments map[string]string) (string, string) {
@@ -2118,6 +2165,8 @@ func confirmationCopy(action string, arguments map[string]string) (string, strin
 		return fmt.Sprintf("Panda prepared removal of the `%s` profile from role `%s`.", arguments["profile"], arguments["role_id"]), "Remove role profile"
 	case "discord_role.create":
 		return fmt.Sprintf("Panda prepared creation of Discord role `%s`.", arguments["name"]), "Create role"
+	case "discord_poll.create":
+		return fmt.Sprintf("Panda prepared a native Discord poll for <#%s>.", arguments["channel_id"]), "Send poll"
 	case "member_role.add":
 		return fmt.Sprintf("Panda prepared assignment of role `%s` to user `%s`.", arguments["role_id"], arguments["user_id"]), "Assign role"
 	case "member_role.remove":
