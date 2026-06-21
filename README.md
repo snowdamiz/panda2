@@ -1,100 +1,191 @@
 # Panda Discord Assistant
 
-Panda is a Go Discord assistant bot implemented from `PLAN.md`.
+Panda is a Discord bot. People can use slash commands, or they can talk to it by saying `Panda` in a server message.
 
-## Local Development
+This guide is for getting Panda online with Fly.io.
+
+## What You Need
+
+- A Discord account with permission to create a Discord app.
+- A Fly.io account.
+- An OpenRouter account with an API key.
+- A terminal on your computer.
+
+Fly.io and OpenRouter may charge money depending on usage. Keep your keys private.
+
+## 1. Make The Discord App
+
+1. Go to the Discord Developer Portal.
+2. Create a new application.
+3. Open the Bot page.
+4. Copy the bot token. This becomes `DISCORD_BOT_TOKEN`.
+5. Turn on these bot settings:
+   - Server Members Intent
+   - Message Content Intent
+6. Open the General Information page.
+7. Copy the Application ID. This becomes `DISCORD_APPLICATION_ID`.
+8. Copy the Public Key. This becomes `DISCORD_PUBLIC_KEY`.
+9. Copy your own Discord user ID. This becomes `OWNER_USER_IDS`.
+
+To copy your Discord user ID, turn on Developer Mode in Discord, then right-click your user and choose Copy User ID.
+
+## 2. Make The OpenRouter Key
+
+1. Go to OpenRouter.
+2. Create an API key.
+3. Copy it. This becomes `OPENROUTER_API_KEY`.
+
+## 3. Create The Fly App
+
+Install Fly's command line tool if you do not already have it:
 
 ```bash
-make start
-make logs
-make stop
+brew install flyctl
 ```
 
-`make start` builds and starts the full local dev stack in the background. The stack is the Panda app process: it starts the HTTP server, opens and migrates SQLite at `data/panda.db` by default, and runs the queue worker. There is no separate database daemon to start for local development.
+If that command does not work, use the Fly install guide linked at the bottom of this README.
 
-Use `make stop` to stop the background stack, `make status` to check it, and `make restart` after config changes. For a foreground process you can interrupt with `Ctrl+C`, run:
+Log in:
 
 ```bash
-make dev
+fly auth login
 ```
+
+Pick one app name. Use lowercase letters, numbers, and dashes only.
+Use that same name everywhere you see `my-panda-bot` below.
+
+Example app name:
+
+```text
+my-panda-bot
+```
+
+Open `fly.toml` and change the app name to your app name:
+
+```toml
+app = "my-panda-bot"
+```
+
+Create the app:
 
 ```bash
-go test ./...
+fly apps create my-panda-bot
 ```
 
-The service can start without Discord or OpenRouter credentials in development. Local tests use fake LLM clients and SQLite fixtures, so no real credentials are needed for development verification.
+Create storage for Panda's database:
 
-Non-secret settings live in `panda.config.json`. Secret settings can live in `.env`; Panda reads that file automatically for `make dev`, `make start`, and `go run ./cmd/bot`, so you do not need to export or source it first. Set `PANDA_CONFIG=/path/to/config.json` to use another config file, or `PANDA_ENV_FILE=/path/to/.env` to use another env file. Real shell/deployment environment variables are still supported and override `.env` and config file values when present.
+```bash
+fly volumes create data --app my-panda-bot --region sjc --size 1
+```
 
-For live Discord/OpenRouter integrations, set `DISCORD_BOT_TOKEN` and `OPENROUTER_API_KEY` in `.env`, your shell, or deployment secrets, then set `discord.application_id` in `panda.config.json` or provide `DISCORD_APPLICATION_ID`.
+## 4. Add The Secrets
 
-When `DISCORD_GUILD_ID` is set for fast local command registration, that guild must have the app installed. Guild-scoped command sync clears global command registrations first so Discord does not show both global and guild copies in the same server. In development, Panda logs Discord command registration access errors and keeps the gateway running so message/webhook testing can continue.
+Replace each `paste_here` value, then run this command:
 
-Set `DISCORD_PUBLIC_KEY` from the Discord Developer Portal to enable signed Discord webhook events at `POST /discord/webhook-events`. Subscribe that endpoint to `APPLICATION_AUTHORIZED` events to enforce owner-only guild installs: Panda records the authorizing user as the guild's Panda owner when they match Discord's `guild.owner_id`; if a non-owner authorizes the app, Panda records the denial, audits it, and leaves the guild.
+```bash
+fly secrets set DISCORD_BOT_TOKEN="paste_here" DISCORD_APPLICATION_ID="paste_here" DISCORD_PUBLIC_KEY="paste_here" OPENROUTER_API_KEY="paste_here" OWNER_USER_IDS="paste_here" --app my-panda-bot
+```
 
-To enable public web search, set `BRAVE_SEARCH_API_KEY`. Panda exposes Brave Search to the model as the read-only `web.search` tool when the key is configured and the guild tool policy allows web reads. Web search is available to everyone by default; admins can restrict it later by mapping `assistant.web_search` to specific roles. The optional `brave_search.base_url` setting defaults to `https://api.search.brave.com/res/v1`.
+Optional: add Brave Search if you want Panda to search the web:
 
-For queue-only processing without Discord or HTTP, run `go run ./cmd/worker`.
+```bash
+fly secrets set BRAVE_SEARCH_API_KEY="paste_here" --app my-panda-bot
+```
 
-Health endpoints report configuration, Fiber, Discord gateway credentials, Discord webhook public key, OpenRouter, Brave Search, SQLite, and local storage status:
+## 5. Deploy
 
-- `GET /healthz`
-- `GET /readyz`
-- `GET /livez`
-- `GET /metrics`
+Run:
 
-`/metrics` emits Prometheus-style local metrics for SQLite readiness, integration configuration, schema migration version, queue depth, and usage counters.
+```bash
+fly deploy --app my-panda-bot
+```
 
-Discord gateway startup and command registration activate when `DISCORD_BOT_TOKEN` and a Discord application ID are configured. OpenRouter calls activate when `OPENROUTER_API_KEY` is set.
+The first deploy can take a few minutes.
 
-OpenRouter routing uses `openrouter.default_model` plus optional `openrouter.fallback_models` in `panda.config.json`. Guild admins can override the primary model, fallbacks, temperature, max response tokens, and tool policy with `/admin model`; transient OpenRouter/provider failures try the ordered fallback list before returning an error. The OpenRouter client also includes retries and a circuit breaker configured with `openrouter.circuit_breaker`.
+## 6. Connect Discord To The Live Bot
 
-SQLite knowledge search uses FTS5 when the binary is built with the `sqlite_fts5` tag. Default local builds fall back to an indexed table search so `go test ./...` works without custom flags. When `openrouter.embedding_model` is configured, admin-managed knowledge documents also store OpenRouter embeddings in SQLite; without it, memory remains keyword-search only.
+Your bot's web address will be:
 
-## Commands
+```text
+https://my-panda-bot.fly.dev
+```
 
-Panda listens to normal Discord messages that contain the word `Panda`, then uses the model to decide whether the message is meant for it. Natural requests like `Panda is this true?` and task-style asks are routed into chat without a slash command.
+In the Discord Developer Portal:
 
-- `/ping`
-- `/help`
-- `/admin role` to define which Discord roles mean Panda admin or moderator
-- `/admin member-role` to assign or remove Discord roles for users
-- `/admin tool` to allow a role to use a specific native or composed tool
-- `/admin model`
-- `/admin prompt`
-- `/admin soul`
-- `/admin audit`
-- `/admin enable`
-- `/admin disable`
-- `/ops health`
-- `/ops guilds`
-- `/ops reload`
-- `/ops drain`
-- `/ops resume`
-- `/ops incident`
-- Message context menu: `Explain with Panda`
-- Message context menu: `Summarize with Panda`
+1. Open your application.
+2. Open the Webhooks page.
+3. Set the webhook events endpoint to:
 
-Guild config is created automatically the first time an admin changes Panda settings. The installing owner can use `/admin role` to choose any Discord role as Panda's admin or moderator role profile; for example, a server role named `Pickle` can be configured as the Panda moderator role. `/admin member-role` assigns those Discord roles to users. Role mappings are enforced when at least one `assistant.use` role is configured. Channel rules support explicit allow lists and deny rules; owners, guild administrators, and the configured Panda admin role bypass assistant-use policy checks.
+```text
+https://my-panda-bot.fly.dev/discord/webhook-events
+```
 
-Tool access has two layers: `tool_policy` sets the server-wide ceiling for tool classes, defaulting to `admin_only`, and `/admin tool` can restrict individual native or composed tools to specific roles. Regular members can still chat with Panda and use configured web search by asking Panda; broader native and composed tools stay admin-only until enabled. Native tools keep their underlying permissions, so allowing a role to use an admin tool does not grant admin access. Composed tools that wrap native admin tools remain admin-only.
+4. Enable webhook events.
+5. Subscribe to `APPLICATION_AUTHORIZED`.
+6. Open the Installation page.
+7. Use the install link to add Panda to your Discord server.
 
-Usage reports, request budgets, server knowledge, role profiles and permissions, Discord role assignment, channel rules, memory consent, moderation guidance, and composed-tool management are available through Panda chat/tools instead of direct slash commands.
+If Discord asks for scopes, Panda needs `bot` and `applications.commands`.
 
-When a chat-triggered tool prepares a privilege-changing admin add, set, removal, or composed-tool approval/rollback, Panda renders a Discord confirmation button tied to the requesting user. Clicking it executes the reviewed server-side action only after fresh permission checks.
+If Discord asks for bot permissions, start with View Channels, Send Messages, and Read Message History. Add Manage Roles only if you want Panda to assign roles.
 
-Server knowledge is available by default for admin-managed documents. User-specific memory consent is separate and defaults off.
+## 7. Check It Worked
 
-Large summarize requests from Discord are queued as durable background jobs after permission, context, rate-limit, and budget checks. Panda updates the deferred Discord response when the job finishes; `/metrics` and `/ops health` expose queue depth for operators.
+Check Fly:
 
-## Deployment Notes
+```bash
+fly status --app my-panda-bot
+```
 
-Fly.io should mount persistent storage at `/data`; the included `fly.toml` and `Dockerfile` keep SQLite and temp data off the ephemeral root filesystem. The Docker build runs tests and builds with `sqlite_fts5` enabled for production search.
+Watch logs:
 
-See `OPERATIONS.md` for deploy, rollback, backup, and incident notes.
+```bash
+fly logs --app my-panda-bot
+```
 
-## Planning Docs
+In Discord, try:
 
-- `PLAN.md` covers the original production bot plan.
-- `DISCORD_TOOLS_PLAN.md` covers Discord tool coverage before self-extension.
-- `MOD_EXTENSION_AGENT_PLAN.md` covers moderator-created composed tools and agents.
+```text
+/ping
+```
+
+Then try:
+
+```text
+Panda hello
+```
+
+Slash commands can take a few minutes to show up in Discord.
+
+## Updating Panda Later
+
+After changing the bot, deploy again:
+
+```bash
+fly deploy --app my-panda-bot
+```
+
+## Common Problems
+
+If `fly` is not found, install Fly's command line tool and reopen your terminal.
+
+If Panda joins the server but does not answer messages, make sure Message Content Intent is turned on in the Discord Bot page.
+
+If Panda cannot see members or roles correctly, make sure Server Members Intent is turned on in the Discord Bot page.
+
+If deploy says the database path is missing or not writable, make sure the Fly volume was created with the name `data`.
+
+If Panda says OpenRouter is missing, set `OPENROUTER_API_KEY` again.
+
+## More Details
+
+Use `OPERATIONS.md` for backups, rollbacks, health checks, and incident steps.
+
+Helpful links:
+
+- [Fly install guide](https://fly.io/docs/flyctl/install/)
+- [Fly deploy command](https://fly.io/docs/flyctl/deploy/)
+- [Fly secrets command](https://fly.io/docs/flyctl/secrets-set/)
+- [Fly volumes command](https://fly.io/docs/flyctl/volumes-create/)
+- [Discord privileged intents](https://support-dev.discord.com/hc/en-us/articles/6207308062871-What-are-Privileged-Intents)
+- [OpenRouter authentication](https://openrouter.ai/docs/api/reference/authentication)
