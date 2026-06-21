@@ -16,6 +16,7 @@ const (
 	toolConfirmationOpRolePermissionRemove = "rr"
 	toolConfirmationOpRoleProfileAdd       = "ra"
 	toolConfirmationOpRoleProfileRemove    = "rp"
+	toolConfirmationOpDiscordRoleCreate    = "rc"
 	toolConfirmationOpMemberRoleAdd        = "ma"
 	toolConfirmationOpMemberRoleRemove     = "mr"
 	toolConfirmationOpToolAccessAdd        = "ta"
@@ -32,6 +33,7 @@ const (
 	toolActionRolePermissionRemove         = "role_permission.remove"
 	toolActionRoleProfileAdd               = "role_profile.add"
 	toolActionRoleProfileRemove            = "role_profile.remove"
+	toolActionDiscordRoleCreate            = "discord_role.create"
 	toolActionMemberRoleAdd                = "member_role.add"
 	toolActionMemberRoleRemove             = "member_role.remove"
 	toolActionToolAccessAdd                = "tool_access.add"
@@ -129,6 +131,12 @@ func RequestFromToolConfirmationID(id string, base Request) (ToolConfirmationReq
 		request.Action = toolActionRoleProfileAdd
 		request.Options["role_id"] = decodeToolConfirmationPart(parts[3])
 		request.Options["profile"] = decodeToolConfirmationPart(parts[4])
+	case toolConfirmationOpDiscordRoleCreate:
+		if len(parts) != 4 {
+			return ToolConfirmationRequest{}, false
+		}
+		request.Action = toolActionDiscordRoleCreate
+		request.Options["name"] = decodeToolConfirmationPart(parts[3])
 	case toolConfirmationOpMemberRoleAdd:
 		if len(parts) != 5 {
 			return ToolConfirmationRequest{}, false
@@ -235,6 +243,12 @@ func toolConfirmationID(userID, action string, arguments map[string]string) stri
 		}
 		prefix[1] = toolConfirmationOpRoleProfileAdd
 		return strings.Join(append(prefix, encodeToolConfirmationPart(arguments["role_id"]), encodeToolConfirmationPart(arguments["profile"])), ":")
+	case toolActionDiscordRoleCreate:
+		if strings.TrimSpace(arguments["name"]) == "" {
+			return ""
+		}
+		prefix[1] = toolConfirmationOpDiscordRoleCreate
+		return strings.Join(append(prefix, encodeToolConfirmationPart(arguments["name"])), ":")
 	case toolActionMemberRoleAdd:
 		if strings.TrimSpace(arguments["user_id"]) == "" || strings.TrimSpace(arguments["role_id"]) == "" {
 			return ""

@@ -35,6 +35,7 @@ type Router struct {
 	context     *contextsvc.Service
 	threads     ThreadManager
 	memberRoles MemberRoleManager
+	roles       DiscordRoleManager
 	attachments AttachmentReader
 	ops         *ops.Service
 	music       MusicService
@@ -48,6 +49,10 @@ type ThreadManager interface {
 type MemberRoleManager interface {
 	AddMemberRole(ctx context.Context, request MemberRoleRequest) error
 	RemoveMemberRole(ctx context.Context, request MemberRoleRequest) error
+}
+
+type DiscordRoleManager interface {
+	CreateRole(ctx context.Context, request DiscordRoleRequest) (DiscordRole, error)
 }
 
 type AttachmentReader interface {
@@ -119,6 +124,11 @@ func (r *Router) WithThreadManager(threadManager ThreadManager) *Router {
 
 func (r *Router) WithMemberRoleManager(memberRoles MemberRoleManager) *Router {
 	r.memberRoles = memberRoles
+	return r
+}
+
+func (r *Router) WithDiscordRoleManager(roles DiscordRoleManager) *Router {
+	r.roles = roles
 	return r
 }
 
@@ -296,6 +306,9 @@ func (r *Router) HandleNaturalMessage(ctx context.Context, request Request) Resp
 		return response
 	}
 	if response, ok := r.handleNaturalSoul(ctx, request, message); ok {
+		return response
+	}
+	if response, ok := r.handleNaturalDiscordRoleCreate(ctx, request, message); ok {
 		return response
 	}
 	if response, ok := r.handleNaturalAutomation(ctx, request, message); ok {
@@ -697,6 +710,77 @@ func (r *Router) handleNaturalSoul(ctx context.Context, request Request, message
 		return Response{Content: "Soul update failed.", Ephemeral: true}, true
 	}
 	return Response{Content: fmt.Sprintf("Agent soul updated (%d characters).", len(config.AgentSoul)), Ephemeral: true}, true
+}
+
+func (r *Router) handleNaturalDiscordRoleCreate(ctx context.Context, request Request, message string) (Response, bool) {
+	name, ok := naturalDiscordRoleCreateName(message)
+	if !ok {
+		return Response{}, false
+	}
+	if denied := r.ensureToolConfirmationPermission(ctx, request, r.admin.CanWriteConfig, "You do not have permission to create Discord roles."); denied.Content != "" {
+		return denied, true
+	}
+	return discordRoleCreateConfirmationResponse(request.UserID, name), true
+}
+
+func naturalDiscordRoleCreateName(message string) (string, bool) {
+	prompt := stripLeadingPandaWakePhrase(message)
+	lower := strings.ToLower(prompt)
+	for _, prefix := range naturalDiscordRoleCreatePrefixes {
+		if strings.HasPrefix(lower, prefix) {
+			return cleanNaturalDiscordRoleName(prompt[len(prefix):])
+		}
+	}
+	return "", false
+}
+
+var naturalDiscordRoleCreatePrefixes = []string{
+	"create a new role called ",
+	"create a new role named ",
+	"create a role called ",
+	"create a role named ",
+	"create new role called ",
+	"create new role named ",
+	"create role called ",
+	"create role named ",
+	"create role ",
+	"make a new role called ",
+	"make a new role named ",
+	"make a role called ",
+	"make a role named ",
+	"add a new role called ",
+	"add a new role named ",
+	"add a role called ",
+	"add a role named ",
+}
+
+func cleanNaturalDiscordRoleName(raw string) (string, bool) {
+	name := strings.TrimSpace(raw)
+	name = strings.Trim(name, " \t\r\n'\"`.,")
+	if strings.HasSuffix(strings.ToLower(name), " please") {
+		name = strings.TrimSpace(name[:len(name)-len(" please")])
+		name = strings.Trim(name, " \t\r\n'\"`.,")
+	}
+	if name == "" || len([]rune(name)) > 100 {
+		return "", false
+	}
+	return name, true
+}
+
+func discordRoleCreateConfirmationResponse(userID, name string) Response {
+	pending := &assistant.InteractionConfirmation{
+		Action:       toolActionDiscordRoleCreate,
+		Arguments:    map[string]string{"name": name},
+		Summary:      fmt.Sprintf("Panda prepared creation of Discord role `%s`.", name),
+		ConfirmLabel: "Create role",
+		Danger:       true,
+	}
+	content := fmt.Sprintf("Prepared Discord role `%s` with no elevated permissions.", name)
+	return Response{
+		Content:      appendConfirmationNotice(content, pending.Summary),
+		Confirmation: ToolConfirmationFromAssistant(userID, pending),
+		Presentation: Presentation{Title: "Confirmation required", Accent: AccentDanger},
+	}
 }
 
 var naturalSoulSetPrefixes = []string{
@@ -1838,6 +1922,27 @@ func (r *Router) HandleToolConfirmation(ctx context.Context, request ToolConfirm
 			return toolConfirmationError(err, "Role profile could not be removed.", "That role profile was not configured for this role.")
 		}
 		return Response{Content: fmt.Sprintf("Removed the Panda %s profile from role `%s`.", admin.RoleProfileLabel(profile), roleID), Ephemeral: true}
+	case toolActionDiscordRoleCreate:
+		if denied := r.ensureToolConfirmationPermission(ctx, request.Request, r.admin.CanWriteConfig, "You do not have permission to create Discord roles."); denied.Content != "" {
+			return denied
+		}
+		if r.roles == nil {
+			return Response{Content: "Discord role creation is not configured for this runtime.", Ephemeral: true}
+		}
+		name := strings.TrimSpace(request.Options["name"])
+		if name == "" {
+			return Response{Content: "That role-creation confirmation is invalid.", Ephemeral: true}
+		}
+		role, err := r.roles.CreateRole(ctx, DiscordRoleRequest{
+			GuildID: request.Request.GuildID,
+			Name:    name,
+			ActorID: request.Request.UserID,
+			Reason:  "Panda natural-language role creation",
+		})
+		if err != nil {
+			return discordRoleCreateErrorResponse(err)
+		}
+		return Response{Content: fmt.Sprintf("Created Discord role `%s` (`%s`).", role.Name, role.ID), Ephemeral: true}
 	case toolActionMemberRoleAdd, toolActionMemberRoleRemove:
 		if denied := r.ensureGuildControl(ctx, request.Request, "Only the Panda owner, server owner or administrator, or the current Panda admin role can assign Discord roles."); denied.Content != "" {
 			return denied
@@ -2289,6 +2394,17 @@ func toolConfirmationError(err error, fallback, notFound string) Response {
 		return Response{Content: notFound, Ephemeral: true}
 	}
 	return Response{Content: fallback, Ephemeral: true}
+}
+
+func discordRoleCreateErrorResponse(err error) Response {
+	if errors.Is(err, ErrDiscordRoleSetup) {
+		return Response{
+			Content:      "Discord role could not be created. Give Panda's bot role `Manage Roles`, move Panda's bot role high enough in the server role list, then try again.",
+			Ephemeral:    true,
+			Presentation: Presentation{Title: "Role setup required", Accent: AccentWarning},
+		}
+	}
+	return Response{Content: "Discord role could not be created. Please try again later.", Ephemeral: true}
 }
 
 func renderAudit(events []store.AuditEvent) string {

@@ -331,6 +331,8 @@ func (e *Executor) Execute(ctx context.Context, request ExecutionRequest) (Execu
 		payload, err = e.manageRolePermission(toolCtx, request, arguments)
 	case "panda.manage_member_role":
 		payload, err = e.manageMemberRole(toolCtx, request, arguments)
+	case "panda.manage_discord_role":
+		payload, err = e.manageDiscordRole(arguments)
 	case "panda.manage_tool_access":
 		payload, err = e.manageToolAccess(toolCtx, request, arguments)
 	case "panda.manage_composed_tool":
@@ -407,6 +409,9 @@ func (e *Executor) executeDiscordTool(ctx context.Context, definition Definition
 		}, nil
 	}
 	if definition.RequiresConfirmation && !request.AllowConfirmedWrites {
+		if definition.Name == "discord.create_role" {
+			return confirmationRequired("discord_role.create", safePreviewArguments(arguments)), nil
+		}
 		return map[string]any{
 			"confirmation_required": true,
 			"tool":                  definition.Name,
@@ -1105,6 +1110,29 @@ func (e *Executor) manageMemberRole(ctx context.Context, request ExecutionReques
 	}
 }
 
+func (e *Executor) manageDiscordRole(arguments string) (any, error) {
+	args, err := parseArguments(arguments)
+	if err != nil {
+		return nil, err
+	}
+	action := strings.ToLower(firstNonEmpty(stringArgument(args, "action"), "create"))
+	if action != "create" && action != "add" && action != "make" {
+		return nil, fmt.Errorf("action must be create")
+	}
+	name := strings.TrimSpace(stringArgument(args, "name"))
+	if name == "" {
+		return nil, fmt.Errorf("name is required")
+	}
+	if len([]rune(name)) > 100 {
+		return nil, fmt.Errorf("name must be 100 characters or fewer")
+	}
+	preview := map[string]any{"name": name}
+	if boolArgument(args, "dry_run") {
+		return dryRunToolResult("discord_role.create", preview), nil
+	}
+	return confirmationRequired("discord_role.create", preview), nil
+}
+
 func (e *Executor) roleIDArgument(ctx context.Context, request ExecutionRequest, args map[string]any) (string, error) {
 	if roleID := discordIDArgument(firstNonEmpty(stringArgument(args, "role_id"), stringArgument(args, "role"))); roleID != "" {
 		return roleID, nil
@@ -1704,6 +1732,9 @@ func userNativeCapabilities(definitions map[string]Definition) []map[string]any 
 	if has("discord.timeout_member", "discord.remove_timeout", "discord.kick_member", "discord.ban_member", "discord.unban_member", "discord.bulk_ban_members", "discord.add_member_role", "discord.remove_member_role", "discord.set_member_nick", "discord.delete_message", "discord.bulk_delete_messages", "discord.set_channel_slowmode", "discord.lock_thread") {
 		add("moderation_actions_with_confirmation", "Moderation actions with confirmation", "Prepare configured moderation actions, then wait for explicit confirmation before execution.", true)
 	}
+	if has("discord.create_role", "panda.manage_discord_role") {
+		add("create_roles_with_confirmation", "Create roles with confirmation", "Prepare new Discord roles with no elevated permissions, then wait for explicit confirmation. Execution requires Panda's bot role to have Manage Roles and sufficient role hierarchy.", true)
+	}
 	if has("panda.list_tools") {
 		add("current_capabilities", "Show current capabilities", "Summarize the Panda capabilities available to you in this channel.", false)
 	}
@@ -1763,7 +1794,7 @@ func (e *Executor) canExecute(name string) bool {
 		return e.configs != nil
 	case "manage_memory_consent", "panda.usage_report", "panda.manage_soul", "panda.manage_budget_limit", "panda.manage_knowledge", "panda.manage_role_permission", "panda.manage_tool_access", "panda.manage_channel_rule":
 		return e.adminOps != nil
-	case "panda.manage_member_role":
+	case "panda.manage_member_role", "panda.manage_discord_role":
 		return e.discord != nil
 	case "panda.manage_composed_tool":
 		return e.composed != nil
@@ -1837,6 +1868,8 @@ func confirmationArguments(action string, preview map[string]any) map[string]str
 		return stringArguments(preview, "role_id", "permission")
 	case "role_profile.add", "role_profile.remove":
 		return stringArguments(preview, "role_id", "profile")
+	case "discord_role.create":
+		return stringArguments(preview, "name")
 	case "member_role.add", "member_role.remove":
 		return stringArguments(preview, "user_id", "role_id")
 	case "tool_access.add", "tool_access.remove":
@@ -1868,6 +1901,8 @@ func confirmationCopy(action string, arguments map[string]string) (string, strin
 		return fmt.Sprintf("Panda prepared the `%s` profile for role `%s`.", arguments["profile"], arguments["role_id"]), "Set role profile"
 	case "role_profile.remove":
 		return fmt.Sprintf("Panda prepared removal of the `%s` profile from role `%s`.", arguments["profile"], arguments["role_id"]), "Remove role profile"
+	case "discord_role.create":
+		return fmt.Sprintf("Panda prepared creation of Discord role `%s`.", arguments["name"]), "Create role"
 	case "member_role.add":
 		return fmt.Sprintf("Panda prepared assignment of role `%s` to user `%s`.", arguments["role_id"], arguments["user_id"]), "Assign role"
 	case "member_role.remove":

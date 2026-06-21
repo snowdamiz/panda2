@@ -182,6 +182,7 @@ func New(cfg config.Config, router *commands.Router, logger *slog.Logger) (*Bot,
 	router.WithContextService(instance.context)
 	router.WithThreadManager(NewThreadManager(client.Rest))
 	router.WithMemberRoleManager(NewMemberRoleManager(client.Rest))
+	router.WithDiscordRoleManager(NewRoleManager(client.Rest))
 	router.WithMusicService(instance.music)
 	return instance, nil
 }

@@ -13,6 +13,7 @@ import (
 	"github.com/disgoorg/disgo/rest"
 	"github.com/disgoorg/omit"
 	"github.com/disgoorg/snowflake/v2"
+	"github.com/sn0w/panda2/internal/commands"
 	"github.com/sn0w/panda2/internal/composed"
 	"github.com/sn0w/panda2/internal/polls"
 	"github.com/sn0w/panda2/internal/repository"
@@ -43,6 +44,9 @@ func (p *ToolProvider) ExecuteDiscordTool(ctx context.Context, request tools.Dis
 		return nil, fmt.Errorf("discord REST adapter is not configured")
 	}
 	if err := p.preflight(request); err != nil {
+		if request.ToolName == "discord.create_role" && isRoleSetupError(err) {
+			return nil, fmt.Errorf("%w: %v", commands.ErrDiscordRoleSetup, err)
+		}
 		return nil, err
 	}
 	handler, ok := p.discordToolHandlers()[request.ToolName]
@@ -67,6 +71,7 @@ func (p *ToolProvider) discordToolHandlers() map[string]discordToolHandler {
 		"discord.list_archived_threads":       p.withoutContext(p.listArchivedThreads),
 		"discord.list_roles":                  p.withoutContext(p.listRoles),
 		"discord.get_role":                    p.withoutContext(p.getRole),
+		"discord.create_role":                 p.withoutContext(p.createRole),
 		"discord.get_member":                  p.withoutContext(p.getMember),
 		"discord.list_members":                p.withoutContext(p.listMembers),
 		"discord.list_bans":                   p.withoutContext(p.listBans),
@@ -783,6 +788,33 @@ func (p *ToolProvider) getRole(request tools.DiscordToolRequest) (any, error) {
 		return nil, err
 	}
 	return map[string]any{"role": roleSummary(*role)}, nil
+}
+
+func (p *ToolProvider) createRole(request tools.DiscordToolRequest) (any, error) {
+	guildID, err := guildIDArg(request)
+	if err != nil {
+		return nil, err
+	}
+	name, err := roleCreateName(stringArg(request.Arguments, "name", ""))
+	if err != nil {
+		return nil, err
+	}
+	permissions := disgoDiscord.PermissionsNone
+	role, err := p.rest.CreateRole(guildID, disgoDiscord.RoleCreate{
+		Name:        name,
+		Permissions: &permissions,
+	}, reasonOpt(request)...)
+	if err != nil {
+		if isRoleSetupError(err) {
+			return nil, fmt.Errorf("%w: %v", commands.ErrDiscordRoleSetup, err)
+		}
+		return nil, err
+	}
+	return map[string]any{
+		"created": true,
+		"role":    roleSummary(*role),
+		"note":    "Created with no elevated permissions. Role management still depends on Panda's Manage Roles permission and role hierarchy.",
+	}, nil
 }
 
 func (p *ToolProvider) getMember(request tools.DiscordToolRequest) (any, error) {

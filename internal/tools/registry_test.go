@@ -23,7 +23,7 @@ func TestDefaultRegistryDefinitionsAreValid(t *testing.T) {
 		t.Fatalf("NewDefaultRegistry: %v", err)
 	}
 	definitions := registry.Definitions()
-	if len(definitions) != 85 {
+	if len(definitions) != 87 {
 		t.Fatalf("expected full Discord tool surface plus assistant tools, got %d", len(definitions))
 	}
 	for _, definition := range definitions {
@@ -842,6 +842,36 @@ func TestExecutorWriteToolRequiresDryRunOrConfirmation(t *testing.T) {
 	}
 }
 
+func TestExecutorRawCreateRoleRendersConfirmationArtifact(t *testing.T) {
+	registry, err := NewDefaultRegistry()
+	if err != nil {
+		t.Fatalf("NewDefaultRegistry: %v", err)
+	}
+	provider := &fakeDiscordProvider{}
+	executor := NewExecutor(registry, nil, nil).WithDiscordToolProvider(provider)
+	result, err := executor.Execute(context.Background(), ExecutionRequest{
+		GuildID: "guild-1",
+		Access:  testAccess(ToolPolicyWriteConfirmed, admin.PermissionAdminConfigWrite),
+		Call: llm.ToolCall{
+			ID:   "call-create-role",
+			Type: "function",
+			Function: llm.ToolCallFunction{
+				Name:      "discord_create_role",
+				Arguments: `{"name":"test"}`,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Execute create role: %v", err)
+	}
+	if result.Confirmation == nil || result.Confirmation.Action != "discord_role.create" || result.Confirmation.Arguments["name"] != "test" {
+		t.Fatalf("expected create-role confirmation artifact, got %+v", result.Confirmation)
+	}
+	if provider.calls != 0 {
+		t.Fatalf("raw create role should not call provider before confirmation, got %d call(s)", provider.calls)
+	}
+}
+
 func TestExecutorCreatePrivateThreadUsesPrivateThreadPermission(t *testing.T) {
 	registry, err := NewDefaultRegistry()
 	if err != nil {
@@ -1057,6 +1087,30 @@ func TestExecutorRoleProfileAndMemberRoleToolsRequireConfirmation(t *testing.T) 
 	}
 	if memberRole.Confirmation == nil || memberRole.Confirmation.Action != "member_role.add" || memberRole.Confirmation.Arguments["user_id"] != "user-target" || memberRole.Confirmation.Arguments["role_id"] != "100000000000000777" {
 		t.Fatalf("expected member role confirmation, got %+v", memberRole)
+	}
+
+	callsBeforeRoleCreate := provider.calls
+	discordRole, err := executor.Execute(context.Background(), ExecutionRequest{
+		GuildID: "guild-1",
+		ActorID: "admin",
+		Access:  testAccess(ToolPolicyOff, admin.PermissionAdminConfigWrite),
+		Call: llm.ToolCall{
+			ID:   "call-discord-role",
+			Type: "function",
+			Function: llm.ToolCallFunction{
+				Name:      "panda_manage_discord_role",
+				Arguments: `{"action":"create","name":"test"}`,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Execute Discord role create: %v", err)
+	}
+	if discordRole.Confirmation == nil || discordRole.Confirmation.Action != "discord_role.create" || discordRole.Confirmation.Arguments["name"] != "test" {
+		t.Fatalf("expected Discord role confirmation, got %+v", discordRole)
+	}
+	if provider.calls != callsBeforeRoleCreate {
+		t.Fatalf("Discord role creation preparation should not call provider, calls before=%d after=%d", callsBeforeRoleCreate, provider.calls)
 	}
 }
 

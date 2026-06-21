@@ -1,6 +1,12 @@
 package commands
 
-import "github.com/sn0w/panda2/internal/polls"
+import (
+	"errors"
+
+	"github.com/sn0w/panda2/internal/polls"
+)
+
+var ErrDiscordRoleSetup = errors.New("discord role setup requires bot manage roles permission and sufficient role hierarchy")
 
 type Request struct {
 	RequestID      string
@@ -119,4 +125,16 @@ type MemberRoleRequest struct {
 	RoleID  string
 	ActorID string
 	Reason  string
+}
+
+type DiscordRoleRequest struct {
+	GuildID string
+	Name    string
+	ActorID string
+	Reason  string
+}
+
+type DiscordRole struct {
+	ID   string
+	Name string
 }

@@ -45,6 +45,12 @@ type fakeMemberRoleManager struct {
 	err     error
 }
 
+type fakeDiscordRoleManager struct {
+	creates []DiscordRoleRequest
+	role    DiscordRole
+	err     error
+}
+
 type fakeAttachmentReader struct {
 	attachment store.Attachment
 	err        error
@@ -73,6 +79,17 @@ func (f *fakeMemberRoleManager) AddMemberRole(_ context.Context, request MemberR
 func (f *fakeMemberRoleManager) RemoveMemberRole(_ context.Context, request MemberRoleRequest) error {
 	f.removes = append(f.removes, request)
 	return f.err
+}
+
+func (f *fakeDiscordRoleManager) CreateRole(_ context.Context, request DiscordRoleRequest) (DiscordRole, error) {
+	f.creates = append(f.creates, request)
+	if f.err != nil {
+		return DiscordRole{}, f.err
+	}
+	if f.role.ID != "" || f.role.Name != "" {
+		return f.role, nil
+	}
+	return DiscordRole{ID: "role-created", Name: request.Name}, nil
 }
 
 func (f fakeContextProvider) FetchMessage(_ context.Context, ref contextsvc.MessageRef) (contextsvc.Message, error) {
@@ -1120,6 +1137,68 @@ func TestHandleToolConfirmationAssignsMemberRole(t *testing.T) {
 	}
 	if len(manager.adds) != 1 || manager.adds[0].UserID != "user-target" || manager.adds[0].RoleID != "role-pickle" {
 		t.Fatalf("unexpected member role manager calls: %+v", manager.adds)
+	}
+}
+
+func TestNaturalDiscordRoleCreateRendersConfirmation(t *testing.T) {
+	client := &fakeLLM{response: llm.ChatResponse{Content: "should not be called"}}
+	router := newTestRouter(t, client, 20)
+
+	response := router.HandleNaturalMessage(context.Background(), Request{
+		GuildID:      "guild-1",
+		ChannelID:    "channel-1",
+		UserID:       "admin",
+		IsGuildAdmin: true,
+		Options:      map[string]string{"message": "panda create a new role called 'test'", "bot_mentioned": "true"},
+	})
+	if response.Confirmation == nil || !response.Confirmation.Danger || !strings.Contains(response.Content, "role `test`") {
+		t.Fatalf("expected role creation confirmation, got %+v", response)
+	}
+	confirmationRequest, ok := RequestFromToolConfirmationID(response.Confirmation.ID, Request{UserID: "admin"})
+	if !ok || confirmationRequest.Action != toolActionDiscordRoleCreate || confirmationRequest.Options["name"] != "test" {
+		t.Fatalf("unexpected role confirmation id: request=%+v ok=%t", confirmationRequest, ok)
+	}
+	if len(client.requests) != 0 {
+		t.Fatalf("natural role creation should not call the model, got %+v", client.requests)
+	}
+}
+
+func TestHandleToolConfirmationCreatesDiscordRole(t *testing.T) {
+	manager := &fakeDiscordRoleManager{role: DiscordRole{ID: "role-test", Name: "test"}}
+	router := newTestRouter(t, &fakeLLM{}, 20).WithDiscordRoleManager(manager)
+
+	response := router.HandleToolConfirmation(context.Background(), ToolConfirmationRequest{
+		Request: Request{
+			GuildID:      "guild-1",
+			UserID:       "admin",
+			IsGuildAdmin: true,
+		},
+		Action:  toolActionDiscordRoleCreate,
+		Options: map[string]string{"name": "test"},
+	})
+	if !response.Ephemeral || !strings.Contains(response.Content, "Created Discord role `test` (`role-test`)") {
+		t.Fatalf("unexpected role creation response: %+v", response)
+	}
+	if len(manager.creates) != 1 || manager.creates[0].Name != "test" || manager.creates[0].GuildID != "guild-1" {
+		t.Fatalf("unexpected role manager calls: %+v", manager.creates)
+	}
+}
+
+func TestHandleToolConfirmationExplainsDiscordRoleSetupFailure(t *testing.T) {
+	manager := &fakeDiscordRoleManager{err: ErrDiscordRoleSetup}
+	router := newTestRouter(t, &fakeLLM{}, 20).WithDiscordRoleManager(manager)
+
+	response := router.HandleToolConfirmation(context.Background(), ToolConfirmationRequest{
+		Request: Request{
+			GuildID:      "guild-1",
+			UserID:       "admin",
+			IsGuildAdmin: true,
+		},
+		Action:  toolActionDiscordRoleCreate,
+		Options: map[string]string{"name": "test"},
+	})
+	if !response.Ephemeral || !strings.Contains(response.Content, "Manage Roles") || !strings.Contains(response.Content, "move Panda's bot role") || !strings.Contains(response.Content, "try again") {
+		t.Fatalf("expected setup guidance, got %+v", response)
 	}
 }
 
