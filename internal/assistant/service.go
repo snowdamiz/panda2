@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/sn0w/panda2/internal/admin"
+	"github.com/sn0w/panda2/internal/curation"
 	"github.com/sn0w/panda2/internal/llm"
 	"github.com/sn0w/panda2/internal/memory"
 	"github.com/sn0w/panda2/internal/repository"
@@ -30,6 +31,7 @@ type Service struct {
 	memory                *memory.Service
 	conversations         *repository.ConversationRepository
 	toolExecutor          *tools.Executor
+	curator               *curation.Service
 	defaultModel          string
 	defaultFallbackModels []string
 }
@@ -39,12 +41,16 @@ type AskRequest struct {
 	GuildID                      string
 	UserID                       string
 	ChannelID                    string
+	VoiceChannelID               string
 	ThreadID                     string
 	Question                     string
 	InvocationContext            string
 	ReplyContent                 string
 	ReplyMessageID               string
 	ReplyAuthorIsBot             bool
+	RoleIDs                      []string
+	IsGuildAdmin                 bool
+	IsOwner                      bool
 	AllowedPermissions           map[string]struct{}
 	AllowedTools                 map[string]struct{}
 	RestrictedTools              map[string]struct{}
@@ -71,12 +77,16 @@ type TaskRequest struct {
 	GuildID                      string
 	UserID                       string
 	ChannelID                    string
+	VoiceChannelID               string
 	Command                      string
 	Input                        string
 	InvocationContext            string
 	Tone                         string
 	Language                     string
 	Detail                       string
+	RoleIDs                      []string
+	IsGuildAdmin                 bool
+	IsOwner                      bool
 	AllowedPermissions           map[string]struct{}
 	AllowedTools                 map[string]struct{}
 	RestrictedTools              map[string]struct{}
@@ -99,15 +109,33 @@ type NaturalMessageDecision struct {
 	Prompt  string
 }
 
+type toolExecutionContext struct {
+	RequestID                    string
+	ActorID                      string
+	ChannelID                    string
+	VoiceChannelID               string
+	RoleIDs                      []string
+	IsGuildAdmin                 bool
+	IsOwner                      bool
+	AllowedPermissions           map[string]struct{}
+	AllowedTools                 map[string]struct{}
+	RestrictedTools              map[string]struct{}
+	RequireExplicitComposedTools bool
+}
+
 func (s *Service) Ask(ctx context.Context, request AskRequest) (AskResponse, error) {
 	return s.complete(ctx, TaskRequest{
 		RequestID:                    request.RequestID,
 		GuildID:                      request.GuildID,
 		UserID:                       request.UserID,
 		ChannelID:                    request.ChannelID,
+		VoiceChannelID:               request.VoiceChannelID,
 		Command:                      "ask",
 		Input:                        request.Question,
 		InvocationContext:            request.InvocationContext,
+		RoleIDs:                      request.RoleIDs,
+		IsGuildAdmin:                 request.IsGuildAdmin,
+		IsOwner:                      request.IsOwner,
 		AllowedPermissions:           request.AllowedPermissions,
 		AllowedTools:                 request.AllowedTools,
 		RestrictedTools:              request.RestrictedTools,
@@ -132,6 +160,11 @@ func (s *Service) WithToolExecutor(executor *tools.Executor) *Service {
 	return s
 }
 
+func (s *Service) WithCurator(curator *curation.Service) *Service {
+	s.curator = curator
+	return s
+}
+
 func (s *Service) ClassifyNaturalMessage(ctx context.Context, request NaturalMessageRequest) (NaturalMessageDecision, error) {
 	if strings.TrimSpace(request.Content) == "" {
 		return NaturalMessageDecision{}, nil
@@ -147,9 +180,10 @@ func (s *Service) ClassifyNaturalMessage(ctx context.Context, request NaturalMes
 	start := time.Now()
 	messages := naturalTriggerMessages(request)
 	response, err := s.chatWithFallback(ctx, config, llm.ChatRequest{
-		Messages:    messages,
-		Temperature: 0,
-		MaxTokens:   180,
+		Messages:       messages,
+		ResponseFormat: jsonObjectResponseFormat(),
+		Temperature:    0,
+		MaxTokens:      300,
 	})
 	latency := time.Since(start).Milliseconds()
 	s.recordUsage(ctx, AskRequest{
@@ -169,9 +203,10 @@ func (s *Service) ClassifyNaturalMessage(ctx context.Context, request NaturalMes
 	retryMessages := naturalTriggerRetryMessages(messages, response.Content)
 	retryStart := time.Now()
 	retryResponse, retryErr := s.chatWithFallback(ctx, config, llm.ChatRequest{
-		Messages:    retryMessages,
-		Temperature: 0,
-		MaxTokens:   120,
+		Messages:       retryMessages,
+		ResponseFormat: jsonObjectResponseFormat(),
+		Temperature:    0,
+		MaxTokens:      220,
 	})
 	retryLatency := time.Since(retryStart).Milliseconds()
 	s.recordUsage(ctx, AskRequest{
@@ -231,7 +266,19 @@ func (s *Service) Chat(ctx context.Context, request AskRequest) (AskResponse, er
 	messages = append(messages, llm.Message{Role: "user", Content: sanitizePromptInput(request.Question)})
 
 	start := time.Now()
-	response, confirmations, sourceLinks, err := s.completeWithTools(ctx, config, request.RequestID, request.UserID, request.ChannelID, request.AllowedPermissions, request.AllowedTools, request.RestrictedTools, request.RequireExplicitComposedTools, llm.ChatRequest{
+	response, confirmations, sourceLinks, err := s.completeWithTools(ctx, config, toolExecutionContext{
+		RequestID:                    request.RequestID,
+		ActorID:                      request.UserID,
+		ChannelID:                    request.ChannelID,
+		VoiceChannelID:               request.VoiceChannelID,
+		RoleIDs:                      request.RoleIDs,
+		IsGuildAdmin:                 request.IsGuildAdmin,
+		IsOwner:                      request.IsOwner,
+		AllowedPermissions:           request.AllowedPermissions,
+		AllowedTools:                 request.AllowedTools,
+		RestrictedTools:              request.RestrictedTools,
+		RequireExplicitComposedTools: request.RequireExplicitComposedTools,
+	}, llm.ChatRequest{
 		Messages:    messages,
 		Temperature: temperatureFromConfig(config, "chat"),
 		MaxTokens:   maxTokensFromConfig(config, "chat"),
@@ -262,6 +309,16 @@ func (s *Service) Chat(ctx context.Context, request AskRequest) (AskResponse, er
 		PromptTokens:     response.Usage.PromptTokens,
 		CompletionTokens: response.Usage.CompletionTokens,
 		TotalTokens:      response.Usage.TotalTokens,
+	})
+	s.curateInteraction(ctx, curation.Interaction{
+		GuildID:   request.GuildID,
+		ChannelID: request.ChannelID,
+		UserID:    request.UserID,
+		MessageID: request.RequestID,
+		Command:   "chat",
+		Model:     response.Model,
+		Prompt:    request.Question,
+		Response:  content,
 	})
 
 	return AskResponse{Content: content, Model: response.Model, Usage: response.Usage, Confirmation: firstConfirmation(confirmations)}, nil
@@ -308,7 +365,19 @@ func (s *Service) complete(ctx context.Context, request TaskRequest) (AskRespons
 	}
 
 	start := time.Now()
-	response, confirmations, sourceLinks, err := s.completeWithTools(ctx, config, request.RequestID, request.UserID, request.ChannelID, request.AllowedPermissions, request.AllowedTools, request.RestrictedTools, request.RequireExplicitComposedTools, llm.ChatRequest{
+	response, confirmations, sourceLinks, err := s.completeWithTools(ctx, config, toolExecutionContext{
+		RequestID:                    request.RequestID,
+		ActorID:                      request.UserID,
+		ChannelID:                    request.ChannelID,
+		VoiceChannelID:               request.VoiceChannelID,
+		RoleIDs:                      request.RoleIDs,
+		IsGuildAdmin:                 request.IsGuildAdmin,
+		IsOwner:                      request.IsOwner,
+		AllowedPermissions:           request.AllowedPermissions,
+		AllowedTools:                 request.AllowedTools,
+		RestrictedTools:              request.RestrictedTools,
+		RequireExplicitComposedTools: request.RequireExplicitComposedTools,
+	}, llm.ChatRequest{
 		Messages:    s.taskMessages(ctx, config, request),
 		Temperature: temperatureFromConfig(config, request.Command),
 		MaxTokens:   maxTokensFromConfig(config, request.Command),
@@ -326,7 +395,28 @@ func (s *Service) complete(ctx context.Context, request TaskRequest) (AskRespons
 	}
 
 	content := finalizeAssistantContent(response.Content, sourceLinks, sourceLinkLimitForPrompt(request.Input))
+	s.curateInteraction(ctx, curation.Interaction{
+		GuildID:   request.GuildID,
+		ChannelID: request.ChannelID,
+		UserID:    request.UserID,
+		MessageID: request.RequestID,
+		Command:   firstNonEmpty(request.Command, "ask"),
+		Model:     response.Model,
+		Prompt:    request.Input,
+		Response:  content,
+	})
 	return AskResponse{Content: content, Model: response.Model, Usage: response.Usage, Confirmation: firstConfirmation(confirmations)}, nil
+}
+
+func (s *Service) curateInteraction(ctx context.Context, interaction curation.Interaction) {
+	if s == nil || s.curator == nil || strings.TrimSpace(interaction.GuildID) == "" {
+		return
+	}
+	curateCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	go func() {
+		defer cancel()
+		_, _ = s.curator.CurateAssistantInteraction(curateCtx, interaction)
+	}()
 }
 
 func (s *Service) taskMessages(ctx context.Context, config store.GuildConfig, request TaskRequest) []llm.Message {
@@ -370,6 +460,10 @@ func naturalTriggerMessages(request NaturalMessageRequest) []llm.Message {
 		},
 		{Role: "user", Content: naturalTriggerInput(request)},
 	}
+}
+
+func jsonObjectResponseFormat() *llm.ResponseFormat {
+	return &llm.ResponseFormat{Type: "json_object"}
 }
 
 func naturalTriggerRetryMessages(messages []llm.Message, previousResponse string) []llm.Message {
@@ -458,21 +552,32 @@ func (s *Service) guildConfig(ctx context.Context, guildID string) (store.GuildC
 	return config, true, nil
 }
 
-func (s *Service) completeWithTools(ctx context.Context, config store.GuildConfig, requestID, actorID, channelID string, allowedPermissions, allowedTools, restrictedTools map[string]struct{}, requireExplicitComposedTools bool, request llm.ChatRequest) (llm.ChatResponse, []InteractionConfirmation, []tools.SourceLink, error) {
-	access := toolAccess(config, allowedPermissions, allowedTools, restrictedTools, requireExplicitComposedTools)
+func (s *Service) completeWithTools(ctx context.Context, config store.GuildConfig, toolContext toolExecutionContext, request llm.ChatRequest) (llm.ChatResponse, []InteractionConfirmation, []tools.SourceLink, error) {
+	access := toolAccess(config, toolContext.AllowedPermissions, toolContext.AllowedTools, toolContext.RestrictedTools, toolContext.RequireExplicitComposedTools)
 	if s.toolExecutor != nil && len(access.Permissions) > 0 {
 		request.Tools = s.toolExecutor.OpenRouterToolsForRequest(ctx, tools.DynamicToolListRequest{
 			GuildID:        config.GuildID,
-			ChannelID:      channelID,
-			ActorID:        actorID,
+			ChannelID:      toolContext.ChannelID,
+			ActorID:        toolContext.ActorID,
 			Access:         access,
 			InvocationType: "chat_tool",
 		})
 	}
 	request.Messages = append(request.Messages, llm.Message{Role: "system", Content: toolAvailabilityMessage(request.Tools, access)})
 	response, err := s.chatWithFallback(ctx, config, request)
-	if err != nil || len(response.ToolCalls) == 0 || s.toolExecutor == nil {
+	if err != nil || s.toolExecutor == nil {
 		return response, nil, nil, err
+	}
+	if len(response.ToolCalls) == 0 {
+		if toolCalls, ok := parseTextToolCalls(response.Content, request.Tools); ok {
+			response.ToolCalls = toolCalls
+			response.Content = ""
+		} else if containsTextToolCallMarkup(response.Content) {
+			response.Content = textToolCallUnavailableMessage()
+		}
+	}
+	if len(response.ToolCalls) == 0 {
+		return response, nil, nil, nil
 	}
 
 	messages := append([]llm.Message{}, request.Messages...)
@@ -486,10 +591,14 @@ func (s *Service) completeWithTools(ctx context.Context, config store.GuildConfi
 	for _, call := range response.ToolCalls {
 		result, err := s.toolExecutor.Execute(ctx, tools.ExecutionRequest{
 			GuildID:        config.GuildID,
-			ChannelID:      channelID,
-			ActorID:        actorID,
-			RequestID:      requestID,
+			ChannelID:      toolContext.ChannelID,
+			VoiceChannelID: toolContext.VoiceChannelID,
+			ActorID:        toolContext.ActorID,
+			RequestID:      toolContext.RequestID,
 			InvocationType: "chat_tool",
+			RoleIDs:        append([]string(nil), toolContext.RoleIDs...),
+			IsGuildAdmin:   toolContext.IsGuildAdmin,
+			IsOwner:        toolContext.IsOwner,
 			Access:         access,
 			Call:           call,
 		})
@@ -509,6 +618,9 @@ func (s *Service) completeWithTools(ctx context.Context, config store.GuildConfi
 	request.Messages = messages
 	request.Tools = nil
 	finalResponse, err := s.chatWithFallback(ctx, config, request)
+	if containsTextToolCallMarkup(finalResponse.Content) {
+		finalResponse.Content = textToolCallUnavailableMessage()
+	}
 	return finalResponse, confirmations, sourceLinks, err
 }
 
@@ -521,10 +633,128 @@ func sanitizeToolMessage(message llm.Message) llm.Message {
 	return message
 }
 
+func parseTextToolCalls(content string, availableTools []llm.Tool) ([]llm.ToolCall, bool) {
+	allowed := map[string]struct{}{}
+	for _, tool := range availableTools {
+		name := strings.TrimSpace(tool.Function.Name)
+		if name != "" {
+			allowed[name] = struct{}{}
+		}
+	}
+	if len(allowed) == 0 {
+		return nil, false
+	}
+
+	remaining := strings.TrimSpace(content)
+	if !strings.HasPrefix(remaining, "<tool_call>") {
+		return nil, false
+	}
+	var calls []llm.ToolCall
+	for remaining != "" {
+		block, rest, ok := nextTextToolCallBlock(remaining)
+		if !ok {
+			return nil, false
+		}
+		call, ok := parseTextToolCallBlock(block, len(calls)+1, allowed)
+		if !ok {
+			return nil, false
+		}
+		calls = append(calls, call)
+		remaining = strings.TrimSpace(rest)
+	}
+	return calls, len(calls) > 0
+}
+
+func nextTextToolCallBlock(content string) (string, string, bool) {
+	content = strings.TrimSpace(content)
+	const startTag = "<tool_call>"
+	const endTag = "</tool_call>"
+	if !strings.HasPrefix(content, startTag) {
+		return "", "", false
+	}
+	end := strings.Index(content, endTag)
+	if end < 0 {
+		return "", "", false
+	}
+	block := content[len(startTag):end]
+	rest := content[end+len(endTag):]
+	return block, rest, true
+}
+
+func parseTextToolCallBlock(block string, index int, allowed map[string]struct{}) (llm.ToolCall, bool) {
+	block = strings.TrimSpace(block)
+	if block == "" {
+		return llm.ToolCall{}, false
+	}
+	argStart := strings.Index(block, "<arg_key>")
+	nameText := block
+	argsText := ""
+	if argStart >= 0 {
+		nameText = block[:argStart]
+		argsText = block[argStart:]
+	}
+	name := strings.TrimSpace(nameText)
+	if _, ok := allowed[name]; !ok {
+		return llm.ToolCall{}, false
+	}
+	args := map[string]any{}
+	for strings.TrimSpace(argsText) != "" {
+		key, rest, ok := consumeTextToolTag(argsText, "arg_key")
+		if !ok || strings.TrimSpace(key) == "" {
+			return llm.ToolCall{}, false
+		}
+		value, rest, ok := consumeTextToolTag(rest, "arg_value")
+		if !ok {
+			return llm.ToolCall{}, false
+		}
+		args[strings.TrimSpace(key)] = strings.TrimSpace(value)
+		argsText = rest
+	}
+	arguments, err := json.Marshal(args)
+	if err != nil {
+		return llm.ToolCall{}, false
+	}
+	return llm.ToolCall{
+		ID:   fmt.Sprintf("text_tool_call_%d", index),
+		Type: "function",
+		Function: llm.ToolCallFunction{
+			Name:      name,
+			Arguments: string(arguments),
+		},
+	}, true
+}
+
+func consumeTextToolTag(content, tag string) (string, string, bool) {
+	content = strings.TrimSpace(content)
+	startTag := "<" + tag + ">"
+	endTag := "</" + tag + ">"
+	if !strings.HasPrefix(content, startTag) {
+		return "", content, false
+	}
+	end := strings.Index(content, endTag)
+	if end < 0 {
+		return "", content, false
+	}
+	value := content[len(startTag):end]
+	return value, content[end+len(endTag):], true
+}
+
+func containsTextToolCallMarkup(content string) bool {
+	content = strings.TrimSpace(content)
+	return strings.Contains(content, "<tool_call>") || strings.Contains(content, "</tool_call>")
+}
+
+func textToolCallUnavailableMessage() string {
+	return "I tried to use a Panda tool, but that tool is not available for this request. I did not take any action. Check Panda tool permissions for this channel and try again."
+}
+
 const defaultAppendedWebSourceLinks = 3
 const maxAppendedWebSourceLinks = 10
 
 func finalizeAssistantContent(content string, sourceLinks []tools.SourceLink, sourceLimit int) string {
+	if containsTextToolCallMarkup(content) {
+		content = textToolCallUnavailableMessage()
+	}
 	return appendWebSearchSourceLinks(security.SanitizeDiscordContent(content), sourceLinks, sourceLimit)
 }
 

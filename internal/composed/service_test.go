@@ -297,6 +297,9 @@ func TestManageComposedToolDraftAndApprovalConfirmation(t *testing.T) {
 	if !strings.Contains(toolsPayloadString(draft), `"preview":false`) || !strings.Contains(toolsPayloadString(draft), `"version":1`) {
 		t.Fatalf("unexpected draft payload: %+v", draft)
 	}
+	if !strings.Contains(toolsPayloadString(draft), `"confirmation_required":true`) || !strings.Contains(toolsPayloadString(draft), "composed_tool.approve") {
+		t.Fatalf("draft should include approval confirmation metadata, got %+v", draft)
+	}
 
 	approval, err := service.ManageComposedTool(ctx, tools.ComposedToolManagementRequest{
 		GuildID:  "guild-1",

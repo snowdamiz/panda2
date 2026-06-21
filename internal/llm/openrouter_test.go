@@ -108,6 +108,42 @@ func TestOpenRouterChatParsesToolCalls(t *testing.T) {
 	}
 }
 
+func TestOpenRouterChatSendsResponseFormat(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload chatCompletionRequest
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		if payload.ResponseFormat == nil || payload.ResponseFormat.Type != "json_object" {
+			t.Fatalf("expected JSON response format, got %+v", payload.ResponseFormat)
+		}
+		if payload.Provider == nil || !payload.Provider.RequireParameters || payload.Provider.AllowFallbacks == nil || *payload.Provider.AllowFallbacks {
+			t.Fatalf("structured response requests should require provider parameter support and disable provider fallback: %+v", payload.Provider)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id":    "gen-json",
+			"model": "provider/model",
+			"choices": []map[string]any{{
+				"message": map[string]string{"role": "assistant", "content": `{"ok":true}`},
+			}},
+		})
+	}))
+	defer server.Close()
+
+	client := NewOpenRouterClient(OpenRouterConfig{APIKey: "key", BaseURL: server.URL})
+	response, err := client.Chat(context.Background(), ChatRequest{
+		Model:          "openrouter/auto",
+		Messages:       []Message{{Role: "user", Content: "return JSON"}},
+		ResponseFormat: &ResponseFormat{Type: "json_object"},
+	})
+	if err != nil {
+		t.Fatalf("Chat returned error: %v", err)
+	}
+	if response.Content != `{"ok":true}` {
+		t.Fatalf("unexpected content %q", response.Content)
+	}
+}
+
 func TestOpenRouterChatWithoutKey(t *testing.T) {
 	client := NewOpenRouterClient(OpenRouterConfig{BaseURL: "http://127.0.0.1"})
 	_, err := client.Chat(context.Background(), ChatRequest{Messages: []Message{{Role: "user", Content: "hi"}}})

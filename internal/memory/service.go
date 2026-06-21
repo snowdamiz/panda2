@@ -2,6 +2,8 @@ package memory
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -22,11 +24,15 @@ type Service struct {
 var ErrInvalidDocument = errors.New("memory document requires a title and content")
 
 type AddDocumentRequest struct {
-	GuildID   string
-	Title     string
-	Content   string
-	CreatedBy string
-	Source    string
+	GuildID        string
+	Title          string
+	Content        string
+	CreatedBy      string
+	Source         string
+	Confidence     float64
+	ReasonSaved    string
+	SourceMetadata string
+	ExpiresAt      *time.Time
 }
 
 func NewService(knowledge *repository.KnowledgeRepository) *Service {
@@ -46,10 +52,14 @@ func (s *Service) AddDocument(ctx context.Context, request AddDocumentRequest) (
 		return store.KnowledgeDocument{}, ErrInvalidDocument
 	}
 	document, err := s.knowledge.AddDocument(ctx, store.KnowledgeDocument{
-		GuildID:   request.GuildID,
-		Title:     strings.TrimSpace(request.Title),
-		Source:    strings.TrimSpace(request.Source),
-		CreatedBy: request.CreatedBy,
+		GuildID:        request.GuildID,
+		Title:          strings.TrimSpace(request.Title),
+		Source:         strings.TrimSpace(request.Source),
+		CreatedBy:      request.CreatedBy,
+		Confidence:     request.Confidence,
+		ReasonSaved:    strings.TrimSpace(request.ReasonSaved),
+		SourceMetadata: strings.TrimSpace(request.SourceMetadata),
+		ExpiresAt:      request.ExpiresAt,
 	}, request.Content)
 	if err != nil {
 		return store.KnowledgeDocument{}, err
@@ -70,6 +80,18 @@ func (s *Service) DeleteDocument(ctx context.Context, guildID string, documentID
 
 func (s *Service) ListDocuments(ctx context.Context, guildID string, limit int) ([]store.KnowledgeDocument, error) {
 	return s.knowledge.ListDocuments(ctx, guildID, limit)
+}
+
+func (s *Service) HasExactContent(ctx context.Context, guildID, content string) (bool, error) {
+	if s == nil || s.knowledge == nil {
+		return false, nil
+	}
+	sum := sha256.Sum256([]byte(strings.TrimSpace(content)))
+	return s.knowledge.HasContentHash(ctx, guildID, hex.EncodeToString(sum[:]))
+}
+
+func (s *Service) DisableExpired(ctx context.Context, now time.Time) (int64, error) {
+	return s.knowledge.DisableExpired(ctx, now)
 }
 
 func (s *Service) ContextBlock(ctx context.Context, guildID, query string, limit int) (string, error) {

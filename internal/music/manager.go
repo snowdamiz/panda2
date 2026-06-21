@@ -6,9 +6,14 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
+	"math/rand"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/sn0w/panda2/internal/repository"
+	"github.com/sn0w/panda2/internal/store"
 )
 
 const (
@@ -26,12 +31,24 @@ type Manager struct {
 	resolver  Resolver
 	streamer  Streamer
 	connector VoiceConnector
+	store     MusicStore
 	logger    *slog.Logger
 
 	mu      sync.Mutex
 	players map[string]*guildPlayer
 
 	emptyVoiceDisconnectWait time.Duration
+}
+
+type MusicStore interface {
+	ReplaceQueue(ctx context.Context, guildID string, items []store.MusicQueueItem) error
+	Queue(ctx context.Context, guildID string) ([]store.MusicQueueItem, error)
+	ClearQueue(ctx context.Context, guildID string) error
+	EnsureSettings(ctx context.Context, guildID string) (store.MusicSettings, error)
+	UpdateSettings(ctx context.Context, guildID string, values map[string]any) (store.MusicSettings, error)
+	SavePlaylist(ctx context.Context, playlist store.MusicPlaylist) (store.MusicPlaylist, error)
+	Playlist(ctx context.Context, guildID, name string) (store.MusicPlaylist, bool, error)
+	Playlists(ctx context.Context, guildID string, limit int) ([]store.MusicPlaylist, error)
 }
 
 func NewManager(resolver Resolver, streamer Streamer, connector VoiceConnector, logger *slog.Logger) *Manager {
@@ -47,6 +64,11 @@ func NewManager(resolver Resolver, streamer Streamer, connector VoiceConnector, 
 
 		emptyVoiceDisconnectWait: emptyVoiceDisconnectWait,
 	}
+}
+
+func (m *Manager) WithRepository(store MusicStore) *Manager {
+	m.store = store
+	return m
 }
 
 func (m *Manager) Handle(ctx context.Context, request Request) (Response, error) {
@@ -65,18 +87,28 @@ func (m *Manager) Handle(ctx context.Context, request Request) (Response, error)
 			return player.resume()
 		})
 	case ActionSkip:
+		if err := m.ensureDJ(ctx, request); err != nil {
+			return Response{}, err
+		}
 		return m.withPlayer(request.GuildID, func(player *guildPlayer) (Response, error) {
 			return player.skip()
 		})
 	case ActionStop:
+		if err := m.ensureDJ(ctx, request); err != nil {
+			return Response{}, err
+		}
 		return m.withPlayer(request.GuildID, func(player *guildPlayer) (Response, error) {
 			return player.stop(ctx)
 		})
 	case ActionQueue:
-		return m.withPlayer(request.GuildID, func(player *guildPlayer) (Response, error) {
+		if player := m.existingPlayer(request.GuildID); player != nil {
 			return player.queue()
-		})
+		}
+		return m.persistedQueue(ctx, request.GuildID)
 	case ActionClear:
+		if err := m.ensureDJ(ctx, request); err != nil {
+			return Response{}, err
+		}
 		return m.withPlayer(request.GuildID, func(player *guildPlayer) (Response, error) {
 			return player.clear()
 		})
@@ -84,6 +116,50 @@ func (m *Manager) Handle(ctx context.Context, request Request) (Response, error)
 		return m.withPlayer(request.GuildID, func(player *guildPlayer) (Response, error) {
 			return player.now()
 		})
+	case ActionLoop:
+		if err := m.ensureDJ(ctx, request); err != nil {
+			return Response{}, err
+		}
+		return m.setLoopMode(ctx, request)
+	case ActionShuffle:
+		if err := m.ensureDJ(ctx, request); err != nil {
+			return Response{}, err
+		}
+		return m.withPlayer(request.GuildID, func(player *guildPlayer) (Response, error) {
+			return player.shuffle()
+		})
+	case ActionRemove:
+		if err := m.ensureDJ(ctx, request); err != nil {
+			return Response{}, err
+		}
+		return m.withPlayer(request.GuildID, func(player *guildPlayer) (Response, error) {
+			return player.remove(request.Intent.Position)
+		})
+	case ActionMove:
+		if err := m.ensureDJ(ctx, request); err != nil {
+			return Response{}, err
+		}
+		return m.withPlayer(request.GuildID, func(player *guildPlayer) (Response, error) {
+			return player.move(request.Intent.Position, request.Intent.To)
+		})
+	case ActionVoteSkip:
+		return m.withPlayer(request.GuildID, func(player *guildPlayer) (Response, error) {
+			return player.voteSkip(request.UserID)
+		})
+	case ActionSettings:
+		if request.Intent.Volume > 0 {
+			if err := m.ensureDJ(ctx, request); err != nil {
+				return Response{}, err
+			}
+		}
+		return m.musicSettings(ctx, request)
+	case ActionPlaylist:
+		if request.Intent.Mode == "save" || request.Intent.Mode == "load" {
+			if err := m.ensureDJ(ctx, request); err != nil {
+				return Response{}, err
+			}
+		}
+		return m.playlist(ctx, request)
 	case ActionControls:
 		return musicResponse("Music controls", controlsMessage()), nil
 	default:
@@ -141,6 +217,7 @@ func (m *Manager) play(ctx context.Context, request Request) (Response, error) {
 	track.RequestedBy = request.UserID
 	track.TextChannelID = request.TextChannelID
 	player := m.player(request.GuildID)
+	player.loadPersistedQueue(ctx)
 	response, err := player.enqueue(ctx, track, request.VoiceChannelID)
 	if err != nil {
 		m.logger.Warn("music voice enqueue failed", slog.Any("err", err), slog.String("guild_id", request.GuildID), slog.String("voice_channel_id", request.VoiceChannelID), slog.String("track", track.Title))
@@ -173,6 +250,219 @@ func (m *Manager) existingPlayer(guildID string) *guildPlayer {
 	return m.players[guildID]
 }
 
+func (m *Manager) persistedQueue(ctx context.Context, guildID string) (Response, error) {
+	if m.store == nil {
+		return Response{}, ErrNothingPlaying
+	}
+	items, err := m.store.Queue(ctx, guildID)
+	if err != nil {
+		return Response{}, err
+	}
+	if len(items) == 0 {
+		return Response{}, ErrNothingPlaying
+	}
+	return queueResponse("Saved music queue", tracksFromQueueItems(items), nil, false), nil
+}
+
+func (m *Manager) ensureDJ(ctx context.Context, request Request) error {
+	if request.IsOwner || request.IsGuildAdmin || m.store == nil {
+		return nil
+	}
+	settings, err := m.store.EnsureSettings(ctx, request.GuildID)
+	if err != nil {
+		return err
+	}
+	djRoleID := strings.TrimSpace(settings.DJRoleID)
+	if djRoleID == "" {
+		return nil
+	}
+	for _, roleID := range request.RoleIDs {
+		if strings.TrimSpace(roleID) == djRoleID {
+			return nil
+		}
+	}
+	return ErrMissingDJ
+}
+
+func (m *Manager) setLoopMode(ctx context.Context, request Request) (Response, error) {
+	if m.store == nil {
+		return musicResponse("Music settings unavailable", "Music settings storage is not configured."), nil
+	}
+	mode := strings.ToLower(strings.TrimSpace(request.Intent.Mode))
+	switch mode {
+	case "", "track":
+		mode = "track"
+	case "queue", "off":
+	default:
+		return musicResponse("Loop mode not changed", "`loop` must be `track`, `queue`, or `off`."), nil
+	}
+	settings, err := m.store.UpdateSettings(ctx, request.GuildID, map[string]any{"loop_mode": mode})
+	if err != nil {
+		return Response{}, err
+	}
+	return musicResponse("Loop updated", fmt.Sprintf("Loop mode is now `%s`.", settings.LoopMode)), nil
+}
+
+func (m *Manager) musicSettings(ctx context.Context, request Request) (Response, error) {
+	if m.store == nil {
+		return musicResponse("Music settings unavailable", "Music settings storage is not configured."), nil
+	}
+	if request.Intent.Volume > 0 {
+		volume := request.Intent.Volume
+		if volume < 1 || volume > 200 {
+			return musicResponse("Volume not changed", "Default volume must be between 1 and 200."), nil
+		}
+		settings, err := m.store.UpdateSettings(ctx, request.GuildID, map[string]any{"default_volume": volume})
+		if err != nil {
+			return Response{}, err
+		}
+		return musicResponse("Default volume updated", fmt.Sprintf("Default volume is now %d%%.", settings.DefaultVolume)), nil
+	}
+	settings, err := m.store.EnsureSettings(ctx, request.GuildID)
+	if err != nil {
+		return Response{}, err
+	}
+	content := fmt.Sprintf("Music settings:\n- loop: `%s`\n- default volume: `%d%%`\n- vote skip threshold: `%.2f`", settings.LoopMode, settings.DefaultVolume, settings.VoteSkipThreshold)
+	if strings.TrimSpace(settings.DJRoleID) != "" {
+		content += fmt.Sprintf("\n- DJ role: `%s`", settings.DJRoleID)
+	} else {
+		content += "\n- DJ role: not configured"
+	}
+	return musicResponse("Music settings", content), nil
+}
+
+func (m *Manager) playlist(ctx context.Context, request Request) (Response, error) {
+	if m.store == nil {
+		return musicResponse("Playlists unavailable", "Music playlist storage is not configured."), nil
+	}
+	switch request.Intent.Mode {
+	case "save":
+		tracks := m.tracksForPlaylist(ctx, request.GuildID)
+		if len(tracks) == 0 {
+			return Response{}, ErrNothingPlaying
+		}
+		items := queueItemsFromTracks(tracks)
+		raw, err := repository.MarshalPlaylistTracks(items)
+		if err != nil {
+			return Response{}, err
+		}
+		playlist, err := m.store.SavePlaylist(ctx, store.MusicPlaylist{
+			GuildID:    request.GuildID,
+			Name:       request.Intent.Name,
+			CreatedBy:  request.UserID,
+			TracksJSON: raw,
+		})
+		if err != nil {
+			return Response{}, err
+		}
+		return musicResponse("Playlist saved", fmt.Sprintf("Saved `%s` with %d track(s).", playlist.Name, len(items))), nil
+	case "load":
+		if strings.TrimSpace(request.VoiceChannelID) == "" {
+			return Response{}, ErrMissingVoice
+		}
+		playlist, ok, err := m.store.Playlist(ctx, request.GuildID, request.Intent.Name)
+		if err != nil {
+			return Response{}, err
+		}
+		if !ok {
+			return musicResponse("Playlist not found", fmt.Sprintf("No saved playlist named `%s`.", request.Intent.Name)), nil
+		}
+		items, err := repository.UnmarshalPlaylistTracks(playlist.TracksJSON)
+		if err != nil {
+			return Response{}, err
+		}
+		tracks := tracksFromQueueItems(items)
+		if len(tracks) == 0 {
+			return musicResponse("Playlist empty", fmt.Sprintf("Playlist `%s` has no tracks.", playlist.Name)), nil
+		}
+		player := m.player(request.GuildID)
+		for index, track := range tracks {
+			track.RequestedBy = request.UserID
+			track.TextChannelID = request.TextChannelID
+			if _, err := player.enqueue(ctx, track, request.VoiceChannelID); err != nil {
+				if index == 0 {
+					return Response{}, err
+				}
+				break
+			}
+		}
+		return musicResponse("Playlist queued", fmt.Sprintf("Queued `%s` with %d track(s).", playlist.Name, len(tracks))), nil
+	default:
+		playlists, err := m.store.Playlists(ctx, request.GuildID, 25)
+		if err != nil {
+			return Response{}, err
+		}
+		if len(playlists) == 0 {
+			return musicResponse("Saved playlists", "No saved playlists yet."), nil
+		}
+		lines := []string{"Saved playlists:"}
+		for _, playlist := range playlists {
+			items, _ := repository.UnmarshalPlaylistTracks(playlist.TracksJSON)
+			lines = append(lines, fmt.Sprintf("- `%s` (%d track(s))", playlist.Name, len(items)))
+		}
+		return musicResponse("Saved playlists", strings.Join(lines, "\n")), nil
+	}
+}
+
+func (m *Manager) ConfigureSettings(ctx context.Context, guildID string, update SettingsUpdate) (SettingsSnapshot, error) {
+	if m.store == nil {
+		return SettingsSnapshot{}, ErrDependencyMissing
+	}
+	values := map[string]any{}
+	if strings.TrimSpace(update.LoopMode) != "" {
+		mode := strings.ToLower(strings.TrimSpace(update.LoopMode))
+		if mode != "off" && mode != "track" && mode != "queue" {
+			return SettingsSnapshot{}, fmt.Errorf("loop mode must be off, track, or queue")
+		}
+		values["loop_mode"] = mode
+	}
+	if update.DefaultVolumeSet {
+		if update.DefaultVolume < 1 || update.DefaultVolume > 200 {
+			return SettingsSnapshot{}, fmt.Errorf("default volume must be between 1 and 200")
+		}
+		values["default_volume"] = update.DefaultVolume
+	}
+	if update.DJRoleSet {
+		values["dj_role_id"] = strings.TrimSpace(update.DJRoleID)
+	}
+	if update.VoteSkipThresholdSet {
+		if update.VoteSkipThreshold <= 0 || update.VoteSkipThreshold > 1 {
+			return SettingsSnapshot{}, fmt.Errorf("vote skip threshold must be greater than 0 and at most 1")
+		}
+		values["vote_skip_threshold"] = update.VoteSkipThreshold
+	}
+	var settings store.MusicSettings
+	var err error
+	if len(values) == 0 {
+		settings, err = m.store.EnsureSettings(ctx, guildID)
+	} else {
+		settings, err = m.store.UpdateSettings(ctx, guildID, values)
+	}
+	if err != nil {
+		return SettingsSnapshot{}, err
+	}
+	return SettingsSnapshot{
+		LoopMode:          settings.LoopMode,
+		DefaultVolume:     settings.DefaultVolume,
+		DJRoleID:          settings.DJRoleID,
+		VoteSkipThreshold: settings.VoteSkipThreshold,
+	}, nil
+}
+
+func (m *Manager) tracksForPlaylist(ctx context.Context, guildID string) []Track {
+	if player := m.existingPlayer(guildID); player != nil {
+		return player.allTracks()
+	}
+	if m.store == nil {
+		return nil
+	}
+	items, err := m.store.Queue(ctx, guildID)
+	if err != nil {
+		return nil
+	}
+	return tracksFromQueueItems(items)
+}
+
 func (m *Manager) removePlayer(guildID string, player *guildPlayer) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -197,6 +487,8 @@ type guildPlayer struct {
 
 	emptyDisconnectTimer *time.Timer
 	emptyDisconnectToken *emptyDisconnectToken
+	loadedPersisted      bool
+	skipVotes            map[string]struct{}
 }
 
 type emptyDisconnectToken struct{}
@@ -215,7 +507,9 @@ func (p *guildPlayer) enqueue(ctx context.Context, track Track, voiceChannelID s
 		p.stopping = false
 		p.voiceChannelID = voiceChannelID
 	}
+	snapshot := append([]Track(nil), p.queueItems...)
 	p.mu.Unlock()
+	p.persistQueueSnapshot(snapshot)
 
 	if !shouldStart {
 		return trackResponse("Track queued", fmt.Sprintf("Queued **%s** at position %d.", trackTitle(track), position), track), nil
@@ -225,9 +519,11 @@ func (p *guildPlayer) enqueue(ctx context.Context, track Track, voiceChannelID s
 	if err != nil {
 		p.mu.Lock()
 		p.queueItems = removeTrackFromQueue(p.queueItems, track)
+		snapshot := append([]Track(nil), p.queueItems...)
 		p.playing = false
 		p.voiceChannelID = ""
 		p.mu.Unlock()
+		p.persistQueueSnapshot(snapshot)
 		p.manager.removePlayer(p.guildID, p)
 		return Response{}, err
 	}
@@ -253,6 +549,7 @@ func (p *guildPlayer) run() {
 		p.mu.Lock()
 		p.current = &track
 		p.trackCancel = cancel
+		p.skipVotes = map[string]struct{}{}
 		p.mu.Unlock()
 
 		err := p.playTrack(ctx, track)
@@ -269,6 +566,9 @@ func (p *guildPlayer) run() {
 		}
 		if stopping {
 			return
+		}
+		if err == nil {
+			p.loopCompletedTrack(track)
 		}
 	}
 }
@@ -288,7 +588,9 @@ func (p *guildPlayer) nextTrack() (Track, bool) {
 	}
 	track := p.queueItems[0]
 	p.queueItems = p.queueItems[1:]
+	snapshot := append([]Track(nil), p.queueItems...)
 	p.mu.Unlock()
+	p.persistQueueSnapshot(snapshot)
 	return track, true
 }
 
@@ -450,6 +752,7 @@ func (p *guildPlayer) stop(ctx context.Context) (Response, error) {
 	if cancel != nil {
 		cancel()
 	}
+	p.persistQueueSnapshot(nil)
 	p.closeSession(ctx)
 	if !hadCurrent && queued == 0 {
 		return Response{}, ErrNothingPlaying
@@ -462,6 +765,7 @@ func (p *guildPlayer) clear() (Response, error) {
 	removed := len(p.queueItems)
 	p.queueItems = nil
 	p.mu.Unlock()
+	p.persistQueueSnapshot(nil)
 	if removed == 0 {
 		return musicResponse("Queue already clear", "The queue is already empty."), nil
 	}
@@ -483,30 +787,208 @@ func (p *guildPlayer) now() (Response, error) {
 
 func (p *guildPlayer) queue() (Response, error) {
 	p.mu.Lock()
-	defer p.mu.Unlock()
 	if p.current == nil && len(p.queueItems) == 0 {
+		p.mu.Unlock()
 		return Response{}, ErrNothingPlaying
 	}
+	current := p.current
+	if current != nil {
+		copyTrack := *current
+		current = &copyTrack
+	}
+	queued := append([]Track(nil), p.queueItems...)
+	paused := p.paused
+	p.mu.Unlock()
+	return queueResponse("Music queue", queued, current, paused), nil
+}
+
+func queueResponse(title string, queued []Track, current *Track, paused bool) Response {
 	lines := []string{"Music queue:"}
-	if p.current != nil {
+	if current != nil {
 		prefix := "Now"
-		if p.paused {
+		if paused {
 			prefix = "Paused"
 		}
-		lines = append(lines, fmt.Sprintf("- %s: **%s**%s", prefix, trackTitle(*p.current), durationSuffix(p.current.Duration)))
+		lines = append(lines, fmt.Sprintf("- %s: **%s**%s%s", prefix, trackTitle(*current), durationSuffix(current.Duration), requesterSuffix(current.RequestedBy)))
 	}
-	if len(p.queueItems) == 0 {
+	if len(queued) == 0 {
 		lines = append(lines, "- Up next: empty")
 	} else {
-		for index, track := range p.queueItems {
+		for index, track := range queued {
 			if index >= 10 {
-				lines = append(lines, fmt.Sprintf("- ...and %d more", len(p.queueItems)-index))
+				lines = append(lines, fmt.Sprintf("- ...and %d more", len(queued)-index))
 				break
 			}
-			lines = append(lines, fmt.Sprintf("- %d. **%s**%s", index+1, trackTitle(track), durationSuffix(track.Duration)))
+			lines = append(lines, fmt.Sprintf("- %d. **%s**%s%s", index+1, trackTitle(track), durationSuffix(track.Duration), requesterSuffix(track.RequestedBy)))
 		}
 	}
-	return musicResponse("Music queue", strings.Join(lines, "\n")), nil
+	return musicResponse(title, strings.Join(lines, "\n"))
+}
+
+func (p *guildPlayer) shuffle() (Response, error) {
+	p.mu.Lock()
+	if len(p.queueItems) < 2 {
+		p.mu.Unlock()
+		return musicResponse("Queue unchanged", "Need at least two queued songs to shuffle."), nil
+	}
+	rand.Shuffle(len(p.queueItems), func(i, j int) {
+		p.queueItems[i], p.queueItems[j] = p.queueItems[j], p.queueItems[i]
+	})
+	snapshot := append([]Track(nil), p.queueItems...)
+	p.mu.Unlock()
+	p.persistQueueSnapshot(snapshot)
+	return musicResponse("Queue shuffled", fmt.Sprintf("Shuffled %d queued song(s).", len(snapshot))), nil
+}
+
+func (p *guildPlayer) remove(position int) (Response, error) {
+	if position <= 0 {
+		return Response{}, ErrInvalidQueueIndex
+	}
+	p.mu.Lock()
+	if position > len(p.queueItems) {
+		p.mu.Unlock()
+		return Response{}, ErrInvalidQueueIndex
+	}
+	removed := p.queueItems[position-1]
+	p.queueItems = append(p.queueItems[:position-1], p.queueItems[position:]...)
+	snapshot := append([]Track(nil), p.queueItems...)
+	p.mu.Unlock()
+	p.persistQueueSnapshot(snapshot)
+	return trackResponse("Track removed", fmt.Sprintf("Removed **%s** from queue position %d.", trackTitle(removed), position), removed), nil
+}
+
+func (p *guildPlayer) move(from, to int) (Response, error) {
+	if from <= 0 || to <= 0 {
+		return Response{}, ErrInvalidQueueIndex
+	}
+	p.mu.Lock()
+	if from > len(p.queueItems) || to > len(p.queueItems) {
+		p.mu.Unlock()
+		return Response{}, ErrInvalidQueueIndex
+	}
+	track := p.queueItems[from-1]
+	p.queueItems = append(p.queueItems[:from-1], p.queueItems[from:]...)
+	if to > len(p.queueItems)+1 {
+		to = len(p.queueItems) + 1
+	}
+	insertAt := to - 1
+	p.queueItems = append(p.queueItems, Track{})
+	copy(p.queueItems[insertAt+1:], p.queueItems[insertAt:])
+	p.queueItems[insertAt] = track
+	snapshot := append([]Track(nil), p.queueItems...)
+	p.mu.Unlock()
+	p.persistQueueSnapshot(snapshot)
+	return trackResponse("Track moved", fmt.Sprintf("Moved **%s** from position %d to %d.", trackTitle(track), from, to), track), nil
+}
+
+func (p *guildPlayer) voteSkip(userID string) (Response, error) {
+	userID = strings.TrimSpace(userID)
+	if userID == "" {
+		return Response{}, ErrMissingDJ
+	}
+	p.mu.Lock()
+	if p.current == nil {
+		p.mu.Unlock()
+		return Response{}, ErrNothingPlaying
+	}
+	if p.skipVotes == nil {
+		p.skipVotes = map[string]struct{}{}
+	}
+	p.skipVotes[userID] = struct{}{}
+	votes := len(p.skipVotes)
+	required := p.voteSkipRequiredLocked()
+	title := trackTitle(*p.current)
+	cancel := p.trackCancel
+	p.mu.Unlock()
+	if votes < required {
+		return musicResponse("Skip vote counted", fmt.Sprintf("Vote counted for **%s**. %d/%d vote(s).", title, votes, required)), nil
+	}
+	if cancel != nil {
+		cancel()
+	}
+	return musicResponse("Vote skip passed", fmt.Sprintf("Skipped **%s** after %d vote(s).", title, votes)), nil
+}
+
+func (p *guildPlayer) voteSkipRequiredLocked() int {
+	threshold := 0.5
+	if p.manager.store != nil {
+		settings, err := p.manager.store.EnsureSettings(context.Background(), p.guildID)
+		if err == nil && settings.VoteSkipThreshold > 0 {
+			threshold = settings.VoteSkipThreshold
+		}
+	}
+	return int(math.Max(2, math.Ceil(1/threshold)))
+}
+
+func (p *guildPlayer) allTracks() []Track {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	var tracks []Track
+	if p.current != nil {
+		tracks = append(tracks, *p.current)
+	}
+	tracks = append(tracks, p.queueItems...)
+	return tracks
+}
+
+func (p *guildPlayer) loadPersistedQueue(ctx context.Context) {
+	if p.manager.store == nil {
+		return
+	}
+	p.mu.Lock()
+	if p.loadedPersisted || len(p.queueItems) > 0 || p.playing {
+		p.mu.Unlock()
+		return
+	}
+	p.loadedPersisted = true
+	p.mu.Unlock()
+	items, err := p.manager.store.Queue(ctx, p.guildID)
+	if err != nil || len(items) == 0 {
+		return
+	}
+	tracks := tracksFromQueueItems(items)
+	p.mu.Lock()
+	if len(p.queueItems) == 0 && !p.playing {
+		p.queueItems = tracks
+	}
+	p.mu.Unlock()
+}
+
+func (p *guildPlayer) loopCompletedTrack(track Track) {
+	if p.manager.store == nil {
+		return
+	}
+	settings, err := p.manager.store.EnsureSettings(context.Background(), p.guildID)
+	if err != nil {
+		return
+	}
+	mode := strings.ToLower(strings.TrimSpace(settings.LoopMode))
+	if mode != "track" && mode != "queue" {
+		return
+	}
+	p.mu.Lock()
+	if p.stopping {
+		p.mu.Unlock()
+		return
+	}
+	if mode == "track" {
+		p.queueItems = append([]Track{track}, p.queueItems...)
+	} else {
+		p.queueItems = append(p.queueItems, track)
+	}
+	snapshot := append([]Track(nil), p.queueItems...)
+	p.mu.Unlock()
+	p.persistQueueSnapshot(snapshot)
+}
+
+func (p *guildPlayer) persistQueueSnapshot(tracks []Track) {
+	if p.manager.store == nil {
+		return
+	}
+	items := queueItemsFromTracks(tracks)
+	if err := p.manager.store.ReplaceQueue(context.Background(), p.guildID, items); err != nil {
+		p.manager.logger.Debug("music queue persistence failed", slog.Any("err", err), slog.String("guild_id", p.guildID))
+	}
 }
 
 func (p *guildPlayer) currentSession() VoiceSession {
@@ -651,8 +1133,16 @@ func durationSuffix(duration time.Duration) string {
 	return fmt.Sprintf(" `%d:%02d`", minutes, seconds)
 }
 
+func requesterSuffix(userID string) string {
+	userID = strings.TrimSpace(userID)
+	if userID == "" {
+		return ""
+	}
+	return fmt.Sprintf(" requested by <@%s>", userID)
+}
+
 func controlsMessage() string {
-	return "Music controls: `play <song>`, `pause`, `resume`, `skip`, `stop`, `queue`, `clear queue`, and `now playing`."
+	return "Music controls: `play <song>`, `pause`, `resume`, `vote skip`, `skip`, `stop`, `queue`, `remove <#>`, `move <#> to <#>`, `shuffle`, `loop track|queue|off`, `save playlist <name>`, `load playlist <name>`, `volume <1-200>`, `clear queue`, and `now playing`."
 }
 
 func musicResponse(title, content string) Response {
@@ -671,5 +1161,42 @@ func trackResponse(title, content string, track Track) Response {
 	if track.Duration > 0 {
 		response.Fields = append(response.Fields, Field{Name: "Duration", Value: strings.TrimSpace(durationSuffix(track.Duration)), Inline: true})
 	}
+	if strings.TrimSpace(track.RequestedBy) != "" {
+		response.Fields = append(response.Fields, Field{Name: "Requester", Value: "<@" + strings.TrimSpace(track.RequestedBy) + ">", Inline: true})
+	}
 	return response
+}
+
+func queueItemsFromTracks(tracks []Track) []store.MusicQueueItem {
+	items := make([]store.MusicQueueItem, 0, len(tracks))
+	for _, track := range tracks {
+		items = append(items, store.MusicQueueItem{
+			TrackID:       track.ID,
+			Query:         track.Query,
+			Title:         track.Title,
+			URL:           track.URL,
+			Uploader:      track.Uploader,
+			DurationMS:    track.Duration.Milliseconds(),
+			RequestedBy:   track.RequestedBy,
+			TextChannelID: track.TextChannelID,
+		})
+	}
+	return items
+}
+
+func tracksFromQueueItems(items []store.MusicQueueItem) []Track {
+	tracks := make([]Track, 0, len(items))
+	for _, item := range items {
+		tracks = append(tracks, Track{
+			ID:            item.TrackID,
+			Query:         item.Query,
+			Title:         item.Title,
+			URL:           item.URL,
+			Uploader:      item.Uploader,
+			Duration:      time.Duration(item.DurationMS) * time.Millisecond,
+			RequestedBy:   item.RequestedBy,
+			TextChannelID: item.TextChannelID,
+		})
+	}
+	return tracks
 }

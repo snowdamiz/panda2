@@ -10,18 +10,20 @@ import (
 	"strconv"
 	"strings"
 	"time"
-	"unicode"
 
 	"github.com/sn0w/panda2/internal/admin"
+	"github.com/sn0w/panda2/internal/alerts"
 	"github.com/sn0w/panda2/internal/assistant"
 	"github.com/sn0w/panda2/internal/composed"
 	contextsvc "github.com/sn0w/panda2/internal/context"
+	"github.com/sn0w/panda2/internal/feedback"
 	"github.com/sn0w/panda2/internal/llm"
 	"github.com/sn0w/panda2/internal/music"
 	"github.com/sn0w/panda2/internal/ops"
 	"github.com/sn0w/panda2/internal/polls"
 	"github.com/sn0w/panda2/internal/ratelimit"
 	"github.com/sn0w/panda2/internal/repository"
+	"github.com/sn0w/panda2/internal/scheduler"
 	"github.com/sn0w/panda2/internal/security"
 	"github.com/sn0w/panda2/internal/store"
 	"github.com/sn0w/panda2/internal/textutil"
@@ -39,6 +41,10 @@ type Router struct {
 	attachments AttachmentReader
 	ops         *ops.Service
 	music       MusicService
+	feedback    *feedback.Service
+	scheduler   *scheduler.Service
+	alerts      *alerts.Service
+	setup       SetupChecker
 	rateLimit   *ratelimit.Limiter
 }
 
@@ -61,6 +67,16 @@ type AttachmentReader interface {
 
 type MusicService interface {
 	Handle(ctx context.Context, request music.Request) (music.Response, error)
+}
+
+type SetupChecker interface {
+	CheckSetup(ctx context.Context, guildID, channelID string) (SetupCheckResult, error)
+}
+
+type SetupCheckResult struct {
+	DiscordConfigured bool
+	Connected         bool
+	Warnings          []string
 }
 
 type helpAccess struct {
@@ -147,6 +163,26 @@ func (r *Router) WithMusicService(musicService MusicService) *Router {
 	return r
 }
 
+func (r *Router) WithFeedbackService(feedbackService *feedback.Service) *Router {
+	r.feedback = feedbackService
+	return r
+}
+
+func (r *Router) WithScheduler(schedulerService *scheduler.Service) *Router {
+	r.scheduler = schedulerService
+	return r
+}
+
+func (r *Router) WithAlertService(alertService *alerts.Service) *Router {
+	r.alerts = alertService
+	return r
+}
+
+func (r *Router) WithSetupChecker(checker SetupChecker) *Router {
+	r.setup = checker
+	return r
+}
+
 func (r *Router) Handle(ctx context.Context, request Request) Response {
 	switch strings.ToLower(request.Command) {
 	case "ping":
@@ -159,6 +195,10 @@ func (r *Router) Handle(ctx context.Context, request Request) Response {
 		return r.handleAdmin(ctx, request)
 	case "ops":
 		return r.handleOps(ctx, request)
+	case "reminder", "reminders":
+		return r.handleReminder(ctx, request)
+	case "schedule", "schedules":
+		return r.handleSchedule(ctx, request)
 	case "ask":
 		return r.handleAsk(ctx, request, "ask")
 	case "chat":
@@ -271,7 +311,7 @@ func elevatedHelpMessage(access helpAccess) string {
 			builder.WriteString("- Ask Panda to approve, pause, resume, disable, archive, or roll back tools. Approval/rollback use buttons.\n")
 		}
 		if access.toolInvoke {
-			builder.WriteString("- Ask Panda to run or simulate approved composed tools.\n")
+			builder.WriteString("- Ask Panda to run/simulate/schedule/list/cancel approved tools.\n")
 		}
 	}
 
@@ -299,21 +339,6 @@ func (r *Router) HandleNaturalMessage(ctx context.Context, request Request) Resp
 	if !r.canHandleNaturalMessage(ctx, request) {
 		return Response{}
 	}
-	if response, ok := r.handleNaturalMusic(ctx, request, message); ok {
-		return response
-	}
-	if response, ok := handleNaturalPoll(message); ok {
-		return response
-	}
-	if response, ok := r.handleNaturalSoul(ctx, request, message); ok {
-		return response
-	}
-	if response, ok := r.handleNaturalDiscordRoleCreate(ctx, request, message); ok {
-		return response
-	}
-	if response, ok := r.handleNaturalAutomation(ctx, request, message); ok {
-		return response
-	}
 	decision, err := r.assistant.ClassifyNaturalMessage(ctx, assistant.NaturalMessageRequest{
 		GuildID:          request.GuildID,
 		UserID:           request.UserID,
@@ -326,14 +351,6 @@ func (r *Router) HandleNaturalMessage(ctx context.Context, request Request) Resp
 	})
 	if err != nil {
 		slog.Warn("natural message classification failed", slog.Any("err", err), slog.String("guild_id", request.GuildID), slog.String("channel_id", request.ChannelID), slog.String("request_id", request.RequestID))
-		if prompt, ok := naturalMessageFallbackPrompt(message, request.Options); ok {
-			request.Command = "chat"
-			if request.Options == nil {
-				request.Options = map[string]string{}
-			}
-			request.Options["question"] = prompt
-			return r.handleChatModeWithAccess(ctx, request, false, true)
-		}
 		return Response{}
 	}
 	if !decision.Respond {
@@ -368,766 +385,6 @@ func (r *Router) canWriteSoul(ctx context.Context, request Request) bool {
 	}
 	allowed, err := r.admin.CanWriteSoul(ctx, assistantAccessRequest(request))
 	return err == nil && allowed
-}
-
-func (r *Router) handleNaturalMusic(ctx context.Context, request Request, message string) (Response, bool) {
-	if r.music == nil {
-		return Response{}, false
-	}
-	intent, ok := music.ParseIntent(message)
-	if !ok {
-		return Response{}, false
-	}
-	response, err := r.music.Handle(ctx, music.Request{
-		GuildID:        request.GuildID,
-		TextChannelID:  request.ChannelID,
-		UserID:         request.UserID,
-		VoiceChannelID: request.VoiceChannelID,
-		Intent:         intent,
-	})
-	if err != nil {
-		return musicError(err), true
-	}
-	return responseFromMusic(response), true
-}
-
-func musicError(err error) Response {
-	switch {
-	case errors.Is(err, music.ErrMissingGuild):
-		return musicStatus("Music unavailable", "Music only works inside a Discord server.", AccentWarning)
-	case errors.Is(err, music.ErrMissingVoice):
-		return musicStatus("Join voice first", "Join a voice channel first, then ask me to play the song.", AccentWarning)
-	case errors.Is(err, music.ErrMissingSong):
-		return musicStatus("Song needed", "Tell me what song to play.", AccentWarning)
-	case errors.Is(err, music.ErrNothingPlaying):
-		return musicStatus("Nothing playing", "Nothing is playing right now.", AccentWarning)
-	case errors.Is(err, music.ErrAlreadyPaused):
-		return musicStatus("Already paused", "Music is already paused.", AccentWarning)
-	case errors.Is(err, music.ErrAlreadyPlaying):
-		return musicStatus("Already playing", "Music is already playing.", AccentWarning)
-	case errors.Is(err, music.ErrDifferentVoice):
-		return musicStatus("Different voice channel", "I am already playing music in another voice channel.", AccentWarning)
-	case errors.Is(err, music.ErrVoiceConnection):
-		return musicStatus("Voice connection failed", "I could not join or speak in that voice channel yet. Try again in a moment.", AccentDanger)
-	case errors.Is(err, music.ErrDependencyMissing):
-		return musicStatus("Audio tools unavailable", "I could not prepare the server-side audio tools yet. Try again in a moment.", AccentDanger)
-	case errors.Is(err, music.ErrTrackLookupFailed):
-		return musicStatus("Song not found", "I could not find that song.", AccentWarning)
-	case errors.Is(err, music.ErrTrackStreamFailed):
-		return musicStatus("Stream failed", "I found the song, but could not start the audio stream.", AccentDanger)
-	default:
-		return musicStatus("Music error", "Music had trouble with that request.", AccentDanger)
-	}
-}
-
-func responseFromMusic(response music.Response) Response {
-	fields := make([]Field, 0, len(response.Fields))
-	for _, field := range response.Fields {
-		fields = append(fields, Field{Name: field.Name, Value: field.Value, Inline: field.Inline})
-	}
-	actions := make([]Action, 0, len(response.Actions))
-	for _, action := range response.Actions {
-		actions = append(actions, Action{Label: action.Label, URL: action.URL})
-	}
-	return Response{
-		Content: response.Content,
-		Presentation: Presentation{
-			Title:  firstNonEmpty(response.Title, "Music"),
-			Accent: AccentMusic,
-			URL:    response.URL,
-			Fields: fields,
-		},
-		Actions: actions,
-	}
-}
-
-func musicStatus(title, content string, accent Accent) Response {
-	return Response{
-		Content: content,
-		Presentation: Presentation{
-			Title:  title,
-			Accent: accent,
-		},
-	}
-}
-
-func handleNaturalPoll(message string) (Response, bool) {
-	poll, ok := naturalPollFromMessage(message)
-	if !ok {
-		return Response{}, false
-	}
-	return Response{Poll: &poll}, true
-}
-
-func naturalPollFromMessage(message string) (polls.Poll, bool) {
-	prompt, ok := naturalPollPrompt(message)
-	if !ok {
-		return polls.Poll{}, false
-	}
-	question, answers, ok := naturalPollQuestionAndAnswers(prompt)
-	if !ok {
-		return polls.Poll{}, false
-	}
-	poll, err := polls.New(question, answers, 0, false)
-	if err != nil {
-		return polls.Poll{}, false
-	}
-	return poll, true
-}
-
-func naturalPollPrompt(message string) (string, bool) {
-	message = stripLeadingDiscordMention(strings.TrimSpace(message))
-	message = stripLeadingPandaWakePhrase(message)
-	if !isPollCreateRequest(message) {
-		return "", false
-	}
-	afterPoll, ok := textAfterWord(message, "poll")
-	if !ok {
-		return "", false
-	}
-	return strings.TrimSpace(trimNaturalPollLeadIn(afterPoll)), true
-}
-
-func stripLeadingDiscordMention(message string) string {
-	message = strings.TrimSpace(message)
-	if !strings.HasPrefix(message, "<@") {
-		return message
-	}
-	end := strings.Index(message, ">")
-	if end < 0 {
-		return message
-	}
-	return strings.TrimLeftFunc(strings.TrimSpace(message[end+1:]), func(value rune) bool {
-		return value == ',' || value == ':' || value == '-' || unicode.IsSpace(value)
-	})
-}
-
-func isPollCreateRequest(message string) bool {
-	words := messageWords(message)
-	hasPoll := false
-	hasCreateVerb := false
-	for index, word := range words {
-		if word == "poll" {
-			hasPoll = true
-			if index == 0 {
-				hasCreateVerb = true
-			}
-			continue
-		}
-		switch word {
-		case "make", "create", "start", "open", "post", "run":
-			hasCreateVerb = true
-		}
-	}
-	return hasPoll && hasCreateVerb
-}
-
-func messageWords(message string) []string {
-	var words []string
-	wordStart := -1
-	for index, value := range message {
-		if isMessageWordRune(value) {
-			if wordStart < 0 {
-				wordStart = index
-			}
-			continue
-		}
-		if wordStart >= 0 {
-			words = append(words, strings.ToLower(message[wordStart:index]))
-			wordStart = -1
-		}
-	}
-	if wordStart >= 0 {
-		words = append(words, strings.ToLower(message[wordStart:]))
-	}
-	return words
-}
-
-func textAfterWord(message, target string) (string, bool) {
-	wordStart := -1
-	for index, value := range message {
-		if isMessageWordRune(value) {
-			if wordStart < 0 {
-				wordStart = index
-			}
-			continue
-		}
-		if wordStart >= 0 {
-			if strings.EqualFold(message[wordStart:index], target) {
-				return message[index:], true
-			}
-			wordStart = -1
-		}
-	}
-	if wordStart >= 0 && strings.EqualFold(message[wordStart:], target) {
-		return "", true
-	}
-	return "", false
-}
-
-func trimNaturalPollLeadIn(value string) string {
-	value = strings.TrimSpace(strings.TrimLeft(value, " \t\r\n,;:.-"))
-	for _, prefix := range []string{"about ", "for ", "on ", "asking ", "that asks ", "with "} {
-		if strings.HasPrefix(strings.ToLower(value), prefix) {
-			return strings.TrimSpace(value[len(prefix):])
-		}
-	}
-	return value
-}
-
-func naturalPollQuestionAndAnswers(prompt string) (string, []polls.Answer, bool) {
-	prompt = strings.TrimSpace(prompt)
-	if prompt == "" {
-		return "", nil, false
-	}
-	if question, answers, ok := explicitNaturalPollOptions(prompt); ok {
-		return question, answers, true
-	}
-	if question, answers, ok := questionMarkNaturalPollOptions(prompt); ok {
-		return question, answers, true
-	}
-	if question, answers, ok := binaryNaturalPollOptions(prompt); ok {
-		return question, answers, true
-	}
-	return "", nil, false
-}
-
-func explicitNaturalPollOptions(prompt string) (string, []polls.Answer, bool) {
-	for _, label := range []string{" options:", " option:", " choices:", " choice:", " answers:", " answer:"} {
-		index := strings.Index(strings.ToLower(prompt), label)
-		if index < 0 {
-			continue
-		}
-		question := cleanNaturalPollQuestion(prompt[:index])
-		answers := polls.ParseAnswers(prompt[index+len(label):])
-		return question, answers, question != "" && len(answers) >= polls.MinAnswers
-	}
-	return "", nil, false
-}
-
-func questionMarkNaturalPollOptions(prompt string) (string, []polls.Answer, bool) {
-	index := strings.Index(prompt, "?")
-	if index < 0 || index == len(prompt)-1 {
-		return "", nil, false
-	}
-	question := cleanNaturalPollQuestion(prompt[:index+1])
-	answers := polls.ParseAnswers(prompt[index+1:])
-	return question, answers, question != "" && len(answers) >= polls.MinAnswers
-}
-
-func binaryNaturalPollOptions(prompt string) (string, []polls.Answer, bool) {
-	left, right, separator, ok := splitBinaryNaturalPoll(prompt)
-	if !ok {
-		return "", nil, false
-	}
-	firstAnswer, questionPrefix := splitNaturalPollQuestionPrefix(left)
-	firstAnswer = cleanNaturalPollAnswer(firstAnswer)
-	secondAnswer := cleanNaturalPollAnswer(right)
-	if firstAnswer == "" || secondAnswer == "" {
-		return "", nil, false
-	}
-	question := cleanNaturalPollQuestion(prompt)
-	if questionPrefix != "" {
-		question = naturalBinaryPollQuestion(questionPrefix, firstAnswer, separator, secondAnswer)
-	}
-	return question, []polls.Answer{{Text: firstAnswer}, {Text: secondAnswer}}, question != ""
-}
-
-func splitBinaryNaturalPoll(prompt string) (string, string, string, bool) {
-	lower := strings.ToLower(prompt)
-	for _, separator := range []string{" versus ", " vs ", " or "} {
-		index := strings.LastIndex(lower, separator)
-		if index <= 0 || index+len(separator) >= len(prompt) {
-			continue
-		}
-		return prompt[:index], prompt[index+len(separator):], strings.TrimSpace(separator), true
-	}
-	return "", "", "", false
-}
-
-func splitNaturalPollQuestionPrefix(left string) (string, string) {
-	trimmed := strings.TrimSpace(left)
-	lower := strings.ToLower(trimmed)
-	for _, prefix := range []string{
-		"what will be better",
-		"what would be better",
-		"what is better",
-		"which will be better",
-		"which would be better",
-		"which is better",
-		"what should we pick",
-		"which should we pick",
-		"who will win",
-		"who wins",
-	} {
-		if strings.HasPrefix(lower, prefix) {
-			return strings.TrimSpace(trimNaturalPollLeadIn(trimmed[len(prefix):])), prefix
-		}
-	}
-	return trimmed, ""
-}
-
-func naturalBinaryPollQuestion(prefix, firstAnswer, separator, secondAnswer string) string {
-	label := sentenceCase(prefix)
-	if separator == "vs" || separator == "versus" {
-		separator = "or"
-	}
-	return fmt.Sprintf("%s: %s %s %s?", label, firstAnswer, separator, secondAnswer)
-}
-
-func cleanNaturalPollQuestion(value string) string {
-	value = strings.TrimSpace(strings.Trim(value, " \t\r\n,;:."))
-	if value == "" {
-		return ""
-	}
-	if strings.HasSuffix(value, "?") {
-		return value
-	}
-	return value + "?"
-}
-
-func cleanNaturalPollAnswer(value string) string {
-	return strings.TrimSpace(strings.Trim(value, " \t\r\n,;:.?!"))
-}
-
-func (r *Router) handleNaturalSoul(ctx context.Context, request Request, message string) (Response, bool) {
-	soul, ok := naturalSoulSetInstruction(message)
-	if !ok {
-		return Response{}, false
-	}
-	if request.GuildID == "" {
-		return Response{Content: "Soul updates must be run inside a Discord server.", Ephemeral: true}, true
-	}
-	allowed, err := r.admin.CanWriteSoul(ctx, assistantAccessRequest(request))
-	if err != nil {
-		return Response{Content: "Permission lookup failed. Please try again later.", Ephemeral: true}, true
-	}
-	if !allowed {
-		return Response{Content: "Only the Panda owner, server owner or administrator, or a delegated soul writer can update Panda's soul.", Ephemeral: true}, true
-	}
-	config, err := r.admin.SetSoul(ctx, request.GuildID, request.UserID, soul)
-	if err != nil {
-		return Response{Content: "Soul update failed.", Ephemeral: true}, true
-	}
-	return Response{Content: fmt.Sprintf("Agent soul updated (%d characters).", len(config.AgentSoul)), Ephemeral: true}, true
-}
-
-func (r *Router) handleNaturalDiscordRoleCreate(ctx context.Context, request Request, message string) (Response, bool) {
-	name, ok := naturalDiscordRoleCreateName(message)
-	if !ok {
-		return Response{}, false
-	}
-	if denied := r.ensureToolConfirmationPermission(ctx, request, r.admin.CanWriteConfig, "You do not have permission to create Discord roles."); denied.Content != "" {
-		return denied, true
-	}
-	return discordRoleCreateConfirmationResponse(request.UserID, name), true
-}
-
-func naturalDiscordRoleCreateName(message string) (string, bool) {
-	prompt := stripLeadingPandaWakePhrase(message)
-	lower := strings.ToLower(prompt)
-	for _, prefix := range naturalDiscordRoleCreatePrefixes {
-		if strings.HasPrefix(lower, prefix) {
-			return cleanNaturalDiscordRoleName(prompt[len(prefix):])
-		}
-	}
-	return "", false
-}
-
-var naturalDiscordRoleCreatePrefixes = []string{
-	"create a new role called ",
-	"create a new role named ",
-	"create a role called ",
-	"create a role named ",
-	"create new role called ",
-	"create new role named ",
-	"create role called ",
-	"create role named ",
-	"create role ",
-	"make a new role called ",
-	"make a new role named ",
-	"make a role called ",
-	"make a role named ",
-	"add a new role called ",
-	"add a new role named ",
-	"add a role called ",
-	"add a role named ",
-}
-
-func cleanNaturalDiscordRoleName(raw string) (string, bool) {
-	name := strings.TrimSpace(raw)
-	name = strings.Trim(name, " \t\r\n'\"`.,")
-	if strings.HasSuffix(strings.ToLower(name), " please") {
-		name = strings.TrimSpace(name[:len(name)-len(" please")])
-		name = strings.Trim(name, " \t\r\n'\"`.,")
-	}
-	if name == "" || len([]rune(name)) > 100 {
-		return "", false
-	}
-	return name, true
-}
-
-func discordRoleCreateConfirmationResponse(userID, name string) Response {
-	pending := &assistant.InteractionConfirmation{
-		Action:       toolActionDiscordRoleCreate,
-		Arguments:    map[string]string{"name": name},
-		Summary:      fmt.Sprintf("Panda prepared creation of Discord role `%s`.", name),
-		ConfirmLabel: "Create role",
-		Danger:       true,
-	}
-	content := fmt.Sprintf("Prepared Discord role `%s` with no elevated permissions.", name)
-	return Response{
-		Content:      appendConfirmationNotice(content, pending.Summary),
-		Confirmation: ToolConfirmationFromAssistant(userID, pending),
-		Presentation: Presentation{Title: "Confirmation required", Accent: AccentDanger},
-	}
-}
-
-var naturalSoulSetPrefixes = []string{
-	"set your soul to",
-	"set its soul to",
-	"set panda's soul to",
-	"set panda soul to",
-	"set the soul to",
-	"set soul to",
-	"update your soul to",
-	"update its soul to",
-	"update panda's soul to",
-	"update panda soul to",
-	"update the soul to",
-	"update soul to",
-	"change your soul to",
-	"change its soul to",
-	"change panda's soul to",
-	"change panda soul to",
-	"change the soul to",
-	"change soul to",
-	"make your soul",
-	"make its soul",
-	"make panda's soul",
-	"make panda soul",
-	"make the soul",
-	"make soul",
-	"apply this soul",
-	"save this soul as",
-	"save this soul",
-	"use this soul as",
-	"use this soul",
-}
-
-func naturalSoulSetInstruction(message string) (string, bool) {
-	message = stripLeadingDiscordMention(strings.TrimSpace(message))
-	message = stripLeadingPandaWakePhrase(message)
-	message = strings.TrimSpace(strings.TrimLeft(message, " \t\r\n,;:.-"))
-	if message == "" {
-		return "", false
-	}
-	lower := strings.ToLower(message)
-	for _, prefix := range naturalSoulSetPrefixes {
-		if !strings.HasPrefix(lower, prefix) {
-			continue
-		}
-		soul := strings.TrimSpace(message[len(prefix):])
-		soul = strings.TrimSpace(strings.TrimLeft(soul, " \t\r\n,;:.-"))
-		soul = strings.Trim(soul, " \t\r\n\"'`")
-		return soul, soul != ""
-	}
-	return "", false
-}
-
-func (r *Router) handleNaturalAutomation(ctx context.Context, request Request, message string) (Response, bool) {
-	instruction, ok := naturalAutomationInstruction(message)
-	if !ok {
-		return Response{}, false
-	}
-	if request.GuildID == "" {
-		return Response{Content: "Composed automations must be drafted inside a Discord server.", Ephemeral: true}, true
-	}
-	if r.composed == nil {
-		return Response{Content: "Composed automations are not configured for this runtime.", Ephemeral: true}, true
-	}
-	allowed, err := r.admin.CanDraftComposedTool(ctx, assistantAccessRequest(request))
-	if err != nil {
-		return Response{Content: "Permission lookup failed. Please try again later.", Ephemeral: true}, true
-	}
-	if !allowed {
-		return Response{Content: "Only the Panda owner, server owner or administrator, or a delegated tool drafter can draft composed automations.", Ephemeral: true}, true
-	}
-	if limited := r.allowUser(request.UserID); limited.Content != "" {
-		return limited, true
-	}
-	if denied := r.ensureBudgetAvailable(ctx, request); denied.Content != "" {
-		return denied, true
-	}
-
-	targetChannelID := firstChannelMentionID(instruction)
-	result, err := r.composed.Draft(ctx, composed.DraftRequest{
-		GuildID:         request.GuildID,
-		ActorID:         request.UserID,
-		Text:            instruction,
-		ChannelID:       targetChannelID,
-		SourceChannelID: request.ChannelID,
-	})
-	if err != nil {
-		slog.Warn("natural automation draft failed", slog.Any("err", err), slog.String("guild_id", request.GuildID), slog.String("channel_id", request.ChannelID), slog.String("request_id", request.RequestID))
-		return Response{Content: "I tried to draft that automation, but the composed-tool draft failed. Please try again or provide the target channel as a Discord channel mention.", Ephemeral: true}, true
-	}
-	return responseFromComposedDraft(request.UserID, result), true
-}
-
-func naturalAutomationInstruction(message string) (string, bool) {
-	message = stripLeadingDiscordMention(strings.TrimSpace(message))
-	message = stripLeadingPandaWakePhrase(message)
-	message = strings.TrimSpace(strings.TrimLeft(message, " \t\r\n,;:.-"))
-	if message == "" {
-		return "", false
-	}
-	lower := strings.ToLower(message)
-	words := messageWords(message)
-	if startsEventAutomation(lower) && hasAutomationTriggerWord(words) && hasAutomationActionWord(words) {
-		return message, true
-	}
-	if strings.Contains(lower, "automation") || strings.Contains(lower, "composed tool") || strings.Contains(lower, "workflow") {
-		if hasAutomationSetupWord(words) && (hasAutomationTriggerWord(words) || strings.Contains(lower, " when ")) {
-			return message, true
-		}
-	}
-	return "", false
-}
-
-func startsEventAutomation(lower string) bool {
-	for _, prefix := range []string{"when ", "whenever ", "anytime ", "if "} {
-		if strings.HasPrefix(lower, prefix) {
-			return true
-		}
-	}
-	return strings.Contains(lower, " when ") || strings.Contains(lower, " whenever ")
-}
-
-func hasAutomationSetupWord(words []string) bool {
-	for _, word := range words {
-		switch word {
-		case "set", "setup", "create", "make", "build", "draft", "add", "configure":
-			return true
-		}
-	}
-	return false
-}
-
-func hasAutomationTriggerWord(words []string) bool {
-	for _, word := range words {
-		switch word {
-		case "role", "roles", "member", "members", "user", "users", "channel", "channels", "thread", "threads",
-			"reaction", "reactions", "poll", "vote", "votes", "invite", "invites", "webhook", "webhooks",
-			"ban", "banned", "unban", "unbanned", "moderation", "automod", "scheduled", "event", "joins", "joined",
-			"created", "updated", "deleted", "added", "removed":
-			return true
-		}
-	}
-	return false
-}
-
-func hasAutomationActionWord(words []string) bool {
-	for _, word := range words {
-		switch word {
-		case "send", "post", "announce", "message", "notify", "reply", "dm", "create", "add", "remove", "delete", "update", "pin", "unpin", "archive":
-			return true
-		}
-	}
-	return false
-}
-
-func firstChannelMentionID(message string) string {
-	for {
-		start := strings.Index(message, "<#")
-		if start < 0 {
-			return ""
-		}
-		rest := message[start+2:]
-		end := strings.Index(rest, ">")
-		if end < 0 {
-			return ""
-		}
-		candidate := strings.TrimSpace(rest[:end])
-		if candidate != "" && allDigits(candidate) {
-			return candidate
-		}
-		message = rest[end+1:]
-	}
-}
-
-func allDigits(value string) bool {
-	if value == "" {
-		return false
-	}
-	for _, char := range value {
-		if char < '0' || char > '9' {
-			return false
-		}
-	}
-	return true
-}
-
-func responseFromComposedDraft(userID string, result composed.DraftResult) Response {
-	version := result.Version
-	if version <= 0 {
-		version = 1
-	}
-	content := fmt.Sprintf("Drafted `%s` version %d for approval.", result.Tool, version)
-	if triggers := composedDraftTriggers(result.Spec); len(triggers) > 0 {
-		content += "\nTrigger: " + strings.Join(triggers, ", ")
-	}
-	if len(result.Validation.Writes) > 0 {
-		content += "\nWrites: " + strings.Join(result.Validation.Writes, ", ")
-	}
-	if result.Validation.RiskLevel != "" {
-		content += "\nRisk: `" + result.Validation.RiskLevel + "`."
-	}
-	pending := &assistant.InteractionConfirmation{
-		Action:       toolActionComposedToolApprove,
-		Arguments:    map[string]string{"tool_name": result.Tool, "version": strconv.Itoa(version)},
-		Summary:      fmt.Sprintf("Panda prepared approval of `%s` version `%d`.", result.Tool, version),
-		ConfirmLabel: "Approve tool",
-		Danger:       true,
-	}
-	response := Response{
-		Content:      appendConfirmationNotice(content, pending.Summary),
-		Confirmation: ToolConfirmationFromAssistant(userID, pending),
-		Presentation: Presentation{Title: "Composed automation drafted", Accent: AccentDanger},
-	}
-	return response
-}
-
-func composedDraftTriggers(spec composed.Spec) []string {
-	var triggers []string
-	for _, invocation := range spec.Invocations {
-		if !composedInvocationEnabled(invocation) {
-			continue
-		}
-		if invocation.Type == composed.InvocationEvent && strings.TrimSpace(invocation.EventType) != "" {
-			triggers = append(triggers, "`"+strings.TrimSpace(invocation.EventType)+"`")
-		}
-	}
-	return triggers
-}
-
-func composedInvocationEnabled(invocation composed.InvocationSpec) bool {
-	return invocation.Enabled == nil || *invocation.Enabled
-}
-
-func sentenceCase(value string) string {
-	value = strings.TrimSpace(value)
-	if value == "" {
-		return ""
-	}
-	runes := []rune(value)
-	runes[0] = unicode.ToUpper(runes[0])
-	return string(runes)
-}
-
-func naturalMessageFallbackPrompt(message string, options map[string]string) (string, bool) {
-	message = strings.TrimSpace(message)
-	if message == "" {
-		return "", false
-	}
-	if truthyOption(options["bot_mentioned"]) || truthyOption(options["reply_author_is_bot"]) {
-		return message, true
-	}
-	if directlyAddressesPanda(message) {
-		prompt := stripLeadingPandaWakePhrase(message)
-		if prompt == "" {
-			prompt = message
-		}
-		return prompt, true
-	}
-	return "", false
-}
-
-func directlyAddressesPanda(message string) bool {
-	words := leadingWords(message, 3)
-	if len(words) == 0 {
-		return false
-	}
-	if words[0] == "panda" {
-		return true
-	}
-	return len(words) >= 2 && isGreetingWord(words[0]) && words[1] == "panda"
-}
-
-func stripLeadingPandaWakePhrase(message string) string {
-	tokens := leadingWordTokens(message, 3)
-	if len(tokens) == 0 {
-		return strings.TrimSpace(message)
-	}
-	removeThrough := -1
-	if strings.EqualFold(tokens[0].word, "panda") {
-		removeThrough = 0
-	} else if len(tokens) >= 2 && isGreetingWord(strings.ToLower(tokens[0].word)) && strings.EqualFold(tokens[1].word, "panda") {
-		removeThrough = 1
-	}
-	if removeThrough < 0 {
-		return strings.TrimSpace(message)
-	}
-	return strings.TrimLeftFunc(strings.TrimSpace(message[tokens[removeThrough].end:]), func(value rune) bool {
-		return value == ',' || value == ':' || value == '-' || unicode.IsSpace(value)
-	})
-}
-
-type wordToken struct {
-	word string
-	end  int
-}
-
-func leadingWords(message string, limit int) []string {
-	tokens := leadingWordTokens(message, limit)
-	words := make([]string, 0, len(tokens))
-	for _, token := range tokens {
-		words = append(words, strings.ToLower(token.word))
-	}
-	return words
-}
-
-func leadingWordTokens(message string, limit int) []wordToken {
-	var tokens []wordToken
-	wordStart := -1
-	for index, value := range message {
-		if isMessageWordRune(value) {
-			if wordStart < 0 {
-				wordStart = index
-			}
-			continue
-		}
-		if wordStart >= 0 {
-			tokens = append(tokens, wordToken{word: message[wordStart:index], end: index})
-			if len(tokens) >= limit {
-				return tokens
-			}
-			wordStart = -1
-		}
-		if len(tokens) == 0 && !unicode.IsSpace(value) && value != ',' && value != ':' && value != '-' {
-			return tokens
-		}
-	}
-	if wordStart >= 0 {
-		tokens = append(tokens, wordToken{word: message[wordStart:], end: len(message)})
-	}
-	if len(tokens) > limit {
-		return tokens[:limit]
-	}
-	return tokens
-}
-
-func isGreetingWord(word string) bool {
-	switch word {
-	case "hey", "hi", "hello", "yo", "ok", "okay", "please":
-		return true
-	default:
-		return false
-	}
-}
-
-func isMessageWordRune(value rune) bool {
-	return value == '_' || unicode.IsLetter(value) || unicode.IsDigit(value)
 }
 
 func (r *Router) handleOps(ctx context.Context, request Request) Response {
@@ -1186,15 +443,6 @@ func (r *Router) handleAdmin(ctx context.Context, request Request) Response {
 
 	subcommand := strings.ToLower(request.Subcommand)
 	if !request.IsGuildAdmin && !request.IsOwner {
-		if subcommand != "soul" {
-			allowed, err := r.admin.CanWriteConfig(ctx, assistantAccessRequest(request))
-			if err != nil {
-				return Response{Content: "Permission lookup failed. Please try again later.", Ephemeral: true}
-			}
-			if !allowed {
-				return Response{Content: "Only the Panda owner, server owner or administrator, or a delegated config role can use admin commands.", Ephemeral: true}
-			}
-		}
 		if subcommand == "soul" {
 			allowed, err := r.admin.CanWriteSoul(ctx, assistantAccessRequest(request))
 			if err != nil {
@@ -1202,6 +450,15 @@ func (r *Router) handleAdmin(ctx context.Context, request Request) Response {
 			}
 			if !allowed {
 				return Response{Content: "Only the Panda owner, server owner or administrator, moderator, creator, or delegated soul writer can update Panda's soul.", Ephemeral: true}
+			}
+		} else {
+			check, denial := r.adminPermissionForSubcommand(subcommand)
+			allowed, err := check(ctx, assistantAccessRequest(request))
+			if err != nil {
+				return Response{Content: "Permission lookup failed. Please try again later.", Ephemeral: true}
+			}
+			if !allowed {
+				return Response{Content: denial, Ephemeral: true}
 			}
 		}
 	}
@@ -1223,6 +480,16 @@ func (r *Router) handleAdmin(ctx context.Context, request Request) Response {
 		return r.handleAdminSoul(ctx, request)
 	case "audit":
 		return r.handleAdminAudit(ctx, request)
+	case "status":
+		return r.handleAdminStatus(ctx, request)
+	case "setup":
+		return r.handleAdminSetup(ctx, request)
+	case "alerts", "alert":
+		return r.handleAdminAlerts(ctx, request)
+	case "feedback":
+		return r.handleAdminFeedback(ctx, request)
+	case "music":
+		return r.handleAdminMusic(ctx, request)
 	case "enable":
 		return r.handleAdminToggle(ctx, request, true)
 	case "disable":
@@ -1648,8 +915,12 @@ func (r *Router) handleAsk(ctx context.Context, request Request, command string)
 		GuildID:                      request.GuildID,
 		UserID:                       request.UserID,
 		ChannelID:                    request.ChannelID,
+		VoiceChannelID:               request.VoiceChannelID,
 		Question:                     question,
 		InvocationContext:            invocationContext,
+		RoleIDs:                      request.RoleIDs,
+		IsGuildAdmin:                 request.IsGuildAdmin,
+		IsOwner:                      request.IsOwner,
 		AllowedPermissions:           r.allowedToolPermissions(ctx, request),
 		AllowedTools:                 toolFilter.allowed,
 		RestrictedTools:              toolFilter.restricted,
@@ -1661,7 +932,7 @@ func (r *Router) handleAsk(ctx context.Context, request Request, command string)
 	if strings.TrimSpace(answer.Content) == "" {
 		return Response{Content: "The model returned an empty response.", Ephemeral: true}
 	}
-	return responseFromAssistantAnswer(request.UserID, answer, "", "")
+	return r.responseFromAssistantAnswer(ctx, request, answer, "", "")
 }
 
 func (r *Router) handleChat(ctx context.Context, request Request) Response {
@@ -1719,12 +990,16 @@ func (r *Router) handleChatModeWithAccess(ctx context.Context, request Request, 
 		GuildID:                      request.GuildID,
 		UserID:                       request.UserID,
 		ChannelID:                    chatChannelID,
+		VoiceChannelID:               request.VoiceChannelID,
 		ThreadID:                     threadID,
 		Question:                     question,
 		InvocationContext:            invocationContext,
 		ReplyContent:                 request.Options["reply_text"],
 		ReplyMessageID:               request.Options["reply_message_id"],
 		ReplyAuthorIsBot:             truthyOption(request.Options["reply_author_is_bot"]),
+		RoleIDs:                      request.RoleIDs,
+		IsGuildAdmin:                 request.IsGuildAdmin,
+		IsOwner:                      request.IsOwner,
 		AllowedPermissions:           r.allowedToolPermissions(ctx, request),
 		AllowedTools:                 toolFilter.allowed,
 		RestrictedTools:              toolFilter.restricted,
@@ -1733,7 +1008,7 @@ func (r *Router) handleChatModeWithAccess(ctx context.Context, request Request, 
 	if err != nil {
 		return assistantError(err)
 	}
-	return responseFromAssistantAnswer(request.UserID, answer, threadID, threadName)
+	return r.responseFromAssistantAnswer(ctx, request, answer, threadID, threadName)
 }
 
 func (r *Router) handleTask(ctx context.Context, request Request) Response {
@@ -1758,12 +1033,16 @@ func (r *Router) handleTask(ctx context.Context, request Request) Response {
 		GuildID:                      request.GuildID,
 		UserID:                       request.UserID,
 		ChannelID:                    request.ChannelID,
+		VoiceChannelID:               request.VoiceChannelID,
 		Command:                      request.Command,
 		Input:                        input,
 		InvocationContext:            invocationContext,
 		Tone:                         request.Options["tone"],
 		Language:                     request.Options["language"],
 		Detail:                       request.Options["detail"],
+		RoleIDs:                      request.RoleIDs,
+		IsGuildAdmin:                 request.IsGuildAdmin,
+		IsOwner:                      request.IsOwner,
 		AllowedPermissions:           permissionNames(r.allowedToolPermissions(ctx, request)),
 		AllowedTools:                 permissionNames(toolFilter.allowed),
 		RestrictedTools:              permissionNames(toolFilter.restricted),
@@ -1785,12 +1064,16 @@ func (r *Router) HandleBackgroundTask(ctx context.Context, task BackgroundTask) 
 		GuildID:                      task.GuildID,
 		UserID:                       task.UserID,
 		ChannelID:                    task.ChannelID,
+		VoiceChannelID:               task.VoiceChannelID,
 		Command:                      task.Command,
 		Input:                        task.Input,
 		InvocationContext:            task.InvocationContext,
 		Tone:                         task.Tone,
 		Language:                     task.Language,
 		Detail:                       task.Detail,
+		RoleIDs:                      task.RoleIDs,
+		IsGuildAdmin:                 task.IsGuildAdmin,
+		IsOwner:                      task.IsOwner,
 		AllowedPermissions:           permissionsFromNames(task.AllowedPermissions),
 		AllowedTools:                 permissionsFromNames(task.AllowedTools),
 		RestrictedTools:              permissionsFromNames(task.RestrictedTools),
@@ -1799,7 +1082,13 @@ func (r *Router) HandleBackgroundTask(ctx context.Context, task BackgroundTask) 
 	if err != nil {
 		return assistantError(err)
 	}
-	return responseFromAssistantAnswer(task.UserID, answer, "", "")
+	return r.responseFromAssistantAnswer(ctx, Request{
+		RequestID: task.RequestID,
+		Command:   task.Command,
+		GuildID:   task.GuildID,
+		ChannelID: task.ChannelID,
+		UserID:    task.UserID,
+	}, answer, "", "")
 }
 
 func (r *Router) HandleToolConfirmation(ctx context.Context, request ToolConfirmationRequest) Response {
@@ -2053,6 +1342,19 @@ func (r *Router) HandleToolConfirmation(ctx context.Context, request ToolConfirm
 	default:
 		return Response{Content: "That confirmation is no longer supported.", Ephemeral: true}
 	}
+}
+
+func (r *Router) HandleFeedback(ctx context.Context, request FeedbackRequest) Response {
+	if r.feedback == nil {
+		return Response{Content: "Feedback is not configured for this runtime.", Ephemeral: true}
+	}
+	if err := r.feedback.Record(ctx, request.TargetID, request.Request.GuildID, request.Request.UserID, request.Rating, ""); err != nil {
+		if errors.Is(err, repository.ErrNotFound) {
+			return Response{Content: "That answer feedback target is no longer available.", Ephemeral: true, Presentation: Presentation{Title: "Feedback unavailable", Accent: AccentWarning}}
+		}
+		return Response{Content: "Feedback could not be recorded.", Ephemeral: true, Presentation: Presentation{Title: "Feedback failed", Accent: AccentWarning}}
+	}
+	return Response{Content: "Feedback recorded. Thank you.", Ephemeral: true, Presentation: Presentation{Title: "Feedback recorded", Accent: AccentSuccess}}
 }
 
 func (r *Router) taskInput(ctx context.Context, request Request) (string, Response) {
@@ -2346,18 +1648,36 @@ func assistantError(err error) Response {
 	}
 }
 
-func responseFromAssistantAnswer(userID string, answer assistant.AskResponse, threadID, threadName string) Response {
+func (r *Router) responseFromAssistantAnswer(ctx context.Context, request Request, answer assistant.AskResponse, threadID, threadName string) Response {
 	response := Response{
 		Content:    answer.Content,
 		ThreadID:   threadID,
 		ThreadName: threadName,
 	}
-	if confirmation := ToolConfirmationFromAssistant(userID, answer.Confirmation); confirmation != nil {
+	if confirmation := ToolConfirmationFromAssistant(request.UserID, answer.Confirmation); confirmation != nil {
 		response.Confirmation = confirmation
 		response.Content = appendConfirmationNotice(response.Content, answer.Confirmation.Summary)
 		response.Presentation = Presentation{Title: "Confirmation required", Accent: AccentWarning}
 		if confirmation.Danger {
 			response.Presentation.Accent = AccentDanger
+		}
+		return response
+	}
+	if r.feedback != nil && strings.TrimSpace(answer.Content) != "" {
+		target, err := r.feedback.CreateTarget(ctx, feedback.TargetRequest{
+			GuildID:   request.GuildID,
+			ChannelID: request.ChannelID,
+			UserID:    request.UserID,
+			Command:   firstNonEmpty(request.Command, "assistant"),
+			Model:     answer.Model,
+			Content:   answer.Content,
+			Metadata: map[string]string{
+				"request_id": request.RequestID,
+				"thread_id":  threadID,
+			},
+		})
+		if err == nil && target.ID != 0 {
+			response.Feedback = &FeedbackControls{TargetID: target.ID}
 		}
 	}
 	return response

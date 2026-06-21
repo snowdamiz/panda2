@@ -267,7 +267,17 @@ func (s *Service) ManageComposedTool(ctx context.Context, request tools.Composed
 		if err != nil {
 			return nil, err
 		}
-		return map[string]any{"result": draftResultPayload(result, action == "preview" || request.DryRun)}, nil
+		payload := draftResultPayload(result, action == "preview" || request.DryRun)
+		if action == "draft" && !request.DryRun {
+			payload["confirmation_required"] = true
+			payload["action"] = "composed_tool.approve"
+			payload["message"] = "Draft saved. Approval is required before this composed tool can run."
+			payload["confirmation_preview"] = map[string]any{
+				"tool_name": result.Tool,
+				"version":   strconv.Itoa(result.Version),
+			}
+		}
+		return map[string]any{"result": payload}, nil
 	case "list":
 		records, err := s.List(ctx, request.GuildID)
 		if err != nil {

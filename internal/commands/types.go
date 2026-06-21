@@ -33,6 +33,7 @@ type Response struct {
 	Modal        *Modal
 	Background   *BackgroundTask
 	Poll         *polls.Poll
+	Feedback     *FeedbackControls
 }
 
 type Accent string
@@ -65,6 +66,10 @@ type Action struct {
 	URL   string
 }
 
+type FeedbackControls struct {
+	TargetID uint
+}
+
 type Confirmation struct {
 	ID           string
 	ConfirmLabel string
@@ -94,12 +99,16 @@ type BackgroundTask struct {
 	GuildID                      string   `json:"guild_id"`
 	UserID                       string   `json:"user_id"`
 	ChannelID                    string   `json:"channel_id"`
+	VoiceChannelID               string   `json:"voice_channel_id,omitempty"`
 	Command                      string   `json:"command"`
 	Input                        string   `json:"input"`
 	InvocationContext            string   `json:"invocation_context,omitempty"`
 	Tone                         string   `json:"tone,omitempty"`
 	Language                     string   `json:"language,omitempty"`
 	Detail                       string   `json:"detail,omitempty"`
+	RoleIDs                      []string `json:"role_ids,omitempty"`
+	IsGuildAdmin                 bool     `json:"is_guild_admin,omitempty"`
+	IsOwner                      bool     `json:"is_owner,omitempty"`
 	AllowedPermissions           []string `json:"allowed_permissions,omitempty"`
 	AllowedTools                 []string `json:"allowed_tools,omitempty"`
 	RestrictedTools              []string `json:"restricted_tools,omitempty"`

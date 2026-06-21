@@ -52,6 +52,9 @@ func (b *Bot) recordDiscordEvent(ctx context.Context, event store.DiscordEvent) 
 	if composed.SupportsEventType(event.EventType) {
 		b.enqueueComposedEvent(ctx, recorded, metadataMap(event.Metadata))
 	}
+	if b.alerts != nil {
+		b.alerts.HandleDiscordEvent(ctx, recorded)
+	}
 }
 
 func (b *Bot) onGuildMessageUpdate(event *events.GuildMessageUpdate) {

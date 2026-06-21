@@ -478,6 +478,33 @@ func DefaultDefinitions() []Definition {
 			IncludeInModelContext: true,
 		},
 		{
+			Name:                  "panda.manage_reminder",
+			Description:           "Create, list, cancel, complete, or snooze the user's reminders from natural-language reminder requests. Use this for reminders and follow-ups that should notify the user later.",
+			RequiredPermission:    admin.PermissionAssistantUse,
+			ToolClass:             ToolClassWorkflow,
+			InputSchema:           reminderManagementSchema(),
+			OutputSchema:          objectSchema("result"),
+			Timeout:               5 * time.Second,
+			Redaction:             RedactContent,
+			Audit:                 AuditOnUse,
+			IncludeInModelContext: true,
+			SupportsDryRun:        true,
+			BypassToolPolicy:      true,
+		},
+		{
+			Name:                  "panda.manage_music",
+			Description:           "Play music, inspect the queue, and control playback from natural-language music requests. Use this for requests like play, pause, resume, skip, stop, queue, now playing, loop, shuffle, playlist, and volume.",
+			RequiredPermission:    admin.PermissionAssistantUse,
+			ToolClass:             ToolClassWorkflow,
+			InputSchema:           musicManagementSchema(),
+			OutputSchema:          objectSchema("result"),
+			Timeout:               20 * time.Second,
+			Redaction:             RedactContent,
+			Audit:                 AuditOnUse,
+			IncludeInModelContext: true,
+			BypassToolPolicy:      true,
+		},
+		{
 			Name:                  "panda.usage_report",
 			Description:           "Read Panda usage totals and top usage breakdowns for the current guild.",
 			RequiredPermission:    admin.PermissionAdminUsageRead,
@@ -611,6 +638,20 @@ func DefaultDefinitions() []Definition {
 			BypassToolPolicy:      true,
 		},
 		{
+			Name:                  "panda.manage_schedule",
+			Description:           "Create, list, or cancel scheduled runs for approved composed tools from natural-language schedule requests. Use this when an admin asks to set, remove, or ask about scheduled composed tool/automation runs.",
+			RequiredPermission:    admin.PermissionToolComposeInvoke,
+			ToolClass:             ToolClassAdminWrite,
+			InputSchema:           scheduleManagementSchema(),
+			OutputSchema:          objectSchema("result"),
+			Timeout:               5 * time.Second,
+			Redaction:             RedactContent,
+			Audit:                 AuditOnUse,
+			IncludeInModelContext: true,
+			SupportsDryRun:        true,
+			BypassToolPolicy:      true,
+		},
+		{
 			Name:                  "panda.manage_channel_rule",
 			Description:           "List or prepare allow/deny/removal of Panda channel access rules. Accepts channel_id, a channel mention, or channel_name.",
 			RequiredPermission:    admin.PermissionAdminConfigWrite,
@@ -705,6 +746,89 @@ func composedToolManagementSchema() json.RawMessage {
 		"input":        map[string]string{"type": "object", "description": "Input object for run/simulate."},
 		"input_json":   map[string]string{"type": "string", "description": "JSON object input for run/simulate."},
 		"dry_run":      map[string]string{"type": "boolean"},
+	})
+}
+
+func scheduleManagementSchema() json.RawMessage {
+	return schemaWithProperties([]string{"action"}, map[string]any{
+		"action": map[string]any{
+			"type":        "string",
+			"description": "Action: create, list, or cancel.",
+		},
+		"tool_name": map[string]string{"type": "string", "description": "Approved composed tool name for create, filtered list, or cancel-by-tool."},
+		"tool":      map[string]string{"type": "string", "description": "Alias for tool_name."},
+		"schedule_id": map[string]any{
+			"type":        "integer",
+			"minimum":     1,
+			"description": "Schedule id for cancel.",
+		},
+		"id": map[string]any{
+			"type":        "integer",
+			"minimum":     1,
+			"description": "Alias for schedule_id.",
+		},
+		"when": map[string]string{"type": "string", "description": "When to run, such as RFC3339, 'in 10 minutes', 'tomorrow', or 'every friday'."},
+		"in":   map[string]string{"type": "string", "description": "Duration until run, such as '10m' or '2h'."},
+		"every": map[string]string{
+			"type":        "string",
+			"description": "Optional repeat interval such as '24h', 'daily', 'weekly', or 'every day'.",
+		},
+		"input":            map[string]string{"type": "object", "description": "Input object for the scheduled composed tool run."},
+		"input_json":       map[string]string{"type": "string", "description": "JSON object input for the scheduled composed tool run."},
+		"include_disabled": map[string]string{"type": "boolean", "description": "Include disabled schedules when listing."},
+		"dry_run":          map[string]string{"type": "boolean"},
+	})
+}
+
+func reminderManagementSchema() json.RawMessage {
+	return schemaWithProperties([]string{"action"}, map[string]any{
+		"action": map[string]any{
+			"type":        "string",
+			"description": "Action: create, list, cancel, complete, or snooze.",
+		},
+		"schedule_id": map[string]any{
+			"type":        "integer",
+			"minimum":     1,
+			"description": "Reminder schedule id for cancel, complete, or snooze.",
+		},
+		"id": map[string]any{
+			"type":        "integer",
+			"minimum":     1,
+			"description": "Alias for schedule_id.",
+		},
+		"message": map[string]string{"type": "string", "description": "Reminder text for create."},
+		"text":    map[string]string{"type": "string", "description": "Alias for message."},
+		"when":    map[string]string{"type": "string", "description": "When to run, such as RFC3339, 'in 10 minutes', 'tomorrow', or 'every friday'."},
+		"in":      map[string]string{"type": "string", "description": "Duration until run, such as '10m', '2h', or '10 minutes'."},
+		"every": map[string]string{
+			"type":        "string",
+			"description": "Optional repeat interval such as '24h', 'daily', 'weekly', or 'every day'.",
+		},
+		"target":           map[string]string{"type": "string", "description": "Target for create: me, user, channel, or role. Defaults to me."},
+		"target_id":        map[string]string{"type": "string", "description": "Target user/channel/role id when target is not me."},
+		"user_id":          map[string]string{"type": "string", "description": "Alias for target_id when target is user."},
+		"channel_id":       map[string]string{"type": "string", "description": "Alias for target_id when target is channel."},
+		"role_id":          map[string]string{"type": "string", "description": "Alias for target_id when target is role."},
+		"follow_up":        map[string]string{"type": "boolean", "description": "Create a follow-up reminder tied to the current conversation, for requests like follow up if nobody answers."},
+		"include_disabled": map[string]string{"type": "boolean", "description": "Include disabled/completed reminders when listing."},
+		"dry_run":          map[string]string{"type": "boolean"},
+	})
+}
+
+func musicManagementSchema() json.RawMessage {
+	return schemaWithProperties([]string{"action"}, map[string]any{
+		"action": map[string]any{
+			"type":        "string",
+			"description": "Action: play, pause, resume, skip, stop, queue, clear, now, controls, loop, shuffle, remove, move, vote_skip, settings, or playlist.",
+		},
+		"query":    map[string]string{"type": "string", "description": "Song/search query for play."},
+		"song":     map[string]string{"type": "string", "description": "Alias for query."},
+		"track":    map[string]string{"type": "string", "description": "Alias for query."},
+		"mode":     map[string]string{"type": "string", "description": "Mode for loop or playlist actions, such as off/track/queue or save/load/list."},
+		"name":     map[string]string{"type": "string", "description": "Playlist name for playlist actions."},
+		"position": map[string]any{"type": "integer", "minimum": 1, "description": "Queue position for remove or move."},
+		"to":       map[string]any{"type": "integer", "minimum": 1, "description": "Destination queue position for move."},
+		"volume":   map[string]any{"type": "integer", "minimum": 1, "maximum": 200, "description": "Default music volume for settings."},
 	})
 }
 

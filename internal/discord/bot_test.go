@@ -256,7 +256,7 @@ func TestMessageMentionsUserUsesMentionsAndContentFallback(t *testing.T) {
 	}
 }
 
-func TestContainsPandaWordUsesStandaloneWord(t *testing.T) {
+func TestContainsPandaWordUsesStandaloneWakeWord(t *testing.T) {
 	tests := []struct {
 		name    string
 		content string
@@ -279,7 +279,7 @@ func TestContainsPandaWordUsesStandaloneWord(t *testing.T) {
 	}
 }
 
-func TestShouldHandleNaturalMessageAllowsRepliesToPandaWithoutWakeWord(t *testing.T) {
+func TestShouldHandleNaturalMessageUsesWakeWordMentionOrReply(t *testing.T) {
 	if !shouldHandleNaturalMessage("what can you do panda", nil) {
 		t.Fatal("expected trailing Panda mention to be handled")
 	}
@@ -289,8 +289,11 @@ func TestShouldHandleNaturalMessageAllowsRepliesToPandaWithoutWakeWord(t *testin
 	if !shouldHandleNaturalMessage("can you help", map[string]string{"bot_mentioned": "true"}) {
 		t.Fatal("expected direct mention to be handled without wake word")
 	}
-	if shouldHandleNaturalMessage("can you list those by tool name", nil) {
+	if shouldHandleNaturalMessage("ambient channel chatter", nil) {
 		t.Fatal("expected ambient message without wake word, mention, or Panda reply to be ignored")
+	}
+	if shouldHandleNaturalMessage("   ", nil) {
+		t.Fatal("expected empty message to be ignored")
 	}
 }
 
@@ -605,6 +608,33 @@ func TestGuildOwnerCountsAsGuildAdmin(t *testing.T) {
 	}
 	if userOwnsGuildFromREST(getter, guildID, snowflake.MustParse("100000000000000002")) {
 		t.Fatal("expected REST lookup to reject non-owner")
+	}
+}
+
+func TestMemberHasAdministratorRole(t *testing.T) {
+	guildID := snowflake.MustParse("200000000000000001")
+	adminRoleID := snowflake.MustParse("300000000000000001")
+	regularRoleID := snowflake.MustParse("300000000000000002")
+	roles := map[snowflake.ID]disgoDiscord.Role{
+		guildID:       {ID: guildID, GuildID: guildID, Permissions: disgoDiscord.PermissionsNone},
+		adminRoleID:   {ID: adminRoleID, GuildID: guildID, Permissions: disgoDiscord.PermissionAdministrator},
+		regularRoleID: {ID: regularRoleID, GuildID: guildID, Permissions: disgoDiscord.PermissionsNone},
+	}
+	lookup := func(guildID, roleID snowflake.ID) (disgoDiscord.Role, bool) {
+		role, ok := roles[roleID]
+		return role, ok && role.GuildID == guildID
+	}
+
+	if !memberHasAdministratorRole(&disgoDiscord.Member{RoleIDs: []snowflake.ID{regularRoleID, adminRoleID}}, guildID, lookup) {
+		t.Fatal("expected administrator role to count as guild admin for message events")
+	}
+	if memberHasAdministratorRole(&disgoDiscord.Member{RoleIDs: []snowflake.ID{regularRoleID}}, guildID, lookup) {
+		t.Fatal("expected regular role to not count as guild admin")
+	}
+
+	roles[guildID] = disgoDiscord.Role{ID: guildID, GuildID: guildID, Permissions: disgoDiscord.PermissionAdministrator}
+	if !memberHasAdministratorRole(&disgoDiscord.Member{RoleIDs: nil}, guildID, lookup) {
+		t.Fatal("expected administrator @everyone permissions to count as guild admin")
 	}
 }
 

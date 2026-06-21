@@ -55,6 +55,18 @@ type ComposedToolManager interface {
 	ManageComposedTool(ctx context.Context, request ComposedToolManagementRequest) (any, error)
 }
 
+type ScheduleManager interface {
+	ManageSchedule(ctx context.Context, request ScheduleManagementRequest) (any, error)
+}
+
+type ReminderManager interface {
+	ManageReminder(ctx context.Context, request ReminderManagementRequest) (any, error)
+}
+
+type MusicManager interface {
+	ManageMusic(ctx context.Context, request MusicManagementRequest) (any, error)
+}
+
 type AuditRecorder interface {
 	Record(ctx context.Context, event store.AuditEvent) error
 }
@@ -109,14 +121,21 @@ type Executor struct {
 	adminOps    AdminOperations
 	dynamic     DynamicToolProvider
 	composed    ComposedToolManager
+	schedule    ScheduleManager
+	reminder    ReminderManager
+	music       MusicManager
 }
 
 type ExecutionRequest struct {
 	GuildID              string
 	ChannelID            string
+	VoiceChannelID       string
 	ActorID              string
 	RequestID            string
 	InvocationType       string
+	RoleIDs              []string
+	IsGuildAdmin         bool
+	IsOwner              bool
 	Access               ToolAccess
 	Call                 llm.ToolCall
 	AllowConfirmedWrites bool
@@ -174,6 +193,64 @@ type ComposedToolManagementRequest struct {
 	DryRun          bool
 }
 
+type ScheduleManagementRequest struct {
+	GuildID         string
+	ChannelID       string
+	ActorID         string
+	RequestID       string
+	InvocationType  string
+	Access          ToolAccess
+	Action          string
+	ScheduleID      uint
+	ToolName        string
+	When            string
+	In              string
+	Every           string
+	Input           map[string]any
+	IncludeDisabled bool
+	DryRun          bool
+}
+
+type ReminderManagementRequest struct {
+	GuildID         string
+	ChannelID       string
+	ActorID         string
+	RequestID       string
+	InvocationType  string
+	Access          ToolAccess
+	Action          string
+	ScheduleID      uint
+	Message         string
+	When            string
+	In              string
+	Every           string
+	Target          string
+	TargetID        string
+	FollowUp        bool
+	IncludeDisabled bool
+	DryRun          bool
+}
+
+type MusicManagementRequest struct {
+	GuildID        string
+	ChannelID      string
+	VoiceChannelID string
+	ActorID        string
+	RequestID      string
+	InvocationType string
+	RoleIDs        []string
+	IsGuildAdmin   bool
+	IsOwner        bool
+	Access         ToolAccess
+	Action         string
+	Query          string
+	Mode           string
+	Name           string
+	Position       int
+	To             int
+	Volume         int
+}
+
 type InteractionConfirmation struct {
 	Action       string
 	Arguments    map[string]string
@@ -223,6 +300,21 @@ func (e *Executor) WithDynamicToolProvider(provider DynamicToolProvider) *Execut
 
 func (e *Executor) WithComposedToolManager(manager ComposedToolManager) *Executor {
 	e.composed = manager
+	return e
+}
+
+func (e *Executor) WithScheduleManager(manager ScheduleManager) *Executor {
+	e.schedule = manager
+	return e
+}
+
+func (e *Executor) WithReminderManager(manager ReminderManager) *Executor {
+	e.reminder = manager
+	return e
+}
+
+func (e *Executor) WithMusicManager(manager MusicManager) *Executor {
+	e.music = manager
 	return e
 }
 
@@ -337,6 +429,12 @@ func (e *Executor) Execute(ctx context.Context, request ExecutionRequest) (Execu
 		payload, err = e.manageToolAccess(toolCtx, request, arguments)
 	case "panda.manage_composed_tool":
 		payload, err = e.manageComposedTool(toolCtx, request, arguments)
+	case "panda.manage_schedule":
+		payload, err = e.manageSchedule(toolCtx, request, arguments)
+	case "panda.manage_reminder":
+		payload, err = e.manageReminder(toolCtx, request, arguments)
+	case "panda.manage_music":
+		payload, err = e.manageMusic(toolCtx, request, arguments)
 	case "panda.manage_channel_rule":
 		payload, err = e.manageChannelRule(toolCtx, request, arguments)
 	case "panda.list_tools":
@@ -1311,6 +1409,103 @@ func (e *Executor) manageComposedTool(ctx context.Context, request ExecutionRequ
 	})
 }
 
+func (e *Executor) manageSchedule(ctx context.Context, request ExecutionRequest, arguments string) (any, error) {
+	if e.schedule == nil {
+		return nil, fmt.Errorf("schedule manager is not configured")
+	}
+	args, err := parseArguments(arguments)
+	if err != nil {
+		return nil, err
+	}
+	input, err := composedManagementInput(args)
+	if err != nil {
+		return nil, err
+	}
+	scheduleID := intArgument(args, "schedule_id", intArgument(args, "id", 0))
+	if scheduleID < 0 {
+		scheduleID = 0
+	}
+	return e.schedule.ManageSchedule(ctx, ScheduleManagementRequest{
+		GuildID:         request.GuildID,
+		ChannelID:       request.ChannelID,
+		ActorID:         request.ActorID,
+		RequestID:       request.RequestID,
+		InvocationType:  request.InvocationType,
+		Access:          request.Access,
+		Action:          normalizeScheduleManagementAction(stringArgument(args, "action")),
+		ScheduleID:      uint(scheduleID),
+		ToolName:        firstNonEmpty(stringArgument(args, "tool_name"), stringArgument(args, "tool")),
+		When:            stringArgument(args, "when"),
+		In:              stringArgument(args, "in"),
+		Every:           stringArgument(args, "every"),
+		Input:           input,
+		IncludeDisabled: boolArgument(args, "include_disabled"),
+		DryRun:          boolArgument(args, "dry_run"),
+	})
+}
+
+func (e *Executor) manageReminder(ctx context.Context, request ExecutionRequest, arguments string) (any, error) {
+	if e.reminder == nil {
+		return nil, fmt.Errorf("reminder manager is not configured")
+	}
+	args, err := parseArguments(arguments)
+	if err != nil {
+		return nil, err
+	}
+	scheduleID := intArgument(args, "schedule_id", intArgument(args, "id", 0))
+	if scheduleID < 0 {
+		scheduleID = 0
+	}
+	return e.reminder.ManageReminder(ctx, ReminderManagementRequest{
+		GuildID:         request.GuildID,
+		ChannelID:       request.ChannelID,
+		ActorID:         request.ActorID,
+		RequestID:       request.RequestID,
+		InvocationType:  request.InvocationType,
+		Access:          request.Access,
+		Action:          normalizeReminderManagementAction(stringArgument(args, "action")),
+		ScheduleID:      uint(scheduleID),
+		Message:         firstNonEmpty(stringArgument(args, "message"), stringArgument(args, "text")),
+		When:            stringArgument(args, "when"),
+		In:              stringArgument(args, "in"),
+		Every:           stringArgument(args, "every"),
+		Target:          stringArgument(args, "target"),
+		TargetID:        firstNonEmpty(firstNonEmpty(stringArgument(args, "target_id"), stringArgument(args, "user_id")), firstNonEmpty(stringArgument(args, "role_id"), stringArgument(args, "channel_id"))),
+		FollowUp:        boolArgument(args, "follow_up"),
+		IncludeDisabled: boolArgument(args, "include_disabled"),
+		DryRun:          boolArgument(args, "dry_run"),
+	})
+}
+
+func (e *Executor) manageMusic(ctx context.Context, request ExecutionRequest, arguments string) (any, error) {
+	if e.music == nil {
+		return nil, fmt.Errorf("music manager is not configured")
+	}
+	args, err := parseArguments(arguments)
+	if err != nil {
+		return nil, err
+	}
+	return e.music.ManageMusic(ctx, MusicManagementRequest{
+		GuildID:        request.GuildID,
+		ChannelID:      request.ChannelID,
+		VoiceChannelID: request.VoiceChannelID,
+		ActorID:        request.ActorID,
+		RequestID:      request.RequestID,
+		InvocationType: request.InvocationType,
+		RoleIDs:        append([]string(nil), request.RoleIDs...),
+		IsGuildAdmin:   request.IsGuildAdmin,
+		IsOwner:        request.IsOwner,
+		Access:         request.Access,
+		Action:         normalizeMusicManagementAction(stringArgument(args, "action")),
+		Query:          firstNonEmpty(stringArgument(args, "query"), firstNonEmpty(stringArgument(args, "song"), stringArgument(args, "track"))),
+		Mode:           stringArgument(args, "mode"),
+		Name:           stringArgument(args, "name"),
+		Position:       intArgument(args, "position", 0),
+		To:             intArgument(args, "to", 0),
+		Volume:         intArgument(args, "volume", 0),
+	})
+}
+
 func (e *Executor) manageChannelRule(ctx context.Context, request ExecutionRequest, arguments string) (any, error) {
 	if e.adminOps == nil {
 		return nil, fmt.Errorf("admin operations are not configured")
@@ -1735,6 +1930,15 @@ func userNativeCapabilities(definitions map[string]Definition) []map[string]any 
 	if has("discord.create_role", "panda.manage_discord_role") {
 		add("create_roles_with_confirmation", "Create roles with confirmation", "Prepare new Discord roles with no elevated permissions, then wait for explicit confirmation. Execution requires Panda's bot role to have Manage Roles and sufficient role hierarchy.", true)
 	}
+	if has("panda.manage_schedule") {
+		add("manage_composed_schedules", "Manage composed tool schedules", "Create, list, or cancel scheduled runs for approved composed tools.", false)
+	}
+	if has("panda.manage_reminder") {
+		add("manage_reminders", "Manage reminders", "Create, list, cancel, complete, or snooze personal reminders.", false)
+	}
+	if has("panda.manage_music") {
+		add("manage_music", "Manage music", "Play music, inspect the queue, and control playback from natural requests.", false)
+	}
 	if has("panda.list_tools") {
 		add("current_capabilities", "Show current capabilities", "Summarize the Panda capabilities available to you in this channel.", false)
 	}
@@ -1794,10 +1998,18 @@ func (e *Executor) canExecute(name string) bool {
 		return e.configs != nil
 	case "manage_memory_consent", "panda.usage_report", "panda.manage_soul", "panda.manage_budget_limit", "panda.manage_knowledge", "panda.manage_role_permission", "panda.manage_tool_access", "panda.manage_channel_rule":
 		return e.adminOps != nil
-	case "panda.manage_member_role", "panda.manage_discord_role":
+	case "panda.manage_member_role":
 		return e.discord != nil
+	case "panda.manage_discord_role":
+		return true
 	case "panda.manage_composed_tool":
 		return e.composed != nil
+	case "panda.manage_schedule":
+		return e.schedule != nil
+	case "panda.manage_reminder":
+		return e.reminder != nil
+	case "panda.manage_music":
+		return e.music != nil
 	case "draft_moderator_note", "generate_workflow_json", "panda.list_tools":
 		return true
 	default:
@@ -1837,6 +2049,9 @@ func confirmationFromPayload(payload any) *InteractionConfirmation {
 	}
 	action := strings.TrimSpace(fmt.Sprint(result["action"]))
 	preview, _ := result["preview"].(map[string]any)
+	if preview == nil {
+		preview, _ = result["confirmation_preview"].(map[string]any)
+	}
 	arguments := confirmationArguments(action, preview)
 	if len(arguments) == 0 {
 		return nil
@@ -1996,6 +2211,75 @@ func normalizeComposedManagementAction(action string) string {
 		return "resume"
 	default:
 		return ""
+	}
+}
+
+func normalizeScheduleManagementAction(action string) string {
+	switch strings.ToLower(strings.TrimSpace(action)) {
+	case "create", "add", "schedule", "set", "setup", "set_up":
+		return "create"
+	case "list", "show", "status":
+		return "list"
+	case "cancel", "delete", "remove", "unschedule", "stop":
+		return "cancel"
+	default:
+		return strings.ToLower(strings.TrimSpace(action))
+	}
+}
+
+func normalizeReminderManagementAction(action string) string {
+	switch strings.ToLower(strings.TrimSpace(action)) {
+	case "create", "add", "remind", "reminder", "schedule", "set", "setup", "set_up":
+		return "create"
+	case "list", "show", "status":
+		return "list"
+	case "cancel", "delete", "remove", "stop":
+		return "cancel"
+	case "complete", "done":
+		return "complete"
+	case "snooze", "delay", "postpone":
+		return "snooze"
+	default:
+		return strings.ToLower(strings.TrimSpace(action))
+	}
+}
+
+func normalizeMusicManagementAction(action string) string {
+	switch strings.ToLower(strings.TrimSpace(action)) {
+	case "play", "queue", "add":
+		return "play"
+	case "pause":
+		return "pause"
+	case "resume", "start":
+		return "resume"
+	case "skip", "next":
+		return "skip"
+	case "stop":
+		return "stop"
+	case "show_queue", "queue_status", "list_queue":
+		return "queue"
+	case "clear_queue", "clear":
+		return "clear"
+	case "now", "now_playing", "current":
+		return "now"
+	case "controls", "help":
+		return "controls"
+	case "loop", "repeat":
+		return "loop"
+	case "shuffle":
+		return "shuffle"
+	case "remove":
+		return "remove"
+	case "move":
+		return "move"
+	case "vote_skip", "voteskip":
+		return "vote_skip"
+	case "settings", "config":
+		return "settings"
+	case "playlist":
+		return "playlist"
+	default:
+		return strings.ToLower(strings.TrimSpace(action))
 	}
 }
 

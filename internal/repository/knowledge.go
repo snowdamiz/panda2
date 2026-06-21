@@ -42,6 +42,10 @@ func (r *KnowledgeRepository) AddDocument(ctx context.Context, document store.Kn
 	document.CreatedAt = firstTime(document.CreatedAt, now)
 	document.UpdatedAt = firstTime(document.UpdatedAt, now)
 	document.Source = firstNonEmpty(document.Source, "admin")
+	document.SourceMetadata = firstNonEmpty(document.SourceMetadata, "{}")
+	if document.Confidence <= 0 {
+		document.Confidence = 1
+	}
 	document.Enabled = true
 
 	chunks := splitKnowledgeChunks(content)
@@ -135,6 +139,25 @@ func (r *KnowledgeRepository) ChunksByDocument(ctx context.Context, guildID stri
 		Order("ordinal ASC").
 		Find(&chunks).Error
 	return chunks, err
+}
+
+func (r *KnowledgeRepository) HasContentHash(ctx context.Context, guildID, hash string) (bool, error) {
+	if strings.TrimSpace(hash) == "" {
+		return false, nil
+	}
+	var count int64
+	err := r.db.WithContext(ctx).Model(&store.KnowledgeChunk{}).
+		Where("guild_id = ? AND content_hash = ?", guildID, hash).
+		Limit(1).
+		Count(&count).Error
+	return count > 0, err
+}
+
+func (r *KnowledgeRepository) DisableExpired(ctx context.Context, now time.Time) (int64, error) {
+	result := r.db.WithContext(ctx).Model(&store.KnowledgeDocument{}).
+		Where("enabled = ? AND expires_at IS NOT NULL AND expires_at <= ?", true, now.UTC()).
+		Updates(map[string]any{"enabled": false, "updated_at": now.UTC()})
+	return result.RowsAffected, result.Error
 }
 
 func (r *KnowledgeRepository) AddEmbeddings(ctx context.Context, embeddings []store.KnowledgeEmbedding) error {

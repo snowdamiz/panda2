@@ -8,11 +8,14 @@ import (
 	"time"
 
 	"github.com/sn0w/panda2/internal/admin"
+	"github.com/sn0w/panda2/internal/alerts"
 	"github.com/sn0w/panda2/internal/assistant"
 	"github.com/sn0w/panda2/internal/commands"
 	"github.com/sn0w/panda2/internal/composed"
 	"github.com/sn0w/panda2/internal/config"
+	"github.com/sn0w/panda2/internal/curation"
 	discordbot "github.com/sn0w/panda2/internal/discord"
+	"github.com/sn0w/panda2/internal/feedback"
 	pandahttp "github.com/sn0w/panda2/internal/http"
 	"github.com/sn0w/panda2/internal/llm"
 	"github.com/sn0w/panda2/internal/maintenance"
@@ -21,6 +24,7 @@ import (
 	"github.com/sn0w/panda2/internal/queue"
 	"github.com/sn0w/panda2/internal/ratelimit"
 	"github.com/sn0w/panda2/internal/repository"
+	"github.com/sn0w/panda2/internal/scheduler"
 	"github.com/sn0w/panda2/internal/store"
 	"github.com/sn0w/panda2/internal/tools"
 	"github.com/sn0w/panda2/internal/websearch"
@@ -33,6 +37,7 @@ type App struct {
 	httpServer *pandahttp.Server
 	discord    *discordbot.Bot
 	worker     *queue.Worker
+	scheduler  *scheduler.Service
 }
 
 func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, error) {
@@ -54,6 +59,10 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 	members := repository.NewMemberRepository(dataStore.DB)
 	jobs := repository.NewJobRepository(dataStore.DB)
 	composedTools := repository.NewComposedToolRepository(dataStore.DB)
+	schedules := repository.NewScheduleRepository(dataStore.DB)
+	alertRules := repository.NewAlertRuleRepository(dataStore.DB)
+	feedbackRepo := repository.NewFeedbackRepository(dataStore.DB)
+	musicRepo := repository.NewMusicRepository(dataStore.DB)
 	openRouter := llm.NewOpenRouterClient(llm.OpenRouterConfig{
 		APIKey:                         cfg.OpenRouterAPIKey,
 		BaseURL:                        cfg.OpenRouterBaseURL,
@@ -64,10 +73,14 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 		CircuitBreakerCooldown:         cfg.OpenRouterCircuitBreakerCooldown,
 	})
 	memoryService := memory.NewServiceWithEmbeddings(knowledge, openRouter, cfg.OpenRouterEmbeddingModel)
+	curator := curation.NewService(memoryService).WithAuditRecorder(audit)
 	maintenanceService := maintenance.NewService(conversations, attachments, dataStore)
 	worker := queue.NewWorker(jobs, "panda-main")
 	worker.Register("maintenance.cleanup", func(ctx context.Context, _ store.Job) error {
-		_, err := maintenanceService.Cleanup(ctx, time.Now().UTC())
+		if _, err := maintenanceService.Cleanup(ctx, time.Now().UTC()); err != nil {
+			return err
+		}
+		_, err := curator.ExpireLowConfidence(ctx)
 		return err
 	})
 	opsService := ops.NewService(cfg, dataStore, guildConfigs, jobs, worker)
@@ -90,13 +103,25 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 	}
 	composedService := composed.NewService(composedTools, toolRegistry, toolExecutor, openRouter, cfg.OpenRouterModel).
 		WithAuditRecorder(audit)
+	schedulerService := scheduler.NewService(schedules, jobs).
+		WithComposedService(composedService).
+		WithDiscordEvents(discordEvents).
+		WithAuditRecorder(audit)
+	alertService := alerts.NewService(alertRules).WithAuditRecorder(audit)
+	feedbackService := feedback.NewService(feedbackRepo)
 	toolExecutor.WithDynamicToolProvider(composedService)
 	toolExecutor.WithComposedToolManager(composedService)
+	toolExecutor.WithScheduleManager(schedulerService)
+	toolExecutor.WithReminderManager(schedulerService)
 	assistantService := assistant.NewService(openRouter, usage, guildConfigs, memoryService, conversations, cfg.OpenRouterModel, cfg.OpenRouterFallbackModels).
-		WithToolExecutor(toolExecutor)
+		WithToolExecutor(toolExecutor).
+		WithCurator(curator)
 	router := commands.NewRouter(adminService, assistantService, opsService, ratelimit.New(cfg.UserRateLimit, cfg.UserRateLimitWindow)).
 		WithAttachmentReader(attachments).
-		WithComposedService(composedService)
+		WithComposedService(composedService).
+		WithScheduler(schedulerService).
+		WithAlertService(alertService).
+		WithFeedbackService(feedbackService)
 
 	discord, err := discordbot.New(cfg, router, logger)
 	if err != nil {
@@ -105,7 +130,13 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 	}
 	discord.WithAttachmentRecorder(attachments).
 		WithDiscordEventRecorder(discordEvents).
-		WithJobQueue(jobs)
+		WithJobQueue(jobs).
+		WithAlertHandler(alertService).
+		WithMusicRepository(musicRepo)
+	toolExecutor.WithMusicManager(discord.MusicManager())
+	schedulerService.WithDeliverySender(discord)
+	alertService.WithDeliverySender(discord)
+	router.WithSetupChecker(discord)
 	if contextService := discord.ContextService(); contextService != nil {
 		toolExecutor.WithContextReader(contextService)
 	}
@@ -117,6 +148,7 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 	worker.Register(discordbot.InteractionJobKind, discord.HandleInteractionJob)
 	worker.Register(composed.EventJobKind, composedService.HandleEventJob)
 	worker.Register(composed.RunJobKind, composedService.HandleRunJob)
+	worker.Register(scheduler.JobKind, schedulerService.HandleJob)
 
 	return &App{
 		cfg:        cfg,
@@ -125,6 +157,7 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 		httpServer: pandahttp.New(cfg, dataStore).WithDiscordWebhookHandler(installService),
 		discord:    discord,
 		worker:     worker,
+		scheduler:  schedulerService,
 	}, nil
 }
 
@@ -150,6 +183,14 @@ func (a *App) Run(ctx context.Context) error {
 	go func() {
 		defer wg.Done()
 		if err := a.worker.Run(ctx, "", 5*time.Second); err != nil {
+			errs <- err
+		}
+	}()
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		if err := a.scheduler.Run(ctx, 5*time.Second); err != nil {
 			errs <- err
 		}
 	}()

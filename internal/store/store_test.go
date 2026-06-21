@@ -4,6 +4,9 @@ import (
 	"context"
 	"path/filepath"
 	"testing"
+
+	"gorm.io/driver/sqlite"
+	"gorm.io/gorm"
 )
 
 func TestOpenRunsMigrationsAndPragmas(t *testing.T) {
@@ -30,8 +33,8 @@ func TestOpenRunsMigrationsAndPragmas(t *testing.T) {
 	if err := store.DB.Table("schema_migrations").Count(&count).Error; err != nil {
 		t.Fatalf("schema migration count failed: %v", err)
 	}
-	if count != 12 {
-		t.Fatalf("expected twelve migrations, got %d", count)
+	if count != int64(len(migrations)) {
+		t.Fatalf("expected %d migrations, got %d", len(migrations), count)
 	}
 
 	var tableCount int64
@@ -74,6 +77,67 @@ func TestOpenRunsMigrationsAndPragmas(t *testing.T) {
 		t.Fatalf("expected guild_tool_roles table, got %d", tableCount)
 	}
 
+	for _, table := range []string{"schedules", "alert_rules", "feedback_targets", "music_queue_items", "music_playlists"} {
+		if err := store.DB.Raw("SELECT COUNT(*) FROM sqlite_master WHERE name = ?", table).Scan(&tableCount).Error; err != nil {
+			t.Fatalf("%s table lookup failed: %v", table, err)
+		}
+		if tableCount != 1 {
+			t.Fatalf("expected %s table, got %d", table, tableCount)
+		}
+	}
+
+}
+
+func TestOpenRunsUsefulnessMigrationWhenLegacyVersionsExist(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "legacy.db")
+	db, err := gorm.Open(sqlite.Open(path), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open seed db: %v", err)
+	}
+	if err := db.Exec(`CREATE TABLE schema_migrations (
+		version INTEGER PRIMARY KEY,
+		name TEXT NOT NULL,
+		applied_at DATETIME NOT NULL
+	)`).Error; err != nil {
+		t.Fatalf("create schema_migrations: %v", err)
+	}
+	for _, row := range []SchemaMigration{
+		{Version: 13, Name: "guild_onboarding_state"},
+		{Version: 14, Name: "guided_onboarding_sessions"},
+	} {
+		if err := db.Exec(`INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, CURRENT_TIMESTAMP)`, row.Version, row.Name).Error; err != nil {
+			t.Fatalf("seed legacy migration %d: %v", row.Version, err)
+		}
+	}
+	sqlDB, err := db.DB()
+	if err != nil {
+		t.Fatalf("seed sql db: %v", err)
+	}
+	_ = sqlDB.Close()
+
+	opened, err := Open(ctx, path)
+	if err != nil {
+		t.Fatalf("Open legacy db: %v", err)
+	}
+	defer opened.Close()
+
+	for _, table := range []string{"schedules", "alert_rules", "feedback_targets", "music_queue_items", "music_playlists"} {
+		var tableCount int64
+		if err := opened.DB.Raw("SELECT COUNT(*) FROM sqlite_master WHERE name = ?", table).Scan(&tableCount).Error; err != nil {
+			t.Fatalf("%s table lookup failed: %v", table, err)
+		}
+		if tableCount != 1 {
+			t.Fatalf("expected %s table, got %d", table, tableCount)
+		}
+	}
+	var count int64
+	if err := opened.DB.Table("schema_migrations").Where("version = ? AND name = ?", 15, "bot_usefulness_layer").Count(&count).Error; err != nil {
+		t.Fatalf("lookup usefulness migration: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("expected bot_usefulness_layer migration at version 15, got %d", count)
+	}
 }
 
 func TestBackupCreatesRestorableSQLiteFile(t *testing.T) {

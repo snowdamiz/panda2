@@ -23,7 +23,7 @@ func TestDefaultRegistryDefinitionsAreValid(t *testing.T) {
 		t.Fatalf("NewDefaultRegistry: %v", err)
 	}
 	definitions := registry.Definitions()
-	if len(definitions) != 87 {
+	if len(definitions) != 90 {
 		t.Fatalf("expected full Discord tool surface plus assistant tools, got %d", len(definitions))
 	}
 	for _, definition := range definitions {
@@ -502,6 +502,50 @@ func (f *fakeComposedManager) ManageComposedTool(_ context.Context, request Comp
 	}, nil
 }
 
+type fakeScheduleManager struct {
+	requests []ScheduleManagementRequest
+}
+
+func (f *fakeScheduleManager) ManageSchedule(_ context.Context, request ScheduleManagementRequest) (any, error) {
+	f.requests = append(f.requests, request)
+	return map[string]any{
+		"result": map[string]any{
+			"action":    request.Action,
+			"tool_name": request.ToolName,
+			"dry_run":   request.DryRun,
+		},
+	}, nil
+}
+
+type fakeReminderManager struct {
+	requests []ReminderManagementRequest
+}
+
+func (f *fakeReminderManager) ManageReminder(_ context.Context, request ReminderManagementRequest) (any, error) {
+	f.requests = append(f.requests, request)
+	return map[string]any{
+		"result": map[string]any{
+			"action":  request.Action,
+			"message": request.Message,
+			"dry_run": request.DryRun,
+		},
+	}, nil
+}
+
+type fakeMusicManager struct {
+	requests []MusicManagementRequest
+}
+
+func (f *fakeMusicManager) ManageMusic(_ context.Context, request MusicManagementRequest) (any, error) {
+	f.requests = append(f.requests, request)
+	return map[string]any{
+		"result": map[string]any{
+			"action": request.Action,
+			"query":  request.Query,
+		},
+	}, nil
+}
+
 func newToolAdminService(t *testing.T) *admin.Service {
 	t.Helper()
 	ctx := context.Background()
@@ -562,6 +606,174 @@ func TestExecutorRunsComposedToolManager(t *testing.T) {
 	}
 	if !strings.Contains(result.Message.Content, `"action":"draft"`) || !strings.Contains(result.Message.Content, `"dry_run":true`) {
 		t.Fatalf("unexpected composed manager result: %+v", result)
+	}
+}
+
+func TestExecutorRunsScheduleManager(t *testing.T) {
+	registry, err := NewDefaultRegistry()
+	if err != nil {
+		t.Fatalf("NewDefaultRegistry: %v", err)
+	}
+	manager := &fakeScheduleManager{}
+	executor := NewExecutor(registry, nil, nil).WithScheduleManager(manager)
+	result, err := executor.Execute(context.Background(), ExecutionRequest{
+		GuildID:   "guild-1",
+		ChannelID: "channel-1",
+		ActorID:   "admin",
+		Access:    testAccess(ToolPolicyWriteConfirmed, admin.PermissionToolComposeInvoke),
+		Call: llm.ToolCall{
+			ID:   "call-schedule-manager",
+			Type: "function",
+			Function: llm.ToolCallFunction{
+				Name:      "panda_manage_schedule",
+				Arguments: `{"action":"schedule","tool_name":"welcome_builder","when":"in 10 minutes","every":"daily","input":{"topic":"standup"},"dry_run":true}`,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if len(manager.requests) != 1 {
+		t.Fatalf("expected schedule manager request, got %d", len(manager.requests))
+	}
+	request := manager.requests[0]
+	if request.Action != "create" || request.ToolName != "welcome_builder" || request.When != "in 10 minutes" || request.Every != "daily" || !request.DryRun {
+		t.Fatalf("unexpected schedule manager request: %+v", request)
+	}
+	if request.Input["topic"] != "standup" {
+		t.Fatalf("unexpected schedule input: %+v", request.Input)
+	}
+	if !strings.Contains(result.Message.Content, `"action":"create"`) || !strings.Contains(result.Message.Content, `"dry_run":true`) {
+		t.Fatalf("unexpected schedule manager result: %+v", result)
+	}
+}
+
+func TestExecutorExposesScheduleManagerToInvokeAccess(t *testing.T) {
+	registry, err := NewDefaultRegistry()
+	if err != nil {
+		t.Fatalf("NewDefaultRegistry: %v", err)
+	}
+	withoutManager := NewExecutor(registry, nil, nil)
+	if toolNames(withoutManager.OpenRouterTools(testAccess(ToolPolicyWriteConfirmed, admin.PermissionToolComposeInvoke)))["panda_manage_schedule"] {
+		t.Fatalf("schedule manager tool should be hidden when no manager is configured")
+	}
+	withManager := NewExecutor(registry, nil, nil).WithScheduleManager(&fakeScheduleManager{})
+	if !toolNames(withManager.OpenRouterTools(testAccess(ToolPolicyWriteConfirmed, admin.PermissionToolComposeInvoke)))["panda_manage_schedule"] {
+		t.Fatalf("schedule manager tool should be available to composed-tool invoke access")
+	}
+}
+
+func TestExecutorRunsReminderManager(t *testing.T) {
+	registry, err := NewDefaultRegistry()
+	if err != nil {
+		t.Fatalf("NewDefaultRegistry: %v", err)
+	}
+	manager := &fakeReminderManager{}
+	executor := NewExecutor(registry, nil, nil).WithReminderManager(manager)
+	result, err := executor.Execute(context.Background(), ExecutionRequest{
+		GuildID:   "guild-1",
+		ChannelID: "channel-1",
+		ActorID:   "user-1",
+		RequestID: "message-1",
+		Access:    testAccess(ToolPolicyAssistive, admin.PermissionAssistantUse),
+		Call: llm.ToolCall{
+			ID:   "call-reminder-manager",
+			Type: "function",
+			Function: llm.ToolCallFunction{
+				Name:      "panda_manage_reminder",
+				Arguments: `{"action":"remind","message":"stand up","in":"10 minutes","target":"me","follow_up":true,"dry_run":true}`,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if len(manager.requests) != 1 {
+		t.Fatalf("expected reminder manager request, got %d", len(manager.requests))
+	}
+	request := manager.requests[0]
+	if request.Action != "create" || request.Message != "stand up" || request.In != "10 minutes" || request.Target != "me" || !request.FollowUp || !request.DryRun {
+		t.Fatalf("unexpected reminder manager request: %+v", request)
+	}
+	if request.GuildID != "guild-1" || request.ChannelID != "channel-1" || request.ActorID != "user-1" || request.RequestID != "message-1" {
+		t.Fatalf("missing reminder execution context: %+v", request)
+	}
+	if !strings.Contains(result.Message.Content, `"action":"create"`) || !strings.Contains(result.Message.Content, `"dry_run":true`) {
+		t.Fatalf("unexpected reminder manager result: %+v", result)
+	}
+}
+
+func TestExecutorExposesReminderManagerToAssistantUse(t *testing.T) {
+	registry, err := NewDefaultRegistry()
+	if err != nil {
+		t.Fatalf("NewDefaultRegistry: %v", err)
+	}
+	access := testAccess(ToolPolicyAssistive, admin.PermissionAssistantUse)
+	withoutManager := NewExecutor(registry, nil, nil)
+	if toolNames(withoutManager.OpenRouterTools(access))["panda_manage_reminder"] {
+		t.Fatalf("reminder manager tool should be hidden when no manager is configured")
+	}
+	withManager := NewExecutor(registry, nil, nil).WithReminderManager(&fakeReminderManager{})
+	if !toolNames(withManager.OpenRouterTools(access))["panda_manage_reminder"] {
+		t.Fatalf("reminder manager tool should be available to assistant use")
+	}
+}
+
+func TestExecutorRunsMusicManager(t *testing.T) {
+	registry, err := NewDefaultRegistry()
+	if err != nil {
+		t.Fatalf("NewDefaultRegistry: %v", err)
+	}
+	manager := &fakeMusicManager{}
+	executor := NewExecutor(registry, nil, nil).WithMusicManager(manager)
+	result, err := executor.Execute(context.Background(), ExecutionRequest{
+		GuildID:        "guild-1",
+		ChannelID:      "text-1",
+		VoiceChannelID: "voice-1",
+		ActorID:        "user-1",
+		RoleIDs:        []string{"role-dj"},
+		IsGuildAdmin:   true,
+		Access:         testAccess(ToolPolicyAssistive, admin.PermissionAssistantUse),
+		Call: llm.ToolCall{
+			ID:   "call-music-manager",
+			Type: "function",
+			Function: llm.ToolCallFunction{
+				Name:      "panda_manage_music",
+				Arguments: `{"action":"add","song":"lofi rain","mode":"all","position":2,"to":1,"volume":45}`,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if len(manager.requests) != 1 {
+		t.Fatalf("expected music manager request, got %d", len(manager.requests))
+	}
+	request := manager.requests[0]
+	if request.Action != "play" || request.Query != "lofi rain" || request.Mode != "all" || request.Position != 2 || request.To != 1 || request.Volume != 45 {
+		t.Fatalf("unexpected music manager request: %+v", request)
+	}
+	if request.VoiceChannelID != "voice-1" || len(request.RoleIDs) != 1 || request.RoleIDs[0] != "role-dj" || !request.IsGuildAdmin {
+		t.Fatalf("missing music execution context: %+v", request)
+	}
+	if !strings.Contains(result.Message.Content, `"action":"play"`) || !strings.Contains(result.Message.Content, `"query":"lofi rain"`) {
+		t.Fatalf("unexpected music manager result: %+v", result)
+	}
+}
+
+func TestExecutorExposesMusicManagerToAssistantUse(t *testing.T) {
+	registry, err := NewDefaultRegistry()
+	if err != nil {
+		t.Fatalf("NewDefaultRegistry: %v", err)
+	}
+	access := testAccess(ToolPolicyAssistive, admin.PermissionAssistantUse)
+	withoutManager := NewExecutor(registry, nil, nil)
+	if toolNames(withoutManager.OpenRouterTools(access))["panda_manage_music"] {
+		t.Fatalf("music manager tool should be hidden when no manager is configured")
+	}
+	withManager := NewExecutor(registry, nil, nil).WithMusicManager(&fakeMusicManager{})
+	if !toolNames(withManager.OpenRouterTools(access))["panda_manage_music"] {
+		t.Fatalf("music manager tool should be available to assistant use")
 	}
 }
 

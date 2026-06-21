@@ -2,9 +2,12 @@ package music
 
 import (
 	"context"
+	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	toolsvc "github.com/sn0w/panda2/internal/tools"
 )
 
 type fakeVoiceSession struct {
@@ -73,6 +76,31 @@ func TestManagerIgnoresEmptyUpdateForDifferentVoiceChannel(t *testing.T) {
 	case <-session.closedCh:
 		t.Fatal("expected unrelated voice channel update to be ignored")
 	case <-time.After(25 * time.Millisecond):
+	}
+}
+
+func TestManageMusicControlsReturnsToolPayload(t *testing.T) {
+	manager := NewManager(nil, nil, nil, nil)
+
+	result, err := manager.ManageMusic(context.Background(), toolsvc.MusicManagementRequest{
+		GuildID: "guild-1",
+		ActorID: "user-1",
+		Action:  "controls",
+	})
+	if err != nil {
+		t.Fatalf("ManageMusic: %v", err)
+	}
+	root, ok := result.(map[string]any)
+	payload, ok := root["result"].(map[string]any)
+	if !ok {
+		t.Fatalf("unexpected music result: %+v", result)
+	}
+	if payload["action"] != "controls" || payload["title"] != "Music controls" {
+		t.Fatalf("unexpected music payload: %+v", payload)
+	}
+	content, _ := payload["content"].(string)
+	if !strings.Contains(content, "play <song>") || !strings.Contains(content, "queue") {
+		t.Fatalf("unexpected music controls content: %q", content)
 	}
 }
 

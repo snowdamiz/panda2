@@ -477,6 +477,153 @@ var migrations = []Migration{
 						AND (tool_policy = 'off' OR memory_enabled = 0)`,
 		},
 	},
+	{
+		Version: 15,
+		Name:    "bot_usefulness_layer",
+		SQL: []string{
+			`ALTER TABLE knowledge_documents ADD COLUMN confidence REAL NOT NULL DEFAULT 1`,
+			`ALTER TABLE knowledge_documents ADD COLUMN reason_saved TEXT NOT NULL DEFAULT ''`,
+			`ALTER TABLE knowledge_documents ADD COLUMN source_metadata TEXT NOT NULL DEFAULT '{}'`,
+			`ALTER TABLE knowledge_documents ADD COLUMN expires_at DATETIME`,
+			`CREATE INDEX IF NOT EXISTS idx_knowledge_documents_expires_at ON knowledge_documents(expires_at)`,
+			`CREATE TABLE IF NOT EXISTS schedules (
+				id INTEGER PRIMARY KEY AUTOINCREMENT,
+				guild_id TEXT NOT NULL,
+				channel_id TEXT NOT NULL,
+				owner_user_id TEXT NOT NULL,
+				kind TEXT NOT NULL,
+				status TEXT NOT NULL DEFAULT 'active',
+				title TEXT NOT NULL DEFAULT '',
+				target_type TEXT NOT NULL DEFAULT 'channel',
+				target_id TEXT NOT NULL DEFAULT '',
+				schedule_type TEXT NOT NULL DEFAULT 'once',
+				timezone TEXT NOT NULL DEFAULT 'UTC',
+				interval_seconds INTEGER NOT NULL DEFAULT 0,
+				payload TEXT NOT NULL DEFAULT '{}',
+				dedupe_key TEXT NOT NULL DEFAULT '',
+				next_run_at DATETIME NOT NULL,
+				last_run_at DATETIME,
+				last_status TEXT NOT NULL DEFAULT '',
+				last_error TEXT NOT NULL DEFAULT '',
+				last_job_id INTEGER NOT NULL DEFAULT 0,
+				run_count INTEGER NOT NULL DEFAULT 0,
+				disabled INTEGER NOT NULL DEFAULT 0,
+				locked_until DATETIME,
+				created_at DATETIME NOT NULL,
+				updated_at DATETIME NOT NULL
+			)`,
+			`CREATE INDEX IF NOT EXISTS idx_schedules_guild_id ON schedules(guild_id)`,
+			`CREATE INDEX IF NOT EXISTS idx_schedules_channel_id ON schedules(channel_id)`,
+			`CREATE INDEX IF NOT EXISTS idx_schedules_owner_user_id ON schedules(owner_user_id)`,
+			`CREATE INDEX IF NOT EXISTS idx_schedules_kind ON schedules(kind)`,
+			`CREATE INDEX IF NOT EXISTS idx_schedules_status ON schedules(status)`,
+			`CREATE INDEX IF NOT EXISTS idx_schedules_target_type ON schedules(target_type)`,
+			`CREATE INDEX IF NOT EXISTS idx_schedules_target_id ON schedules(target_id)`,
+			`CREATE INDEX IF NOT EXISTS idx_schedules_schedule_type ON schedules(schedule_type)`,
+			`CREATE INDEX IF NOT EXISTS idx_schedules_dedupe_key ON schedules(dedupe_key)`,
+			`CREATE INDEX IF NOT EXISTS idx_schedules_next_run_at ON schedules(next_run_at)`,
+			`CREATE INDEX IF NOT EXISTS idx_schedules_last_run_at ON schedules(last_run_at)`,
+			`CREATE INDEX IF NOT EXISTS idx_schedules_last_status ON schedules(last_status)`,
+			`CREATE INDEX IF NOT EXISTS idx_schedules_last_job_id ON schedules(last_job_id)`,
+			`CREATE INDEX IF NOT EXISTS idx_schedules_disabled ON schedules(disabled)`,
+			`CREATE INDEX IF NOT EXISTS idx_schedules_locked_until ON schedules(locked_until)`,
+			`CREATE TABLE IF NOT EXISTS alert_rules (
+				id INTEGER PRIMARY KEY AUTOINCREMENT,
+				guild_id TEXT NOT NULL,
+				pack TEXT NOT NULL,
+				channel_id TEXT NOT NULL,
+				enabled INTEGER NOT NULL DEFAULT 1,
+				cooldown_seconds INTEGER NOT NULL DEFAULT 300,
+				pending_count INTEGER NOT NULL DEFAULT 0,
+				last_sent_at DATETIME,
+				created_by TEXT NOT NULL DEFAULT '',
+				created_at DATETIME NOT NULL,
+				updated_at DATETIME NOT NULL,
+				UNIQUE(guild_id, pack)
+			)`,
+			`CREATE INDEX IF NOT EXISTS idx_alert_rules_guild_id ON alert_rules(guild_id)`,
+			`CREATE INDEX IF NOT EXISTS idx_alert_rules_pack ON alert_rules(pack)`,
+			`CREATE INDEX IF NOT EXISTS idx_alert_rules_channel_id ON alert_rules(channel_id)`,
+			`CREATE INDEX IF NOT EXISTS idx_alert_rules_enabled ON alert_rules(enabled)`,
+			`CREATE INDEX IF NOT EXISTS idx_alert_rules_last_sent_at ON alert_rules(last_sent_at)`,
+			`CREATE INDEX IF NOT EXISTS idx_alert_rules_created_by ON alert_rules(created_by)`,
+			`CREATE TABLE IF NOT EXISTS feedback_targets (
+				id INTEGER PRIMARY KEY AUTOINCREMENT,
+				guild_id TEXT NOT NULL,
+				channel_id TEXT NOT NULL,
+				user_id TEXT NOT NULL,
+				command TEXT NOT NULL,
+				model TEXT NOT NULL DEFAULT '',
+				content_hash TEXT NOT NULL DEFAULT '',
+				metadata TEXT NOT NULL DEFAULT '{}',
+				created_at DATETIME NOT NULL
+			)`,
+			`CREATE INDEX IF NOT EXISTS idx_feedback_targets_guild_id ON feedback_targets(guild_id)`,
+			`CREATE INDEX IF NOT EXISTS idx_feedback_targets_channel_id ON feedback_targets(channel_id)`,
+			`CREATE INDEX IF NOT EXISTS idx_feedback_targets_user_id ON feedback_targets(user_id)`,
+			`CREATE INDEX IF NOT EXISTS idx_feedback_targets_command ON feedback_targets(command)`,
+			`CREATE INDEX IF NOT EXISTS idx_feedback_targets_model ON feedback_targets(model)`,
+			`CREATE INDEX IF NOT EXISTS idx_feedback_targets_content_hash ON feedback_targets(content_hash)`,
+			`CREATE INDEX IF NOT EXISTS idx_feedback_targets_created_at ON feedback_targets(created_at)`,
+			`CREATE TABLE IF NOT EXISTS feedback_events (
+				id INTEGER PRIMARY KEY AUTOINCREMENT,
+				target_id INTEGER NOT NULL,
+				guild_id TEXT NOT NULL,
+				user_id TEXT NOT NULL,
+				rating TEXT NOT NULL,
+				reason TEXT NOT NULL DEFAULT '',
+				created_at DATETIME NOT NULL,
+				updated_at DATETIME NOT NULL,
+				UNIQUE(target_id, user_id),
+				FOREIGN KEY(target_id) REFERENCES feedback_targets(id) ON DELETE CASCADE
+			)`,
+			`CREATE INDEX IF NOT EXISTS idx_feedback_events_target_id ON feedback_events(target_id)`,
+			`CREATE INDEX IF NOT EXISTS idx_feedback_events_guild_id ON feedback_events(guild_id)`,
+			`CREATE INDEX IF NOT EXISTS idx_feedback_events_user_id ON feedback_events(user_id)`,
+			`CREATE INDEX IF NOT EXISTS idx_feedback_events_rating ON feedback_events(rating)`,
+			`CREATE TABLE IF NOT EXISTS music_queue_items (
+				id INTEGER PRIMARY KEY AUTOINCREMENT,
+				guild_id TEXT NOT NULL,
+				position INTEGER NOT NULL,
+				track_id TEXT NOT NULL DEFAULT '',
+				query TEXT NOT NULL DEFAULT '',
+				title TEXT NOT NULL DEFAULT '',
+				url TEXT NOT NULL DEFAULT '',
+				uploader TEXT NOT NULL DEFAULT '',
+				duration_ms INTEGER NOT NULL DEFAULT 0,
+				requested_by TEXT NOT NULL DEFAULT '',
+				text_channel_id TEXT NOT NULL DEFAULT '',
+				created_at DATETIME NOT NULL,
+				updated_at DATETIME NOT NULL,
+				UNIQUE(guild_id, position)
+			)`,
+			`CREATE INDEX IF NOT EXISTS idx_music_queue_items_guild_id ON music_queue_items(guild_id)`,
+			`CREATE INDEX IF NOT EXISTS idx_music_queue_items_position ON music_queue_items(position)`,
+			`CREATE INDEX IF NOT EXISTS idx_music_queue_items_requested_by ON music_queue_items(requested_by)`,
+			`CREATE INDEX IF NOT EXISTS idx_music_queue_items_text_channel_id ON music_queue_items(text_channel_id)`,
+			`CREATE TABLE IF NOT EXISTS music_settings (
+				guild_id TEXT PRIMARY KEY,
+				loop_mode TEXT NOT NULL DEFAULT 'off',
+				default_volume INTEGER NOT NULL DEFAULT 100,
+				dj_role_id TEXT NOT NULL DEFAULT '',
+				vote_skip_threshold REAL NOT NULL DEFAULT 0.5,
+				created_at DATETIME NOT NULL,
+				updated_at DATETIME NOT NULL
+			)`,
+			`CREATE TABLE IF NOT EXISTS music_playlists (
+				id INTEGER PRIMARY KEY AUTOINCREMENT,
+				guild_id TEXT NOT NULL,
+				name TEXT NOT NULL,
+				created_by TEXT NOT NULL DEFAULT '',
+				tracks_json TEXT NOT NULL DEFAULT '[]',
+				created_at DATETIME NOT NULL,
+				updated_at DATETIME NOT NULL,
+				UNIQUE(guild_id, name)
+			)`,
+			`CREATE INDEX IF NOT EXISTS idx_music_playlists_guild_id ON music_playlists(guild_id)`,
+			`CREATE INDEX IF NOT EXISTS idx_music_playlists_created_by ON music_playlists(created_by)`,
+		},
+	},
 }
 
 func RunMigrations(db *gorm.DB) error {
@@ -523,10 +670,22 @@ func execMigrationStatement(tx *gorm.DB, statement string) error {
 	if err == nil {
 		return nil
 	}
+	if isAddColumnStatement(statement) && isDuplicateColumnError(err) {
+		return nil
+	}
 	if isKnowledgeFTS5Statement(statement) && strings.Contains(strings.ToLower(err.Error()), "no such module: fts5") {
 		return createFallbackKnowledgeSearchTable(tx)
 	}
 	return err
+}
+
+func isAddColumnStatement(statement string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(statement))
+	return strings.HasPrefix(normalized, "alter table ") && strings.Contains(normalized, " add column ")
+}
+
+func isDuplicateColumnError(err error) bool {
+	return err != nil && strings.Contains(strings.ToLower(err.Error()), "duplicate column name")
 }
 
 func isKnowledgeFTS5Statement(statement string) bool {

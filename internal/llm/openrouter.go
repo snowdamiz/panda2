@@ -83,13 +83,14 @@ func (c *OpenRouterClient) Chat(ctx context.Context, request ChatRequest) (ChatR
 	}
 
 	payload := chatCompletionRequest{
-		Model:       request.Model,
-		Messages:    request.Messages,
-		Tools:       request.Tools,
-		Temperature: request.Temperature,
-		MaxTokens:   request.MaxTokens,
+		Model:          request.Model,
+		Messages:       request.Messages,
+		Tools:          request.Tools,
+		ResponseFormat: request.ResponseFormat,
+		Temperature:    request.Temperature,
+		MaxTokens:      request.MaxTokens,
 	}
-	if len(request.Tools) > 0 {
+	if len(request.Tools) > 0 || request.ResponseFormat != nil {
 		allowFallbacks := false
 		payload.Provider = &providerPreferences{
 			RequireParameters: true,
@@ -376,12 +377,13 @@ func (b *circuitBreaker) recordFailure() {
 }
 
 type chatCompletionRequest struct {
-	Model       string               `json:"model"`
-	Messages    []Message            `json:"messages"`
-	Tools       []Tool               `json:"tools,omitempty"`
-	Provider    *providerPreferences `json:"provider,omitempty"`
-	Temperature float64              `json:"temperature,omitempty"`
-	MaxTokens   int                  `json:"max_tokens,omitempty"`
+	Model          string               `json:"model"`
+	Messages       []Message            `json:"messages"`
+	Tools          []Tool               `json:"tools,omitempty"`
+	ResponseFormat *ResponseFormat      `json:"response_format,omitempty"`
+	Provider       *providerPreferences `json:"provider,omitempty"`
+	Temperature    float64              `json:"temperature,omitempty"`
+	MaxTokens      int                  `json:"max_tokens,omitempty"`
 }
 
 type providerPreferences struct {

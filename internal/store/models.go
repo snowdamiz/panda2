@@ -135,14 +135,18 @@ func (AssistantMessage) TableName() string {
 }
 
 type KnowledgeDocument struct {
-	ID        uint      `gorm:"primaryKey"`
-	GuildID   string    `gorm:"index;not null;size:32"`
-	Title     string    `gorm:"not null"`
-	Source    string    `gorm:"not null;default:'admin'"`
-	CreatedBy string    `gorm:"index;not null;default:'';size:32"`
-	Enabled   bool      `gorm:"not null;default:true"`
-	CreatedAt time.Time `gorm:"not null"`
-	UpdatedAt time.Time `gorm:"not null"`
+	ID             uint       `gorm:"primaryKey"`
+	GuildID        string     `gorm:"index;not null;size:32"`
+	Title          string     `gorm:"not null"`
+	Source         string     `gorm:"not null;default:'admin'"`
+	CreatedBy      string     `gorm:"index;not null;default:'';size:32"`
+	Enabled        bool       `gorm:"not null;default:true"`
+	Confidence     float64    `gorm:"not null;default:1"`
+	ReasonSaved    string     `gorm:"not null;default:''"`
+	SourceMetadata string     `gorm:"not null;default:'{}'"`
+	ExpiresAt      *time.Time `gorm:"index"`
+	CreatedAt      time.Time  `gorm:"not null"`
+	UpdatedAt      time.Time  `gorm:"not null"`
 }
 
 type KnowledgeChunk struct {
@@ -297,4 +301,104 @@ type ComposedToolDedupe struct {
 	InvocationFingerprint string    `gorm:"uniqueIndex:idx_composed_tool_dedupes_tool_fingerprint;not null;size:128"`
 	ExpiresAt             time.Time `gorm:"index;not null"`
 	CreatedAt             time.Time `gorm:"not null"`
+}
+
+type Schedule struct {
+	ID              uint       `gorm:"primaryKey"`
+	GuildID         string     `gorm:"index;not null;size:32"`
+	ChannelID       string     `gorm:"index;not null;size:32"`
+	OwnerUserID     string     `gorm:"index;not null;size:32"`
+	Kind            string     `gorm:"index;not null;size:32"`
+	Status          string     `gorm:"index;not null;default:'active';size:32"`
+	Title           string     `gorm:"not null;default:''"`
+	TargetType      string     `gorm:"index;not null;default:'channel';size:32"`
+	TargetID        string     `gorm:"index;not null;default:'';size:64"`
+	ScheduleType    string     `gorm:"index;not null;default:'once';size:32"`
+	Timezone        string     `gorm:"not null;default:'UTC';size:64"`
+	IntervalSeconds int        `gorm:"not null;default:0"`
+	Payload         string     `gorm:"not null;default:'{}'"`
+	DedupeKey       string     `gorm:"index;not null;default:'';size:128"`
+	NextRunAt       time.Time  `gorm:"index;not null"`
+	LastRunAt       *time.Time `gorm:"index"`
+	LastStatus      string     `gorm:"index;not null;default:'';size:32"`
+	LastError       string     `gorm:"not null;default:''"`
+	LastJobID       uint       `gorm:"index;not null;default:0"`
+	RunCount        int        `gorm:"not null;default:0"`
+	Disabled        bool       `gorm:"index;not null;default:false"`
+	LockedUntil     *time.Time `gorm:"index"`
+	CreatedAt       time.Time  `gorm:"not null"`
+	UpdatedAt       time.Time  `gorm:"not null"`
+}
+
+type AlertRule struct {
+	ID              uint       `gorm:"primaryKey"`
+	GuildID         string     `gorm:"index;not null;size:32"`
+	Pack            string     `gorm:"index;not null;size:64"`
+	ChannelID       string     `gorm:"index;not null;size:32"`
+	Enabled         bool       `gorm:"index;not null;default:true"`
+	CooldownSeconds int        `gorm:"not null;default:300"`
+	PendingCount    int        `gorm:"not null;default:0"`
+	LastSentAt      *time.Time `gorm:"index"`
+	CreatedBy       string     `gorm:"index;not null;default:'';size:32"`
+	CreatedAt       time.Time  `gorm:"not null"`
+	UpdatedAt       time.Time  `gorm:"not null"`
+}
+
+type FeedbackTarget struct {
+	ID          uint      `gorm:"primaryKey"`
+	GuildID     string    `gorm:"index;not null;size:32"`
+	ChannelID   string    `gorm:"index;not null;size:32"`
+	UserID      string    `gorm:"index;not null;size:32"`
+	Command     string    `gorm:"index;not null;size:64"`
+	Model       string    `gorm:"index;not null;default:'';size:128"`
+	ContentHash string    `gorm:"index;not null;default:'';size:128"`
+	Metadata    string    `gorm:"not null;default:'{}'"`
+	CreatedAt   time.Time `gorm:"index;not null"`
+}
+
+type FeedbackEvent struct {
+	ID        uint      `gorm:"primaryKey"`
+	TargetID  uint      `gorm:"uniqueIndex:idx_feedback_events_target_user;index;not null"`
+	GuildID   string    `gorm:"index;not null;size:32"`
+	UserID    string    `gorm:"uniqueIndex:idx_feedback_events_target_user;index;not null;size:32"`
+	Rating    string    `gorm:"index;not null;size:32"`
+	Reason    string    `gorm:"not null;default:''"`
+	CreatedAt time.Time `gorm:"not null"`
+	UpdatedAt time.Time `gorm:"not null"`
+}
+
+type MusicQueueItem struct {
+	ID            uint      `gorm:"primaryKey"`
+	GuildID       string    `gorm:"index;not null;size:32"`
+	Position      int       `gorm:"index;not null"`
+	TrackID       string    `gorm:"not null;default:'';size:128"`
+	Query         string    `gorm:"not null;default:''"`
+	Title         string    `gorm:"not null;default:''"`
+	URL           string    `gorm:"not null;default:''"`
+	Uploader      string    `gorm:"not null;default:''"`
+	DurationMS    int64     `gorm:"not null;default:0"`
+	RequestedBy   string    `gorm:"index;not null;default:'';size:32"`
+	TextChannelID string    `gorm:"index;not null;default:'';size:32"`
+	CreatedAt     time.Time `gorm:"not null"`
+	UpdatedAt     time.Time `gorm:"not null"`
+}
+
+type MusicSettings struct {
+	GuildID           string    `gorm:"primaryKey;size:32"`
+	LoopMode          string    `gorm:"not null;default:'off';size:32"`
+	DefaultVolume     int       `gorm:"not null;default:100"`
+	DJRoleID          string    `gorm:"not null;default:'';size:32"`
+	VoteSkipThreshold float64   `gorm:"not null;default:0.5"`
+	CreatedAt         time.Time `gorm:"not null"`
+	UpdatedAt         time.Time `gorm:"not null"`
+}
+
+type MusicPlaylist struct {
+	ID         uint      `gorm:"primaryKey"`
+	GuildID    string    `gorm:"uniqueIndex:idx_music_playlists_guild_name;index;not null;size:32"`
+	Name       string    `gorm:"uniqueIndex:idx_music_playlists_guild_name;not null;size:80"`
+	CreatedBy  string    `gorm:"index;not null;default:'';size:32"`
+	TracksJSON string    `gorm:"not null;default:'[]'"`
+	CreatedAt  time.Time `gorm:"not null"`
+	UpdatedAt  time.Time `gorm:"not null"`
 }

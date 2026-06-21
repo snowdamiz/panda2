@@ -182,6 +182,10 @@ func (s *Service) ensureGuildConfig(ctx context.Context, guildID string) (store.
 	return s.configs.EnsureDefault(ctx, guildID, s.defaultModel)
 }
 
+func (s *Service) Config(ctx context.Context, guildID string) (store.GuildConfig, error) {
+	return s.ensureGuildConfig(ctx, guildID)
+}
+
 func (s *Service) SetModel(ctx context.Context, guildID, actorID, model string) (store.GuildConfig, error) {
 	return s.ConfigureModel(ctx, guildID, actorID, ModelSettings{DefaultModel: model})
 }

@@ -26,6 +26,15 @@ type DiscordActivityCount struct {
 	Count     int
 }
 
+type DiscordActivityFilter struct {
+	GuildID          string
+	ChannelID        string
+	Since            time.Time
+	ExcludeUserID    string
+	ExcludeAuthorBot bool
+	EventTypes       []string
+}
+
 func NewDiscordEventRepository(db *gorm.DB) *DiscordEventRepository {
 	return &DiscordEventRepository{db: db}
 }
@@ -76,6 +85,29 @@ func (r *DiscordEventRepository) ActivityCounts(ctx context.Context, guildID, ch
 		Limit(clampLimit(limit, 10, 50)).
 		Scan(&rows).Error
 	return rows, err
+}
+
+func (r *DiscordEventRepository) CountActivity(ctx context.Context, filter DiscordActivityFilter) (int64, error) {
+	query := r.db.WithContext(ctx).Model(&store.DiscordEvent{}).
+		Where("guild_id = ?", filter.GuildID)
+	if filter.ChannelID != "" {
+		query = query.Where("channel_id = ?", filter.ChannelID)
+	}
+	if !filter.Since.IsZero() {
+		query = query.Where("created_at > ?", filter.Since.UTC())
+	}
+	if filter.ExcludeUserID != "" {
+		query = query.Where("user_id <> ?", filter.ExcludeUserID)
+	}
+	if len(filter.EventTypes) > 0 {
+		query = query.Where("event_type IN ?", filter.EventTypes)
+	}
+	if filter.ExcludeAuthorBot {
+		query = query.Where("(metadata NOT LIKE ? OR metadata = '')", `%"author_bot":"true"%`)
+	}
+	var count int64
+	err := query.Count(&count).Error
+	return count, err
 }
 
 func (r *DiscordEventRepository) DeleteExpired(ctx context.Context, now time.Time) (int64, error) {

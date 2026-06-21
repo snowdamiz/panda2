@@ -29,11 +29,16 @@ type Message struct {
 }
 
 type ChatRequest struct {
-	Model       string
-	Messages    []Message
-	Tools       []Tool
-	Temperature float64
-	MaxTokens   int
+	Model          string
+	Messages       []Message
+	Tools          []Tool
+	ResponseFormat *ResponseFormat
+	Temperature    float64
+	MaxTokens      int
+}
+
+type ResponseFormat struct {
+	Type string `json:"type"`
 }
 
 type Tool struct {

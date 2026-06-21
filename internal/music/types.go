@@ -19,6 +19,13 @@ const (
 	ActionClear    Action = "clear"
 	ActionNow      Action = "now"
 	ActionControls Action = "controls"
+	ActionLoop     Action = "loop"
+	ActionShuffle  Action = "shuffle"
+	ActionRemove   Action = "remove"
+	ActionMove     Action = "move"
+	ActionVoteSkip Action = "vote_skip"
+	ActionSettings Action = "settings"
+	ActionPlaylist Action = "playlist"
 )
 
 var (
@@ -33,11 +40,18 @@ var (
 	ErrDependencyMissing = errors.New("music dependency missing")
 	ErrTrackLookupFailed = errors.New("track lookup failed")
 	ErrTrackStreamFailed = errors.New("track stream failed")
+	ErrMissingDJ         = errors.New("missing DJ permission")
+	ErrInvalidQueueIndex = errors.New("invalid queue index")
 )
 
 type Intent struct {
-	Action Action
-	Query  string
+	Action   Action
+	Query    string
+	Mode     string
+	Name     string
+	Position int
+	To       int
+	Volume   int
 }
 
 type Request struct {
@@ -45,6 +59,9 @@ type Request struct {
 	TextChannelID  string
 	UserID         string
 	VoiceChannelID string
+	RoleIDs        []string
+	IsGuildAdmin   bool
+	IsOwner        bool
 	Intent         Intent
 }
 
@@ -65,6 +82,23 @@ type Field struct {
 type ResponseAction struct {
 	Label string
 	URL   string
+}
+
+type SettingsUpdate struct {
+	LoopMode             string
+	DefaultVolume        int
+	DefaultVolumeSet     bool
+	DJRoleID             string
+	DJRoleSet            bool
+	VoteSkipThreshold    float64
+	VoteSkipThresholdSet bool
+}
+
+type SettingsSnapshot struct {
+	LoopMode          string
+	DefaultVolume     int
+	DJRoleID          string
+	VoteSkipThreshold float64
 }
 
 type Track struct {

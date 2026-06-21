@@ -24,12 +24,15 @@ import (
 	"github.com/disgoorg/disgo/rest"
 	"github.com/disgoorg/disgo/voice"
 	"github.com/disgoorg/snowflake/v2"
+	alertsvc "github.com/sn0w/panda2/internal/alerts"
 	"github.com/sn0w/panda2/internal/attachments"
 	"github.com/sn0w/panda2/internal/commands"
 	"github.com/sn0w/panda2/internal/config"
 	contextsvc "github.com/sn0w/panda2/internal/context"
 	"github.com/sn0w/panda2/internal/music"
 	"github.com/sn0w/panda2/internal/polls"
+	"github.com/sn0w/panda2/internal/scheduler"
+	"github.com/sn0w/panda2/internal/security"
 	"github.com/sn0w/panda2/internal/store"
 )
 
@@ -42,6 +45,7 @@ type Bot struct {
 	context     *contextsvc.Service
 	attachments AttachmentRecorder
 	events      DiscordEventRecorder
+	alerts      DiscordAlertHandler
 	httpClient  *http.Client
 	music       *music.Manager
 	closeOnce   sync.Once
@@ -57,6 +61,10 @@ type DiscordEventRecorder interface {
 
 type InteractionJobQueue interface {
 	Enqueue(ctx context.Context, job store.Job) (store.Job, error)
+}
+
+type DiscordAlertHandler interface {
+	HandleDiscordEvent(ctx context.Context, event store.DiscordEvent)
 }
 
 type typingSender interface {
@@ -205,8 +213,94 @@ func (b *Bot) WithJobQueue(jobs InteractionJobQueue) *Bot {
 	return b
 }
 
+func (b *Bot) WithAlertHandler(handler DiscordAlertHandler) *Bot {
+	b.alerts = handler
+	return b
+}
+
+func (b *Bot) WithMusicRepository(repo music.MusicStore) *Bot {
+	if b.music != nil {
+		b.music.WithRepository(repo)
+	}
+	return b
+}
+
+func (b *Bot) MusicManager() *music.Manager {
+	if b == nil {
+		return nil
+	}
+	return b.music
+}
+
 func (b *Bot) ContextService() *contextsvc.Service {
 	return b.context
+}
+
+func (b *Bot) CheckSetup(ctx context.Context, guildID, channelID string) (commands.SetupCheckResult, error) {
+	result := commands.SetupCheckResult{
+		DiscordConfigured: b != nil && b.cfg.DiscordConfigured(),
+		Connected:         b != nil && b.client != nil,
+	}
+	if !result.DiscordConfigured || b == nil || b.client == nil {
+		return result, nil
+	}
+	if strings.TrimSpace(guildID) == "" {
+		result.Warnings = append(result.Warnings, "Run setup inside a Discord server to check guild-specific readiness.")
+		return result, nil
+	}
+	guildSnowflake, err := snowflake.Parse(guildID)
+	if err != nil {
+		result.Warnings = append(result.Warnings, "Current guild id could not be parsed.")
+		return result, nil
+	}
+	if _, err := b.client.Rest.GetGuild(guildSnowflake, false, rest.WithCtx(ctx)); err != nil {
+		result.Warnings = append(result.Warnings, "Panda could not read this guild; check installation and bot scope.")
+	}
+	if strings.TrimSpace(channelID) != "" {
+		channelSnowflake, err := snowflake.Parse(channelID)
+		if err != nil {
+			result.Warnings = append(result.Warnings, "Current channel id could not be parsed.")
+		} else if _, err := b.client.Rest.GetChannel(channelSnowflake, rest.WithCtx(ctx)); err != nil {
+			result.Warnings = append(result.Warnings, "Panda could not read the current channel; check View Channel and Read Message History.")
+		}
+	}
+	return result, nil
+}
+
+func (b *Bot) SendScheduledMessage(ctx context.Context, delivery scheduler.Delivery) error {
+	if b == nil || b.client == nil {
+		return errors.New("discord client is not configured")
+	}
+	channelID, err := snowflake.Parse(delivery.ChannelID)
+	if err != nil {
+		return err
+	}
+	content, mentions := scheduledMessageContent(delivery)
+	_, err = b.client.Rest.CreateMessage(channelID, disgoDiscord.NewMessageCreate().
+		WithContent(content).
+		WithAllowedMentions(mentions).
+		WithSuppressEmbeds(true),
+		rest.WithCtx(ctx),
+	)
+	return err
+}
+
+func (b *Bot) SendAlert(ctx context.Context, delivery alertsvc.Delivery) error {
+	if b == nil || b.client == nil {
+		return errors.New("discord client is not configured")
+	}
+	channelID, err := snowflake.Parse(delivery.ChannelID)
+	if err != nil {
+		return err
+	}
+	content := alertMessageContent(delivery)
+	_, err = b.client.Rest.CreateMessage(channelID, disgoDiscord.NewMessageCreate().
+		WithContent(content).
+		WithAllowedMentions(noAllowedMentions()).
+		WithSuppressEmbeds(true),
+		rest.WithCtx(ctx),
+	)
+	return err
 }
 
 func (b *Bot) Start(ctx context.Context) error {
@@ -365,6 +459,63 @@ func applicationCommands() []disgoDiscord.ApplicationCommandCreate {
 					Description: "Allow people to vote for multiple answers",
 					Required:    false,
 				},
+			},
+		},
+		disgoDiscord.SlashCommandCreate{
+			Name:        "reminder",
+			Description: "Create and manage Panda reminders",
+			Options: []disgoDiscord.ApplicationCommandOption{
+				disgoDiscord.ApplicationCommandOptionString{
+					Name:        "action",
+					Description: "Reminder action",
+					Required:    true,
+					Choices: []disgoDiscord.ApplicationCommandOptionChoiceString{
+						{Name: "Create", Value: "create"},
+						{Name: "List", Value: "list"},
+						{Name: "Cancel", Value: "cancel"},
+						{Name: "Complete", Value: "complete"},
+						{Name: "Snooze", Value: "snooze"},
+					},
+				},
+				disgoDiscord.ApplicationCommandOptionString{Name: "text", Description: "Reminder text", Required: false, MaxLength: &maxTextLength},
+				disgoDiscord.ApplicationCommandOptionString{Name: "when", Description: "When to run, such as 2026-06-22T18:00:00Z, in 2 hours, tomorrow, every friday", Required: false, MaxLength: &maxQuestionLength},
+				disgoDiscord.ApplicationCommandOptionString{Name: "every", Description: "Repeat interval such as 24h, every day, or every week", Required: false, MaxLength: &maxQuestionLength},
+				disgoDiscord.ApplicationCommandOptionString{
+					Name:        "target",
+					Description: "Reminder target",
+					Required:    false,
+					Choices: []disgoDiscord.ApplicationCommandOptionChoiceString{
+						{Name: "Me", Value: "me"},
+						{Name: "Channel", Value: "channel"},
+						{Name: "Role", Value: "role"},
+					},
+				},
+				disgoDiscord.ApplicationCommandOptionRole{Name: "role", Description: "Role target when target is role", Required: false},
+				disgoDiscord.ApplicationCommandOptionString{Name: "id", Description: "Reminder id for cancel, complete, or snooze", Required: false, MaxLength: &maxConfirmLength},
+				disgoDiscord.ApplicationCommandOptionBool{Name: "confirm_public", Description: "Confirm public or role-targeted reminder creation", Required: false},
+				dryRunOption,
+			},
+		},
+		disgoDiscord.SlashCommandCreate{
+			Name:        "schedule",
+			Description: "Schedule approved composed tools",
+			Options: []disgoDiscord.ApplicationCommandOption{
+				disgoDiscord.ApplicationCommandOptionString{
+					Name:        "action",
+					Description: "Schedule action",
+					Required:    true,
+					Choices: []disgoDiscord.ApplicationCommandOptionChoiceString{
+						{Name: "List", Value: "list"},
+						{Name: "Create", Value: "create"},
+						{Name: "Cancel", Value: "cancel"},
+					},
+				},
+				disgoDiscord.ApplicationCommandOptionString{Name: "tool_name", Description: "Approved composed tool name", Required: false, MaxLength: &maxConfirmLength},
+				disgoDiscord.ApplicationCommandOptionString{Name: "when", Description: "When to run", Required: false, MaxLength: &maxQuestionLength},
+				disgoDiscord.ApplicationCommandOptionString{Name: "every", Description: "Repeat interval", Required: false, MaxLength: &maxQuestionLength},
+				disgoDiscord.ApplicationCommandOptionString{Name: "input_json", Description: "JSON object input for the composed tool", Required: false, MaxLength: &maxTextLength},
+				disgoDiscord.ApplicationCommandOptionString{Name: "id", Description: "Schedule id for cancel", Required: false, MaxLength: &maxConfirmLength},
+				dryRunOption,
 			},
 		},
 		disgoDiscord.SlashCommandCreate{
@@ -598,6 +749,95 @@ func applicationCommands() []disgoDiscord.ApplicationCommandCreate {
 					Description: "Show recent privileged actions",
 				},
 				disgoDiscord.ApplicationCommandOptionSubCommand{
+					Name:        "status",
+					Description: "Show Panda setup, queues, schedules, alerts, and warnings",
+				},
+				disgoDiscord.ApplicationCommandOptionSubCommand{
+					Name:        "setup",
+					Description: "Run setup checklist and optionally save common defaults",
+					Options: []disgoDiscord.ApplicationCommandOption{
+						disgoDiscord.ApplicationCommandOptionRole{Name: "admin_role", Description: "Role to mark as Panda admin", Required: false},
+						disgoDiscord.ApplicationCommandOptionRole{Name: "moderator_role", Description: "Role to mark as Panda moderator", Required: false},
+						disgoDiscord.ApplicationCommandOptionChannel{
+							Name:        "channel",
+							Description: "Default channel to allow Panda assistant use",
+							Required:    false,
+							ChannelTypes: []disgoDiscord.ChannelType{
+								disgoDiscord.ChannelTypeGuildText,
+								disgoDiscord.ChannelTypeGuildNews,
+								disgoDiscord.ChannelTypeGuildForum,
+								disgoDiscord.ChannelTypeGuildPublicThread,
+								disgoDiscord.ChannelTypeGuildNewsThread,
+								disgoDiscord.ChannelTypeGuildPrivateThread,
+							},
+						},
+						dryRunOption,
+					},
+				},
+				disgoDiscord.ApplicationCommandOptionSubCommand{
+					Name:        "alerts",
+					Description: "Manage recommended moderation and server-log alert packs",
+					Options: []disgoDiscord.ApplicationCommandOption{
+						disgoDiscord.ApplicationCommandOptionString{
+							Name:        "action",
+							Description: "Alert action",
+							Required:    true,
+							Choices: []disgoDiscord.ApplicationCommandOptionChoiceString{
+								{Name: "Preview", Value: "preview"},
+								{Name: "List", Value: "list"},
+								{Name: "Enable", Value: "enable"},
+								{Name: "Disable", Value: "disable"},
+								{Name: "Test", Value: "test"},
+							},
+						},
+						disgoDiscord.ApplicationCommandOptionString{
+							Name:        "pack",
+							Description: "Alert pack",
+							Required:    false,
+							Choices: []disgoDiscord.ApplicationCommandOptionChoiceString{
+								{Name: "Security", Value: "security"},
+								{Name: "Moderation", Value: "moderation"},
+								{Name: "Community", Value: "community"},
+								{Name: "All", Value: "all"},
+							},
+						},
+						disgoDiscord.ApplicationCommandOptionChannel{
+							Name:        "channel",
+							Description: "Alert destination channel",
+							Required:    false,
+							ChannelTypes: []disgoDiscord.ChannelType{
+								disgoDiscord.ChannelTypeGuildText,
+								disgoDiscord.ChannelTypeGuildNews,
+							},
+						},
+						dryRunOption,
+					},
+				},
+				disgoDiscord.ApplicationCommandOptionSubCommand{
+					Name:        "feedback",
+					Description: "Show private aggregate assistant feedback trends",
+				},
+				disgoDiscord.ApplicationCommandOptionSubCommand{
+					Name:        "music",
+					Description: "Configure per-server music settings",
+					Options: []disgoDiscord.ApplicationCommandOption{
+						disgoDiscord.ApplicationCommandOptionString{
+							Name:        "loop_mode",
+							Description: "Default loop mode",
+							Required:    false,
+							Choices: []disgoDiscord.ApplicationCommandOptionChoiceString{
+								{Name: "Off", Value: "off"},
+								{Name: "Track", Value: "track"},
+								{Name: "Queue", Value: "queue"},
+							},
+						},
+						disgoDiscord.ApplicationCommandOptionString{Name: "default_volume", Description: "Default volume percentage 1-200", Required: false, MaxLength: &maxConfirmLength},
+						disgoDiscord.ApplicationCommandOptionRole{Name: "dj_role", Description: "Role allowed to use disruptive music controls", Required: false},
+						disgoDiscord.ApplicationCommandOptionString{Name: "vote_skip_threshold", Description: "Vote skip threshold from 0.1 to 1", Required: false, MaxLength: &maxConfirmLength},
+						dryRunOption,
+					},
+				},
+				disgoDiscord.ApplicationCommandOptionSubCommand{
 					Name:        "enable",
 					Description: "Enable assistant responses",
 					Options: []disgoDiscord.ApplicationCommandOption{
@@ -659,7 +899,7 @@ func (b *Bot) handleSlashCommand(event *events.ApplicationCommandInteractionCrea
 	if allowMultiselect, ok := data.OptBool("allow_multiselect"); ok && allowMultiselect {
 		request.Options["allow_multiselect"] = "true"
 	}
-	for _, name := range []string{"model", "fallback_models", "temperature", "max_response_tokens", "max_tokens", "tool_policy", "prompt", "soul", "action", "confirm", "tool_name", "profile"} {
+	for _, name := range []string{"model", "fallback_models", "temperature", "max_response_tokens", "max_tokens", "tool_policy", "prompt", "soul", "action", "confirm", "tool_name", "profile", "text", "when", "every", "target", "id", "pack", "input_json", "loop_mode", "default_volume", "vote_skip_threshold"} {
 		if value, ok := data.OptString(name); ok {
 			request.Options[name] = value
 		}
@@ -667,6 +907,18 @@ func (b *Bot) handleSlashCommand(event *events.ApplicationCommandInteractionCrea
 	if role, ok := data.OptRole("role"); ok {
 		request.Options["role_id"] = role.ID.String()
 		request.Options["role_name"] = role.Name
+	}
+	if role, ok := data.OptRole("admin_role"); ok {
+		request.Options["admin_role_id"] = role.ID.String()
+		request.Options["admin_role_name"] = role.Name
+	}
+	if role, ok := data.OptRole("moderator_role"); ok {
+		request.Options["moderator_role_id"] = role.ID.String()
+		request.Options["moderator_role_name"] = role.Name
+	}
+	if role, ok := data.OptRole("dj_role"); ok {
+		request.Options["dj_role_id"] = role.ID.String()
+		request.Options["dj_role_name"] = role.Name
 	}
 	if channel, ok := data.OptChannel("channel"); ok {
 		request.Options["channel_id"] = channel.ID.String()
@@ -678,6 +930,9 @@ func (b *Bot) handleSlashCommand(event *events.ApplicationCommandInteractionCrea
 	}
 	if dryRun, ok := data.OptBool("dry_run"); ok && dryRun {
 		request.Options["dry_run"] = "true"
+	}
+	if confirmPublic, ok := data.OptBool("confirm_public"); ok && confirmPublic {
+		request.Options["confirm_public"] = "true"
 	}
 	b.respondToInteraction(event, request)
 }
@@ -911,6 +1166,13 @@ func (b *Bot) onButtonInteraction(event *events.ComponentInteractionCreate) {
 	}
 
 	baseRequest := b.requestFromComponentEvent(event)
+	if feedbackRequest, ok := commands.RequestFromFeedbackID(customID, baseRequest); ok {
+		response := b.router.HandleFeedback(context.Background(), feedbackRequest)
+		if err := event.CreateMessage(messageCreateFromResponse(response)); err != nil {
+			b.logger.Warn("failed to respond to feedback", slog.Any("err", err))
+		}
+		return
+	}
 	if confirmedToolRequest, ok := commands.RequestFromToolConfirmationID(customID, baseRequest); ok {
 		response := b.router.HandleToolConfirmation(context.Background(), confirmedToolRequest)
 		if err := event.UpdateMessage(messageUpdateFromResponse(response)); err != nil {
@@ -1374,6 +1636,16 @@ func componentsFromResponse(response commands.Response) []disgoDiscord.LayoutCom
 			disgoDiscord.NewSecondaryButton(cancelLabel, cancelID),
 		))
 	}
+	if response.Feedback != nil && response.Feedback.TargetID != 0 {
+		buttons := []disgoDiscord.InteractiveComponent{
+			disgoDiscord.NewSecondaryButton("Helpful", commands.FeedbackButtonID(response.Feedback.TargetID, "helpful")),
+			disgoDiscord.NewSecondaryButton("Not helpful", commands.FeedbackButtonID(response.Feedback.TargetID, "not_helpful")),
+			disgoDiscord.NewSecondaryButton("Too long", commands.FeedbackButtonID(response.Feedback.TargetID, "too_long")),
+			disgoDiscord.NewSecondaryButton("Wrong", commands.FeedbackButtonID(response.Feedback.TargetID, "wrong")),
+			disgoDiscord.NewDangerButton("Unsafe", commands.FeedbackButtonID(response.Feedback.TargetID, "unsafe")),
+		}
+		components = append(components, disgoDiscord.NewActionRow(buttons...))
+	}
 	if buttons := actionButtonsFromResponse(response.Actions); len(buttons) > 0 {
 		components = append(components, disgoDiscord.NewActionRow(buttons...))
 	}
@@ -1488,7 +1760,7 @@ func (b *Bot) onMessageCreate(event *events.MessageCreate) {
 		UserID:         event.Message.Author.ID.String(),
 		RoleIDs:        messageRoleIDs(event.Message.Member),
 		IsOwner:        b.cfg.IsOwner(event.Message.Author.ID.String()),
-		IsGuildAdmin:   b.isMessageGuildOwner(event, event.Message.Author.ID),
+		IsGuildAdmin:   b.isMessageGuildAdmin(event, event.Message.Author.ID),
 	}
 	reference := messageReferenceFromMessage(event.Message)
 	go b.respondToNaturalMessage(context.Background(), event.ChannelID, reference, request)
@@ -1567,6 +1839,60 @@ func discordReplyAllowedMentions() *disgoDiscord.AllowedMentions {
 		Users:       []snowflake.ID{},
 		RepliedUser: false,
 	}
+}
+
+func noAllowedMentions() *disgoDiscord.AllowedMentions {
+	return &disgoDiscord.AllowedMentions{
+		Parse:       []disgoDiscord.AllowedMentionType{},
+		Roles:       []snowflake.ID{},
+		Users:       []snowflake.ID{},
+		RepliedUser: false,
+	}
+}
+
+func scheduledMessageContent(delivery scheduler.Delivery) (string, *disgoDiscord.AllowedMentions) {
+	title := strings.TrimSpace(delivery.Title)
+	if title == "" {
+		title = "Reminder"
+	}
+	message := security.SanitizeDiscordContent(delivery.Message)
+	mentions := noAllowedMentions()
+	prefix := ""
+	switch delivery.TargetType {
+	case scheduler.TargetUser:
+		if userID, err := snowflake.Parse(delivery.TargetID); err == nil {
+			prefix = "<@" + userID.String() + "> "
+			mentions.Users = []snowflake.ID{userID}
+		}
+	case scheduler.TargetRole:
+		if roleID, err := snowflake.Parse(delivery.TargetID); err == nil {
+			prefix = "<@&" + roleID.String() + "> "
+			mentions.Roles = []snowflake.ID{roleID}
+		}
+	}
+	return fmt.Sprintf("%s**%s**\n%s", prefix, title, message), mentions
+}
+
+func alertMessageContent(delivery alertsvc.Delivery) string {
+	lines := []string{
+		fmt.Sprintf("**Panda alert: %s**", strings.TrimSpace(delivery.Pack)),
+		fmt.Sprintf("- risk: `%s`", firstNonEmptyText(delivery.Risk, "unknown")),
+		fmt.Sprintf("- event: `%s`", firstNonEmptyText(delivery.EventType, "unknown")),
+		"- summary: " + security.SanitizeDiscordContent(firstNonEmptyText(delivery.Summary, "Discord event recorded.")),
+	}
+	if strings.TrimSpace(delivery.ActorID) != "" {
+		lines = append(lines, "- actor: `"+delivery.ActorID+"`")
+	}
+	if strings.TrimSpace(delivery.TargetID) != "" {
+		lines = append(lines, "- target: `"+delivery.TargetID+"`")
+	}
+	if strings.TrimSpace(delivery.Suggested) != "" {
+		lines = append(lines, "- next: "+security.SanitizeDiscordContent(delivery.Suggested))
+	}
+	if pending := alertsvc.FormatPending(delivery.PendingCount); pending != "" {
+		lines = append(lines, strings.TrimSpace(pending))
+	}
+	return strings.Join(lines, "\n")
 }
 
 func startTypingIndicator(ctx context.Context, sender typingSender, logger *slog.Logger, channelID snowflake.ID, requestID string, interval time.Duration) func() {
@@ -1758,12 +2084,34 @@ func (b *Bot) isModalGuildAdmin(event *events.ModalSubmitInteractionCreate) bool
 	return b.userOwnsEventGuild(event.User().ID, guild, ok, event.GuildID())
 }
 
-func (b *Bot) isMessageGuildOwner(event *events.MessageCreate, userID snowflake.ID) bool {
+func (b *Bot) isMessageGuildAdmin(event *events.MessageCreate, userID snowflake.ID) bool {
 	if event == nil {
 		return false
 	}
+	if guildID := messageEventGuildID(event); guildID != nil && memberHasAdministratorRole(event.Message.Member, *guildID, b.messageRole) {
+		return true
+	}
 	guild, ok := event.Guild()
 	return b.userOwnsEventGuild(userID, guild, ok, messageEventGuildID(event))
+}
+
+func (b *Bot) messageRole(guildID, roleID snowflake.ID) (disgoDiscord.Role, bool) {
+	if b == nil || b.client == nil {
+		return disgoDiscord.Role{}, false
+	}
+	if b.client.Caches != nil {
+		if role, ok := b.client.Caches.Role(guildID, roleID); ok {
+			return role, true
+		}
+	}
+	if b.client.Rest == nil {
+		return disgoDiscord.Role{}, false
+	}
+	role, err := b.client.Rest.GetRole(guildID, roleID)
+	if err != nil || role == nil {
+		return disgoDiscord.Role{}, false
+	}
+	return *role, true
 }
 
 func messageEventGuildID(event *events.MessageCreate) *snowflake.ID {
@@ -1803,6 +2151,20 @@ func memberIsGuildAdmin(member *disgoDiscord.ResolvedMember) bool {
 		return false
 	}
 	return member.Permissions.Has(disgoDiscord.PermissionAdministrator)
+}
+
+func memberHasAdministratorRole(member *disgoDiscord.Member, guildID snowflake.ID, roleLookup func(guildID, roleID snowflake.ID) (disgoDiscord.Role, bool)) bool {
+	if member == nil || guildID == 0 || roleLookup == nil {
+		return false
+	}
+	roleIDs := append([]snowflake.ID{guildID}, member.RoleIDs...)
+	for _, roleID := range roleIDs {
+		role, ok := roleLookup(guildID, roleID)
+		if ok && role.Permissions.Has(disgoDiscord.PermissionAdministrator) {
+			return true
+		}
+	}
+	return false
 }
 
 func messageRoleIDs(member *disgoDiscord.Member) []string {
