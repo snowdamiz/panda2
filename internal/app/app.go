@@ -103,7 +103,9 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 		_ = dataStore.Close()
 		return nil, err
 	}
-	discord.WithAttachmentRecorder(attachments).WithDiscordEventRecorder(discordEvents).WithJobQueue(jobs)
+	discord.WithAttachmentRecorder(attachments).
+		WithDiscordEventRecorder(discordEvents).
+		WithJobQueue(jobs)
 	if contextService := discord.ContextService(); contextService != nil {
 		toolExecutor.WithContextReader(contextService)
 	}
@@ -111,7 +113,7 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 		toolExecutor.WithDiscordToolProvider(provider)
 		composedService.WithDiscordResolver(provider)
 	}
-	installService := discordbot.NewInstallService(guilds, audit, discord)
+	installService := discordbot.NewInstallService(guilds, audit)
 	worker.Register(discordbot.InteractionJobKind, discord.HandleInteractionJob)
 	worker.Register(composed.EventJobKind, composedService.HandleEventJob)
 	worker.Register(composed.RunJobKind, composedService.HandleRunJob)

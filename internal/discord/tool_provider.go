@@ -14,6 +14,7 @@ import (
 	"github.com/disgoorg/omit"
 	"github.com/disgoorg/snowflake/v2"
 	"github.com/sn0w/panda2/internal/composed"
+	"github.com/sn0w/panda2/internal/polls"
 	"github.com/sn0w/panda2/internal/repository"
 	"github.com/sn0w/panda2/internal/security"
 	"github.com/sn0w/panda2/internal/store"
@@ -84,6 +85,9 @@ func (p *ToolProvider) discordToolHandlers() map[string]discordToolHandler {
 		"discord.reply_message":               p.withoutContext(p.replyMessage),
 		"discord.edit_own_message":            p.withoutContext(p.editOwnMessage),
 		"discord.delete_own_message":          p.withoutContext(p.deleteOwnMessage),
+		"discord.create_poll":                 p.withoutContext(p.createPoll),
+		"discord.get_poll_answer_voters":      p.withoutContext(p.getPollAnswerVoters),
+		"discord.end_poll":                    p.withoutContext(p.endPoll),
 		"discord.add_reaction":                p.withoutContext(p.addReaction),
 		"discord.remove_own_reaction":         p.withoutContext(p.removeOwnReaction),
 		"discord.create_thread":               p.withoutContext(p.createThread),
@@ -255,6 +259,82 @@ func (p *ToolProvider) deleteOwnMessage(request tools.DiscordToolRequest) (any, 
 		return nil, err
 	}
 	return map[string]any{"deleted": true, "channel_id": channelID.String(), "message_id": messageID.String()}, nil
+}
+
+func (p *ToolProvider) createPoll(request tools.DiscordToolRequest) (any, error) {
+	channelID, err := snowflakeArg(request.Arguments, "channel_id")
+	if err != nil {
+		return nil, err
+	}
+	poll, err := pollFromArguments(request.Arguments)
+	if err != nil {
+		return nil, err
+	}
+	messageCreate := disgoDiscord.NewMessageCreate().
+		WithPoll(pollCreateFromPoll(poll)).
+		WithAllowedMentions(allowedMentionsArg(request.Arguments))
+	if content := strings.TrimSpace(stringArg(request.Arguments, "content", "")); content != "" {
+		messageCreate = messageCreate.WithContent(security.SafeDiscordContent(content))
+	}
+	message, err := p.rest.CreateMessage(channelID, messageCreate)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{
+		"created":    true,
+		"message_id": message.ID.String(),
+		"channel_id": message.ChannelID.String(),
+		"poll":       pollPreview(poll),
+		"message":    messageSummary(*message),
+	}, nil
+}
+
+func (p *ToolProvider) getPollAnswerVoters(request tools.DiscordToolRequest) (any, error) {
+	channelID, messageID, err := messageTargetArgs(request.Arguments)
+	if err != nil {
+		return nil, err
+	}
+	answerID := intArg(request.Arguments, "answer_id", 0)
+	if answerID <= 0 {
+		return nil, fmt.Errorf("answer_id is required")
+	}
+	after := optionalSnowflakeValue(request.Arguments, "after")
+	limit := limitArg(request, 25)
+	users, err := p.rest.GetPollAnswerVotes(channelID, messageID, answerID, after, limit)
+	if err != nil {
+		return nil, err
+	}
+	summaries := make([]map[string]any, 0, len(users))
+	for _, user := range users {
+		summaries = append(summaries, userSummary(user))
+	}
+	return map[string]any{
+		"channel_id": channelID.String(),
+		"message_id": messageID.String(),
+		"answer_id":  answerID,
+		"count":      len(summaries),
+		"users":      summaries,
+	}, nil
+}
+
+func (p *ToolProvider) endPoll(request tools.DiscordToolRequest) (any, error) {
+	channelID, messageID, err := messageTargetArgs(request.Arguments)
+	if err != nil {
+		return nil, err
+	}
+	if err := p.ensureOwnMessage(channelID, messageID); err != nil {
+		return nil, err
+	}
+	message, err := p.rest.ExpirePoll(channelID, messageID)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{
+		"ended":      true,
+		"channel_id": channelID.String(),
+		"message_id": messageID.String(),
+		"message":    messageSummary(*message),
+	}, nil
 }
 
 func (p *ToolProvider) ensureOwnMessage(channelID, messageID snowflake.ID) error {
@@ -1604,6 +1684,123 @@ func reasonOpt(request tools.DiscordToolRequest) []rest.RequestOpt {
 	return []rest.RequestOpt{rest.WithReason(truncateDiscordToolText(reason, 512))}
 }
 
+func pollFromArguments(arguments map[string]any) (polls.Poll, error) {
+	question := strings.TrimSpace(stringArg(arguments, "question", ""))
+	durationHours := intArg(arguments, "duration_hours", 0)
+	if durationHours == 0 {
+		durationHours = intArg(arguments, "duration", 0)
+	}
+	allowMultiselect := boolArg(arguments, "allow_multiselect") || boolArg(arguments, "multiselect")
+	return polls.New(question, pollAnswersArg(arguments), durationHours, allowMultiselect)
+}
+
+func pollAnswersArg(arguments map[string]any) []polls.Answer {
+	value, ok := arguments["answers"]
+	if !ok || value == nil {
+		return nil
+	}
+	var answers []polls.Answer
+	switch typed := value.(type) {
+	case []any:
+		answers = make([]polls.Answer, 0, len(typed))
+		for _, item := range typed {
+			if answer, ok := pollAnswerFromValue(item); ok {
+				answers = append(answers, answer)
+			}
+		}
+	case []string:
+		answers = make([]polls.Answer, 0, len(typed))
+		for _, text := range typed {
+			answers = append(answers, polls.Answer{Text: text})
+		}
+	case string:
+		answers = polls.ParseAnswers(typed)
+	}
+	emojis := delimitedStringArg(arguments, "answer_emojis")
+	for index := range answers {
+		if index >= len(emojis) {
+			break
+		}
+		if strings.TrimSpace(answers[index].Emoji) == "" {
+			answers[index].Emoji = emojis[index]
+		}
+	}
+	return answers
+}
+
+func pollAnswerFromValue(value any) (polls.Answer, bool) {
+	switch typed := value.(type) {
+	case string:
+		text := strings.TrimSpace(typed)
+		return polls.Answer{Text: text}, text != ""
+	case map[string]any:
+		text := firstNonEmptyText(stringArg(typed, "text", ""), stringArg(typed, "answer", ""), stringArg(typed, "label", ""))
+		emoji := firstNonEmptyText(stringArg(typed, "emoji", ""), stringArg(typed, "emoji_id", ""))
+		return polls.Answer{Text: text, Emoji: emoji}, strings.TrimSpace(text) != ""
+	default:
+		text := strings.TrimSpace(fmt.Sprint(value))
+		return polls.Answer{Text: text}, text != ""
+	}
+}
+
+func delimitedStringArg(arguments map[string]any, name string) []string {
+	value, ok := arguments[name]
+	if !ok || value == nil {
+		return nil
+	}
+	switch typed := value.(type) {
+	case []any:
+		values := make([]string, 0, len(typed))
+		for _, item := range typed {
+			text := strings.TrimSpace(fmt.Sprint(item))
+			if text != "" {
+				values = append(values, text)
+			}
+		}
+		return values
+	case []string:
+		values := make([]string, 0, len(typed))
+		for _, item := range typed {
+			text := strings.TrimSpace(item)
+			if text != "" {
+				values = append(values, text)
+			}
+		}
+		return values
+	case string:
+		fields := strings.FieldsFunc(typed, func(r rune) bool {
+			return r == ',' || r == '|' || r == '\n' || r == ';' || r == '\t'
+		})
+		values := make([]string, 0, len(fields))
+		for _, field := range fields {
+			text := strings.TrimSpace(field)
+			if text != "" {
+				values = append(values, text)
+			}
+		}
+		return values
+	default:
+		return nil
+	}
+}
+
+func pollPreview(poll polls.Poll) map[string]any {
+	answers := make([]map[string]any, 0, len(poll.Answers))
+	for index, answer := range poll.Answers {
+		answers = append(answers, map[string]any{
+			"position": index + 1,
+			"text":     answer.Text,
+			"emoji":    answer.Emoji,
+		})
+	}
+	return map[string]any{
+		"question":          poll.Question,
+		"answers":           answers,
+		"duration_hours":    poll.DurationHours,
+		"allow_multiselect": poll.AllowMultiselect,
+	}
+}
+
 func reactionArgs(arguments map[string]any) (snowflake.ID, snowflake.ID, string, error) {
 	channelID, messageID, err := messageTargetArgs(arguments)
 	if err != nil {
@@ -2222,7 +2419,7 @@ func messageSummary(message disgoDiscord.Message) map[string]any {
 			"url":         embed.URL,
 		})
 	}
-	return map[string]any{
+	summary := map[string]any{
 		"guild_id":           guildID,
 		"channel_id":         message.ChannelID.String(),
 		"message_id":         message.ID.String(),
@@ -2241,6 +2438,67 @@ func messageSummary(message disgoDiscord.Message) map[string]any {
 		"message_type":       fmt.Sprint(message.Type),
 		"attachment_count":   len(message.Attachments),
 		"embed_count":        len(message.Embeds),
+	}
+	if message.Poll != nil {
+		summary["poll"] = pollSummary(*message.Poll)
+	}
+	return summary
+}
+
+func pollSummary(poll disgoDiscord.Poll) map[string]any {
+	answers := make([]map[string]any, 0, len(poll.Answers))
+	for _, answer := range poll.Answers {
+		answerSummary := map[string]any{
+			"text": pollMediaText(answer.PollMedia),
+		}
+		if answer.AnswerID != nil {
+			answerSummary["answer_id"] = *answer.AnswerID
+		}
+		if answer.PollMedia.Emoji != nil {
+			answerSummary["emoji"] = pollEmojiSummary(*answer.PollMedia.Emoji)
+		}
+		answers = append(answers, answerSummary)
+	}
+	summary := map[string]any{
+		"question":          pollMediaText(poll.Question),
+		"answers":           answers,
+		"expiry":            timePtrValue(poll.Expiry),
+		"allow_multiselect": poll.AllowMultiselect,
+		"layout_type":       int(poll.LayoutType),
+	}
+	if poll.Results != nil {
+		answerCounts := make([]map[string]any, 0, len(poll.Results.AnswerCounts))
+		for _, count := range poll.Results.AnswerCounts {
+			answerCounts = append(answerCounts, map[string]any{
+				"answer_id": count.ID,
+				"count":     count.Count,
+				"me_voted":  count.MeVoted,
+			})
+		}
+		summary["results"] = map[string]any{
+			"is_finalized":  poll.Results.IsFinalized,
+			"answer_counts": answerCounts,
+		}
+	}
+	return summary
+}
+
+func pollMediaText(media disgoDiscord.PollMedia) string {
+	if media.Text == nil {
+		return ""
+	}
+	return *media.Text
+}
+
+func pollEmojiSummary(emoji disgoDiscord.PartialEmoji) map[string]any {
+	id := ""
+	if emoji.ID != nil {
+		id = emoji.ID.String()
+	}
+	return map[string]any{
+		"id":       id,
+		"name":     stringPtrValue(emoji.Name),
+		"animated": emoji.Animated,
 	}
 }
 

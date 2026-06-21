@@ -169,6 +169,42 @@ func TestRouterPing(t *testing.T) {
 	}
 }
 
+func TestHandlePollCreatesNativePollResponse(t *testing.T) {
+	router := newTestRouter(t, &fakeLLM{}, 5)
+	response := router.Handle(context.Background(), Request{
+		Command: "poll",
+		Options: map[string]string{
+			"question":          "Where should lunch be?",
+			"answers":           "Tacos | Pizza | Sushi",
+			"duration_hours":    "12",
+			"allow_multiselect": "true",
+		},
+	})
+	if response.Poll == nil {
+		t.Fatalf("expected poll response, got %+v", response)
+	}
+	if response.Poll.Question != "Where should lunch be?" || len(response.Poll.Answers) != 3 || response.Poll.DurationHours != 12 || !response.Poll.AllowMultiselect {
+		t.Fatalf("unexpected poll response: %+v", response.Poll)
+	}
+	if response.Content != "" || response.Ephemeral {
+		t.Fatalf("native poll response should not add text or be ephemeral: %+v", response)
+	}
+}
+
+func TestHandlePollRejectsInvalidPoll(t *testing.T) {
+	router := newTestRouter(t, &fakeLLM{}, 5)
+	response := router.Handle(context.Background(), Request{
+		Command: "poll",
+		Options: map[string]string{
+			"question": "Lunch?",
+			"answers":  "Only one",
+		},
+	})
+	if response.Poll != nil || !response.Ephemeral || !strings.Contains(response.Content, "at least 2 answers") {
+		t.Fatalf("expected validation response, got %+v", response)
+	}
+}
+
 func TestRouterHelpHidesElevatedGuidanceFromRegularUsers(t *testing.T) {
 	router := newTestRouter(t, &fakeLLM{}, 5)
 	response := router.Handle(context.Background(), Request{Command: "help", UserID: "user-1"})
@@ -214,6 +250,7 @@ func TestRouterHelpShowsAdminGuidanceToGuildAdmins(t *testing.T) {
 		"- `/admin role action:list|set|remove profile:admin|moderator role:@Role` - Panda role profiles",
 		"- `/admin member-role action:add|remove user:@User role:@Role` - assign Discord roles to users",
 		"- `/admin tool action:list|add|remove tool_name:<tool> role:@Role` - role tool grants",
+		"- `/admin channel action:list|allow|deny|remove channel:#Channel`",
 		"- `/admin model model:<slug> fallback_models:<csv> temperature:<0-2> max_response_tokens:<64-4000> tool_policy:<policy> dry_run:<bool>`",
 		"- Policies: `off`, `read_only`, `assistive`, `admin_only`, `moderator`, `write_confirmed`, `owner_ops`",
 		"- `/admin prompt prompt:<text> dry_run:<bool>` - server instructions; omit `prompt` for modal",
@@ -313,7 +350,7 @@ func TestAdminRoleProfileRequiresGuildControl(t *testing.T) {
 		UserID:     "user-1",
 		Options:    map[string]string{"action": "set", "profile": "admin", "role_id": "role-admin"},
 	})
-	if !response.Ephemeral || !strings.Contains(response.Content, "Only the installing server owner") {
+	if !response.Ephemeral || !strings.Contains(response.Content, "Only the Panda owner") {
 		t.Fatalf("expected denial response, got %+v", response)
 	}
 }
@@ -358,6 +395,85 @@ func TestAdminRoleProfileConfiguresDelegatedAdminRole(t *testing.T) {
 	}
 }
 
+func TestAdminChannelAccessAllowListsAssistantUse(t *testing.T) {
+	ctx := context.Background()
+	router := newTestRouter(t, &fakeLLM{response: llm.ChatResponse{Content: "ok"}}, 5)
+
+	empty := router.Handle(ctx, Request{
+		Command:      "admin",
+		Subcommand:   "channel",
+		GuildID:      "guild-1",
+		UserID:       "admin",
+		IsGuildAdmin: true,
+		Options:      map[string]string{"action": "list"},
+	})
+	if !empty.Ephemeral || !strings.Contains(empty.Content, "No channel access rules") {
+		t.Fatalf("expected empty channel rule list, got %+v", empty)
+	}
+
+	allowed := router.Handle(ctx, Request{
+		Command:      "admin",
+		Subcommand:   "channel",
+		GuildID:      "guild-1",
+		UserID:       "admin",
+		IsGuildAdmin: true,
+		Options: map[string]string{
+			"action":       "allow",
+			"channel_id":   "channel-allowed",
+			"channel_name": "panda",
+		},
+	})
+	if !allowed.Ephemeral || !strings.Contains(allowed.Content, "Allowed Panda assistant use") || !strings.Contains(allowed.Content, "#panda") {
+		t.Fatalf("expected channel allow response, got %+v", allowed)
+	}
+
+	denied := router.Handle(ctx, Request{
+		Command:   "ask",
+		GuildID:   "guild-1",
+		ChannelID: "channel-other",
+		UserID:    "user-1",
+		Options:   map[string]string{"question": "hi"},
+	})
+	if !denied.Ephemeral || !strings.Contains(denied.Content, "permission") {
+		t.Fatalf("expected non-allowed channel denial, got %+v", denied)
+	}
+
+	answer := router.Handle(ctx, Request{
+		Command:   "ask",
+		GuildID:   "guild-1",
+		ChannelID: "channel-allowed",
+		UserID:    "user-1",
+		Options:   map[string]string{"question": "hi"},
+	})
+	if answer.Content != "ok" {
+		t.Fatalf("expected allowed channel answer, got %+v", answer)
+	}
+
+	list := router.Handle(ctx, Request{
+		Command:      "admin",
+		Subcommand:   "channel",
+		GuildID:      "guild-1",
+		UserID:       "admin",
+		IsGuildAdmin: true,
+		Options:      map[string]string{"action": "list"},
+	})
+	if !strings.Contains(list.Content, "allow-list active") || !strings.Contains(list.Content, "channel-allowed") {
+		t.Fatalf("expected allow-list details, got %+v", list)
+	}
+
+	removed := router.Handle(ctx, Request{
+		Command:      "admin",
+		Subcommand:   "channel",
+		GuildID:      "guild-1",
+		UserID:       "admin",
+		IsGuildAdmin: true,
+		Options:      map[string]string{"action": "remove", "channel_id": "channel-allowed"},
+	})
+	if !removed.Ephemeral || !strings.Contains(removed.Content, "Removed Panda channel access rule") {
+		t.Fatalf("expected channel remove response, got %+v", removed)
+	}
+}
+
 func TestAdminRoleProfileConfiguresModeratorRole(t *testing.T) {
 	ctx := context.Background()
 	router := newTestRouter(t, &fakeLLM{}, 5)
@@ -384,6 +500,67 @@ func TestAdminRoleProfileConfiguresModeratorRole(t *testing.T) {
 	list := router.Handle(ctx, Request{Command: "admin", Subcommand: "role", GuildID: "guild-1", UserID: "owner", IsGuildAdmin: true, Options: map[string]string{"action": "list"}})
 	if !strings.Contains(list.Content, "moderator: `role-pickle`") {
 		t.Fatalf("expected role profile list to include moderator role, got %+v", list)
+	}
+}
+
+func TestAdminRoleProfileCanReuseSameRoleForAdminAndModerator(t *testing.T) {
+	ctx := context.Background()
+	router := newTestRouter(t, &fakeLLM{}, 5)
+	ownerRequest := Request{
+		Command:      "admin",
+		Subcommand:   "role",
+		GuildID:      "guild-1",
+		UserID:       "owner",
+		IsGuildAdmin: true,
+	}
+
+	adminRequest := ownerRequest
+	adminRequest.Options = map[string]string{"action": "set", "profile": "admin", "role_id": "role-staff"}
+	adminResponse := router.Handle(ctx, adminRequest)
+	if !adminResponse.Ephemeral || !strings.Contains(adminResponse.Content, "`role-staff` is now a Panda admin role") {
+		t.Fatalf("expected admin role profile response, got %+v", adminResponse)
+	}
+
+	modRequest := ownerRequest
+	modRequest.Options = map[string]string{"action": "set", "profile": "moderator", "role_id": "role-staff"}
+	modResponse := router.Handle(ctx, modRequest)
+	if !modResponse.Ephemeral || !strings.Contains(modResponse.Content, "`role-staff` is now a Panda moderator role") {
+		t.Fatalf("expected moderator role profile response, got %+v", modResponse)
+	}
+
+	listRequest := ownerRequest
+	listRequest.Options = map[string]string{"action": "list"}
+	list := router.Handle(ctx, listRequest)
+	for _, want := range []string{"admin: `role-staff`", "moderator: `role-staff`"} {
+		if !strings.Contains(list.Content, want) {
+			t.Fatalf("expected combined role profile list to include %q, got %+v", want, list)
+		}
+	}
+
+	staffAccess := admin.AssistantAccessRequest{GuildID: "guild-1", RoleIDs: []string{"role-staff"}}
+	for name, check := range map[string]func(context.Context, admin.AssistantAccessRequest) (bool, error){
+		"config write":   router.admin.CanWriteConfig,
+		"moderation use": router.admin.CanUseModeration,
+	} {
+		allowed, err := check(ctx, staffAccess)
+		if err != nil || !allowed {
+			t.Fatalf("expected combined role to allow %s, allowed=%t err=%v", name, allowed, err)
+		}
+	}
+
+	removeAdminRequest := ownerRequest
+	removeAdminRequest.Options = map[string]string{"action": "remove", "profile": "admin", "role_id": "role-staff"}
+	removeAdmin := router.Handle(ctx, removeAdminRequest)
+	if !removeAdmin.Ephemeral || !strings.Contains(removeAdmin.Content, "Removed the Panda admin profile") {
+		t.Fatalf("expected admin profile removal response, got %+v", removeAdmin)
+	}
+	allowed, err := router.admin.CanWriteConfig(ctx, staffAccess)
+	if err != nil || allowed {
+		t.Fatalf("expected removed admin profile to stop config write, allowed=%t err=%v", allowed, err)
+	}
+	allowed, err = router.admin.CanUseModeration(ctx, staffAccess)
+	if err != nil || !allowed {
+		t.Fatalf("expected moderator profile to keep working after admin removal, allowed=%t err=%v", allowed, err)
 	}
 }
 
@@ -942,6 +1119,7 @@ func TestHandleToolConfirmationAssignsMemberRole(t *testing.T) {
 }
 
 func TestLLMToolConfirmationRendersButton(t *testing.T) {
+	const channelID = "100000000000000123"
 	client := &fakeLLM{responses: []llm.ChatResponse{
 		{
 			Model:   "fixture/model",
@@ -951,7 +1129,7 @@ func TestLLMToolConfirmationRendersButton(t *testing.T) {
 				Type: "function",
 				Function: llm.ToolCallFunction{
 					Name:      "panda_manage_channel_rule",
-					Arguments: `{"action":"remove","channel_id":"channel-1"}`,
+					Arguments: `{"action":"remove","channel_id":"100000000000000123"}`,
 				},
 			}},
 		},
@@ -976,13 +1154,13 @@ func TestLLMToolConfirmationRendersButton(t *testing.T) {
 		ChannelID:    "channel-1",
 		UserID:       "admin",
 		IsGuildAdmin: true,
-		Options:      map[string]string{"question": "Panda remove the channel rule for channel-1"},
+		Options:      map[string]string{"question": "Panda remove the channel rule for " + channelID},
 	})
 	if response.Confirmation == nil || !response.Confirmation.Danger || !strings.Contains(response.Content, "confirmation button") {
 		t.Fatalf("expected LLM-triggered confirmation response, got %+v", response)
 	}
 	request, ok := RequestFromToolConfirmationID(response.Confirmation.ID, Request{UserID: "admin"})
-	if !ok || request.Action != toolActionChannelRuleRemove || request.Options["channel_id"] != "channel-1" {
+	if !ok || request.Action != toolActionChannelRuleRemove || request.Options["channel_id"] != channelID {
 		t.Fatalf("unexpected rendered confirmation id: request=%+v ok=%t", request, ok)
 	}
 	if len(client.requests) != 2 || len(client.requests[0].Tools) == 0 {
@@ -1095,6 +1273,55 @@ func TestNaturalMessageUsesInlineChat(t *testing.T) {
 	}
 	if !strings.Contains(joinRequestMessages(client.requests[0]), "Bot mentioned: true") {
 		t.Fatalf("expected trigger request to include mention metadata: %+v", client.requests[0])
+	}
+}
+
+func TestNaturalMessageCreatesNativePollWithoutLLM(t *testing.T) {
+	client := &fakeLLM{}
+	router := newTestRouter(t, client, 5)
+
+	response := router.HandleNaturalMessage(context.Background(), Request{
+		UserID:    "user-1",
+		GuildID:   "guild-1",
+		ChannelID: "channel-1",
+		Options: map[string]string{
+			"message":       "panda make a poll. what will be better fable 5 or gpt 5.6",
+			"bot_mentioned": "true",
+		},
+	})
+	if response.Poll == nil {
+		t.Fatalf("expected native poll response, got %+v", response)
+	}
+	if response.Content != "" || response.Presentation.Title != "" {
+		t.Fatalf("natural poll should not render a chat embed: %+v", response)
+	}
+	if response.Poll.Question != "What will be better: fable 5 or gpt 5.6?" {
+		t.Fatalf("unexpected poll question: %+v", response.Poll)
+	}
+	if len(response.Poll.Answers) != 2 || response.Poll.Answers[0].Text != "fable 5" || response.Poll.Answers[1].Text != "gpt 5.6" {
+		t.Fatalf("unexpected poll answers: %+v", response.Poll.Answers)
+	}
+	if len(client.requests) != 0 {
+		t.Fatalf("natural poll should bypass LLM chat, got %d request(s)", len(client.requests))
+	}
+}
+
+func TestNaturalMessageCreatesNativePollFromExplicitOptions(t *testing.T) {
+	router := newTestRouter(t, &fakeLLM{}, 5)
+
+	response := router.HandleNaturalMessage(context.Background(), Request{
+		UserID:    "user-1",
+		GuildID:   "guild-1",
+		ChannelID: "channel-1",
+		Options: map[string]string{
+			"message": "hey panda create a poll: Where should lunch be? Tacos | Pizza | Sushi",
+		},
+	})
+	if response.Poll == nil {
+		t.Fatalf("expected native poll response, got %+v", response)
+	}
+	if response.Poll.Question != "Where should lunch be?" || len(response.Poll.Answers) != 3 {
+		t.Fatalf("unexpected poll: %+v", response.Poll)
 	}
 }
 

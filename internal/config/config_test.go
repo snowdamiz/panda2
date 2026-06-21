@@ -80,6 +80,11 @@ func TestLoadConfigFile(t *testing.T) {
 		"brave_search": {
 			"base_url": "https://brave.example/res/v1"
 		},
+		"music": {
+			"ytdlp_path": "/usr/local/bin/yt-dlp",
+			"ffmpeg_path": "/usr/local/bin/ffmpeg",
+			"sidecar_dir": "tmp-data/music-tools"
+		},
 		"runtime": {
 			"port": "9090",
 			"environment": "development",
@@ -122,6 +127,12 @@ func TestLoadConfigFile(t *testing.T) {
 	if cfg.BraveSearchBaseURL != "https://brave.example/res/v1" {
 		t.Fatalf("unexpected Brave Search base URL: %q", cfg.BraveSearchBaseURL)
 	}
+	if cfg.MusicYTDLPPath != "/usr/local/bin/yt-dlp" || cfg.MusicFFmpegPath != "/usr/local/bin/ffmpeg" {
+		t.Fatalf("unexpected music paths: ytdlp=%q ffmpeg=%q", cfg.MusicYTDLPPath, cfg.MusicFFmpegPath)
+	}
+	if cfg.MusicSidecarDir != "tmp-data/music-tools" {
+		t.Fatalf("unexpected music sidecar dir: %q", cfg.MusicSidecarDir)
+	}
 	if cfg.Port != "9090" || cfg.Environment != "development" || cfg.LogLevel != "debug" {
 		t.Fatalf("unexpected runtime config: port=%q environment=%q log=%q", cfg.Port, cfg.Environment, cfg.LogLevel)
 	}
@@ -153,6 +164,9 @@ func TestEnvOverridesConfigFile(t *testing.T) {
 	t.Setenv("OPENROUTER_FALLBACK_MODELS", "provider/env-a,provider/env-b")
 	t.Setenv("BRAVE_SEARCH_API_KEY", "brave-key")
 	t.Setenv("BRAVE_SEARCH_BASE_URL", "https://brave-env.example/res/v1")
+	t.Setenv("YTDLP_PATH", "/opt/bin/yt-dlp")
+	t.Setenv("FFMPEG_PATH", "/opt/bin/ffmpeg")
+	t.Setenv("MUSIC_SIDECAR_DIR", "/opt/panda/music-bin")
 	t.Setenv("OWNER_USER_IDS", "99")
 
 	cfg, _, err := Load()
@@ -176,6 +190,12 @@ func TestEnvOverridesConfigFile(t *testing.T) {
 	}
 	if !cfg.BraveSearchConfigured() || cfg.BraveSearchBaseURL != "https://brave-env.example/res/v1" {
 		t.Fatalf("expected env Brave Search settings, configured=%t base=%q", cfg.BraveSearchConfigured(), cfg.BraveSearchBaseURL)
+	}
+	if cfg.MusicYTDLPPath != "/opt/bin/yt-dlp" || cfg.MusicFFmpegPath != "/opt/bin/ffmpeg" {
+		t.Fatalf("expected env music paths, ytdlp=%q ffmpeg=%q", cfg.MusicYTDLPPath, cfg.MusicFFmpegPath)
+	}
+	if cfg.MusicSidecarDir != "/opt/panda/music-bin" {
+		t.Fatalf("expected env music sidecar dir, got %q", cfg.MusicSidecarDir)
 	}
 }
 
@@ -341,6 +361,9 @@ func clearConfigEnv(t *testing.T) {
 		"OPENROUTER_CIRCUIT_COOLDOWN",
 		"BRAVE_SEARCH_API_KEY",
 		"BRAVE_SEARCH_BASE_URL",
+		"YTDLP_PATH",
+		"FFMPEG_PATH",
+		"MUSIC_SIDECAR_DIR",
 		"SQLITE_PATH",
 		"DATA_DIR",
 		"PORT",

@@ -10,6 +10,7 @@ import (
 
 	disgoDiscord "github.com/disgoorg/disgo/discord"
 	"github.com/disgoorg/disgo/events"
+	"github.com/disgoorg/disgo/gateway"
 	"github.com/disgoorg/snowflake/v2"
 	"github.com/sn0w/panda2/internal/composed"
 	"github.com/sn0w/panda2/internal/repository"
@@ -272,6 +273,9 @@ func (b *Bot) onGuildScheduledEventUserRemove(event *events.GuildScheduledEventU
 }
 
 func (b *Bot) onGuildVoiceStateUpdate(event *events.GuildVoiceStateUpdate) {
+	b.forwardOwnVoiceStateToVoiceManager(event)
+	b.updateMusicVoiceOccupancy(event)
+
 	channelID := ""
 	if event.VoiceState.ChannelID != nil {
 		channelID = event.VoiceState.ChannelID.String()
@@ -283,6 +287,129 @@ func (b *Bot) onGuildVoiceStateUpdate(event *events.GuildVoiceStateUpdate) {
 		EventType: "voice_state_update",
 		Summary:   "Voice state updated",
 	})
+}
+
+func (b *Bot) updateMusicVoiceOccupancy(event *events.GuildVoiceStateUpdate) {
+	if b == nil || b.music == nil || b.client == nil || b.client.Caches == nil || event == nil {
+		return
+	}
+	selfID := b.selfUserID()
+	if selfID != 0 && event.VoiceState.UserID == selfID {
+		return
+	}
+
+	guildID := event.VoiceState.GuildID
+	channelIDValue := b.music.ActiveVoiceChannelID(guildID.String())
+	if channelIDValue == "" {
+		return
+	}
+	channelID, err := snowflake.Parse(channelIDValue)
+	if err != nil {
+		if b.logger != nil {
+			b.logger.Debug("active music voice channel id is invalid", slog.Any("err", err), slog.String("channel_id", channelIDValue))
+		}
+		return
+	}
+	if !voiceStateUpdateTouchesChannel(event, channelID) {
+		return
+	}
+
+	listeners := b.voiceListenerCount(guildID, channelID)
+	b.music.UpdateVoiceOccupancy(guildID.String(), channelID.String(), listeners > 0)
+}
+
+func (b *Bot) voiceListenerCount(guildID snowflake.ID, channelID snowflake.ID) int {
+	if b == nil || b.client == nil || b.client.Caches == nil || channelID == 0 {
+		return 0
+	}
+	selfID := b.selfUserID()
+	listeners := 0
+	for state := range b.client.Caches.VoiceStates(guildID) {
+		if state.ChannelID == nil || *state.ChannelID != channelID {
+			continue
+		}
+		if selfID != 0 && state.UserID == selfID {
+			continue
+		}
+		if b.cachedVoiceMemberIsBot(guildID, state.UserID) {
+			continue
+		}
+		listeners++
+	}
+	return listeners
+}
+
+func (b *Bot) cachedVoiceMemberIsBot(guildID snowflake.ID, userID snowflake.ID) bool {
+	if b == nil || b.client == nil || b.client.Caches == nil {
+		return false
+	}
+	member, ok := b.client.Caches.Member(guildID, userID)
+	return ok && member.User.Bot
+}
+
+func voiceStateUpdateTouchesChannel(event *events.GuildVoiceStateUpdate, channelID snowflake.ID) bool {
+	if event == nil || channelID == 0 {
+		return false
+	}
+	if event.VoiceState.ChannelID != nil && *event.VoiceState.ChannelID == channelID {
+		return true
+	}
+	return event.OldVoiceState.ChannelID != nil && *event.OldVoiceState.ChannelID == channelID
+}
+
+func (b *Bot) onVoiceServerUpdate(event *events.VoiceServerUpdate) {
+	if b == nil || b.logger == nil || event == nil {
+		return
+	}
+	endpoint := ""
+	if event.Endpoint != nil {
+		endpoint = *event.Endpoint
+	}
+	b.logger.Info("voice server update received",
+		slog.String("guild_id", event.GuildID.String()),
+		slog.String("endpoint", endpoint),
+	)
+}
+
+func (b *Bot) forwardOwnVoiceStateToVoiceManager(event *events.GuildVoiceStateUpdate) {
+	if b == nil || b.client == nil || b.client.VoiceManager == nil || event == nil {
+		return
+	}
+	selfID := b.selfUserID()
+	if selfID == 0 || event.VoiceState.UserID != selfID {
+		return
+	}
+	b.client.VoiceManager.HandleVoiceStateUpdate(gateway.EventVoiceStateUpdate{
+		VoiceState: event.VoiceState,
+		Member:     event.Member,
+	})
+	if b.logger != nil {
+		channelID := ""
+		if event.VoiceState.ChannelID != nil {
+			channelID = event.VoiceState.ChannelID.String()
+		}
+		b.logger.Debug("forwarded own voice state to voice manager",
+			slog.String("guild_id", event.VoiceState.GuildID.String()),
+			slog.String("channel_id", channelID),
+			slog.String("session_id", event.VoiceState.SessionID),
+		)
+	}
+}
+
+func (b *Bot) selfUserID() snowflake.ID {
+	if b == nil || b.client == nil {
+		return 0
+	}
+	if b.client.ApplicationID != 0 {
+		return b.client.ApplicationID
+	}
+	if b.client.Caches == nil {
+		return 0
+	}
+	if selfUser, ok := b.client.Caches.SelfUser(); ok {
+		return selfUser.ID
+	}
+	return 0
 }
 
 func (b *Bot) recordMessageEvent(ctx context.Context, eventType string, message disgoDiscord.Message) {

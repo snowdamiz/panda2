@@ -41,31 +41,3 @@ func TestGuildRepositoryRecordsInstallOwnership(t *testing.T) {
 		t.Fatalf("unexpected stored guild: %+v", guild)
 	}
 }
-
-func TestGuildRepositoryMarksDeniedInstallLeft(t *testing.T) {
-	ctx := context.Background()
-	db, err := store.Open(ctx, "file::memory:?cache=shared")
-	if err != nil {
-		t.Fatalf("open store: %v", err)
-	}
-	defer db.Close()
-
-	repo := NewGuildRepository(db.DB)
-	if _, err := repo.RecordDeniedInstall(ctx, GuildInstall{
-		GuildID:           "guild-1",
-		OwnerUserID:       "owner-1",
-		InstalledByUserID: "admin-1",
-	}); err != nil {
-		t.Fatalf("RecordDeniedInstall: %v", err)
-	}
-	if err := repo.MarkLeft(ctx, "guild-1"); err != nil {
-		t.Fatalf("MarkLeft: %v", err)
-	}
-	guild, ok, err := repo.Get(ctx, "guild-1")
-	if err != nil || !ok {
-		t.Fatalf("Get: ok=%t err=%v", ok, err)
-	}
-	if guild.InstallStatus != GuildInstallStatusLeft || guild.LeftAt == nil {
-		t.Fatalf("expected left guild, got %+v", guild)
-	}
-}

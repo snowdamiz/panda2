@@ -23,14 +23,9 @@ type WebhookEvent struct {
 	Data      json.RawMessage
 }
 
-type GuildLeaver interface {
-	LeaveGuild(ctx context.Context, guildID string) error
-}
-
 type InstallService struct {
 	guilds *repository.GuildRepository
 	audit  *repository.AuditRepository
-	leaver GuildLeaver
 }
 
 type applicationAuthorizedData struct {
@@ -53,8 +48,8 @@ type webhookGuildInstall struct {
 	PreferredLocale string `json:"preferred_locale"`
 }
 
-func NewInstallService(guilds *repository.GuildRepository, audit *repository.AuditRepository, leaver GuildLeaver) *InstallService {
-	return &InstallService{guilds: guilds, audit: audit, leaver: leaver}
+func NewInstallService(guilds *repository.GuildRepository, audit *repository.AuditRepository) *InstallService {
+	return &InstallService{guilds: guilds, audit: audit}
 }
 
 func (s *InstallService) HandleWebhookEvent(ctx context.Context, event WebhookEvent) error {
@@ -76,50 +71,20 @@ func (s *InstallService) HandleWebhookEvent(ctx context.Context, event WebhookEv
 	if err != nil {
 		return err
 	}
-	if install.InstalledByUserID == install.OwnerUserID {
-		return s.acceptOwnerInstall(ctx, install, data.Scopes)
-	}
-	return s.rejectNonOwnerInstall(ctx, install, data.Scopes)
+	return s.acceptGuildInstall(ctx, install, data.Scopes)
 }
 
-func (s *InstallService) acceptOwnerInstall(ctx context.Context, install repository.GuildInstall, scopes []string) error {
+func (s *InstallService) acceptGuildInstall(ctx context.Context, install repository.GuildInstall, scopes []string) error {
 	if _, err := s.guilds.RecordAuthorizedInstall(ctx, install); err != nil {
 		return err
 	}
-	return s.recordInstallAudit(ctx, "discord.install.authorized", install, map[string]any{
+	if err := s.recordInstallAudit(ctx, "discord.install.authorized", install, map[string]any{
 		"status": "active",
-		"scopes": scopes,
-	})
-}
-
-func (s *InstallService) rejectNonOwnerInstall(ctx context.Context, install repository.GuildInstall, scopes []string) error {
-	if _, err := s.guilds.RecordDeniedInstall(ctx, install); err != nil {
-		return err
-	}
-	if err := s.recordInstallAudit(ctx, "discord.install.denied", install, map[string]any{
-		"status": "denied",
-		"reason": "installer_is_not_guild_owner",
 		"scopes": scopes,
 	}); err != nil {
 		return err
 	}
-	if s.leaver == nil {
-		return errors.New("discord guild leaver is not configured")
-	}
-	if err := s.leaver.LeaveGuild(ctx, install.GuildID); err != nil {
-		_ = s.recordInstallAudit(ctx, "discord.install.leave_failed", install, map[string]any{
-			"status": "denied",
-			"error":  err.Error(),
-		})
-		return fmt.Errorf("leave denied guild %s: %w", install.GuildID, err)
-	}
-	if err := s.guilds.MarkLeft(ctx, install.GuildID); err != nil {
-		return err
-	}
-	return s.recordInstallAudit(ctx, "discord.install.left", install, map[string]any{
-		"status": "left",
-		"reason": "installer_is_not_guild_owner",
-	})
+	return nil
 }
 
 func (s *InstallService) recordInstallAudit(ctx context.Context, action string, install repository.GuildInstall, metadata map[string]any) error {

@@ -363,6 +363,9 @@ func DefaultDefinitions() []Definition {
 		discordWrite("discord.reply_message", "Dry-run or confirmed reply to a visible Discord message with reply mention disabled by default.", []string{"channel_id", "message_id", "content"}, "SEND_MESSAGES", "READ_MESSAGE_HISTORY"),
 		discordWrite("discord.edit_own_message", "Dry-run or confirmed edit of a Panda-authored message only.", []string{"channel_id", "message_id", "content"}, "SEND_MESSAGES"),
 		discordWrite("discord.delete_own_message", "Dry-run or confirmed delete of a Panda-authored message only.", []string{"channel_id", "message_id"}, "MANAGE_MESSAGES"),
+		discordWrite("discord.create_poll", "Dry-run or confirmed creation of a native Discord poll with 2-10 answers. Native polls cannot be edited after creation.", []string{"channel_id", "question", "answers"}, "SEND_MESSAGES"),
+		discordRead("discord.get_poll_answer_voters", "List users who voted for one answer in a native Discord poll.", []string{"channel_id", "message_id", "answer_id"}, 3*time.Second, 100, "VIEW_CHANNEL", "READ_MESSAGE_HISTORY"),
+		discordWrite("discord.end_poll", "Dry-run or confirmed immediate close of a Panda-authored native Discord poll.", []string{"channel_id", "message_id"}, "VIEW_CHANNEL", "READ_MESSAGE_HISTORY"),
 		discordWrite("discord.add_reaction", "Dry-run or confirmed add reaction to a visible message.", []string{"channel_id", "message_id", "emoji"}, "ADD_REACTIONS", "READ_MESSAGE_HISTORY"),
 		discordWrite("discord.remove_own_reaction", "Dry-run or confirmed remove Panda's own reaction from a message.", []string{"channel_id", "message_id", "emoji"}, "READ_MESSAGE_HISTORY"),
 		threadWrite("discord.create_thread", "Dry-run or confirmed thread creation.", []string{"channel_id", "name"}, "CREATE_PUBLIC_THREADS"),
@@ -532,7 +535,7 @@ func DefaultDefinitions() []Definition {
 		},
 		{
 			Name:                  "panda.manage_role_permission",
-			Description:           "List, add, or prepare removal of Panda role permissions and named role profiles. Use profile=admin to make one role a full Panda admin role, or profile=moderator/mod to grant assistant and moderation tools. Provide role_id, a role mention, or role_name.",
+			Description:           "List, add, or prepare removal of Panda role permissions and named role profiles. Use profile=admin to make one role a full Panda admin role, or profile=moderator/mod to grant assistant and moderation tools. The same Discord role may have both profiles when a server combines admin and moderator. Provide role_id, a role mention, or role_name.",
 			RequiredPermission:    admin.PermissionAdminConfigWrite,
 			ToolClass:             ToolClassAdminWrite,
 			InputSchema:           actionSchema([]string{"action"}, "action", "role_id", "role_name", "permission", "profile", "dry_run"),
@@ -593,10 +596,10 @@ func DefaultDefinitions() []Definition {
 		},
 		{
 			Name:                  "panda.manage_channel_rule",
-			Description:           "List or prepare allow/deny/removal of Panda channel access rules.",
+			Description:           "List or prepare allow/deny/removal of Panda channel access rules. Accepts channel_id, a channel mention, or channel_name.",
 			RequiredPermission:    admin.PermissionAdminConfigWrite,
 			ToolClass:             ToolClassAdminWrite,
-			InputSchema:           actionSchema([]string{"action"}, "action", "channel_id", "dry_run"),
+			InputSchema:           actionSchema([]string{"action"}, "action", "channel_id", "channel_name", "dry_run"),
 			OutputSchema:          objectSchema("result"),
 			Timeout:               2 * time.Second,
 			Redaction:             RedactSecrets,
@@ -711,14 +714,15 @@ func toolInputSchema(required []string) json.RawMessage {
 	for _, name := range []string{
 		"dry_run", "purpose", "limit", "before", "after", "around",
 		"include_author_ids", "include_attachments", "allowed_mentions",
-		"content", "name", "emoji", "duration", "delete_message_duration",
-		"delete_message_seconds", "nick", "seconds", "locked", "private",
+		"content", "name", "emoji", "duration", "duration_hours",
+		"delete_message_duration", "delete_message_seconds", "nick", "seconds", "locked", "private",
 		"archived", "auto_archive_duration", "overwrite_type", "allow",
 		"deny", "rule_json", "event_json", "starts_at", "ends_at",
 		"description", "entity_type", "location", "status", "max_age",
 		"max_uses", "temporary", "unique", "enabled", "channel_ids",
 		"author_ids", "user_ids", "message_ids", "role_ids", "webhook_id",
-		"keyword_filter", "custom_message", "reason",
+		"keyword_filter", "custom_message", "reason", "answer_emojis",
+		"allow_multiselect", "answer_id",
 	} {
 		if _, exists := properties[name]; !exists {
 			properties[name] = toolInputProperty(name)
@@ -729,13 +733,15 @@ func toolInputSchema(required []string) json.RawMessage {
 
 func toolInputProperty(name string) any {
 	switch name {
-	case "dry_run", "include_author_ids", "include_attachments", "locked", "private", "archived", "temporary", "unique", "enabled":
+	case "dry_run", "include_author_ids", "include_attachments", "locked", "private", "archived", "temporary", "unique", "enabled", "allow_multiselect":
 		return map[string]string{"type": "boolean"}
-	case "limit", "seconds", "delete_message_seconds", "max_age", "max_uses", "auto_archive_duration":
+	case "limit", "seconds", "delete_message_seconds", "max_age", "max_uses", "auto_archive_duration", "duration_hours", "answer_id":
 		return map[string]any{"type": "integer", "minimum": 0}
+	case "answers":
+		return map[string]any{"type": "array", "items": map[string]string{"type": "string"}, "minItems": 2, "maxItems": 10}
 	case "allowed_mentions", "rule_json", "event_json":
 		return map[string]string{"type": "object"}
-	case "channel_ids", "author_ids", "user_ids", "message_ids", "role_ids", "keyword_filter":
+	case "channel_ids", "author_ids", "user_ids", "message_ids", "role_ids", "keyword_filter", "answer_emojis":
 		return map[string]any{"type": "array", "items": map[string]string{"type": "string"}}
 	default:
 		return map[string]string{"type": "string"}

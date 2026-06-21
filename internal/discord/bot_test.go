@@ -18,6 +18,7 @@ import (
 	"github.com/disgoorg/snowflake/v2"
 	"github.com/sn0w/panda2/internal/commands"
 	"github.com/sn0w/panda2/internal/config"
+	"github.com/sn0w/panda2/internal/polls"
 	"github.com/sn0w/panda2/internal/store"
 )
 
@@ -110,7 +111,7 @@ func TestApplicationCommandsIncludeContextMenus(t *testing.T) {
 	for _, command := range commands {
 		names[command.CommandName()] = true
 	}
-	for _, name := range []string{"Explain with Panda", "Summarize with Panda", "admin", "ops", "help", "ping"} {
+	for _, name := range []string{"Explain with Panda", "Summarize with Panda", "admin", "ops", "help", "ping", "poll"} {
 		if !names[name] {
 			t.Fatalf("expected command %q to be registered", name)
 		}
@@ -118,6 +119,42 @@ func TestApplicationCommandsIncludeContextMenus(t *testing.T) {
 	for _, name := range []string{"ask", "chat", "summarize", "explain", "rewrite", "translate", "memory-consent", "search-memory", "mod", "tool"} {
 		if names[name] {
 			t.Fatalf("expected natural-language command %q not to be registered as a slash command", name)
+		}
+	}
+}
+
+func TestPollCommandIncludesNativePollOptions(t *testing.T) {
+	var pollCommand *disgoDiscord.SlashCommandCreate
+	for _, command := range applicationCommands() {
+		slash, ok := command.(disgoDiscord.SlashCommandCreate)
+		if ok && slash.Name == "poll" {
+			pollCommand = &slash
+			break
+		}
+	}
+	if pollCommand == nil {
+		t.Fatal("expected /poll command")
+	}
+	optionNames := map[string]bool{}
+	for _, option := range pollCommand.Options {
+		switch typed := option.(type) {
+		case disgoDiscord.ApplicationCommandOptionString:
+			optionNames[typed.Name] = true
+			if (typed.Name == "question" || typed.Name == "answers") && !typed.Required {
+				t.Fatalf("%s should be required", typed.Name)
+			}
+		case disgoDiscord.ApplicationCommandOptionInt:
+			optionNames[typed.Name] = true
+			if typed.Name == "duration_hours" && (typed.MinValue == nil || *typed.MinValue != 1 || typed.MaxValue == nil || *typed.MaxValue != polls.MaxDurationHours) {
+				t.Fatalf("unexpected duration limits: %+v", typed)
+			}
+		case disgoDiscord.ApplicationCommandOptionBool:
+			optionNames[typed.Name] = true
+		}
+	}
+	for _, name := range []string{"question", "answers", "duration_hours", "allow_multiselect"} {
+		if !optionNames[name] {
+			t.Fatalf("expected /poll option %q", name)
 		}
 	}
 }
@@ -438,6 +475,27 @@ func TestAdminToolCommandIncludesAccessOptions(t *testing.T) {
 	}
 }
 
+func TestAdminChannelCommandIncludesAccessOptions(t *testing.T) {
+	channel := adminSubcommand(t, adminSlashCommand(t), "channel")
+	action := subcommandStringOption(t, channel, "action")
+	if !action.Required {
+		t.Fatal("channel action should be required")
+	}
+	option, ok := findSubcommandChannelOption(channel, "channel")
+	if !ok {
+		t.Fatal("expected /admin channel to include channel picker")
+	}
+	if option.Required {
+		t.Fatal("channel should be optional so action=list can omit it")
+	}
+	if len(option.ChannelTypes) == 0 {
+		t.Fatal("channel picker should be limited to guild message channels")
+	}
+	if !subcommandHasBoolOption(channel, "dry_run") {
+		t.Fatal("expected /admin channel to include dry_run option")
+	}
+}
+
 func TestGuildOwnerCountsAsGuildAdmin(t *testing.T) {
 	ownerID := snowflake.MustParse("100000000000000001")
 	guildID := snowflake.MustParse("200000000000000001")
@@ -578,31 +636,141 @@ func TestResponsePartOnlyRendersComponentsWhenRequested(t *testing.T) {
 	}
 }
 
-func TestResponseMessageCreatesSuppressEmbeds(t *testing.T) {
-	response := commands.Response{Content: "Source: https://example.com/article"}
-
-	interactionMessage := messageCreateFromResponsePart(response, response.Content, true)
-	if !interactionMessage.Flags.Has(disgoDiscord.MessageFlagSuppressEmbeds) {
-		t.Fatalf("expected interaction message to suppress embeds, got flags %v", interactionMessage.Flags)
+func TestResponseRendersNativePoll(t *testing.T) {
+	poll, err := polls.New("Pick one", []polls.Answer{{Text: "Red"}, {Text: "Blue", Emoji: "123456789012345678"}}, 6, true)
+	if err != nil {
+		t.Fatalf("poll setup: %v", err)
 	}
-
-	channelMessage := channelMessageCreateFromResponsePart(response, response.Content, true)
-	if !channelMessage.Flags.Has(disgoDiscord.MessageFlagSuppressEmbeds) {
-		t.Fatalf("expected channel message to suppress embeds, got flags %v", channelMessage.Flags)
+	message := messageCreateFromResponse(commands.Response{Poll: &poll})
+	if message.Poll == nil {
+		t.Fatalf("expected poll payload, got %+v", message)
+	}
+	if len(message.Embeds) != 0 || message.Flags.Has(disgoDiscord.MessageFlagSuppressEmbeds) {
+		t.Fatalf("native poll response should not use Panda embeds or suppress flags: embeds=%+v flags=%v", message.Embeds, message.Flags)
+	}
+	if message.Poll.Duration != 6 || !message.Poll.AllowMultiselect {
+		t.Fatalf("unexpected poll settings: %+v", message.Poll)
+	}
+	if message.Poll.Question.Text == nil || *message.Poll.Question.Text != "Pick one" {
+		t.Fatalf("unexpected poll question: %+v", message.Poll.Question)
+	}
+	if len(message.Poll.Answers) != 2 || message.Poll.Answers[1].Emoji == nil || message.Poll.Answers[1].Emoji.ID == nil {
+		t.Fatalf("unexpected poll answers: %+v", message.Poll.Answers)
 	}
 }
 
-func TestResponseMessageUpdatesSuppressEmbeds(t *testing.T) {
-	response := commands.Response{Content: "Source: https://example.com/article"}
+func TestPollOnlyResponseIsDispatchable(t *testing.T) {
+	poll, err := polls.New("Pick one", []polls.Answer{{Text: "Red"}, {Text: "Blue"}}, 1, false)
+	if err != nil {
+		t.Fatalf("poll setup: %v", err)
+	}
+	if !hasChannelResponsePayload(commands.Response{Poll: &poll}) {
+		t.Fatal("poll-only natural response should be dispatched")
+	}
+	if hasChannelResponsePayload(commands.Response{}) {
+		t.Fatal("empty response should not be dispatched")
+	}
+}
+
+func TestResponseMessageCreatesPandaEmbed(t *testing.T) {
+	response := commands.Response{
+		Content: "### Panda Help\n\nUse `Panda play <song>` or ask a question.",
+		Presentation: commands.Presentation{
+			Title:  "Panda Help",
+			Accent: commands.AccentInfo,
+			Footer: "Open-source Discord assistant",
+		},
+		Actions: []commands.Action{
+			{Label: "Commands", URL: "https://example.com/commands"},
+			{Label: "Ignored", URL: "javascript:alert(1)"},
+		},
+	}
+
+	interactionMessage := messageCreateFromResponsePart(response, response.Content, true)
+	if interactionMessage.Content != "" || interactionMessage.Flags.Has(disgoDiscord.MessageFlagSuppressEmbeds) {
+		t.Fatalf("expected interaction message to use an embed without suppressed flags, got content=%q flags=%v", interactionMessage.Content, interactionMessage.Flags)
+	}
+	if len(interactionMessage.Embeds) != 1 {
+		t.Fatalf("expected one embed, got %+v", interactionMessage.Embeds)
+	}
+	embed := interactionMessage.Embeds[0]
+	if embed.Title != "Panda Help" || embed.Description != "Use `Panda play <song>` or ask a question." || embed.Color != infoEmbedColor {
+		t.Fatalf("unexpected embed: %+v", embed)
+	}
+	if embed.Footer == nil || embed.Footer.Text != "Open-source Discord assistant" {
+		t.Fatalf("expected footer, got %+v", embed.Footer)
+	}
+	if len(interactionMessage.Components) != 1 {
+		t.Fatalf("expected link action row, got %+v", interactionMessage.Components)
+	}
+	row, ok := interactionMessage.Components[0].(disgoDiscord.ActionRowComponent)
+	if !ok || len(row.Components) != 1 {
+		t.Fatalf("expected one valid link button, got %+v", interactionMessage.Components)
+	}
+	button, ok := row.Components[0].(disgoDiscord.ButtonComponent)
+	if !ok || button.Style != disgoDiscord.ButtonStyleLink || button.URL != "https://example.com/commands" {
+		t.Fatalf("unexpected link button: %+v", row.Components[0])
+	}
+}
+
+func TestResponseMessageUpdatesPandaEmbed(t *testing.T) {
+	response := commands.Response{Content: "Source: https://example.com/article", Presentation: commands.Presentation{Title: "Panda replied"}}
 
 	webhookUpdate := webhookMessageUpdateFromResponsePart(response, response.Content, true)
-	if webhookUpdate.Flags == nil || !webhookUpdate.Flags.Has(disgoDiscord.MessageFlagSuppressEmbeds) {
-		t.Fatalf("expected webhook update to suppress embeds, got flags %v", webhookUpdate.Flags)
+	if webhookUpdate.Content == nil || *webhookUpdate.Content != "" {
+		t.Fatalf("expected webhook update to clear top-level content, got %v", webhookUpdate.Content)
+	}
+	if webhookUpdate.Flags == nil || webhookUpdate.Flags.Has(disgoDiscord.MessageFlagSuppressEmbeds) {
+		t.Fatalf("expected webhook update to keep custom embeds visible, got flags %v", webhookUpdate.Flags)
+	}
+	if webhookUpdate.Embeds == nil || len(*webhookUpdate.Embeds) != 1 || (*webhookUpdate.Embeds)[0].Description != response.Content {
+		t.Fatalf("expected webhook update embed, got %+v", webhookUpdate.Embeds)
 	}
 
 	messageUpdate := messageUpdateFromResponse(response)
-	if messageUpdate.Flags == nil || !messageUpdate.Flags.Has(disgoDiscord.MessageFlagSuppressEmbeds) {
-		t.Fatalf("expected message update to suppress embeds, got flags %v", messageUpdate.Flags)
+	if messageUpdate.Embeds == nil || len(*messageUpdate.Embeds) != 1 {
+		t.Fatalf("expected message update embed, got %+v", messageUpdate.Embeds)
+	}
+}
+
+func TestResponseMessageInfersPresentationForPlainResponses(t *testing.T) {
+	tests := []struct {
+		name      string
+		content   string
+		wantTitle string
+		wantColor int
+	}{
+		{
+			name:      "admin success",
+			content:   "Assigned `Pickle` (`role-pickle`) to `Snow` (`user-target`).",
+			wantTitle: "Done",
+			wantColor: successEmbedColor,
+		},
+		{
+			name:      "permission warning",
+			content:   "You do not have permission to use Panda here.",
+			wantTitle: "Heads up",
+			wantColor: warningEmbedColor,
+		},
+		{
+			name:      "ops info",
+			content:   "Health: sqlite=ok discord=ok shards=ok openrouter=ok queued_jobs=0 guild_configs=1 draining=false incident=false data_dir=`data`.",
+			wantTitle: "Ops health",
+			wantColor: infoEmbedColor,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			message := messageCreateFromResponse(commands.Response{Content: test.content})
+			if len(message.Embeds) != 1 {
+				t.Fatalf("expected inferred embed, got %+v", message.Embeds)
+			}
+			embed := message.Embeds[0]
+			if embed.Title != test.wantTitle || embed.Color != test.wantColor || embed.Description != test.content {
+				t.Fatalf("unexpected inferred embed: %+v", embed)
+			}
+		})
 	}
 }
 
@@ -820,4 +988,14 @@ func findSubcommandUserOption(subcommand disgoDiscord.ApplicationCommandOptionSu
 		}
 	}
 	return disgoDiscord.ApplicationCommandOptionUser{}, false
+}
+
+func findSubcommandChannelOption(subcommand disgoDiscord.ApplicationCommandOptionSubCommand, name string) (disgoDiscord.ApplicationCommandOptionChannel, bool) {
+	for _, option := range subcommand.Options {
+		channelOption, ok := option.(disgoDiscord.ApplicationCommandOptionChannel)
+		if ok && channelOption.Name == name {
+			return channelOption, true
+		}
+	}
+	return disgoDiscord.ApplicationCommandOptionChannel{}, false
 }

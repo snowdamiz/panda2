@@ -271,6 +271,76 @@ func TestRoleProfilesGrantExpectedAccess(t *testing.T) {
 	}
 }
 
+func TestSingleDiscordRoleCanHoldAdminAndModeratorProfiles(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(ctx, "file::memory:?cache=shared")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer db.Close()
+
+	service := NewService(
+		repository.NewGuildConfigRepository(db.DB),
+		repository.NewUsageRepository(db.DB),
+		repository.NewAuditRepository(db.DB),
+		memory.NewService(repository.NewKnowledgeRepository(db.DB)),
+		repository.NewAccessRepository(db.DB),
+		repository.NewBudgetRepository(db.DB),
+		nil,
+		"openrouter/auto",
+	)
+
+	if _, err := service.ApplyRoleProfile(ctx, "guild-1", "owner", "role-staff", "moderator"); err != nil {
+		t.Fatalf("ApplyRoleProfile moderator: %v", err)
+	}
+	if _, err := service.ApplyRoleProfile(ctx, "guild-1", "owner", "role-staff", "admin"); err != nil {
+		t.Fatalf("ApplyRoleProfile admin: %v", err)
+	}
+
+	roles, err := service.ListRolePermissions(ctx, "guild-1")
+	if err != nil {
+		t.Fatalf("ListRolePermissions: %v", err)
+	}
+	for _, permission := range []string{PermissionAdminBadge, PermissionAssistantUse, PermissionModerationUse} {
+		if !hasRolePermission(roles, "role-staff", permission) {
+			t.Fatalf("expected role-staff to have %s in %+v", permission, roles)
+		}
+	}
+
+	request := AssistantAccessRequest{GuildID: "guild-1", RoleIDs: []string{"role-staff"}}
+	for name, check := range map[string]func(context.Context, AssistantAccessRequest) (bool, error){
+		"config write":   service.CanWriteConfig,
+		"assistant use":  service.CanUseAssistant,
+		"moderation use": service.CanUseModeration,
+	} {
+		allowed, err := check(ctx, request)
+		if err != nil || !allowed {
+			t.Fatalf("expected combined role to allow %s, allowed=%t err=%v", name, allowed, err)
+		}
+	}
+
+	if _, err := service.ApplyRoleProfile(ctx, "guild-1", "owner", "role-admins", "admin"); err != nil {
+		t.Fatalf("ApplyRoleProfile admin replacement: %v", err)
+	}
+	allowed, err := service.CanWriteConfig(ctx, request)
+	if err != nil || allowed {
+		t.Fatalf("expected replaced admin profile to stop granting config write, allowed=%t err=%v", allowed, err)
+	}
+	allowed, err = service.CanUseModeration(ctx, request)
+	if err != nil || !allowed {
+		t.Fatalf("expected moderator profile to survive admin replacement, allowed=%t err=%v", allowed, err)
+	}
+}
+
+func hasRolePermission(roles []store.GuildRole, roleID, permission string) bool {
+	for _, role := range roles {
+		if role.RoleID == roleID && role.Permission == permission {
+			return true
+		}
+	}
+	return false
+}
+
 func TestWebSearchAccessDefaultsOpenUntilMapped(t *testing.T) {
 	ctx := context.Background()
 	db, err := store.Open(ctx, "file::memory:?cache=shared")

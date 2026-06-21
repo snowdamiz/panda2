@@ -10,15 +10,6 @@ import (
 	"github.com/sn0w/panda2/internal/store"
 )
 
-type fakeGuildLeaver struct {
-	leftGuildIDs []string
-}
-
-func (f *fakeGuildLeaver) LeaveGuild(_ context.Context, guildID string) error {
-	f.leftGuildIDs = append(f.leftGuildIDs, guildID)
-	return nil
-}
-
 func TestInstallServiceAcceptsServerOwnerInstall(t *testing.T) {
 	ctx := context.Background()
 	db, err := store.Open(ctx, "file::memory:?cache=shared")
@@ -27,9 +18,8 @@ func TestInstallServiceAcceptsServerOwnerInstall(t *testing.T) {
 	}
 	defer db.Close()
 
-	leaver := &fakeGuildLeaver{}
 	guilds := repository.NewGuildRepository(db.DB)
-	service := NewInstallService(guilds, repository.NewAuditRepository(db.DB), leaver)
+	service := NewInstallService(guilds, repository.NewAuditRepository(db.DB))
 	if err := service.HandleWebhookEvent(ctx, authorizedEvent(t, "owner-1", "owner-1")); err != nil {
 		t.Fatalf("HandleWebhookEvent: %v", err)
 	}
@@ -41,13 +31,10 @@ func TestInstallServiceAcceptsServerOwnerInstall(t *testing.T) {
 	if guild.InstallStatus != repository.GuildInstallStatusActive || guild.InstalledByUserID != "owner-1" || guild.OwnerUserID != "owner-1" {
 		t.Fatalf("unexpected accepted guild: %+v", guild)
 	}
-	if len(leaver.leftGuildIDs) != 0 {
-		t.Fatalf("owner install should not leave guilds, left=%v", leaver.leftGuildIDs)
-	}
 	assertAuditAction(t, db, "discord.install.authorized")
 }
 
-func TestInstallServiceRejectsNonOwnerInstallAndLeavesGuild(t *testing.T) {
+func TestInstallServiceAcceptsNonOwnerInstallerAsPandaOwner(t *testing.T) {
 	ctx := context.Background()
 	db, err := store.Open(ctx, "file::memory:?cache=shared")
 	if err != nil {
@@ -55,10 +42,9 @@ func TestInstallServiceRejectsNonOwnerInstallAndLeavesGuild(t *testing.T) {
 	}
 	defer db.Close()
 
-	leaver := &fakeGuildLeaver{}
 	guilds := repository.NewGuildRepository(db.DB)
-	service := NewInstallService(guilds, repository.NewAuditRepository(db.DB), leaver)
-	if err := service.HandleWebhookEvent(ctx, authorizedEvent(t, "admin-1", "owner-1")); err != nil {
+	service := NewInstallService(guilds, repository.NewAuditRepository(db.DB))
+	if err := service.HandleWebhookEvent(ctx, authorizedEvent(t, "installer-1", "owner-1")); err != nil {
 		t.Fatalf("HandleWebhookEvent: %v", err)
 	}
 
@@ -66,14 +52,35 @@ func TestInstallServiceRejectsNonOwnerInstallAndLeavesGuild(t *testing.T) {
 	if err != nil || !ok {
 		t.Fatalf("Get guild: ok=%t err=%v", ok, err)
 	}
-	if guild.InstallStatus != repository.GuildInstallStatusLeft || guild.InstalledByUserID != "admin-1" || guild.OwnerUserID != "owner-1" || guild.LeftAt == nil {
-		t.Fatalf("unexpected denied guild: %+v", guild)
+	if guild.InstallStatus != repository.GuildInstallStatusActive || guild.InstalledByUserID != "installer-1" || guild.OwnerUserID != "owner-1" || guild.LeftAt != nil {
+		t.Fatalf("unexpected accepted guild: %+v", guild)
 	}
-	if len(leaver.leftGuildIDs) != 1 || leaver.leftGuildIDs[0] != "guild-1" {
-		t.Fatalf("expected denied guild to be left, got %v", leaver.leftGuildIDs)
+	assertAuditAction(t, db, "discord.install.authorized")
+}
+
+func TestInstallServiceDoesNotRestrictChannelsByDefault(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(ctx, "file::memory:?cache=shared")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
 	}
-	assertAuditAction(t, db, "discord.install.denied")
-	assertAuditAction(t, db, "discord.install.left")
+	defer db.Close()
+
+	guilds := repository.NewGuildRepository(db.DB)
+	access := repository.NewAccessRepository(db.DB)
+	service := NewInstallService(guilds, repository.NewAuditRepository(db.DB))
+	if err := service.HandleWebhookEvent(ctx, authorizedEvent(t, "owner-1", "owner-1")); err != nil {
+		t.Fatalf("HandleWebhookEvent: %v", err)
+	}
+
+	rules, err := access.ListChannelRules(ctx, "guild-1")
+	if err != nil {
+		t.Fatalf("ListChannelRules: %v", err)
+	}
+	if len(rules) != 0 {
+		t.Fatalf("expected no default channel restrictions, got %+v", rules)
+	}
+	assertAuditAction(t, db, "discord.install.authorized")
 }
 
 func authorizedEvent(t *testing.T, installerID, ownerID string) WebhookEvent {

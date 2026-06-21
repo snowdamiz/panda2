@@ -18,7 +18,8 @@ RUN CGO_ENABLED=1 GOOS=linux go build -tags "$GO_TAGS" -trimpath -ldflags="-s -w
 
 FROM debian:12.12-slim AS runtime
 
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates \
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
   && rm -rf /var/lib/apt/lists/* \
   && groupadd --system panda \
   && useradd --system --gid panda --home-dir /nonexistent --shell /usr/sbin/nologin panda \

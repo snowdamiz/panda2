@@ -73,6 +73,7 @@ func TestOpenRunsMigrationsAndPragmas(t *testing.T) {
 	if tableCount != 1 {
 		t.Fatalf("expected guild_tool_roles table, got %d", tableCount)
 	}
+
 }
 
 func TestBackupCreatesRestorableSQLiteFile(t *testing.T) {

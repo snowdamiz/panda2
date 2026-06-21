@@ -1180,6 +1180,7 @@ func discordIDArgument(value string) string {
 	value = strings.TrimSpace(value)
 	value = strings.TrimPrefix(value, "<@&")
 	value = strings.TrimPrefix(value, "<@")
+	value = strings.TrimPrefix(value, "<#")
 	value = strings.TrimSuffix(value, ">")
 	if value == "" {
 		return ""
@@ -1299,7 +1300,10 @@ func (e *Executor) manageChannelRule(ctx context.Context, request ExecutionReque
 		}
 		return map[string]any{"result": map[string]any{"rules": channelRulePayloads(rules)}}, nil
 	case "allow", "deny":
-		channelID := stringArgument(args, "channel_id")
+		channelID, err := e.channelIDArgument(ctx, request, args)
+		if err != nil {
+			return nil, err
+		}
 		if channelID == "" {
 			return nil, fmt.Errorf("channel_id is required")
 		}
@@ -1309,7 +1313,10 @@ func (e *Executor) manageChannelRule(ctx context.Context, request ExecutionReque
 		}
 		return confirmationRequired("channel_rule.set", preview), nil
 	case "remove":
-		channelID := stringArgument(args, "channel_id")
+		channelID, err := e.channelIDArgument(ctx, request, args)
+		if err != nil {
+			return nil, err
+		}
 		if channelID == "" {
 			return nil, fmt.Errorf("channel_id is required")
 		}
@@ -1321,6 +1328,77 @@ func (e *Executor) manageChannelRule(ctx context.Context, request ExecutionReque
 	default:
 		return nil, fmt.Errorf("action must be list, allow, deny, or remove")
 	}
+}
+
+func (e *Executor) channelIDArgument(ctx context.Context, request ExecutionRequest, args map[string]any) (string, error) {
+	if channelID := discordIDArgument(firstNonEmpty(stringArgument(args, "channel_id"), stringArgument(args, "channel"))); channelID != "" {
+		return channelID, nil
+	}
+	channelName := firstNonEmpty(stringArgument(args, "channel_name"), stringArgument(args, "channel"))
+	if channelID := discordIDArgument(channelName); channelID != "" {
+		return channelID, nil
+	}
+	channelName = strings.TrimSpace(strings.TrimPrefix(channelName, "#"))
+	if channelName == "" {
+		return "", nil
+	}
+	if e.discord == nil {
+		return "", fmt.Errorf("channel_id is required because Discord channel lookup is not configured")
+	}
+	payload, err := e.discord.ExecuteDiscordTool(ctx, DiscordToolRequest{
+		ToolName:  "discord.list_channels",
+		GuildID:   request.GuildID,
+		ActorID:   request.ActorID,
+		RequestID: request.RequestID,
+		Arguments: map[string]any{"guild_id": request.GuildID},
+	})
+	if err != nil {
+		return "", err
+	}
+	return channelIDFromListChannelsPayload(payload, channelName)
+}
+
+func channelIDFromListChannelsPayload(payload any, channelName string) (string, error) {
+	payloadMap, ok := payload.(map[string]any)
+	if !ok {
+		return "", fmt.Errorf("Discord channel lookup returned an unexpected shape")
+	}
+	channelsValue, ok := payloadMap["channels"]
+	if !ok {
+		return "", fmt.Errorf("Discord channel lookup returned no channels")
+	}
+	target := normalizeDiscordLookupName(channelName)
+	var matches []string
+	switch channels := channelsValue.(type) {
+	case []map[string]any:
+		for _, channel := range channels {
+			if normalizeDiscordLookupName(fmt.Sprint(channel["name"])) == target {
+				matches = append(matches, strings.TrimSpace(fmt.Sprint(channel["id"])))
+			}
+		}
+	case []any:
+		for _, value := range channels {
+			channel, ok := value.(map[string]any)
+			if ok && normalizeDiscordLookupName(fmt.Sprint(channel["name"])) == target {
+				matches = append(matches, strings.TrimSpace(fmt.Sprint(channel["id"])))
+			}
+		}
+	default:
+		return "", fmt.Errorf("Discord channel lookup returned an unexpected shape")
+	}
+	cleaned := make([]string, 0, len(matches))
+	for _, match := range matches {
+		if id := discordIDArgument(match); id != "" {
+			cleaned = append(cleaned, id)
+		}
+	}
+	if len(cleaned) == 0 {
+		return "", fmt.Errorf("channel %q was not found", channelName)
+	}
+	if len(cleaned) > 1 {
+		return "", fmt.Errorf("channel name %q is ambiguous", channelName)
+	}
+	return cleaned[0], nil
 }
 
 func (e *Executor) draftModeratorNote(arguments string) (any, error) {
@@ -1610,6 +1688,9 @@ func userNativeCapabilities(definitions map[string]Definition) []map[string]any 
 	}
 	if has("discord.edit_own_message", "discord.delete_own_message") {
 		add("manage_panda_messages_with_confirmation", "Manage Panda's own messages with confirmation", "Prepare edits or deletions for Panda-authored messages only, then wait for explicit confirmation.", true)
+	}
+	if has("discord.create_poll", "discord.get_poll_answer_voters", "discord.end_poll") {
+		add("native_discord_polls", "Create and inspect native Discord polls", "Create native Discord polls, inspect voters for poll answers, or prepare closing Panda-authored polls.", true)
 	}
 	if has("discord.add_reaction", "discord.remove_own_reaction") {
 		add("manage_reactions_with_confirmation", "Manage reactions with confirmation", "Prepare adding or removing Panda's own reaction on visible messages, then wait for explicit confirmation.", true)

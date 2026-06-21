@@ -8,6 +8,8 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -15,15 +17,19 @@ import (
 
 	"github.com/disgoorg/disgo"
 	"github.com/disgoorg/disgo/bot"
+	"github.com/disgoorg/disgo/cache"
 	disgoDiscord "github.com/disgoorg/disgo/discord"
 	"github.com/disgoorg/disgo/events"
 	"github.com/disgoorg/disgo/gateway"
 	"github.com/disgoorg/disgo/rest"
+	"github.com/disgoorg/disgo/voice"
 	"github.com/disgoorg/snowflake/v2"
 	"github.com/sn0w/panda2/internal/attachments"
 	"github.com/sn0w/panda2/internal/commands"
 	"github.com/sn0w/panda2/internal/config"
 	contextsvc "github.com/sn0w/panda2/internal/context"
+	"github.com/sn0w/panda2/internal/music"
+	"github.com/sn0w/panda2/internal/polls"
 	"github.com/sn0w/panda2/internal/store"
 )
 
@@ -37,6 +43,7 @@ type Bot struct {
 	attachments AttachmentRecorder
 	events      DiscordEventRecorder
 	httpClient  *http.Client
+	music       *music.Manager
 	closeOnce   sync.Once
 }
 
@@ -70,6 +77,18 @@ const InteractionJobKind = "discord.interaction"
 const deferredProgressInterval = 8 * time.Second
 const typingRefreshInterval = 5 * time.Second
 const discordContentLimit = 2000
+const discordEmbedDescriptionLimit = 4096
+const discordEmbedFieldNameLimit = 256
+const discordEmbedFieldValueLimit = 1024
+
+const (
+	pandaEmbedColor   = 0xff6fae
+	infoEmbedColor    = 0x5865f2
+	successEmbedColor = 0x57f287
+	warningEmbedColor = 0xfee75c
+	dangerEmbedColor  = 0xed4245
+	musicEmbedColor   = 0xff66a8
+)
 
 type interactionJobPayload struct {
 	ApplicationID string                  `json:"application_id"`
@@ -83,12 +102,18 @@ func New(cfg config.Config, router *commands.Router, logger *slog.Logger) (*Bot,
 	}
 
 	instance := &Bot{cfg: cfg, router: router, logger: logger}
+	daveSessions := newDaveSessionFactory(logger)
 	client, err := disgo.New(cfg.DiscordBotToken,
 		bot.WithGatewayConfigOpts(gateway.WithIntents(
-			gateway.IntentsNonPrivileged.Remove(gateway.IntentDirectMessages, gateway.IntentDirectMessageReactions, gateway.IntentDirectMessageTyping, gateway.IntentDirectMessagePolls),
+			gateway.IntentsNonPrivileged.Remove(gateway.IntentDirectMessageReactions, gateway.IntentDirectMessageTyping, gateway.IntentDirectMessagePolls),
 			gateway.IntentGuildMembers,
 			gateway.IntentMessageContent,
 		)),
+		bot.WithCacheConfigOpts(cache.WithCaches(cache.FlagVoiceStates)),
+		bot.WithVoiceManagerConfigOpts(
+			voice.WithDaveSessionCreateFunc(daveSessions.New),
+			voice.WithDaveSessionLogger(logger),
+		),
 		bot.WithEventListenerFunc(instance.onApplicationCommand),
 		bot.WithEventListenerFunc(instance.onComponentInteraction),
 		bot.WithEventListenerFunc(instance.onModalSubmit),
@@ -128,15 +153,35 @@ func New(cfg config.Config, router *commands.Router, logger *slog.Logger) (*Bot,
 		bot.WithEventListenerFunc(instance.onGuildScheduledEventUserAdd),
 		bot.WithEventListenerFunc(instance.onGuildScheduledEventUserRemove),
 		bot.WithEventListenerFunc(instance.onGuildVoiceStateUpdate),
+		bot.WithEventListenerFunc(instance.onVoiceServerUpdate),
 	)
 	if err != nil {
 		return nil, err
 	}
 	instance.client = client
 	instance.context = contextsvc.NewService(NewContextProvider(client.Rest))
+	sidecars := music.NewSidecarManager(music.SidecarConfig{
+		Dir:        cfg.MusicSidecarDir,
+		YTDLPPath:  cfg.MusicYTDLPPath,
+		FFmpegPath: cfg.MusicFFmpegPath,
+		Logger:     logger,
+	})
+	ytdlp := music.NewYTDLP(music.YTDLPConfig{
+		YTDLPPath:  cfg.MusicYTDLPPath,
+		FFmpegPath: cfg.MusicFFmpegPath,
+		Logger:     logger,
+		Sidecars:   sidecars,
+	})
+	go func() {
+		if _, err := sidecars.Ensure(context.Background()); err != nil && logger != nil {
+			logger.Warn("music sidecar provisioning failed", slog.Any("err", err))
+		}
+	}()
+	instance.music = music.NewManager(ytdlp, ytdlp, newMusicVoiceConnector(client, logger, daveSessions), logger)
 	router.WithContextService(instance.context)
 	router.WithThreadManager(NewThreadManager(client.Rest))
 	router.WithMemberRoleManager(NewMemberRoleManager(client.Rest))
+	router.WithMusicService(instance.music)
 	return instance, nil
 }
 
@@ -187,21 +232,13 @@ func (b *Bot) Start(ctx context.Context) error {
 
 func (b *Bot) Close(ctx context.Context) {
 	b.closeOnce.Do(func() {
+		if b.music != nil {
+			b.music.Close(ctx)
+		}
 		if b.client != nil {
 			b.client.Close(ctx)
 		}
 	})
-}
-
-func (b *Bot) LeaveGuild(ctx context.Context, guildID string) error {
-	if b.client == nil {
-		return errors.New("discord client is not configured")
-	}
-	id, err := snowflake.Parse(strings.TrimSpace(guildID))
-	if err != nil {
-		return fmt.Errorf("parse guild id: %w", err)
-	}
-	return b.client.Rest.LeaveGuild(id)
 }
 
 func (b *Bot) registerCommands() error {
@@ -260,6 +297,10 @@ func isRecoverableCommandRegistrationError(err error) bool {
 func applicationCommands() []disgoDiscord.ApplicationCommandCreate {
 	minQuestionLength := 1
 	maxQuestionLength := 1800
+	maxPollQuestionLength := polls.MaxQuestionRunes
+	maxPollAnswersLength := polls.MaxAnswers * (polls.MaxAnswerRunes + 3)
+	minPollDurationHours := 1
+	maxPollDurationHours := polls.MaxDurationHours
 	maxConfirmLength := 100
 	maxTextLength := 4000
 	confirmOption := disgoDiscord.ApplicationCommandOptionString{
@@ -291,6 +332,38 @@ func applicationCommands() []disgoDiscord.ApplicationCommandCreate {
 		disgoDiscord.SlashCommandCreate{
 			Name:        "help",
 			Description: "Show Panda commands",
+		},
+		disgoDiscord.SlashCommandCreate{
+			Name:        "poll",
+			Description: "Create a native Discord poll",
+			Options: []disgoDiscord.ApplicationCommandOption{
+				disgoDiscord.ApplicationCommandOptionString{
+					Name:        "question",
+					Description: "Poll question",
+					Required:    true,
+					MinLength:   &minQuestionLength,
+					MaxLength:   &maxPollQuestionLength,
+				},
+				disgoDiscord.ApplicationCommandOptionString{
+					Name:        "answers",
+					Description: "Answers separated by |, semicolons, or new lines",
+					Required:    true,
+					MinLength:   &minQuestionLength,
+					MaxLength:   &maxPollAnswersLength,
+				},
+				disgoDiscord.ApplicationCommandOptionInt{
+					Name:        "duration_hours",
+					Description: "How long voting stays open",
+					Required:    false,
+					MinValue:    &minPollDurationHours,
+					MaxValue:    &maxPollDurationHours,
+				},
+				disgoDiscord.ApplicationCommandOptionBool{
+					Name:        "allow_multiselect",
+					Description: "Allow people to vote for multiple answers",
+					Required:    false,
+				},
+			},
 		},
 		disgoDiscord.SlashCommandCreate{
 			Name:        "ops",
@@ -412,6 +485,38 @@ func applicationCommands() []disgoDiscord.ApplicationCommandCreate {
 							Description: "Role to allow or remove",
 							Required:    false,
 						},
+					},
+				},
+				disgoDiscord.ApplicationCommandOptionSubCommand{
+					Name:        "channel",
+					Description: "Choose which channels can use Panda assistant features",
+					Options: []disgoDiscord.ApplicationCommandOption{
+						disgoDiscord.ApplicationCommandOptionString{
+							Name:        "action",
+							Description: "Channel access action",
+							Required:    true,
+							Choices: []disgoDiscord.ApplicationCommandOptionChoiceString{
+								{Name: "List", Value: "list"},
+								{Name: "Allow", Value: "allow"},
+								{Name: "Deny", Value: "deny"},
+								{Name: "Remove", Value: "remove"},
+							},
+						},
+						disgoDiscord.ApplicationCommandOptionChannel{
+							Name:        "channel",
+							Description: "Channel to allow, deny, or remove",
+							Required:    false,
+							ChannelTypes: []disgoDiscord.ChannelType{
+								disgoDiscord.ChannelTypeGuildText,
+								disgoDiscord.ChannelTypeGuildNews,
+								disgoDiscord.ChannelTypeGuildForum,
+								disgoDiscord.ChannelTypeGuildMedia,
+								disgoDiscord.ChannelTypeGuildPublicThread,
+								disgoDiscord.ChannelTypeGuildNewsThread,
+								disgoDiscord.ChannelTypeGuildPrivateThread,
+							},
+						},
+						dryRunOption,
 					},
 				},
 				disgoDiscord.ApplicationCommandOptionSubCommand{
@@ -543,6 +648,15 @@ func (b *Bot) handleSlashCommand(event *events.ApplicationCommandInteractionCrea
 	if question, ok := data.OptString("question"); ok {
 		request.Options["question"] = question
 	}
+	if answers, ok := data.OptString("answers"); ok {
+		request.Options["answers"] = answers
+	}
+	if durationHours, ok := data.OptInt("duration_hours"); ok {
+		request.Options["duration_hours"] = strconv.Itoa(durationHours)
+	}
+	if allowMultiselect, ok := data.OptBool("allow_multiselect"); ok && allowMultiselect {
+		request.Options["allow_multiselect"] = "true"
+	}
 	for _, name := range []string{"model", "fallback_models", "temperature", "max_response_tokens", "max_tokens", "tool_policy", "prompt", "soul", "action", "confirm", "tool_name", "profile"} {
 		if value, ok := data.OptString(name); ok {
 			request.Options[name] = value
@@ -551,6 +665,10 @@ func (b *Bot) handleSlashCommand(event *events.ApplicationCommandInteractionCrea
 	if role, ok := data.OptRole("role"); ok {
 		request.Options["role_id"] = role.ID.String()
 		request.Options["role_name"] = role.Name
+	}
+	if channel, ok := data.OptChannel("channel"); ok {
+		request.Options["channel_id"] = channel.ID.String()
+		request.Options["channel_name"] = channel.Name
 	}
 	if user, ok := data.OptUser("user"); ok {
 		request.Options["member_user_id"] = user.ID.String()
@@ -611,7 +729,7 @@ func (b *Bot) respondToInteraction(event *events.ApplicationCommandInteractionCr
 				_, err := b.client.Rest.UpdateInteractionResponse(
 					b.client.ApplicationID,
 					event.Token(),
-					disgoDiscord.NewMessageUpdate().WithContent(threadNotice(response)),
+					webhookMessageUpdateFromResponse(threadNoticeResponse(response)),
 				)
 				if err != nil {
 					b.logger.Warn("failed to update thread interaction response", slog.Any("err", err), slog.String("request_id", requestID), slog.String("command", request.Command))
@@ -661,7 +779,7 @@ func (b *Bot) runDeferredInteraction(ctx context.Context, applicationID snowflak
 			_, err := b.client.Rest.UpdateInteractionResponse(
 				applicationID,
 				token,
-				disgoDiscord.NewMessageUpdate().WithContent(deferredProgressContent(request.Command, progressCount)),
+				webhookMessageUpdateFromResponse(deferredProgressResponse(request.Command, progressCount)),
 			)
 			if err != nil {
 				b.logger.Debug("failed to update deferred progress", slog.Any("err", err), slog.String("request_id", requestID), slog.String("command", request.Command))
@@ -692,6 +810,16 @@ func deferredProgressContent(command string, count int) string {
 		return action + "..."
 	}
 	return fmt.Sprintf("%s... still working", action)
+}
+
+func deferredProgressResponse(command string, count int) commands.Response {
+	return commands.Response{
+		Content: deferredProgressContent(command, count),
+		Presentation: commands.Presentation{
+			Title:  "Working on it",
+			Accent: commands.AccentInfo,
+		},
+	}
 }
 
 func (b *Bot) prepareDeferredRequest(request commands.Request) commands.Request {
@@ -726,7 +854,7 @@ func (b *Bot) queueBackgroundInteraction(ctx context.Context, applicationID snow
 	if err != nil {
 		return commands.Response{Content: "Long summary could not be queued.", Ephemeral: true}
 	}
-	return commands.Response{Content: fmt.Sprintf("Queued long summary job #%d. This response will update when the result is ready.", job.ID)}
+	return commands.Response{Content: fmt.Sprintf("Queued long summary job #%d. This response will update when the result is ready.", job.ID), Presentation: commands.Presentation{Title: "Summary queued", Accent: commands.AccentInfo}}
 }
 
 func (b *Bot) HandleInteractionJob(ctx context.Context, job store.Job) error {
@@ -744,7 +872,7 @@ func (b *Bot) HandleInteractionJob(ctx context.Context, job store.Job) error {
 	_, _ = b.client.Rest.UpdateInteractionResponse(
 		applicationID,
 		payload.Token,
-		disgoDiscord.NewMessageUpdate().WithContent(fmt.Sprintf("Running long summary job #%d...", job.ID)),
+		webhookMessageUpdateFromResponse(commands.Response{Content: fmt.Sprintf("Running long summary job #%d...", job.ID), Presentation: commands.Presentation{Title: "Summary running", Accent: commands.AccentInfo}}),
 	)
 	response := b.router.HandleBackgroundTask(ctx, payload.Task)
 	err = b.updateInteractionResponse(applicationID, payload.Token, response)
@@ -774,7 +902,7 @@ func (b *Bot) onComponentInteraction(event *events.ComponentInteractionCreate) {
 func (b *Bot) onButtonInteraction(event *events.ComponentInteractionCreate) {
 	customID := event.ButtonInteractionData().CustomID()
 	if customID == commands.ConfirmationCancelID {
-		if err := event.UpdateMessage(disgoDiscord.NewMessageUpdate().WithContent("Cancelled.").WithComponents()); err != nil {
+		if err := event.UpdateMessage(messageUpdateFromResponse(commands.Response{Content: "Cancelled.", Presentation: commands.Presentation{Title: "Cancelled", Accent: commands.AccentWarning}}).WithComponents()); err != nil {
 			b.logger.Warn("failed to cancel confirmation", slog.Any("err", err))
 		}
 		return
@@ -791,7 +919,7 @@ func (b *Bot) onButtonInteraction(event *events.ComponentInteractionCreate) {
 
 	confirmedRequest, ok := commands.RequestFromConfirmationID(customID, baseRequest)
 	if !ok {
-		if err := event.CreateMessage(disgoDiscord.NewMessageCreate().WithContent("That confirmation is no longer valid for this user.").WithEphemeral(true)); err != nil {
+		if err := event.CreateMessage(messageCreateFromResponse(commands.Response{Content: "That confirmation is no longer valid for this user.", Ephemeral: true, Presentation: commands.Presentation{Title: "Confirmation expired", Accent: commands.AccentWarning}})); err != nil {
 			b.logger.Warn("failed to reject confirmation", slog.Any("err", err))
 		}
 		return
@@ -830,7 +958,7 @@ func (b *Bot) onModalSubmit(event *events.ModalSubmitInteractionCreate) {
 	}
 	request, ok := commands.RequestFromModalID(event.Data.CustomID, values, b.requestFromModalEvent(event))
 	if !ok {
-		if err := event.CreateMessage(disgoDiscord.NewMessageCreate().WithContent("That modal is no longer valid for this user.").WithEphemeral(true)); err != nil {
+		if err := event.CreateMessage(messageCreateFromResponse(commands.Response{Content: "That modal is no longer valid for this user.", Ephemeral: true, Presentation: commands.Presentation{Title: "Modal expired", Accent: commands.AccentWarning}})); err != nil {
 			b.logger.Warn("failed to reject modal submit", slog.Any("err", err))
 		}
 		return
@@ -865,7 +993,21 @@ func messageCreateFromResponse(response commands.Response) disgoDiscord.MessageC
 }
 
 func messageCreateFromResponsePart(response commands.Response, content string, includeComponents bool) disgoDiscord.MessageCreate {
-	message := disgoDiscord.NewMessageCreate().WithContent(content).WithEphemeral(response.Ephemeral).WithSuppressEmbeds(true)
+	message := disgoDiscord.NewMessageCreate().WithEphemeral(response.Ephemeral)
+	if response.Poll != nil {
+		if strings.TrimSpace(content) != "" {
+			message = message.WithContent(content)
+		}
+		if includeComponents {
+			message = message.WithComponents(componentsFromResponse(response)...)
+		}
+		return message.WithPoll(pollCreateFromPoll(*response.Poll))
+	}
+	if embed, ok := embedFromResponsePart(response, content); ok {
+		message = message.WithContent("").WithEmbeds(embed).WithSuppressEmbeds(false)
+	} else {
+		message = message.WithContent(content).WithSuppressEmbeds(true)
+	}
 	if includeComponents {
 		message = message.WithComponents(componentsFromResponse(response)...)
 	}
@@ -881,7 +1023,24 @@ func channelMessageCreateFromResponsePart(response commands.Response, content st
 }
 
 func channelMessageCreateFromResponsePartWithReference(response commands.Response, content string, includeComponents bool, reference *disgoDiscord.MessageReference) disgoDiscord.MessageCreate {
-	message := disgoDiscord.NewMessageCreate().WithContent(content).WithSuppressEmbeds(true)
+	message := disgoDiscord.NewMessageCreate()
+	if response.Poll != nil {
+		if strings.TrimSpace(content) != "" {
+			message = message.WithContent(content)
+		}
+		if includeComponents {
+			message = message.WithComponents(componentsFromResponse(response)...)
+		}
+		if reference != nil {
+			message = message.WithMessageReference(reference).WithAllowedMentions(discordReplyAllowedMentions())
+		}
+		return message.WithPoll(pollCreateFromPoll(*response.Poll))
+	}
+	if embed, ok := embedFromResponsePart(response, content); ok {
+		message = message.WithContent("").WithEmbeds(embed).WithSuppressEmbeds(false)
+	} else {
+		message = message.WithContent(content).WithSuppressEmbeds(true)
+	}
 	if includeComponents {
 		message = message.WithComponents(componentsFromResponse(response)...)
 	}
@@ -889,6 +1048,51 @@ func channelMessageCreateFromResponsePartWithReference(response commands.Respons
 		message = message.WithMessageReference(reference).WithAllowedMentions(discordReplyAllowedMentions())
 	}
 	return message
+}
+
+func pollCreateFromPoll(poll polls.Poll) disgoDiscord.PollCreate {
+	answers := make([]disgoDiscord.PollMedia, 0, len(poll.Answers))
+	for _, answer := range poll.Answers {
+		text := answer.Text
+		answers = append(answers, disgoDiscord.PollMedia{
+			Text:  &text,
+			Emoji: partialPollEmoji(answer.Emoji),
+		})
+	}
+	return disgoDiscord.NewPollCreate(poll.Question, answers...).
+		WithDuration(poll.DurationHours).
+		WithAllowMultiselect(poll.AllowMultiselect)
+}
+
+func partialPollEmoji(raw string) *disgoDiscord.PartialEmoji {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	if id, ok := customEmojiID(raw); ok {
+		return &disgoDiscord.PartialEmoji{ID: &id}
+	}
+	name := raw
+	return &disgoDiscord.PartialEmoji{Name: &name}
+}
+
+func customEmojiID(raw string) (snowflake.ID, bool) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return 0, false
+	}
+	if id, err := snowflake.Parse(raw); err == nil {
+		return id, true
+	}
+	if strings.HasPrefix(raw, "<") && strings.HasSuffix(raw, ">") {
+		raw = strings.TrimPrefix(strings.TrimSuffix(raw, ">"), "<")
+	}
+	parts := strings.Split(raw, ":")
+	if len(parts) < 2 {
+		return 0, false
+	}
+	id, err := snowflake.Parse(parts[len(parts)-1])
+	return id, err == nil
 }
 
 func firstDiscordContentChunk(content string) string {
@@ -926,7 +1130,12 @@ func webhookMessageUpdateFromResponse(response commands.Response) disgoDiscord.M
 }
 
 func webhookMessageUpdateFromResponsePart(response commands.Response, content string, includeComponents bool) disgoDiscord.MessageUpdate {
-	message := disgoDiscord.NewMessageUpdate().WithContent(content).WithSuppressEmbeds(true)
+	message := disgoDiscord.NewMessageUpdate()
+	if embed, ok := embedFromResponsePart(response, content); ok {
+		message = message.WithContent("").WithEmbeds(embed).WithSuppressEmbeds(false)
+	} else {
+		message = message.WithContent(content).WithSuppressEmbeds(true)
+	}
 	if includeComponents {
 		message = message.WithComponents(componentsFromResponse(response)...)
 	}
@@ -934,10 +1143,7 @@ func webhookMessageUpdateFromResponsePart(response commands.Response, content st
 }
 
 func messageUpdateFromResponse(response commands.Response) disgoDiscord.MessageUpdate {
-	return disgoDiscord.NewMessageUpdate().
-		WithContent(firstDiscordContentChunk(response.Content)).
-		WithSuppressEmbeds(true).
-		WithComponents(componentsFromResponse(response)...)
+	return webhookMessageUpdateFromResponse(response)
 }
 
 func (b *Bot) updateInteractionResponse(applicationID snowflake.ID, token string, response commands.Response) error {
@@ -1026,6 +1232,189 @@ func discordSplitIndex(runes []rune, limit int) int {
 	return limit
 }
 
+func embedFromResponsePart(response commands.Response, content string) (disgoDiscord.Embed, bool) {
+	description := strings.TrimSpace(content)
+	presentation := responsePresentation(response.Presentation, description)
+	title := strings.TrimSpace(presentation.Title)
+	description = trimDuplicateMarkdownHeading(description, title)
+	if utf8RuneCount(description) > discordEmbedDescriptionLimit {
+		description = limitRunes(description, discordEmbedDescriptionLimit)
+	}
+
+	fields := embedFieldsFromResponse(presentation.Fields)
+	if title == "" && description == "" && len(fields) == 0 {
+		return disgoDiscord.Embed{}, false
+	}
+
+	embed := disgoDiscord.NewEmbed().WithColor(embedColor(presentation.Accent))
+	if title != "" {
+		embed = embed.WithTitle(title)
+	}
+	if description != "" {
+		embed = embed.WithDescription(description)
+	}
+	if validHTTPURL(presentation.URL) {
+		embed = embed.WithURL(strings.TrimSpace(presentation.URL))
+	}
+	if footer := strings.TrimSpace(presentation.Footer); footer != "" {
+		embed = embed.WithFooterText(footer)
+	}
+	if len(fields) > 0 {
+		embed = embed.WithFields(fields...)
+	}
+	return embed, true
+}
+
+func responsePresentation(presentation commands.Presentation, content string) commands.Presentation {
+	if presentationHasExplicitDisplay(presentation) {
+		if strings.TrimSpace(presentation.Title) == "" && strings.TrimSpace(content) != "" {
+			presentation.Title = "Panda"
+		}
+		return presentation
+	}
+	return inferredPresentation(content)
+}
+
+func presentationHasExplicitDisplay(presentation commands.Presentation) bool {
+	return strings.TrimSpace(presentation.Title) != "" ||
+		strings.TrimSpace(presentation.URL) != "" ||
+		strings.TrimSpace(presentation.Footer) != "" ||
+		presentation.Accent != commands.AccentDefault ||
+		len(presentation.Fields) > 0
+}
+
+func inferredPresentation(content string) commands.Presentation {
+	trimmed := strings.TrimSpace(content)
+	if trimmed == "" {
+		return commands.Presentation{}
+	}
+	lower := strings.ToLower(trimmed)
+	switch {
+	case strings.HasPrefix(trimmed, "Health:"):
+		return commands.Presentation{Title: "Ops health", Accent: commands.AccentInfo}
+	case strings.HasPrefix(trimmed, "Configured guilds:"):
+		return commands.Presentation{Title: "Configured guilds", Accent: commands.AccentInfo}
+	case strings.HasPrefix(trimmed, "Recent audit events:"):
+		return commands.Presentation{Title: "Audit log", Accent: commands.AccentInfo}
+	case strings.HasPrefix(trimmed, "Panda role profiles:"):
+		return commands.Presentation{Title: "Role profiles", Accent: commands.AccentInfo}
+	case strings.HasPrefix(trimmed, "Tool access rules:"):
+		return commands.Presentation{Title: "Tool access", Accent: commands.AccentInfo}
+	case strings.HasPrefix(lower, "incident mode:"):
+		return commands.Presentation{Title: "Incident mode", Accent: commands.AccentInfo}
+	case strings.Contains(lower, "failed") || strings.Contains(lower, "could not") || strings.Contains(lower, "invalid"):
+		return commands.Presentation{Title: "Something went wrong", Accent: commands.AccentDanger}
+	case strings.Contains(lower, "permission") || strings.Contains(lower, "only ") || strings.Contains(lower, "must ") || strings.Contains(lower, "provide ") || strings.Contains(lower, "choose ") || strings.Contains(lower, "please ") || strings.Contains(lower, "not configured") || strings.Contains(lower, "not found") || strings.Contains(lower, "disabled") || strings.Contains(lower, "exhausted") || strings.Contains(lower, "too quickly"):
+		return commands.Presentation{Title: "Heads up", Accent: commands.AccentWarning}
+	case looksLikeSuccess(lower):
+		return commands.Presentation{Title: "Done", Accent: commands.AccentSuccess}
+	default:
+		return commands.Presentation{Title: "Panda", Accent: commands.AccentDefault}
+	}
+}
+
+func looksLikeSuccess(lower string) bool {
+	for _, prefix := range []string{
+		"assigned ",
+		"allowed ",
+		"approved ",
+		"cleared ",
+		"deleted ",
+		"granted ",
+		"model settings updated",
+		"prompt updated",
+		"queue worker",
+		"removed ",
+		"role `",
+		"runtime config reload check passed",
+		"server prompt updated",
+		"set ",
+		"soul updated",
+		"agent soul updated",
+		"assistant responses are enabled",
+		"assistant responses are disabled",
+		"updated ",
+	} {
+		if strings.HasPrefix(lower, prefix) {
+			return true
+		}
+	}
+	return strings.Contains(lower, " updated.") || strings.Contains(lower, " saved.")
+}
+
+func embedFieldsFromResponse(fields []commands.Field) []disgoDiscord.EmbedField {
+	embedFields := make([]disgoDiscord.EmbedField, 0, len(fields))
+	for _, field := range fields {
+		name := strings.TrimSpace(field.Name)
+		value := strings.TrimSpace(field.Value)
+		if name == "" || value == "" {
+			continue
+		}
+		inline := field.Inline
+		embedFields = append(embedFields, disgoDiscord.EmbedField{
+			Name:   limitRunes(name, discordEmbedFieldNameLimit),
+			Value:  limitRunes(value, discordEmbedFieldValueLimit),
+			Inline: &inline,
+		})
+	}
+	return embedFields
+}
+
+func embedColor(accent commands.Accent) int {
+	switch accent {
+	case commands.AccentInfo:
+		return infoEmbedColor
+	case commands.AccentSuccess:
+		return successEmbedColor
+	case commands.AccentWarning:
+		return warningEmbedColor
+	case commands.AccentDanger:
+		return dangerEmbedColor
+	case commands.AccentMusic:
+		return musicEmbedColor
+	default:
+		return pandaEmbedColor
+	}
+}
+
+func trimDuplicateMarkdownHeading(content, title string) string {
+	if content == "" || title == "" {
+		return content
+	}
+	lines := strings.Split(content, "\n")
+	if len(lines) == 0 {
+		return content
+	}
+	first := strings.TrimSpace(lines[0])
+	if !strings.HasPrefix(first, "#") {
+		return content
+	}
+	heading := strings.TrimSpace(strings.TrimLeft(first, "# "))
+	heading = strings.TrimSuffix(heading, ":")
+	if !strings.EqualFold(heading, title) {
+		return content
+	}
+	return strings.TrimLeftFunc(strings.Join(lines[1:], "\n"), unicode.IsSpace)
+}
+
+func limitRunes(value string, limit int) string {
+	if limit <= 0 {
+		return ""
+	}
+	runes := []rune(value)
+	if len(runes) <= limit {
+		return value
+	}
+	if limit <= 3 {
+		return string(runes[:limit])
+	}
+	return string(runes[:limit-3]) + "..."
+}
+
+func utf8RuneCount(value string) int {
+	return len([]rune(value))
+}
+
 func componentsFromResponse(response commands.Response) []disgoDiscord.LayoutComponent {
 	var components []disgoDiscord.LayoutComponent
 	if response.Confirmation != nil && strings.TrimSpace(response.Confirmation.ID) != "" {
@@ -1042,7 +1431,31 @@ func componentsFromResponse(response commands.Response) []disgoDiscord.LayoutCom
 			disgoDiscord.NewSecondaryButton(cancelLabel, cancelID),
 		))
 	}
+	if buttons := actionButtonsFromResponse(response.Actions); len(buttons) > 0 {
+		components = append(components, disgoDiscord.NewActionRow(buttons...))
+	}
 	return components
+}
+
+func actionButtonsFromResponse(actions []commands.Action) []disgoDiscord.InteractiveComponent {
+	buttons := make([]disgoDiscord.InteractiveComponent, 0, len(actions))
+	for _, action := range actions {
+		label := strings.TrimSpace(action.Label)
+		rawURL := strings.TrimSpace(action.URL)
+		if label == "" || !validHTTPURL(rawURL) {
+			continue
+		}
+		buttons = append(buttons, disgoDiscord.NewLinkButton(limitRunes(label, 80), rawURL))
+		if len(buttons) == 5 {
+			break
+		}
+	}
+	return buttons
+}
+
+func validHTTPURL(rawURL string) bool {
+	parsed, err := url.Parse(strings.TrimSpace(rawURL))
+	return err == nil && (parsed.Scheme == "http" || parsed.Scheme == "https") && parsed.Host != ""
 }
 
 func firstNonEmptyText(values ...string) string {
@@ -1072,6 +1485,16 @@ func threadNotice(response commands.Response) string {
 		return fmt.Sprintf("Continued this chat in <#%s>.", response.ThreadID)
 	}
 	return fmt.Sprintf("Continued this chat in <#%s> (`%s`).", response.ThreadID, name)
+}
+
+func threadNoticeResponse(response commands.Response) commands.Response {
+	return commands.Response{
+		Content: threadNotice(response),
+		Presentation: commands.Presentation{
+			Title:  "Continued in thread",
+			Accent: commands.AccentInfo,
+		},
+	}
 }
 
 func shouldDefer(command string) bool {
@@ -1113,24 +1536,67 @@ func (b *Bot) onMessageCreate(event *events.MessageCreate) {
 	if !shouldHandleNaturalMessage(content, options) {
 		return
 	}
-	stopTyping := startTypingIndicator(context.Background(), event.Client().Rest, b.logger, event.ChannelID, event.Message.ID.String(), typingRefreshInterval)
-	defer stopTyping()
-	response := b.router.HandleNaturalMessage(context.Background(), commands.Request{
-		RequestID:    event.Message.ID.String(),
-		Options:      options,
-		GuildID:      guildID,
-		ChannelID:    event.ChannelID.String(),
-		UserID:       event.Message.Author.ID.String(),
-		RoleIDs:      messageRoleIDs(event.Message.Member),
-		IsOwner:      b.cfg.IsOwner(event.Message.Author.ID.String()),
-		IsGuildAdmin: b.isMessageGuildOwner(event, event.Message.Author.ID),
-	})
-	if response.Content == "" {
+	request := commands.Request{
+		RequestID:      event.Message.ID.String(),
+		Options:        options,
+		GuildID:        guildID,
+		ChannelID:      event.ChannelID.String(),
+		VoiceChannelID: b.userVoiceChannelID(context.Background(), guildID, event.Message.Author.ID),
+		UserID:         event.Message.Author.ID.String(),
+		RoleIDs:        messageRoleIDs(event.Message.Member),
+		IsOwner:        b.cfg.IsOwner(event.Message.Author.ID.String()),
+		IsGuildAdmin:   b.isMessageGuildOwner(event, event.Message.Author.ID),
+	}
+	reference := messageReferenceFromMessage(event.Message)
+	go b.respondToNaturalMessage(context.Background(), event.ChannelID, reference, request)
+}
+
+func (b *Bot) respondToNaturalMessage(ctx context.Context, channelID snowflake.ID, reference *disgoDiscord.MessageReference, request commands.Request) {
+	if b == nil || b.client == nil || b.router == nil {
 		return
 	}
-	if err := b.sendChannelResponse(event.ChannelID, response, messageReferenceFromMessage(event.Message)); err != nil {
+	stopTyping := startTypingIndicator(ctx, b.client.Rest, b.logger, channelID, request.RequestID, typingRefreshInterval)
+	defer stopTyping()
+	response := b.router.HandleNaturalMessage(ctx, request)
+	if !hasChannelResponsePayload(response) {
+		return
+	}
+	if err := b.sendChannelResponse(channelID, response, reference); err != nil {
 		b.logger.Warn("failed to reply to natural message", slog.Any("err", err))
 	}
+}
+
+func hasChannelResponsePayload(response commands.Response) bool {
+	return strings.TrimSpace(response.Content) != "" || response.Poll != nil
+}
+
+func (b *Bot) userVoiceChannelID(ctx context.Context, guildIDValue string, userID snowflake.ID) string {
+	if b.client == nil || strings.TrimSpace(guildIDValue) == "" || userID == 0 {
+		return ""
+	}
+	guildID, err := snowflake.Parse(guildIDValue)
+	if err != nil {
+		return ""
+	}
+	state, ok := b.client.Caches.VoiceState(guildID, userID)
+	if !ok || state.ChannelID == nil {
+		return b.userVoiceChannelIDFromREST(ctx, guildID, userID)
+	}
+	return state.ChannelID.String()
+}
+
+func (b *Bot) userVoiceChannelIDFromREST(ctx context.Context, guildID snowflake.ID, userID snowflake.ID) string {
+	if b.client == nil || b.client.Rest == nil {
+		return ""
+	}
+	state, err := b.client.Rest.GetUserVoiceState(guildID, userID, rest.WithCtx(ctx))
+	if err != nil || state == nil || state.ChannelID == nil {
+		if err != nil && b.logger != nil {
+			b.logger.Debug("user voice state lookup failed", slog.Any("err", err), slog.String("guild_id", guildID.String()), slog.String("user_id", userID.String()))
+		}
+		return ""
+	}
+	return state.ChannelID.String()
 }
 
 func messageReferenceFromMessage(message disgoDiscord.Message) *disgoDiscord.MessageReference {

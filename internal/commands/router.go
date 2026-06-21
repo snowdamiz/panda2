@@ -17,7 +17,9 @@ import (
 	"github.com/sn0w/panda2/internal/composed"
 	contextsvc "github.com/sn0w/panda2/internal/context"
 	"github.com/sn0w/panda2/internal/llm"
+	"github.com/sn0w/panda2/internal/music"
 	"github.com/sn0w/panda2/internal/ops"
+	"github.com/sn0w/panda2/internal/polls"
 	"github.com/sn0w/panda2/internal/ratelimit"
 	"github.com/sn0w/panda2/internal/repository"
 	"github.com/sn0w/panda2/internal/security"
@@ -35,6 +37,7 @@ type Router struct {
 	memberRoles MemberRoleManager
 	attachments AttachmentReader
 	ops         *ops.Service
+	music       MusicService
 	rateLimit   *ratelimit.Limiter
 }
 
@@ -49,6 +52,10 @@ type MemberRoleManager interface {
 
 type AttachmentReader interface {
 	Get(ctx context.Context, guildID string, id uint) (store.Attachment, error)
+}
+
+type MusicService interface {
+	Handle(ctx context.Context, request music.Request) (music.Response, error)
 }
 
 type helpAccess struct {
@@ -73,14 +80,24 @@ const baseHelpMessage = "### Panda Help\n\n" +
 	"**Chat naturally**\n" +
 	"- Mention `Panda` in a normal message: `Panda is this true?`\n" +
 	"- Panda checks intent before replying, so casual mentions do not always trigger it.\n\n" +
+	"**Music**\n" +
+	"- Join a voice channel, then say `Panda play <song>`.\n" +
+	"- Natural controls: `pause`, `resume`, `skip`, `stop`, `queue`, `clear queue`, `now playing`.\n\n" +
 	"**Message actions**\n" +
-	"- Use **Explain with Panda** or **Summarize with Panda** from a message's **Apps** menu."
+	"- Use **Explain with Panda** or **Summarize with Panda** from a message's **Apps** menu.\n" +
+	"- `/poll question:<text> answers:<answer | answer | answer>` creates a native Discord poll."
 
 const regularHelpMessage = baseHelpMessage + "\n\n" +
 	"**Good things to ask**\n" +
 	"- Questions about the conversation\n" +
 	"- Summaries, rewrites, and explanations\n" +
 	"- Help thinking through an idea or decision"
+
+const (
+	pandaRepositoryURL = "https://github.com/snowdamiz/panda2"
+	pandaSetupURL      = "https://github.com/snowdamiz/panda2#local-development"
+	pandaCommandsURL   = "https://github.com/snowdamiz/panda2#commands"
+)
 
 const discordMessageContentLimit = 2000
 const invocationContextWindow = 2 * time.Minute
@@ -115,12 +132,19 @@ func (r *Router) WithComposedService(composedService *composed.Service) *Router 
 	return r
 }
 
+func (r *Router) WithMusicService(musicService MusicService) *Router {
+	r.music = musicService
+	return r
+}
+
 func (r *Router) Handle(ctx context.Context, request Request) Response {
 	switch strings.ToLower(request.Command) {
 	case "ping":
-		return Response{Content: "pong", Ephemeral: true}
+		return Response{Content: "pong", Ephemeral: true, Presentation: Presentation{Title: "Panda is online", Accent: AccentSuccess}}
 	case "help":
 		return r.handleHelp(ctx, request)
+	case "poll":
+		return r.handlePoll(request)
 	case "admin":
 		return r.handleAdmin(ctx, request)
 	case "ops":
@@ -132,12 +156,25 @@ func (r *Router) Handle(ctx context.Context, request Request) Response {
 	case "summarize", "explain", "rewrite", "translate":
 		return r.handleTask(ctx, request)
 	default:
-		return Response{Content: "Unknown command.", Ephemeral: true}
+		return Response{Content: "Unknown command.", Ephemeral: true, Presentation: Presentation{Title: "Unknown command", Accent: AccentWarning}}
 	}
 }
 
 func (r *Router) handleHelp(ctx context.Context, request Request) Response {
-	return Response{Content: r.helpMessage(ctx, request), Ephemeral: true}
+	return Response{
+		Content:   r.helpMessage(ctx, request),
+		Ephemeral: true,
+		Presentation: Presentation{
+			Title:  "Panda Help",
+			Accent: AccentInfo,
+			Footer: "Open-source Discord assistant",
+		},
+		Actions: []Action{
+			{Label: "Commands", URL: pandaCommandsURL},
+			{Label: "Setup", URL: pandaSetupURL},
+			{Label: "Repository", URL: pandaRepositoryURL},
+		},
+	}
 }
 
 func (r *Router) helpMessage(ctx context.Context, request Request) string {
@@ -146,6 +183,23 @@ func (r *Router) helpMessage(ctx context.Context, request Request) string {
 		return regularHelpMessage
 	}
 	return elevatedHelpMessage(access)
+}
+
+func (r *Router) handlePoll(request Request) Response {
+	question := strings.TrimSpace(request.Options["question"])
+	answers := polls.ParseAnswers(request.Options["answers"])
+	poll, err := polls.New(question, answers, intOption(request.Options["duration_hours"], 0), truthyOption(request.Options["allow_multiselect"]))
+	if err != nil {
+		return Response{
+			Content:   "Poll could not be created: " + err.Error(),
+			Ephemeral: true,
+			Presentation: Presentation{
+				Title:  "Poll not created",
+				Accent: AccentWarning,
+			},
+		}
+	}
+	return Response{Poll: &poll}
 }
 
 func (r *Router) helpAccess(ctx context.Context, request Request) helpAccess {
@@ -183,6 +237,7 @@ func elevatedHelpMessage(access helpAccess) string {
 			builder.WriteString("- `/admin role action:list|set|remove profile:admin|moderator role:@Role` - Panda role profiles\n")
 			builder.WriteString("- `/admin member-role action:add|remove user:@User role:@Role` - assign Discord roles to users\n")
 			builder.WriteString("- `/admin tool action:list|add|remove tool_name:<tool> role:@Role` - role tool grants\n")
+			builder.WriteString("- `/admin channel action:list|allow|deny|remove channel:#Channel`\n")
 			builder.WriteString("- `/admin model model:<slug> fallback_models:<csv> temperature:<0-2> max_response_tokens:<64-4000> tool_policy:<policy> dry_run:<bool>`\n")
 			builder.WriteString("- Policies: `off`, `read_only`, `assistive`, `admin_only`, `moderator`, `write_confirmed`, `owner_ops`\n")
 			builder.WriteString("- `/admin prompt prompt:<text> dry_run:<bool>` - server instructions; omit `prompt` for modal\n")
@@ -234,6 +289,12 @@ func (r *Router) HandleNaturalMessage(ctx context.Context, request Request) Resp
 	if denied := r.ensureAssistantAllowed(ctx, request); denied.Content != "" {
 		return Response{}
 	}
+	if response, ok := r.handleNaturalMusic(ctx, request, message); ok {
+		return response
+	}
+	if response, ok := handleNaturalPoll(message); ok {
+		return response
+	}
 	decision, err := r.assistant.ClassifyNaturalMessage(ctx, assistant.NaturalMessageRequest{
 		GuildID:          request.GuildID,
 		UserID:           request.UserID,
@@ -265,6 +326,336 @@ func (r *Router) HandleNaturalMessage(ctx context.Context, request Request) Resp
 	}
 	request.Options["question"] = decision.Prompt
 	return r.handleChatMode(ctx, request, false)
+}
+
+func (r *Router) handleNaturalMusic(ctx context.Context, request Request, message string) (Response, bool) {
+	if r.music == nil {
+		return Response{}, false
+	}
+	intent, ok := music.ParseIntent(message)
+	if !ok {
+		return Response{}, false
+	}
+	response, err := r.music.Handle(ctx, music.Request{
+		GuildID:        request.GuildID,
+		TextChannelID:  request.ChannelID,
+		UserID:         request.UserID,
+		VoiceChannelID: request.VoiceChannelID,
+		Intent:         intent,
+	})
+	if err != nil {
+		return musicError(err), true
+	}
+	return responseFromMusic(response), true
+}
+
+func musicError(err error) Response {
+	switch {
+	case errors.Is(err, music.ErrMissingGuild):
+		return musicStatus("Music unavailable", "Music only works inside a Discord server.", AccentWarning)
+	case errors.Is(err, music.ErrMissingVoice):
+		return musicStatus("Join voice first", "Join a voice channel first, then ask me to play the song.", AccentWarning)
+	case errors.Is(err, music.ErrMissingSong):
+		return musicStatus("Song needed", "Tell me what song to play.", AccentWarning)
+	case errors.Is(err, music.ErrNothingPlaying):
+		return musicStatus("Nothing playing", "Nothing is playing right now.", AccentWarning)
+	case errors.Is(err, music.ErrAlreadyPaused):
+		return musicStatus("Already paused", "Music is already paused.", AccentWarning)
+	case errors.Is(err, music.ErrAlreadyPlaying):
+		return musicStatus("Already playing", "Music is already playing.", AccentWarning)
+	case errors.Is(err, music.ErrDifferentVoice):
+		return musicStatus("Different voice channel", "I am already playing music in another voice channel.", AccentWarning)
+	case errors.Is(err, music.ErrVoiceConnection):
+		return musicStatus("Voice connection failed", "I could not join or speak in that voice channel yet. Try again in a moment.", AccentDanger)
+	case errors.Is(err, music.ErrDependencyMissing):
+		return musicStatus("Audio tools unavailable", "I could not prepare the server-side audio tools yet. Try again in a moment.", AccentDanger)
+	case errors.Is(err, music.ErrTrackLookupFailed):
+		return musicStatus("Song not found", "I could not find that song.", AccentWarning)
+	case errors.Is(err, music.ErrTrackStreamFailed):
+		return musicStatus("Stream failed", "I found the song, but could not start the audio stream.", AccentDanger)
+	default:
+		return musicStatus("Music error", "Music had trouble with that request.", AccentDanger)
+	}
+}
+
+func responseFromMusic(response music.Response) Response {
+	fields := make([]Field, 0, len(response.Fields))
+	for _, field := range response.Fields {
+		fields = append(fields, Field{Name: field.Name, Value: field.Value, Inline: field.Inline})
+	}
+	actions := make([]Action, 0, len(response.Actions))
+	for _, action := range response.Actions {
+		actions = append(actions, Action{Label: action.Label, URL: action.URL})
+	}
+	return Response{
+		Content: response.Content,
+		Presentation: Presentation{
+			Title:  firstNonEmpty(response.Title, "Music"),
+			Accent: AccentMusic,
+			URL:    response.URL,
+			Fields: fields,
+		},
+		Actions: actions,
+	}
+}
+
+func musicStatus(title, content string, accent Accent) Response {
+	return Response{
+		Content: content,
+		Presentation: Presentation{
+			Title:  title,
+			Accent: accent,
+		},
+	}
+}
+
+func handleNaturalPoll(message string) (Response, bool) {
+	poll, ok := naturalPollFromMessage(message)
+	if !ok {
+		return Response{}, false
+	}
+	return Response{Poll: &poll}, true
+}
+
+func naturalPollFromMessage(message string) (polls.Poll, bool) {
+	prompt, ok := naturalPollPrompt(message)
+	if !ok {
+		return polls.Poll{}, false
+	}
+	question, answers, ok := naturalPollQuestionAndAnswers(prompt)
+	if !ok {
+		return polls.Poll{}, false
+	}
+	poll, err := polls.New(question, answers, 0, false)
+	if err != nil {
+		return polls.Poll{}, false
+	}
+	return poll, true
+}
+
+func naturalPollPrompt(message string) (string, bool) {
+	message = stripLeadingDiscordMention(strings.TrimSpace(message))
+	message = stripLeadingPandaWakePhrase(message)
+	if !isPollCreateRequest(message) {
+		return "", false
+	}
+	afterPoll, ok := textAfterWord(message, "poll")
+	if !ok {
+		return "", false
+	}
+	return strings.TrimSpace(trimNaturalPollLeadIn(afterPoll)), true
+}
+
+func stripLeadingDiscordMention(message string) string {
+	message = strings.TrimSpace(message)
+	if !strings.HasPrefix(message, "<@") {
+		return message
+	}
+	end := strings.Index(message, ">")
+	if end < 0 {
+		return message
+	}
+	return strings.TrimLeftFunc(strings.TrimSpace(message[end+1:]), func(value rune) bool {
+		return value == ',' || value == ':' || value == '-' || unicode.IsSpace(value)
+	})
+}
+
+func isPollCreateRequest(message string) bool {
+	words := messageWords(message)
+	hasPoll := false
+	hasCreateVerb := false
+	for index, word := range words {
+		if word == "poll" {
+			hasPoll = true
+			if index == 0 {
+				hasCreateVerb = true
+			}
+			continue
+		}
+		switch word {
+		case "make", "create", "start", "open", "post", "run":
+			hasCreateVerb = true
+		}
+	}
+	return hasPoll && hasCreateVerb
+}
+
+func messageWords(message string) []string {
+	var words []string
+	wordStart := -1
+	for index, value := range message {
+		if isMessageWordRune(value) {
+			if wordStart < 0 {
+				wordStart = index
+			}
+			continue
+		}
+		if wordStart >= 0 {
+			words = append(words, strings.ToLower(message[wordStart:index]))
+			wordStart = -1
+		}
+	}
+	if wordStart >= 0 {
+		words = append(words, strings.ToLower(message[wordStart:]))
+	}
+	return words
+}
+
+func textAfterWord(message, target string) (string, bool) {
+	wordStart := -1
+	for index, value := range message {
+		if isMessageWordRune(value) {
+			if wordStart < 0 {
+				wordStart = index
+			}
+			continue
+		}
+		if wordStart >= 0 {
+			if strings.EqualFold(message[wordStart:index], target) {
+				return message[index:], true
+			}
+			wordStart = -1
+		}
+	}
+	if wordStart >= 0 && strings.EqualFold(message[wordStart:], target) {
+		return "", true
+	}
+	return "", false
+}
+
+func trimNaturalPollLeadIn(value string) string {
+	value = strings.TrimSpace(strings.TrimLeft(value, " \t\r\n,;:.-"))
+	for _, prefix := range []string{"about ", "for ", "on ", "asking ", "that asks ", "with "} {
+		if strings.HasPrefix(strings.ToLower(value), prefix) {
+			return strings.TrimSpace(value[len(prefix):])
+		}
+	}
+	return value
+}
+
+func naturalPollQuestionAndAnswers(prompt string) (string, []polls.Answer, bool) {
+	prompt = strings.TrimSpace(prompt)
+	if prompt == "" {
+		return "", nil, false
+	}
+	if question, answers, ok := explicitNaturalPollOptions(prompt); ok {
+		return question, answers, true
+	}
+	if question, answers, ok := questionMarkNaturalPollOptions(prompt); ok {
+		return question, answers, true
+	}
+	if question, answers, ok := binaryNaturalPollOptions(prompt); ok {
+		return question, answers, true
+	}
+	return "", nil, false
+}
+
+func explicitNaturalPollOptions(prompt string) (string, []polls.Answer, bool) {
+	for _, label := range []string{" options:", " option:", " choices:", " choice:", " answers:", " answer:"} {
+		index := strings.Index(strings.ToLower(prompt), label)
+		if index < 0 {
+			continue
+		}
+		question := cleanNaturalPollQuestion(prompt[:index])
+		answers := polls.ParseAnswers(prompt[index+len(label):])
+		return question, answers, question != "" && len(answers) >= polls.MinAnswers
+	}
+	return "", nil, false
+}
+
+func questionMarkNaturalPollOptions(prompt string) (string, []polls.Answer, bool) {
+	index := strings.Index(prompt, "?")
+	if index < 0 || index == len(prompt)-1 {
+		return "", nil, false
+	}
+	question := cleanNaturalPollQuestion(prompt[:index+1])
+	answers := polls.ParseAnswers(prompt[index+1:])
+	return question, answers, question != "" && len(answers) >= polls.MinAnswers
+}
+
+func binaryNaturalPollOptions(prompt string) (string, []polls.Answer, bool) {
+	left, right, separator, ok := splitBinaryNaturalPoll(prompt)
+	if !ok {
+		return "", nil, false
+	}
+	firstAnswer, questionPrefix := splitNaturalPollQuestionPrefix(left)
+	firstAnswer = cleanNaturalPollAnswer(firstAnswer)
+	secondAnswer := cleanNaturalPollAnswer(right)
+	if firstAnswer == "" || secondAnswer == "" {
+		return "", nil, false
+	}
+	question := cleanNaturalPollQuestion(prompt)
+	if questionPrefix != "" {
+		question = naturalBinaryPollQuestion(questionPrefix, firstAnswer, separator, secondAnswer)
+	}
+	return question, []polls.Answer{{Text: firstAnswer}, {Text: secondAnswer}}, question != ""
+}
+
+func splitBinaryNaturalPoll(prompt string) (string, string, string, bool) {
+	lower := strings.ToLower(prompt)
+	for _, separator := range []string{" versus ", " vs ", " or "} {
+		index := strings.LastIndex(lower, separator)
+		if index <= 0 || index+len(separator) >= len(prompt) {
+			continue
+		}
+		return prompt[:index], prompt[index+len(separator):], strings.TrimSpace(separator), true
+	}
+	return "", "", "", false
+}
+
+func splitNaturalPollQuestionPrefix(left string) (string, string) {
+	trimmed := strings.TrimSpace(left)
+	lower := strings.ToLower(trimmed)
+	for _, prefix := range []string{
+		"what will be better",
+		"what would be better",
+		"what is better",
+		"which will be better",
+		"which would be better",
+		"which is better",
+		"what should we pick",
+		"which should we pick",
+		"who will win",
+		"who wins",
+	} {
+		if strings.HasPrefix(lower, prefix) {
+			return strings.TrimSpace(trimNaturalPollLeadIn(trimmed[len(prefix):])), prefix
+		}
+	}
+	return trimmed, ""
+}
+
+func naturalBinaryPollQuestion(prefix, firstAnswer, separator, secondAnswer string) string {
+	label := sentenceCase(prefix)
+	if separator == "vs" || separator == "versus" {
+		separator = "or"
+	}
+	return fmt.Sprintf("%s: %s %s %s?", label, firstAnswer, separator, secondAnswer)
+}
+
+func cleanNaturalPollQuestion(value string) string {
+	value = strings.TrimSpace(strings.Trim(value, " \t\r\n,;:."))
+	if value == "" {
+		return ""
+	}
+	if strings.HasSuffix(value, "?") {
+		return value
+	}
+	return value + "?"
+}
+
+func cleanNaturalPollAnswer(value string) string {
+	return strings.TrimSpace(strings.Trim(value, " \t\r\n,;:.?!"))
+}
+
+func sentenceCase(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	runes := []rune(value)
+	runes[0] = unicode.ToUpper(runes[0])
+	return string(runes)
 }
 
 func naturalMessageFallbackPrompt(message string, options map[string]string) (string, bool) {
@@ -434,7 +825,7 @@ func (r *Router) handleAdmin(ctx context.Context, request Request) Response {
 				return Response{Content: "Permission lookup failed. Please try again later.", Ephemeral: true}
 			}
 			if !allowed {
-				return Response{Content: "Only the installing server owner, a server administrator, or a delegated config role can use admin commands.", Ephemeral: true}
+				return Response{Content: "Only the Panda owner, server owner or administrator, or a delegated config role can use admin commands.", Ephemeral: true}
 			}
 		}
 		if subcommand == "soul" {
@@ -443,7 +834,7 @@ func (r *Router) handleAdmin(ctx context.Context, request Request) Response {
 				return Response{Content: "Permission lookup failed. Please try again later.", Ephemeral: true}
 			}
 			if !allowed {
-				return Response{Content: "Only the installing server owner, a server administrator, moderator, creator, or delegated soul writer can update Panda's soul.", Ephemeral: true}
+				return Response{Content: "Only the Panda owner, server owner or administrator, moderator, creator, or delegated soul writer can update Panda's soul.", Ephemeral: true}
 			}
 		}
 	}
@@ -455,6 +846,8 @@ func (r *Router) handleAdmin(ctx context.Context, request Request) Response {
 		return r.handleAdminMemberRole(ctx, request)
 	case "tool":
 		return r.handleAdminToolAccess(ctx, request)
+	case "channel", "channels":
+		return r.handleAdminChannelAccess(ctx, request)
 	case "model":
 		return r.handleAdminModel(ctx, request)
 	case "prompt":
@@ -491,7 +884,7 @@ func (r *Router) handleAdminRoleProfile(ctx context.Context, request Request) Re
 		}
 		return Response{Content: renderRoleProfiles(roles), Ephemeral: true}
 	case "set", "add":
-		if denied := r.ensureGuildControl(ctx, request, "Only the installing server owner, a server administrator, or the current Panda admin role can set Panda role profiles."); denied.Content != "" {
+		if denied := r.ensureGuildControl(ctx, request, "Only the Panda owner, server owner or administrator, or the current Panda admin role can set Panda role profiles."); denied.Content != "" {
 			return denied
 		}
 		profile, roleID, roleName, response := roleProfileOptions(request)
@@ -503,7 +896,7 @@ func (r *Router) handleAdminRoleProfile(ctx context.Context, request Request) Re
 		}
 		return Response{Content: fmt.Sprintf("%s is now a Panda %s role.", roleDisplay(roleID, roleName), admin.RoleProfileLabel(profile)), Ephemeral: true}
 	case "remove", "unset":
-		if denied := r.ensureGuildControl(ctx, request, "Only the installing server owner, a server administrator, or the current Panda admin role can remove Panda role profiles."); denied.Content != "" {
+		if denied := r.ensureGuildControl(ctx, request, "Only the Panda owner, server owner or administrator, or the current Panda admin role can remove Panda role profiles."); denied.Content != "" {
 			return denied
 		}
 		profile, roleID, roleName, response := roleProfileOptions(request)
@@ -575,7 +968,7 @@ func roleProfileLine(profile string, roleIDs []string) string {
 }
 
 func (r *Router) handleAdminMemberRole(ctx context.Context, request Request) Response {
-	if denied := r.ensureGuildControl(ctx, request, "Only the installing server owner, a server administrator, or the current Panda admin role can assign Discord roles."); denied.Content != "" {
+	if denied := r.ensureGuildControl(ctx, request, "Only the Panda owner, server owner or administrator, or the current Panda admin role can assign Discord roles."); denied.Content != "" {
 		return denied
 	}
 	if r.memberRoles == nil {
@@ -666,6 +1059,107 @@ func (r *Router) handleAdminToolAccess(ctx context.Context, request Request) Res
 	default:
 		return Response{Content: "`action` must be `list`, `add`, or `remove`.", Ephemeral: true}
 	}
+}
+
+func (r *Router) handleAdminChannelAccess(ctx context.Context, request Request) Response {
+	action := strings.ToLower(strings.TrimSpace(firstNonEmpty(request.Options["action"], "list")))
+	channelID, channelName := channelOptions(request)
+	switch action {
+	case "list", "":
+		rules, err := r.admin.ListChannelRules(ctx, request.GuildID)
+		if err != nil {
+			return Response{Content: "Channel access lookup failed.", Ephemeral: true}
+		}
+		return Response{Content: renderChannelRules(rules), Ephemeral: true}
+	case "allow", "add":
+		if channelID == "" {
+			return Response{Content: "Choose a `channel` to allow Panda assistant use there.", Ephemeral: true}
+		}
+		if dryRunRequested(request) {
+			return dryRunResponse("Panda assistant use would be allowed in %s.", channelDisplay(channelID, channelName))
+		}
+		rule, err := r.admin.SetChannelRule(ctx, request.GuildID, request.UserID, channelID, "allow")
+		if err != nil {
+			return Response{Content: "Channel access rule could not be saved.", Ephemeral: true}
+		}
+		return Response{Content: fmt.Sprintf("Allowed Panda assistant use in %s. Because an allow rule exists, other channels need their own allow rule unless the user is an admin.", channelDisplay(rule.ChannelID, channelName)), Ephemeral: true}
+	case "deny", "block":
+		if channelID == "" {
+			return Response{Content: "Choose a `channel` to deny Panda assistant use there.", Ephemeral: true}
+		}
+		if dryRunRequested(request) {
+			return dryRunResponse("Panda assistant use would be denied in %s.", channelDisplay(channelID, channelName))
+		}
+		rule, err := r.admin.SetChannelRule(ctx, request.GuildID, request.UserID, channelID, "deny")
+		if err != nil {
+			return Response{Content: "Channel access rule could not be saved.", Ephemeral: true}
+		}
+		return Response{Content: fmt.Sprintf("Denied Panda assistant use in %s.", channelDisplay(rule.ChannelID, channelName)), Ephemeral: true}
+	case "remove", "clear":
+		if channelID == "" {
+			return Response{Content: "Choose a `channel` to remove from Panda channel access rules.", Ephemeral: true}
+		}
+		if dryRunRequested(request) {
+			return dryRunResponse("The Panda channel access rule for %s would be removed.", channelDisplay(channelID, channelName))
+		}
+		if err := r.admin.RemoveChannelRule(ctx, request.GuildID, request.UserID, channelID); err != nil {
+			if errors.Is(err, repository.ErrNotFound) {
+				return Response{Content: "That channel access rule was not found.", Ephemeral: true}
+			}
+			return Response{Content: "Channel access rule could not be removed.", Ephemeral: true}
+		}
+		return Response{Content: fmt.Sprintf("Removed Panda channel access rule for %s.", channelDisplay(channelID, channelName)), Ephemeral: true}
+	default:
+		return Response{Content: "`action` must be `list`, `allow`, `deny`, or `remove`.", Ephemeral: true}
+	}
+}
+
+func channelOptions(request Request) (string, string) {
+	channelID := normalizeChannelID(firstNonEmpty(request.Options["channel_id"], request.Options["channel"]))
+	channelName := strings.TrimPrefix(strings.TrimSpace(request.Options["channel_name"]), "#")
+	return channelID, channelName
+}
+
+func normalizeChannelID(value string) string {
+	value = strings.TrimSpace(value)
+	if strings.HasPrefix(value, "<#") && strings.HasSuffix(value, ">") {
+		return strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(value, "<#"), ">"))
+	}
+	return value
+}
+
+func channelDisplay(channelID, channelName string) string {
+	channelID = normalizeChannelID(channelID)
+	channelName = strings.TrimPrefix(strings.TrimSpace(channelName), "#")
+	if channelName != "" {
+		return fmt.Sprintf("`#%s` (`%s`)", channelName, channelID)
+	}
+	return fmt.Sprintf("`%s`", channelID)
+}
+
+func renderChannelRules(rules []store.GuildChannelRule) string {
+	if len(rules) == 0 {
+		return "No channel access rules are configured. Panda assistant use is available in any channel where Discord permissions allow it."
+	}
+	hasAllow := false
+	for _, rule := range rules {
+		if rule.Rule == "allow" {
+			hasAllow = true
+			break
+		}
+	}
+	header := "Channel access rules:"
+	if hasAllow {
+		header = "Channel access rules (allow-list active):"
+	}
+	lines := []string{header}
+	for _, rule := range rules {
+		lines = append(lines, fmt.Sprintf("- `%s` %s", rule.Rule, channelDisplay(rule.ChannelID, "")))
+	}
+	if hasAllow {
+		lines = append(lines, "Only allowed channels can use Panda assistant features unless the user is an admin.")
+	}
+	return strings.Join(lines, "\n")
 }
 
 func (r *Router) handleAdminModel(ctx context.Context, request Request) Response {
@@ -903,7 +1397,11 @@ func (r *Router) handleTask(ctx context.Context, request Request) Response {
 		RequireExplicitComposedTools: toolFilter.requireExplicitComposed,
 	}
 	if shouldBackgroundTask(request, input) {
-		return Response{Content: "Queued long summary. The result will replace this response when it is ready.", Background: &task}
+		return Response{
+			Content:      "Queued long summary. The result will replace this response when it is ready.",
+			Presentation: Presentation{Title: "Summary queued", Accent: AccentInfo},
+			Background:   &task,
+		}
 	}
 	return r.HandleBackgroundTask(ctx, task)
 }
@@ -1026,7 +1524,7 @@ func (r *Router) HandleToolConfirmation(ctx context.Context, request ToolConfirm
 		}
 		return Response{Content: fmt.Sprintf("Removed `%s` from role `%s`.", permission, roleID), Ephemeral: true}
 	case toolActionRoleProfileAdd:
-		if denied := r.ensureGuildControl(ctx, request.Request, "Only the installing server owner, a server administrator, or the current Panda admin role can set Panda role profiles."); denied.Content != "" {
+		if denied := r.ensureGuildControl(ctx, request.Request, "Only the Panda owner, server owner or administrator, or the current Panda admin role can set Panda role profiles."); denied.Content != "" {
 			return denied
 		}
 		roleID := strings.TrimSpace(request.Options["role_id"])
@@ -1039,7 +1537,7 @@ func (r *Router) HandleToolConfirmation(ctx context.Context, request ToolConfirm
 		}
 		return Response{Content: fmt.Sprintf("Role `%s` is now a Panda %s role.", roleID, admin.RoleProfileLabel(profile)), Ephemeral: true}
 	case toolActionRoleProfileRemove:
-		if denied := r.ensureGuildControl(ctx, request.Request, "Only the installing server owner, a server administrator, or the current Panda admin role can remove Panda role profiles."); denied.Content != "" {
+		if denied := r.ensureGuildControl(ctx, request.Request, "Only the Panda owner, server owner or administrator, or the current Panda admin role can remove Panda role profiles."); denied.Content != "" {
 			return denied
 		}
 		roleID := strings.TrimSpace(request.Options["role_id"])
@@ -1052,7 +1550,7 @@ func (r *Router) HandleToolConfirmation(ctx context.Context, request ToolConfirm
 		}
 		return Response{Content: fmt.Sprintf("Removed the Panda %s profile from role `%s`.", admin.RoleProfileLabel(profile), roleID), Ephemeral: true}
 	case toolActionMemberRoleAdd, toolActionMemberRoleRemove:
-		if denied := r.ensureGuildControl(ctx, request.Request, "Only the installing server owner, a server administrator, or the current Panda admin role can assign Discord roles."); denied.Content != "" {
+		if denied := r.ensureGuildControl(ctx, request.Request, "Only the Panda owner, server owner or administrator, or the current Panda admin role can assign Discord roles."); denied.Content != "" {
 			return denied
 		}
 		if r.memberRoles == nil {
@@ -1445,20 +1943,29 @@ func (r *Router) allowUser(userID string) Response {
 func assistantError(err error) Response {
 	switch {
 	case errors.Is(err, llm.ErrNotConfigured):
-		return Response{Content: "I cannot answer yet because `OPENROUTER_API_KEY` is not configured.", Ephemeral: true}
+		return Response{Content: "I cannot answer yet because `OPENROUTER_API_KEY` is not configured.", Ephemeral: true, Presentation: Presentation{Title: "Assistant not configured", Accent: AccentWarning}}
 	case errors.Is(err, assistant.ErrAssistantDisabled):
-		return Response{Content: "Assistant responses are disabled for this server.", Ephemeral: true}
+		return Response{Content: "Assistant responses are disabled for this server.", Ephemeral: true, Presentation: Presentation{Title: "Assistant disabled", Accent: AccentWarning}}
 	default:
 		slog.Warn("assistant request failed", slog.Any("err", err))
-		return Response{Content: "The model request failed. Please try again later.", Ephemeral: true}
+		return Response{Content: "The model request failed. Please try again later.", Ephemeral: true, Presentation: Presentation{Title: "Model request failed", Accent: AccentDanger}}
 	}
 }
 
 func responseFromAssistantAnswer(userID string, answer assistant.AskResponse, threadID, threadName string) Response {
-	response := Response{Content: answer.Content, ThreadID: threadID, ThreadName: threadName}
+	response := Response{
+		Content:      answer.Content,
+		ThreadID:     threadID,
+		ThreadName:   threadName,
+		Presentation: Presentation{Title: "Panda replied", Accent: AccentDefault},
+	}
 	if confirmation := ToolConfirmationFromAssistant(userID, answer.Confirmation); confirmation != nil {
 		response.Confirmation = confirmation
 		response.Content = appendConfirmationNotice(response.Content, answer.Confirmation.Summary)
+		response.Presentation = Presentation{Title: "Confirmation required", Accent: AccentWarning}
+		if confirmation.Danger {
+			response.Presentation.Accent = AccentDanger
+		}
 	}
 	return response
 }
@@ -1576,7 +2083,7 @@ func truthyOption(value string) bool {
 }
 
 func dryRunResponse(format string, args ...any) Response {
-	return Response{Content: "Dry run: " + fmt.Sprintf(format, args...), Ephemeral: true}
+	return Response{Content: "Dry run: " + fmt.Sprintf(format, args...), Ephemeral: true, Presentation: Presentation{Title: "Dry run", Accent: AccentInfo}}
 }
 
 func validBudgetScope(scope string) bool {

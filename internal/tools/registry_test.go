@@ -23,7 +23,7 @@ func TestDefaultRegistryDefinitionsAreValid(t *testing.T) {
 		t.Fatalf("NewDefaultRegistry: %v", err)
 	}
 	definitions := registry.Definitions()
-	if len(definitions) != 82 {
+	if len(definitions) != 85 {
 		t.Fatalf("expected full Discord tool surface plus assistant tools, got %d", len(definitions))
 	}
 	for _, definition := range definitions {
@@ -97,7 +97,7 @@ func TestOpenRouterToolsFiltersByPermission(t *testing.T) {
 		Permissions: map[string]struct{}{admin.PermissionAssistantUse: {}},
 	})
 	writeNames := toolNames(writeTools)
-	if !writeNames["discord_send_message"] || writeNames["discord_create_thread"] {
+	if !writeNames["discord_send_message"] || !writeNames["discord_create_poll"] || writeNames["discord_create_thread"] {
 		t.Fatalf("plain assistant use should not expose thread creation, got %+v", writeNames)
 	}
 	threadTools := registry.OpenRouterToolsForAccess(ToolAccess{
@@ -1061,6 +1061,7 @@ func TestExecutorRoleProfileAndMemberRoleToolsRequireConfirmation(t *testing.T) 
 }
 
 func TestExecutorAdminRemovalToolsRequireConfirmation(t *testing.T) {
+	const channelID = "100000000000000123"
 	registry, err := NewDefaultRegistry()
 	if err != nil {
 		t.Fatalf("NewDefaultRegistry: %v", err)
@@ -1075,7 +1076,7 @@ func TestExecutorAdminRemovalToolsRequireConfirmation(t *testing.T) {
 			Type: "function",
 			Function: llm.ToolCallFunction{
 				Name:      "panda_manage_channel_rule",
-				Arguments: `{"action":"remove","channel_id":"channel-1"}`,
+				Arguments: `{"action":"remove","channel_id":"100000000000000123"}`,
 			},
 		},
 	})
@@ -1083,11 +1084,48 @@ func TestExecutorAdminRemovalToolsRequireConfirmation(t *testing.T) {
 		t.Fatalf("Execute channel remove: %v", err)
 	}
 	message := result.Message
-	if !strings.Contains(message.Content, `"confirmation_required":true`) || !strings.Contains(message.Content, "channel-1") {
+	if !strings.Contains(message.Content, `"confirmation_required":true`) || !strings.Contains(message.Content, channelID) {
 		t.Fatalf("expected confirmation preview, got %+v", message)
 	}
-	if result.Confirmation == nil || result.Confirmation.Action != "channel_rule.remove" || result.Confirmation.Arguments["channel_id"] != "channel-1" {
+	if result.Confirmation == nil || result.Confirmation.Action != "channel_rule.remove" || result.Confirmation.Arguments["channel_id"] != channelID {
 		t.Fatalf("expected channel-rule confirmation artifact, got %+v", result.Confirmation)
+	}
+}
+
+func TestExecutorChannelRuleResolvesChannelName(t *testing.T) {
+	registry, err := NewDefaultRegistry()
+	if err != nil {
+		t.Fatalf("NewDefaultRegistry: %v", err)
+	}
+	provider := &fakeDiscordProvider{result: map[string]any{"channels": []map[string]any{{
+		"id":   "100000000000000888",
+		"name": "panda",
+	}}}}
+	executor := NewExecutor(registry, nil, nil).
+		WithAdminOperations(newToolAdminService(t)).
+		WithDiscordToolProvider(provider)
+
+	result, err := executor.Execute(context.Background(), ExecutionRequest{
+		GuildID: "guild-1",
+		ActorID: "admin",
+		Access:  testAccess(ToolPolicyWriteConfirmed, admin.PermissionAdminConfigWrite),
+		Call: llm.ToolCall{
+			ID:   "call-channel-allow",
+			Type: "function",
+			Function: llm.ToolCallFunction{
+				Name:      "panda_manage_channel_rule",
+				Arguments: `{"action":"allow","channel_name":"panda"}`,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Execute channel allow: %v", err)
+	}
+	if result.Confirmation == nil || result.Confirmation.Action != "channel_rule.set" || result.Confirmation.Arguments["channel_id"] != "100000000000000888" || result.Confirmation.Arguments["rule"] != "allow" {
+		t.Fatalf("expected resolved channel-rule confirmation, got %+v", result.Confirmation)
+	}
+	if len(provider.requests) != 1 || provider.requests[0].ToolName != "discord.list_channels" {
+		t.Fatalf("expected channel lookup request, got %+v", provider.requests)
 	}
 }
 
@@ -1119,7 +1157,7 @@ func TestExecutorAdminMutationToolsRequireConfirmation(t *testing.T) {
 		{
 			name:           "channel rule allow",
 			tool:           "panda_manage_channel_rule",
-			arguments:      `{"action":"allow","channel_id":"channel-1"}`,
+			arguments:      `{"action":"allow","channel_id":"100000000000000123"}`,
 			expectedAction: "channel_rule.set",
 		},
 	} {

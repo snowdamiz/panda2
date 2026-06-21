@@ -37,6 +37,9 @@ type Config struct {
 	OpenRouterCircuitBreakerCooldown         time.Duration
 	BraveSearchAPIKey                        string
 	BraveSearchBaseURL                       string
+	MusicYTDLPPath                           string
+	MusicFFmpegPath                          string
+	MusicSidecarDir                          string
 	SQLitePath                               string
 	DataDir                                  string
 	Port                                     string
@@ -51,6 +54,7 @@ type fileConfig struct {
 	Discord     fileDiscordConfig     `json:"discord"`
 	OpenRouter  fileOpenRouterConfig  `json:"openrouter"`
 	BraveSearch fileBraveSearchConfig `json:"brave_search"`
+	Music       fileMusicConfig       `json:"music"`
 	Runtime     fileRuntimeConfig     `json:"runtime"`
 	Storage     fileStorageConfig     `json:"storage"`
 }
@@ -79,6 +83,12 @@ type fileCircuitBreakerConfig struct {
 
 type fileBraveSearchConfig struct {
 	BaseURL string `json:"base_url"`
+}
+
+type fileMusicConfig struct {
+	YTDLPPath  string `json:"ytdlp_path"`
+	FFmpegPath string `json:"ffmpeg_path"`
+	SidecarDir string `json:"sidecar_dir"`
 }
 
 type fileRuntimeConfig struct {
@@ -128,6 +138,9 @@ func (c Config) Validate() ([]string, error) {
 	}
 	if c.BraveSearchBaseURL == "" {
 		return nil, errors.New("brave_search.base_url (BRAVE_SEARCH_BASE_URL) must not be empty")
+	}
+	if c.MusicSidecarDir == "" {
+		return nil, errors.New("music.sidecar_dir (MUSIC_SIDECAR_DIR) must not be empty")
 	}
 	if c.DiscordPublicKey != "" {
 		decoded, err := hex.DecodeString(c.DiscordPublicKey)
@@ -477,6 +490,16 @@ func applyFileConfig(cfg *Config, file fileConfig) error {
 		cfg.BraveSearchBaseURL = value
 	}
 
+	if value := strings.TrimSpace(file.Music.YTDLPPath); value != "" {
+		cfg.MusicYTDLPPath = value
+	}
+	if value := strings.TrimSpace(file.Music.FFmpegPath); value != "" {
+		cfg.MusicFFmpegPath = value
+	}
+	if value := strings.TrimSpace(file.Music.SidecarDir); value != "" {
+		cfg.MusicSidecarDir = value
+	}
+
 	if value := strings.TrimSpace(file.Runtime.Port); value != "" {
 		cfg.Port = value
 	}
@@ -528,6 +551,9 @@ func applyEnvValues(cfg *Config, lookup func(string) (string, bool)) {
 	cfg.OpenRouterCircuitBreakerCooldown = durationFromLookup(lookup, "OPENROUTER_CIRCUIT_COOLDOWN", cfg.OpenRouterCircuitBreakerCooldown)
 	cfg.BraveSearchAPIKey = stringFromLookup(lookup, "BRAVE_SEARCH_API_KEY", cfg.BraveSearchAPIKey)
 	cfg.BraveSearchBaseURL = nonEmptyStringFromLookup(lookup, "BRAVE_SEARCH_BASE_URL", cfg.BraveSearchBaseURL)
+	cfg.MusicYTDLPPath = nonEmptyStringFromLookup(lookup, "YTDLP_PATH", cfg.MusicYTDLPPath)
+	cfg.MusicFFmpegPath = nonEmptyStringFromLookup(lookup, "FFMPEG_PATH", cfg.MusicFFmpegPath)
+	cfg.MusicSidecarDir = nonEmptyStringFromLookup(lookup, "MUSIC_SIDECAR_DIR", cfg.MusicSidecarDir)
 	cfg.Port = nonEmptyStringFromLookup(lookup, "PORT", cfg.Port)
 	cfg.Environment = nonEmptyStringFromLookup(lookup, "ENVIRONMENT", cfg.Environment)
 	cfg.LogLevel = nonEmptyStringFromLookup(lookup, "LOG_LEVEL", cfg.LogLevel)
@@ -546,6 +572,9 @@ func finalize(cfg *Config) {
 	}
 	if cfg.SQLitePath == "" {
 		cfg.SQLitePath = cfg.DataDir + "/panda.db"
+	}
+	if cfg.MusicSidecarDir == "" {
+		cfg.MusicSidecarDir = cfg.DataDir + "/music-bin"
 	}
 }
 

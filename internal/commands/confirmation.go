@@ -27,6 +27,10 @@ func destructiveConfirmation(id, label, summary string) Response {
 	return Response{
 		Content:   summary + "\n\nPress the confirmation button to continue.",
 		Ephemeral: true,
+		Presentation: Presentation{
+			Title:  "Confirmation required",
+			Accent: AccentWarning,
+		},
 		Confirmation: &Confirmation{
 			ID:           id,
 			ConfirmLabel: label,

@@ -11,8 +11,6 @@ import (
 
 const (
 	GuildInstallStatusActive = "active"
-	GuildInstallStatusDenied = "denied"
-	GuildInstallStatusLeft   = "left"
 )
 
 type GuildRepository struct {
@@ -34,22 +32,6 @@ func NewGuildRepository(db *gorm.DB) *GuildRepository {
 
 func (r *GuildRepository) RecordAuthorizedInstall(ctx context.Context, install GuildInstall) (store.Guild, error) {
 	return r.upsertInstall(ctx, install, GuildInstallStatusActive, nil)
-}
-
-func (r *GuildRepository) RecordDeniedInstall(ctx context.Context, install GuildInstall) (store.Guild, error) {
-	return r.upsertInstall(ctx, install, GuildInstallStatusDenied, nil)
-}
-
-func (r *GuildRepository) MarkLeft(ctx context.Context, guildID string) error {
-	now := time.Now().UTC()
-	return r.db.WithContext(ctx).
-		Model(&store.Guild{}).
-		Where("guild_id = ?", strings.TrimSpace(guildID)).
-		Updates(map[string]any{
-			"install_status": GuildInstallStatusLeft,
-			"left_at":        &now,
-			"updated_at":     now,
-		}).Error
 }
 
 func (r *GuildRepository) Get(ctx context.Context, guildID string) (store.Guild, bool, error) {

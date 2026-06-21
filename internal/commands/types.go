@@ -1,16 +1,19 @@
 package commands
 
+import "github.com/sn0w/panda2/internal/polls"
+
 type Request struct {
-	RequestID    string
-	Command      string
-	Subcommand   string
-	Options      map[string]string
-	GuildID      string
-	ChannelID    string
-	UserID       string
-	RoleIDs      []string
-	IsGuildAdmin bool
-	IsOwner      bool
+	RequestID      string
+	Command        string
+	Subcommand     string
+	Options        map[string]string
+	GuildID        string
+	ChannelID      string
+	VoiceChannelID string
+	UserID         string
+	RoleIDs        []string
+	IsGuildAdmin   bool
+	IsOwner        bool
 }
 
 type Response struct {
@@ -18,9 +21,42 @@ type Response struct {
 	Ephemeral    bool
 	ThreadID     string
 	ThreadName   string
+	Presentation Presentation
+	Actions      []Action
 	Confirmation *Confirmation
 	Modal        *Modal
 	Background   *BackgroundTask
+	Poll         *polls.Poll
+}
+
+type Accent string
+
+const (
+	AccentDefault Accent = ""
+	AccentInfo    Accent = "info"
+	AccentSuccess Accent = "success"
+	AccentWarning Accent = "warning"
+	AccentDanger  Accent = "danger"
+	AccentMusic   Accent = "music"
+)
+
+type Presentation struct {
+	Title  string
+	Accent Accent
+	URL    string
+	Footer string
+	Fields []Field
+}
+
+type Field struct {
+	Name   string
+	Value  string
+	Inline bool
+}
+
+type Action struct {
+	Label string
+	URL   string
 }
 
 type Confirmation struct {

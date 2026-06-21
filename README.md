@@ -127,7 +127,17 @@ https://my-panda-bot.fly.dev/discord/webhook-events
 
 If Discord asks for scopes, Panda needs `bot` and `applications.commands`.
 
-If Discord asks for bot permissions, start with View Channels, Send Messages, and Read Message History. Add Manage Roles only if you want Panda to assign roles.
+If Discord asks for bot permissions, start with View Channels, Send Messages, Read Message History, Connect, and Speak. Add Manage Roles only if you want Panda to assign roles.
+
+After Panda is installed, it can answer in any channel where Discord permissions allow it. The user who installed Panda becomes the Panda owner for that server, and the Discord server owner always retains management access.
+
+Admins can restrict Panda to chosen channels later:
+
+```text
+/admin channel action:allow channel:#panda
+```
+
+When at least one channel is allowed, regular assistant use is limited to allowed channels. Admins can still use admin commands elsewhere to fix access. Use the same Discord role in both `/admin role` profile commands when a server does not split admin and moderator roles.
 
 ## 7. Check It Worked
 
@@ -155,6 +165,14 @@ Then try:
 Panda hello
 ```
 
+To try music, join a voice channel and say:
+
+```text
+Panda play one more time daft punk
+```
+
+Then use natural controls like `Panda pause`, `Panda resume`, `Panda skip`, `Panda queue`, or `Panda stop`.
+
 Slash commands can take a few minutes to show up in Discord.
 
 ## Updating Panda Later
@@ -172,6 +190,8 @@ If `fly` is not found, install Fly's command line tool and reopen your terminal.
 If Panda joins the server but does not answer messages, make sure Message Content Intent is turned on in the Discord Bot page.
 
 If Panda cannot see members or roles correctly, make sure Server Members Intent is turned on in the Discord Bot page.
+
+If Panda says the server-side audio tools are not ready yet, try again after a moment. Panda provisions its own music sidecars in the data volume.
 
 If deploy says the database path is missing or not writable, make sure the Fly volume was created with the name `data`.
 
