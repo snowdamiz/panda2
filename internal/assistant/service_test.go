@@ -839,6 +839,13 @@ func TestAskCapabilityQuestionCanUseListToolsWhenDefaultAdminOnly(t *testing.T) 
 					Name:      "panda_list_tools",
 					Arguments: `{}`,
 				},
+			}, {
+				ID:   "call-ignored-read-config",
+				Type: "function",
+				Function: llm.ToolCallFunction{
+					Name:      "read_config",
+					Arguments: `{}`,
+				},
 			}},
 		},
 		{Model: "fixture/model", Content: "I can inspect my current tool access with panda.list_tools."},
@@ -995,6 +1002,10 @@ func TestAskContinuesSequentialToolRoundsWithinOnePrompt(t *testing.T) {
 	}
 	if !toolNamePresent(client.requests[1].Tools, "read_config") {
 		t.Fatalf("expected tools to remain available on second tool round, got %+v", client.requests[1].Tools)
+	}
+	secondMessages := joinMessages(client.requests[1].Messages)
+	if strings.Contains(secondMessages, "call-ignored-read-config") {
+		t.Fatalf("batched tool call should not be executed or replayed in the next request, got %s", secondMessages)
 	}
 	finalMessages := joinMessages(client.requests[2].Messages)
 	for _, want := range []string{"call-list-tools", "call-read-config", `"policy":"admin_only"`, `"tool_policy"`} {

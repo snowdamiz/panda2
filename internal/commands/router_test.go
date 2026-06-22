@@ -1800,24 +1800,26 @@ func TestLLMToolConfirmationsRenderMultipleButtons(t *testing.T) {
 		{
 			Model:   "fixture/model",
 			Content: "",
-			ToolCalls: []llm.ToolCall{
-				{
-					ID:   "call-allow-channel",
-					Type: "function",
-					Function: llm.ToolCallFunction{
-						Name:      "panda_manage_channel_rule",
-						Arguments: `{"action":"allow","channel_id":"` + channelID + `"}`,
-					},
+			ToolCalls: []llm.ToolCall{{
+				ID:   "call-allow-channel",
+				Type: "function",
+				Function: llm.ToolCallFunction{
+					Name:      "panda_manage_channel_rule",
+					Arguments: `{"action":"allow","channel_id":"` + channelID + `"}`,
 				},
-				{
-					ID:   "call-set-mod-role",
-					Type: "function",
-					Function: llm.ToolCallFunction{
-						Name:      "panda_manage_role_permission",
-						Arguments: `{"action":"add","role_id":"` + roleID + `","profile":"moderator"}`,
-					},
+			}},
+		},
+		{
+			Model:   "fixture/model",
+			Content: "",
+			ToolCalls: []llm.ToolCall{{
+				ID:   "call-set-mod-role",
+				Type: "function",
+				Function: llm.ToolCallFunction{
+					Name:      "panda_manage_role_permission",
+					Arguments: `{"action":"add","role_id":"` + roleID + `","profile":"moderator"}`,
 				},
-			},
+			}},
 		},
 		{Model: "fixture/model", Content: "I prepared the channel rule and moderator role changes."},
 	}}
@@ -1867,10 +1869,10 @@ func TestLLMToolConfirmationsRenderMultipleButtons(t *testing.T) {
 	if !ok || roleRequest.Options["role_id"] != roleID || roleRequest.Options["profile"] != "moderator" {
 		t.Fatalf("unexpected role-profile confirmation: %+v", confirmed)
 	}
-	if len(client.requests) != 2 || len(client.requests[1].Messages) == 0 {
+	if len(client.requests) != 3 || len(client.requests[2].Messages) == 0 {
 		t.Fatalf("expected initial and final LLM requests, got %+v", client.requests)
 	}
-	finalMessages := joinRequestMessages(client.requests[1])
+	finalMessages := joinRequestMessages(client.requests[2])
 	if !strings.Contains(finalMessages, `"action":"channel_rule.set"`) || !strings.Contains(finalMessages, `"action":"role_profile.add"`) {
 		t.Fatalf("final request should include both tool results, got %s", finalMessages)
 	}
