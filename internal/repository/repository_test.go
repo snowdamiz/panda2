@@ -73,6 +73,43 @@ func TestGuildConfigEnsureDefaultCreatesWithoutRecordNotFoundLog(t *testing.T) {
 	}
 }
 
+func TestGuildMissingReadDoesNotLogRecordNotFound(t *testing.T) {
+	ctx := context.Background()
+	db, logs, cleanup := newRepositoryGormWithLogBuffer(t)
+	defer cleanup()
+
+	repo := NewGuildRepository(db)
+	if _, ok, err := repo.Get(ctx, "guild-1"); err != nil || ok {
+		t.Fatalf("expected missing guild without error, ok=%t err=%v", ok, err)
+	}
+	if strings.Contains(logs.String(), "record not found") {
+		t.Fatalf("missing guild should not be logged as record not found:\n%s", logs.String())
+	}
+}
+
+func TestGuildRecordAuthorizedInstallCreatesWithoutRecordNotFoundLog(t *testing.T) {
+	ctx := context.Background()
+	db, logs, cleanup := newRepositoryGormWithLogBuffer(t)
+	defer cleanup()
+
+	repo := NewGuildRepository(db)
+	guild, err := repo.RecordAuthorizedInstall(ctx, GuildInstall{
+		GuildID:           "guild-1",
+		Name:              "Panda Server",
+		OwnerUserID:       "owner-1",
+		InstalledByUserID: "installer-1",
+	})
+	if err != nil {
+		t.Fatalf("RecordAuthorizedInstall: %v", err)
+	}
+	if guild.GuildID != "guild-1" || guild.InstallStatus != GuildInstallStatusActive {
+		t.Fatalf("unexpected guild: %+v", guild)
+	}
+	if strings.Contains(logs.String(), "record not found") {
+		t.Fatalf("initial guild install should not be logged as record not found:\n%s", logs.String())
+	}
+}
+
 func TestUsageRecord(t *testing.T) {
 	ctx := context.Background()
 	db, err := store.Open(ctx, "file::memory:?cache=shared")

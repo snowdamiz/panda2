@@ -736,6 +736,7 @@ func (s *Service) completeWithTools(ctx context.Context, config store.GuildConfi
 				response.ToolCalls = filteredToolCalls
 			}
 		}
+		response.ToolCalls = firstToolCallOnly(response.ToolCalls)
 		if len(response.ToolCalls) == 0 {
 			if containsTextToolCallMarkup(response.Content) {
 				response.Content = textToolCallUnavailableMessage()
@@ -814,6 +815,13 @@ func filterUnavailableToolCalls(toolCalls []llm.ToolCall, availableTools []llm.T
 		}
 	}
 	return filtered
+}
+
+func firstToolCallOnly(toolCalls []llm.ToolCall) []llm.ToolCall {
+	if len(toolCalls) <= 1 {
+		return toolCalls
+	}
+	return toolCalls[:1]
 }
 
 func applyPreferredToolSelection(availableTools []llm.Tool, preferredTool string) ([]llm.Tool, llm.Message) {
@@ -1259,7 +1267,7 @@ func toolAvailabilityMessage(availableTools []llm.Tool, access tools.ToolAccess)
 	if len(names) == 0 {
 		return "Tool availability for this request and user: no function tools are currently exposed to Panda. If asked what tools or capabilities Panda has, answer for the current user only, say that no function tools are available in this context, and do not list generic model/platform tools." + accessNotice + adminOnlyNotice + disabledFeatureNotice
 	}
-	return "Tool availability for this request and user: Panda can call only these current function tools: `" + strings.Join(names, "`, `") + "`. If asked what tools or capabilities Panda has and `panda_list_tools` is listed, call it before answering. Otherwise answer only from this user-scoped list. Do not describe tools available to other users or roles. If `panda_list_tools` returns an admin_tools_notice, you may mention that admin-only tools exist only in that generic way; do not name or describe hidden admin tools. Do not claim arbitrary webpage browsing, image generation or analysis, code execution, hidden tools, or platform abilities unless they are listed here." + accessNotice + adminOnlyNotice + disabledFeatureNotice
+	return "Tool availability for this request and user: Panda can call only these current function tools: `" + strings.Join(names, "`, `") + "`. Call at most one function tool in this assistant turn; after the tool result, continue with another tool call only if needed. If asked what tools or capabilities Panda has and `panda_list_tools` is listed, call it before answering. Otherwise answer only from this user-scoped list. Do not describe tools available to other users or roles. If `panda_list_tools` returns an admin_tools_notice, you may mention that admin-only tools exist only in that generic way; do not name or describe hidden admin tools. Do not claim arbitrary webpage browsing, image generation or analysis, code execution, hidden tools, or platform abilities unless they are listed here." + accessNotice + adminOnlyNotice + disabledFeatureNotice
 }
 
 func toolAccessHasAdminPermission(access tools.ToolAccess) bool {

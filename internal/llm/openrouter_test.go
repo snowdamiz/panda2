@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
@@ -22,8 +23,19 @@ func TestOpenRouterChatSendsExpectedRequest(t *testing.T) {
 		if got := r.Header.Get("HTTP-Referer"); got != "https://example.test" {
 			t.Fatalf("unexpected referer %q", got)
 		}
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read request: %v", err)
+		}
+		var rawPayload map[string]any
+		if err := json.Unmarshal(body, &rawPayload); err != nil {
+			t.Fatalf("decode raw request: %v", err)
+		}
+		if _, ok := rawPayload["parallel_tool_calls"]; ok {
+			t.Fatalf("tool requests should not send unsupported parallel_tool_calls: %s", string(body))
+		}
 		var payload chatCompletionRequest
-		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		if err := json.Unmarshal(body, &payload); err != nil {
 			t.Fatalf("decode request: %v", err)
 		}
 		if payload.Model != "openrouter/auto" {
@@ -31,9 +43,6 @@ func TestOpenRouterChatSendsExpectedRequest(t *testing.T) {
 		}
 		if len(payload.Tools) != 1 || payload.Tools[0].Function.Name != "fixture_tool" {
 			t.Fatalf("unexpected tools payload: %+v", payload.Tools)
-		}
-		if payload.ParallelToolCalls == nil || !*payload.ParallelToolCalls {
-			t.Fatalf("tool requests should explicitly enable parallel tool calls: %+v", payload.ParallelToolCalls)
 		}
 		if payload.Provider == nil || !payload.Provider.RequireParameters || payload.Provider.AllowFallbacks == nil || *payload.Provider.AllowFallbacks {
 			t.Fatalf("tool requests should require provider parameter support and disable provider fallback: %+v", payload.Provider)

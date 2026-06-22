@@ -35,15 +35,7 @@ func (r *GuildRepository) RecordAuthorizedInstall(ctx context.Context, install G
 }
 
 func (r *GuildRepository) Get(ctx context.Context, guildID string) (store.Guild, bool, error) {
-	var guild store.Guild
-	err := r.db.WithContext(ctx).Where("guild_id = ?", strings.TrimSpace(guildID)).First(&guild).Error
-	if err == nil {
-		return guild, true, nil
-	}
-	if err == gorm.ErrRecordNotFound {
-		return store.Guild{}, false, nil
-	}
-	return store.Guild{}, false, err
+	return findGuildByID(r.db.WithContext(ctx), guildID)
 }
 
 func (r *GuildRepository) upsertInstall(ctx context.Context, install GuildInstall, status string, leftAt *time.Time) (store.Guild, error) {
@@ -66,12 +58,11 @@ func (r *GuildRepository) upsertInstall(ctx context.Context, install GuildInstal
 	}
 
 	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		var existing store.Guild
-		err := tx.Where("guild_id = ?", guildID).First(&existing).Error
-		if err != nil && err != gorm.ErrRecordNotFound {
+		existing, ok, err := findGuildByID(tx, guildID)
+		if err != nil {
 			return err
 		}
-		if err == gorm.ErrRecordNotFound {
+		if !ok {
 			return tx.Create(&guild).Error
 		}
 
@@ -91,4 +82,16 @@ func (r *GuildRepository) upsertInstall(ctx context.Context, install GuildInstal
 		return tx.Where("guild_id = ?", guildID).First(&guild).Error
 	})
 	return guild, err
+}
+
+func findGuildByID(tx *gorm.DB, guildID string) (store.Guild, bool, error) {
+	var guild store.Guild
+	result := tx.Where("guild_id = ?", strings.TrimSpace(guildID)).Limit(1).Find(&guild)
+	if result.Error != nil {
+		return store.Guild{}, false, result.Error
+	}
+	if result.RowsAffected == 0 {
+		return store.Guild{}, false, nil
+	}
+	return guild, true, nil
 }
