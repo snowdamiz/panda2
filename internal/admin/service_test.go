@@ -5,17 +5,12 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/sn0w/panda2/internal/llm"
 	"github.com/sn0w/panda2/internal/memory"
 	"github.com/sn0w/panda2/internal/repository"
 	"github.com/sn0w/panda2/internal/store"
 )
 
-type fakeModels struct {
-	valid map[string]bool
-}
-
-func TestConfigureModelPersistsFallbacksAndRuntimeSettings(t *testing.T) {
+func TestConfigureBehaviorPersistsRuntimeSettings(t *testing.T) {
 	ctx := context.Background()
 	db, err := store.Open(ctx, "file::memory:?cache=shared")
 	if err != nil {
@@ -31,39 +26,25 @@ func TestConfigureModelPersistsFallbacksAndRuntimeSettings(t *testing.T) {
 		memory.NewService(repository.NewKnowledgeRepository(db.DB)),
 		repository.NewAccessRepository(db.DB),
 		repository.NewBudgetRepository(db.DB),
-		fakeModels{valid: map[string]bool{
-			"provider/primary":    true,
-			"provider/classifier": true,
-			"provider/fallback-a": true,
-			"provider/fallback-b": true,
-		}},
-		"openrouter/auto",
 	)
 
-	config, err := service.ConfigureModel(ctx, "guild-1", "admin", ModelSettings{
-		DefaultModel:         "provider/primary",
-		ClassifierModel:      "provider/classifier",
-		FallbackModels:       []string{"provider/fallback-a", "provider/fallback-b", "provider/fallback-a"},
-		FallbackModelsSet:    true,
-		Temperature:          0.75,
-		TemperatureSet:       true,
-		MaxResponseTokens:    1200,
-		MaxResponseTokensSet: true,
-		ToolPolicy:           "read_only",
-		ToolPolicySet:        true,
+	config, err := service.ConfigureBehavior(ctx, "guild-1", "admin", BehaviorSettings{
+		Temperature:     0.75,
+		TemperatureSet:  true,
+		AnswerLength:    "detailed",
+		AnswerLengthSet: true,
+		ToolPolicy:      "read_only",
+		ToolPolicySet:   true,
 	})
 	if err != nil {
-		t.Fatalf("ConfigureModel: %v", err)
+		t.Fatalf("ConfigureBehavior: %v", err)
 	}
-	if config.DefaultModel != "provider/primary" || config.ClassifierModel != "provider/classifier" || config.Temperature != 0.75 || config.MaxResponseTokens != 1200 || config.ToolPolicy != "read_only" {
+	if config.Temperature != 0.75 || config.MaxResponseTokens != 1600 || config.ToolPolicy != "read_only" {
 		t.Fatalf("unexpected config: %+v", config)
-	}
-	if !strings.Contains(config.FallbackModels, "provider/fallback-a") || strings.Count(config.FallbackModels, "provider/fallback-a") != 1 {
-		t.Fatalf("fallback models were not normalized: %q", config.FallbackModels)
 	}
 }
 
-func TestConfigureModelRejectsInvalidRuntimeSettings(t *testing.T) {
+func TestConfigureBehaviorRejectsInvalidRuntimeSettings(t *testing.T) {
 	ctx := context.Background()
 	db, err := store.Open(ctx, "file::memory:?cache=shared")
 	if err != nil {
@@ -80,15 +61,14 @@ func TestConfigureModelRejectsInvalidRuntimeSettings(t *testing.T) {
 		repository.NewAccessRepository(db.DB),
 		repository.NewBudgetRepository(db.DB),
 		nil,
-		"openrouter/auto",
 	)
-	if _, err := service.ConfigureModel(ctx, "guild-1", "admin", ModelSettings{Temperature: 2.5, TemperatureSet: true}); err == nil {
+	if _, err := service.ConfigureBehavior(ctx, "guild-1", "admin", BehaviorSettings{Temperature: 2.5, TemperatureSet: true}); err == nil {
 		t.Fatal("expected invalid temperature to be rejected")
 	}
-	if _, err := service.ConfigureModel(ctx, "guild-1", "admin", ModelSettings{MaxResponseTokens: 12, MaxResponseTokensSet: true}); err == nil {
+	if _, err := service.ConfigureBehavior(ctx, "guild-1", "admin", BehaviorSettings{MaxResponseTokens: 12, MaxResponseTokensSet: true}); err == nil {
 		t.Fatal("expected invalid max response tokens to be rejected")
 	}
-	if _, err := service.ConfigureModel(ctx, "guild-1", "admin", ModelSettings{ToolPolicy: "execute_anything", ToolPolicySet: true}); err == nil {
+	if _, err := service.ConfigureBehavior(ctx, "guild-1", "admin", BehaviorSettings{ToolPolicy: "execute_anything", ToolPolicySet: true}); err == nil {
 		t.Fatal("expected invalid tool policy to be rejected")
 	}
 }
@@ -109,7 +89,6 @@ func TestSetSoulPersistsAndSoulWritersAreDelegated(t *testing.T) {
 		repository.NewAccessRepository(db.DB),
 		repository.NewBudgetRepository(db.DB),
 		nil,
-		"openrouter/auto",
 	)
 	config, err := service.SetSoul(ctx, "guild-1", "admin", "Be precise, warm, and a little playful.")
 	if err != nil {
@@ -163,7 +142,6 @@ func TestAddRolePermissionRejectsUnknownPermission(t *testing.T) {
 		repository.NewAccessRepository(db.DB),
 		repository.NewBudgetRepository(db.DB),
 		nil,
-		"openrouter/auto",
 	)
 	if _, err := service.AddRolePermission(ctx, "guild-1", "admin", "role-1", "anything.goes"); err == nil {
 		t.Fatal("expected unknown permission to be rejected")
@@ -186,7 +164,6 @@ func TestAdminRoleHasGuildControl(t *testing.T) {
 		repository.NewAccessRepository(db.DB),
 		repository.NewBudgetRepository(db.DB),
 		nil,
-		"openrouter/auto",
 	)
 	if _, err := service.SetAdminRole(ctx, "guild-1", "owner", "role-mod"); err != nil {
 		t.Fatalf("SetAdminRole: %v", err)
@@ -241,7 +218,6 @@ func TestRoleProfilesGrantExpectedAccess(t *testing.T) {
 		repository.NewAccessRepository(db.DB),
 		repository.NewBudgetRepository(db.DB),
 		nil,
-		"openrouter/auto",
 	)
 
 	if _, err := service.ApplyRoleProfile(ctx, "guild-1", "owner", "role-pickle", "mod"); err != nil {
@@ -289,7 +265,6 @@ func TestSingleDiscordRoleCanHoldAdminAndModeratorProfiles(t *testing.T) {
 		repository.NewAccessRepository(db.DB),
 		repository.NewBudgetRepository(db.DB),
 		nil,
-		"openrouter/auto",
 	)
 
 	if _, err := service.ApplyRoleProfile(ctx, "guild-1", "owner", "role-staff", "moderator"); err != nil {
@@ -359,7 +334,6 @@ func TestWebSearchAccessDefaultsOpenUntilMapped(t *testing.T) {
 		repository.NewAccessRepository(db.DB),
 		repository.NewBudgetRepository(db.DB),
 		nil,
-		"openrouter/auto",
 	)
 
 	allowed, err := service.CanUseWebSearch(ctx, AssistantAccessRequest{GuildID: "guild-1", RoleIDs: []string{"anyone"}})
@@ -396,7 +370,6 @@ func TestToolRoleAccessIsRoleScoped(t *testing.T) {
 		repository.NewAccessRepository(db.DB),
 		repository.NewBudgetRepository(db.DB),
 		nil,
-		"openrouter/auto",
 	)
 	if _, err := service.AddToolRole(ctx, "guild-1", "admin", "Web.Search", "role-search"); err != nil {
 		t.Fatalf("AddToolRole: %v", err)
@@ -452,7 +425,6 @@ func TestInstalledGuildOwnerHasConfigAccess(t *testing.T) {
 		repository.NewAccessRepository(db.DB),
 		repository.NewBudgetRepository(db.DB),
 		nil,
-		"openrouter/auto",
 	).WithGuildRepository(guilds)
 
 	allowed, err := service.CanWriteConfig(ctx, AssistantAccessRequest{GuildID: "guild-1", UserID: "owner-1"})
@@ -466,44 +438,5 @@ func TestInstalledGuildOwnerHasConfigAccess(t *testing.T) {
 	allowed, err = service.CanWriteConfig(ctx, AssistantAccessRequest{GuildID: "guild-1", UserID: "user-1"})
 	if err != nil || allowed {
 		t.Fatalf("expected non-owner config denial, allowed=%t err=%v", allowed, err)
-	}
-}
-
-func (f fakeModels) ListModels(context.Context) ([]llm.Model, error) {
-	return nil, nil
-}
-
-func (f fakeModels) ValidateModel(_ context.Context, slug string) (bool, error) {
-	return f.valid[slug], nil
-}
-
-func TestSetModelValidatesWhenModelListerConfigured(t *testing.T) {
-	ctx := context.Background()
-	db, err := store.Open(ctx, "file::memory:?cache=shared")
-	if err != nil {
-		t.Fatalf("open store: %v", err)
-	}
-	defer db.Close()
-
-	configs := repository.NewGuildConfigRepository(db.DB)
-	service := NewService(
-		configs,
-		repository.NewUsageRepository(db.DB),
-		repository.NewAuditRepository(db.DB),
-		memory.NewService(repository.NewKnowledgeRepository(db.DB)),
-		repository.NewAccessRepository(db.DB),
-		repository.NewBudgetRepository(db.DB),
-		fakeModels{valid: map[string]bool{"provider/good": true}},
-		"openrouter/auto",
-	)
-	if _, err := service.SetModel(ctx, "guild-1", "admin", "provider/missing"); err == nil {
-		t.Fatal("expected unavailable model to be rejected")
-	}
-	config, err := service.SetModel(ctx, "guild-1", "admin", "provider/good")
-	if err != nil {
-		t.Fatalf("SetModel valid: %v", err)
-	}
-	if config.DefaultModel != "provider/good" {
-		t.Fatalf("unexpected model %q", config.DefaultModel)
 	}
 }

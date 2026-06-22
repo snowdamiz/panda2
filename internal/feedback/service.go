@@ -31,7 +31,6 @@ type TargetRequest struct {
 	ChannelID string
 	UserID    string
 	Command   string
-	Model     string
 	Content   string
 	Metadata  map[string]string
 }
@@ -63,7 +62,6 @@ func (s *Service) CreateTarget(ctx context.Context, request TargetRequest) (stor
 		ChannelID:   request.ChannelID,
 		UserID:      request.UserID,
 		Command:     request.Command,
-		Model:       request.Model,
 		ContentHash: contentHash(request.Content),
 		Metadata:    string(metadata),
 		CreatedAt:   s.now().UTC(),

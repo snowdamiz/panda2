@@ -10,8 +10,8 @@ import (
 	"github.com/sn0w/panda2/internal/admin"
 	"github.com/sn0w/panda2/internal/alerts"
 	"github.com/sn0w/panda2/internal/assistant"
+	"github.com/sn0w/panda2/internal/billing"
 	"github.com/sn0w/panda2/internal/commands"
-	"github.com/sn0w/panda2/internal/composed"
 	"github.com/sn0w/panda2/internal/config"
 	"github.com/sn0w/panda2/internal/curation"
 	discordbot "github.com/sn0w/panda2/internal/discord"
@@ -56,9 +56,10 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 	discordEvents := repository.NewDiscordEventRepository(dataStore.DB)
 	access := repository.NewAccessRepository(dataStore.DB)
 	budgets := repository.NewBudgetRepository(dataStore.DB)
+	billingRepo := repository.NewBillingRepository(dataStore.DB)
+	dataRepo := repository.NewGuildDataRepository(dataStore.DB)
 	members := repository.NewMemberRepository(dataStore.DB)
 	jobs := repository.NewJobRepository(dataStore.DB)
-	composedTools := repository.NewComposedToolRepository(dataStore.DB)
 	schedules := repository.NewScheduleRepository(dataStore.DB)
 	alertRules := repository.NewAlertRuleRepository(dataStore.DB)
 	feedbackRepo := repository.NewFeedbackRepository(dataStore.DB)
@@ -73,7 +74,18 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 		CircuitBreakerCooldown:         cfg.OpenRouterCircuitBreakerCooldown,
 	})
 	memoryService := memory.NewServiceWithEmbeddings(knowledge, openRouter, cfg.OpenRouterEmbeddingModel)
-	curator := curation.NewService(memoryService).WithAuditRecorder(audit)
+	billingService := billing.NewService(billingRepo, billing.Config{
+		PublicURL:        cfg.PublicAppURL,
+		SuccessURL:       cfg.BillingSuccessURL,
+		CancelURL:        cfg.BillingCancelURL,
+		StripeSecretKey:  cfg.StripeSecretKey,
+		StripeAPIBaseURL: cfg.StripeAPIBaseURL,
+		DiscordSKUPlans:  cfg.DiscordSKUPlans,
+		StripePricePlans: cfg.StripePricePlans,
+	})
+	curator := curation.NewService(memoryService).
+		WithAuditRecorder(audit).
+		WithBilling(billingService)
 	maintenanceService := maintenance.NewService(conversations, attachments, dataStore)
 	worker := queue.NewWorker(jobs, "panda-main")
 	worker.Register("maintenance.cleanup", func(ctx context.Context, _ store.Job) error {
@@ -84,8 +96,9 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 		return err
 	})
 	opsService := ops.NewService(cfg, dataStore, guildConfigs, jobs, worker)
-	adminService := admin.NewService(guildConfigs, usage, audit, memoryService, access, budgets, openRouter, cfg.OpenRouterModel, members).
-		WithGuildRepository(guilds)
+	adminService := admin.NewService(guildConfigs, usage, audit, memoryService, access, budgets, members).
+		WithGuildRepository(guilds).
+		WithBilling(billingService)
 	toolRegistry, err := tools.NewDefaultRegistry()
 	if err != nil {
 		_ = dataStore.Close()
@@ -94,33 +107,32 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 	toolExecutor := tools.NewExecutor(toolRegistry, memoryService, guildConfigs).
 		WithAttachmentReader(attachments).
 		WithAuditRecorder(audit).
-		WithAdminOperations(adminService)
+		WithAdminOperations(adminService).
+		WithBilling(billingService)
 	if cfg.BraveSearchConfigured() {
 		toolExecutor.WithWebSearcher(websearch.NewBraveClient(websearch.Config{
 			APIKey:  cfg.BraveSearchAPIKey,
 			BaseURL: cfg.BraveSearchBaseURL,
 		}))
 	}
-	composedService := composed.NewService(composedTools, toolRegistry, toolExecutor, openRouter, cfg.OpenRouterModel).
-		WithAuditRecorder(audit)
 	schedulerService := scheduler.NewService(schedules, jobs).
-		WithComposedService(composedService).
 		WithDiscordEvents(discordEvents).
-		WithAuditRecorder(audit)
+		WithAuditRecorder(audit).
+		WithBilling(billingService)
 	alertService := alerts.NewService(alertRules).WithAuditRecorder(audit)
 	feedbackService := feedback.NewService(feedbackRepo)
-	toolExecutor.WithDynamicToolProvider(composedService)
-	toolExecutor.WithComposedToolManager(composedService)
 	toolExecutor.WithScheduleManager(schedulerService)
 	toolExecutor.WithReminderManager(schedulerService)
 	assistantService := assistant.NewService(openRouter, usage, guildConfigs, memoryService, conversations, cfg.OpenRouterModel, cfg.OpenRouterClassifierModel, cfg.OpenRouterFallbackModels).
 		WithToolExecutor(toolExecutor).
+		WithBilling(billingService).
 		WithCurator(curator)
 	router := commands.NewRouter(adminService, assistantService, opsService, ratelimit.New(cfg.UserRateLimit, cfg.UserRateLimitWindow)).
 		WithAttachmentReader(attachments).
-		WithComposedService(composedService).
 		WithScheduler(schedulerService).
 		WithAlertService(alertService).
+		WithBilling(billingService).
+		WithDataRepository(dataRepo).
 		WithFeedbackService(feedbackService).
 		WithToolExecutor(toolExecutor)
 
@@ -133,6 +145,7 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 		WithDiscordEventRecorder(discordEvents).
 		WithJobQueue(jobs).
 		WithAlertHandler(alertService).
+		WithBillingHandler(billingService).
 		WithMusicRepository(musicRepo)
 	toolExecutor.WithMusicManager(discord.MusicManager())
 	schedulerService.WithDeliverySender(discord)
@@ -143,22 +156,21 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 	}
 	if provider := discord.ToolProvider(discordEvents); provider != nil {
 		toolExecutor.WithDiscordToolProvider(provider)
-		composedService.WithDiscordResolver(provider)
 	}
-	installService := discordbot.NewInstallService(guilds, audit)
+	installService := discordbot.NewInstallService(guilds, audit).WithBilling(billingService)
 	worker.Register(discordbot.InteractionJobKind, discord.HandleInteractionJob)
-	worker.Register(composed.EventJobKind, composedService.HandleEventJob)
-	worker.Register(composed.RunJobKind, composedService.HandleRunJob)
 	worker.Register(scheduler.JobKind, schedulerService.HandleJob)
 
 	return &App{
-		cfg:        cfg,
-		logger:     logger,
-		store:      dataStore,
-		httpServer: pandahttp.New(cfg, dataStore).WithDiscordWebhookHandler(installService),
-		discord:    discord,
-		worker:     worker,
-		scheduler:  schedulerService,
+		cfg:    cfg,
+		logger: logger,
+		store:  dataStore,
+		httpServer: pandahttp.New(cfg, dataStore).
+			WithDiscordWebhookHandler(installService).
+			WithBillingWebhookHandler(billingService),
+		discord:   discord,
+		worker:    worker,
+		scheduler: schedulerService,
 	}, nil
 }
 

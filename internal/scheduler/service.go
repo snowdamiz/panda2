@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sn0w/panda2/internal/billing"
 	"github.com/sn0w/panda2/internal/composed"
 	"github.com/sn0w/panda2/internal/repository"
 	"github.com/sn0w/panda2/internal/security"
@@ -49,6 +50,7 @@ type Service struct {
 	events    DiscordActivityCounter
 	delivery  DeliverySender
 	audit     AuditRecorder
+	billing   *billing.Service
 	now       func() time.Time
 }
 
@@ -133,6 +135,11 @@ func (s *Service) WithAuditRecorder(recorder AuditRecorder) *Service {
 	return s
 }
 
+func (s *Service) WithBilling(billingService *billing.Service) *Service {
+	s.billing = billingService
+	return s
+}
+
 func (s *Service) SetClock(now func() time.Time) {
 	if now != nil {
 		s.now = now
@@ -141,6 +148,9 @@ func (s *Service) SetClock(now func() time.Time) {
 
 func (s *Service) CreateReminder(ctx context.Context, request CreateReminderRequest) (store.Schedule, error) {
 	if err := validateReminderRequest(request); err != nil {
+		return store.Schedule{}, err
+	}
+	if err := s.ensureScheduleCapacity(ctx, request.GuildID); err != nil {
 		return store.Schedule{}, err
 	}
 	now := s.now().UTC()
@@ -194,6 +204,9 @@ func (s *Service) CreateComposed(ctx context.Context, request CreateComposedRequ
 	if next.IsZero() {
 		return store.Schedule{}, fmt.Errorf("next run time is required")
 	}
+	if err := s.ensureScheduleCapacity(ctx, request.GuildID); err != nil {
+		return store.Schedule{}, err
+	}
 	scheduleType := ScheduleOnce
 	intervalSeconds := 0
 	if request.Interval > 0 {
@@ -230,6 +243,34 @@ func (s *Service) CreateComposed(ctx context.Context, request CreateComposedRequ
 		})
 	}
 	return schedule, err
+}
+
+func (s *Service) ensureScheduleCapacity(ctx context.Context, guildID string) error {
+	if s.billing == nil {
+		return nil
+	}
+	entitlement, err := s.billing.Resolve(ctx, guildID)
+	if err != nil {
+		return err
+	}
+	if !entitlement.CanUsePaidFeatures || entitlement.ReadOnly {
+		return billing.ErrReadOnly
+	}
+	stats, err := s.schedules.Stats(ctx, guildID)
+	if err != nil {
+		return err
+	}
+	limit := int64(entitlement.Plan.Schedules)
+	if limit >= 0 && stats.Active >= limit {
+		return billing.QuotaError{
+			Metric:     billing.MetricScheduledRun,
+			Used:       stats.Active,
+			Limit:      limit,
+			Plan:       entitlement.Plan.Plan,
+			UpgradeURL: entitlement.UpgradeURL,
+		}
+	}
+	return nil
 }
 
 func (s *Service) List(ctx context.Context, guildID, ownerUserID, kind string, includeDisabled bool, limit int) ([]store.Schedule, error) {
@@ -358,7 +399,9 @@ func (s *Service) HandleJob(ctx context.Context, job store.Job) error {
 func (s *Service) executeSchedule(ctx context.Context, schedule store.Schedule, now time.Time) (string, error) {
 	switch schedule.Kind {
 	case KindReminder:
-		return repository.ScheduleLastSucceeded, s.deliverReminder(ctx, schedule)
+		return s.withScheduledRunQuota(ctx, schedule, func() (string, error) {
+			return repository.ScheduleLastSucceeded, s.deliverReminder(ctx, schedule)
+		})
 	case KindFollowUp:
 		resolved, err := s.followUpResolved(ctx, schedule, now)
 		if err != nil {
@@ -367,12 +410,40 @@ func (s *Service) executeSchedule(ctx context.Context, schedule store.Schedule, 
 		if resolved {
 			return repository.ScheduleLastSkipped, nil
 		}
-		return repository.ScheduleLastSucceeded, s.deliverReminder(ctx, schedule)
+		return s.withScheduledRunQuota(ctx, schedule, func() (string, error) {
+			return repository.ScheduleLastSucceeded, s.deliverReminder(ctx, schedule)
+		})
 	case KindComposed:
+		if s.composed == nil {
+			return repository.ScheduleLastSkipped, nil
+		}
 		return repository.ScheduleLastSucceeded, s.runComposed(ctx, schedule)
 	default:
 		return repository.ScheduleLastFailed, fmt.Errorf("unsupported schedule kind %q", schedule.Kind)
 	}
+}
+
+func (s *Service) withScheduledRunQuota(ctx context.Context, schedule store.Schedule, run func() (string, error)) (string, error) {
+	if s.billing == nil {
+		return run()
+	}
+	reservation, err := s.billing.BeginUsage(ctx, schedule.GuildID, billing.MetricScheduledRun, 1)
+	if err != nil {
+		return repository.ScheduleLastFailed, err
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = s.billing.ReleaseUsage(context.Background(), reservation)
+		}
+	}()
+	status, err := run()
+	if err != nil {
+		return status, err
+	}
+	_ = s.billing.CommitUsage(ctx, reservation)
+	committed = true
+	return status, nil
 }
 
 func (s *Service) deliverReminder(ctx context.Context, schedule store.Schedule) error {

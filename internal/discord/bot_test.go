@@ -123,12 +123,12 @@ func TestApplicationCommandsIncludeContextMenus(t *testing.T) {
 	for _, command := range commands {
 		names[command.CommandName()] = true
 	}
-	for _, name := range []string{"Explain with Panda", "Summarize with Panda", "admin", "ops", "help", "ping", "poll"} {
+	for _, name := range []string{"Explain with Panda", "Summarize with Panda", "help", "ping", "poll", "billing", "support", "data", "reminder"} {
 		if !names[name] {
 			t.Fatalf("expected command %q to be registered", name)
 		}
 	}
-	for _, name := range []string{"ask", "chat", "summarize", "explain", "rewrite", "translate", "memory-consent", "search-memory", "mod", "tool"} {
+	for _, name := range []string{"admin", "ops", "schedule", "ask", "chat", "summarize", "explain", "rewrite", "translate", "memory-consent", "search-memory", "mod", "tool"} {
 		if names[name] {
 			t.Fatalf("expected natural-language command %q not to be registered as a slash command", name)
 		}
@@ -470,8 +470,10 @@ func TestDeferredProgressContentUsesCommandAction(t *testing.T) {
 	}
 }
 
-func TestAdminModelCommandIncludesRuntimeOptions(t *testing.T) {
-	var modelCommand *disgoDiscord.ApplicationCommandOptionSubCommand
+func TestAdminBehaviorCommandIncludesRuntimeOptions(t *testing.T) {
+	t.Skip("admin slash commands are disabled in this build")
+	var behaviorCommand *disgoDiscord.ApplicationCommandOptionSubCommand
+	foundModelCommand := false
 	for _, command := range applicationCommands() {
 		slash, ok := command.(disgoDiscord.SlashCommandCreate)
 		if !ok || slash.Name != "admin" {
@@ -479,34 +481,74 @@ func TestAdminModelCommandIncludesRuntimeOptions(t *testing.T) {
 		}
 		for _, option := range slash.Options {
 			subcommand, ok := option.(disgoDiscord.ApplicationCommandOptionSubCommand)
-			if ok && subcommand.Name == "model" {
-				modelCommand = &subcommand
+			if !ok {
+				continue
+			}
+			if subcommand.Name == "behavior" {
+				behaviorCommand = &subcommand
 				break
+			}
+			if subcommand.Name == "model" {
+				foundModelCommand = true
 			}
 		}
 	}
-	if modelCommand == nil {
-		t.Fatal("expected /admin model subcommand")
+	if foundModelCommand {
+		t.Fatal("did not expect legacy /admin model subcommand")
+	}
+	if behaviorCommand == nil {
+		t.Fatal("expected /admin behavior subcommand")
 	}
 
 	optionNames := map[string]bool{}
-	for _, option := range modelCommand.Options {
+	for _, option := range behaviorCommand.Options {
 		switch typed := option.(type) {
 		case disgoDiscord.ApplicationCommandOptionString:
 			optionNames[typed.Name] = true
-			if typed.Name == "model" && typed.Required {
-				t.Fatal("model option should be optional so runtime settings can be updated independently")
-			}
 		}
 	}
-	for _, name := range []string{"model", "classifier_model", "fallback_models", "temperature", "max_response_tokens", "tool_policy"} {
+	for _, name := range []string{"answer_length", "tool_policy"} {
 		if !optionNames[name] {
-			t.Fatalf("expected /admin model option %q", name)
+			t.Fatalf("expected /admin behavior option %q", name)
+		}
+	}
+	for _, legacy := range []string{"model", "classifier_model", "fallback_models"} {
+		if optionNames[legacy] {
+			t.Fatalf("did not expect legacy model option %q", legacy)
 		}
 	}
 }
 
+func TestBillingCommandIncludesPurchaseOptions(t *testing.T) {
+	billingCommand := slashCommand(t, "billing")
+	action := slashStringOption(t, billingCommand, "action")
+	if action.Required {
+		t.Fatal("billing action should be optional so /billing shows status")
+	}
+	for _, expected := range []string{"status", "upgrade", "portal"} {
+		if !stringOptionHasChoice(action, expected) {
+			t.Fatalf("expected billing action choice %q", expected)
+		}
+	}
+	if stringOptionHasChoice(action, "pack") {
+		t.Fatal("did not expect billing pack action")
+	}
+	plan := slashStringOption(t, billingCommand, "plan")
+	for _, expected := range []string{"starter", "plus", "pro", "business"} {
+		if !stringOptionHasChoice(plan, expected) {
+			t.Fatalf("expected billing plan choice %q", expected)
+		}
+	}
+	if slashHasStringOption(billingCommand, "pack") {
+		t.Fatal("did not expect billing command to include pack option")
+	}
+	if !slashHasStringOption(billingCommand, "email") {
+		t.Fatal("expected billing command to include optional email")
+	}
+}
+
 func TestAdminRoleCommandIncludesProfileControls(t *testing.T) {
+	t.Skip("admin slash commands are disabled in this build")
 	roleCommand := adminSubcommand(t, adminSlashCommand(t), "role")
 	action := subcommandStringOption(t, roleCommand, "action")
 	if !action.Required {
@@ -525,6 +567,7 @@ func TestAdminRoleCommandIncludesProfileControls(t *testing.T) {
 }
 
 func TestAdminMemberRoleCommandIncludesUserAndRolePickers(t *testing.T) {
+	t.Skip("admin slash commands are disabled in this build")
 	memberRole := adminSubcommand(t, adminSlashCommand(t), "member-role")
 	action := subcommandStringOption(t, memberRole, "action")
 	if !action.Required {
@@ -547,6 +590,7 @@ func TestAdminMemberRoleCommandIncludesUserAndRolePickers(t *testing.T) {
 }
 
 func TestAdminToolCommandIncludesAccessOptions(t *testing.T) {
+	t.Skip("admin slash commands are disabled in this build")
 	tool := adminSubcommand(t, adminSlashCommand(t), "tool")
 	action := subcommandStringOption(t, tool, "action")
 	if !action.Required {
@@ -565,6 +609,7 @@ func TestAdminToolCommandIncludesAccessOptions(t *testing.T) {
 }
 
 func TestAdminChannelCommandIncludesAccessOptions(t *testing.T) {
+	t.Skip("admin slash commands are disabled in this build")
 	channel := adminSubcommand(t, adminSlashCommand(t), "channel")
 	action := subcommandStringOption(t, channel, "action")
 	if !action.Required {
@@ -657,12 +702,13 @@ func TestMessageEventGuildIDFallsBackToMessageGuildID(t *testing.T) {
 }
 
 func TestAdminToggleCommandsIncludeSafetyOptions(t *testing.T) {
+	t.Skip("admin slash commands are disabled in this build")
 	adminCommand := adminSlashCommand(t)
 	disable := adminSubcommand(t, adminCommand, "disable")
 	if !subcommandHasStringOption(disable, "confirm") {
 		t.Fatal("expected /admin disable to include confirm option")
 	}
-	for _, subcommandName := range []string{"model", "prompt", "soul", "enable", "disable"} {
+	for _, subcommandName := range []string{"behavior", "prompt", "soul", "enable", "disable"} {
 		subcommand := adminSubcommand(t, adminCommand, subcommandName)
 		if !subcommandHasBoolOption(subcommand, "dry_run") {
 			t.Fatalf("expected /admin %s to include dry_run option", subcommandName)
@@ -794,7 +840,7 @@ func TestResponseMessageCreatesPandaEmbed(t *testing.T) {
 		Presentation: commands.Presentation{
 			Title:  "Panda Help",
 			Accent: commands.AccentInfo,
-			Footer: "Open-source Discord assistant",
+			Footer: "Hosted Discord assistant",
 		},
 		Actions: []commands.Action{
 			{Label: "Commands", URL: "https://example.com/commands"},
@@ -813,7 +859,7 @@ func TestResponseMessageCreatesPandaEmbed(t *testing.T) {
 	if embed.Title != "Panda Help" || embed.Description != "Use `Panda play <song>` or ask a question." || embed.Color != infoEmbedColor {
 		t.Fatalf("unexpected embed: %+v", embed)
 	}
-	if embed.Footer == nil || embed.Footer.Text != "Open-source Discord assistant" {
+	if embed.Footer == nil || embed.Footer.Text != "Hosted Discord assistant" {
 		t.Fatalf("expected footer, got %+v", embed.Footer)
 	}
 	if len(interactionMessage.Components) != 1 {
@@ -864,7 +910,7 @@ func TestPlainResponseDoesNotInferPresentation(t *testing.T) {
 		},
 		{
 			name:    "ops info",
-			content: "Health: sqlite=ok discord=ok shards=ok openrouter=ok queued_jobs=0 guild_configs=1 draining=false incident=false data_dir=`data`.",
+			content: "Health: sqlite=ok discord=ok shards=ok ai_service=ok queued_jobs=0 guild_configs=1 draining=false incident=false data_dir=`data`.",
 		},
 	}
 
@@ -1012,6 +1058,7 @@ func TestModalResponseRendersModal(t *testing.T) {
 }
 
 func TestAdminPromptCommandCanOpenModal(t *testing.T) {
+	t.Skip("admin slash commands are disabled in this build")
 	prompt := adminSubcommand(t, adminSlashCommand(t), "prompt")
 	option := subcommandStringOption(t, prompt, "prompt")
 	if option.Required {
@@ -1020,6 +1067,7 @@ func TestAdminPromptCommandCanOpenModal(t *testing.T) {
 }
 
 func TestAdminSoulCommandCanOpenModal(t *testing.T) {
+	t.Skip("admin slash commands are disabled in this build")
 	soul := adminSubcommand(t, adminSlashCommand(t), "soul")
 	option := subcommandStringOption(t, soul, "soul")
 	if option.Required {
@@ -1059,6 +1107,39 @@ func slashCommand(t *testing.T, name string) disgoDiscord.SlashCommandCreate {
 	}
 	t.Fatalf("expected /%s command", name)
 	return disgoDiscord.SlashCommandCreate{}
+}
+
+func slashHasStringOption(command disgoDiscord.SlashCommandCreate, name string) bool {
+	_, ok := findSlashStringOption(command, name)
+	return ok
+}
+
+func slashStringOption(t *testing.T, command disgoDiscord.SlashCommandCreate, name string) disgoDiscord.ApplicationCommandOptionString {
+	t.Helper()
+	option, ok := findSlashStringOption(command, name)
+	if !ok {
+		t.Fatalf("expected /%s option %q", command.Name, name)
+	}
+	return option
+}
+
+func findSlashStringOption(command disgoDiscord.SlashCommandCreate, name string) (disgoDiscord.ApplicationCommandOptionString, bool) {
+	for _, option := range command.Options {
+		stringOption, ok := option.(disgoDiscord.ApplicationCommandOptionString)
+		if ok && stringOption.Name == name {
+			return stringOption, true
+		}
+	}
+	return disgoDiscord.ApplicationCommandOptionString{}, false
+}
+
+func stringOptionHasChoice(option disgoDiscord.ApplicationCommandOptionString, value string) bool {
+	for _, choice := range option.Choices {
+		if choice.Value == value {
+			return true
+		}
+	}
+	return false
 }
 
 func adminSubcommand(t *testing.T, command disgoDiscord.SlashCommandCreate, name string) disgoDiscord.ApplicationCommandOptionSubCommand {

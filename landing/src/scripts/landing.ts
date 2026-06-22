@@ -1,4 +1,4 @@
-import { commandViews, modelOptions } from '../data/landing';
+import { commandViews } from '../data/landing';
 
 (() => {
   'use strict';
@@ -6,22 +6,10 @@ import { commandViews, modelOptions } from '../data/landing';
   const header = document.querySelector<HTMLElement>('[data-header]');
   const menuButton = document.querySelector<HTMLButtonElement>('[data-menu-button]');
   const mobileNav = document.querySelector<HTMLElement>('[data-mobile-nav]');
-  const modelButton = document.querySelector<HTMLButtonElement>('[data-model-button]');
-  const modelMenu = document.querySelector<HTMLElement>('[data-model-menu]');
-  const modelName = document.querySelector<HTMLElement>('[data-model-name]');
-  const modelProvider = document.querySelector<HTMLElement>('[data-model-provider]');
-  const pandaResponse = document.querySelector<HTMLElement>('[data-panda-response]');
-  const typingLine = document.querySelector<HTMLElement>('[data-typing-line]');
-  const cycleModelButton = document.querySelector<HTMLButtonElement>('[data-cycle-model]');
-  const consoleModel = document.querySelector<HTMLElement>('[data-console-model]');
-  const consoleRoute = document.querySelector<HTMLElement>('[data-route-primary]');
   const commandDetail = document.querySelector<HTMLElement>('[data-command-detail]');
   const commandViewMap = new Map<string, (typeof commandViews)[number]>(
     commandViews.map((view) => [view.key, view]),
   );
-
-  let consoleModelIndex = 0;
-  let responseTimer: number | undefined;
 
   const setHeaderState = () => {
     header?.classList.toggle('scrolled', window.scrollY > 20);
@@ -50,93 +38,10 @@ import { commandViews, modelOptions } from '../data/landing';
     });
   }
 
-  const closeModelMenu = () => {
-    if (!modelButton || !modelMenu) return;
-    modelButton.setAttribute('aria-expanded', 'false');
-    modelMenu.hidden = true;
-  };
-
-  if (modelButton && modelMenu) {
-    modelButton.setAttribute('aria-expanded', 'false');
-    modelButton.addEventListener('click', (event) => {
-      event.stopPropagation();
-      const opening = modelButton.getAttribute('aria-expanded') !== 'true';
-      modelButton.setAttribute('aria-expanded', String(opening));
-      modelMenu.hidden = !opening;
-    });
-
-    modelMenu.querySelectorAll<HTMLButtonElement>('[data-model]').forEach((option) => {
-      option.addEventListener('click', () => {
-        if (modelName) modelName.textContent = option.dataset.model || 'Auto Router';
-        if (modelProvider) modelProvider.textContent = option.dataset.provider || 'OpenRouter';
-        closeModelMenu();
-
-        if (!pandaResponse || !typingLine) return;
-        window.clearTimeout(responseTimer);
-        pandaResponse.classList.add('is-loading');
-        typingLine.classList.add('active');
-        responseTimer = window.setTimeout(() => {
-          typingLine.classList.remove('active');
-          pandaResponse.classList.remove('is-loading');
-        }, 620);
-      });
-    });
-  }
-
-  document.addEventListener('click', (event) => {
-    if (
-      modelMenu &&
-      modelButton &&
-      event.target instanceof Node &&
-      !modelMenu.contains(event.target) &&
-      !modelButton.contains(event.target)
-    ) {
-      closeModelMenu();
-    }
-  });
-
   document.addEventListener('keydown', (event) => {
     if (event.key !== 'Escape') return;
-    closeModelMenu();
     closeMobileMenu();
   });
-
-  if (cycleModelButton && consoleModel && consoleRoute) {
-    cycleModelButton.addEventListener('click', () => {
-      consoleModelIndex = (consoleModelIndex + 1) % modelOptions.length;
-      const selected = modelOptions[consoleModelIndex];
-      const updateModel = () => {
-        consoleModel.textContent = selected.slug;
-        consoleRoute.textContent = selected.route;
-      };
-      const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-
-      if (reduceMotion || typeof consoleModel.animate !== 'function') {
-        updateModel();
-        return;
-      }
-
-      consoleModel
-        .animate(
-          [
-            { opacity: 1, transform: 'translateY(0)' },
-            { opacity: 0, transform: 'translateY(-5px)' },
-          ],
-          { duration: 150, easing: 'ease-in', fill: 'forwards' },
-        )
-        .finished.then(() => {
-          updateModel();
-          consoleModel.animate(
-            [
-              { opacity: 0, transform: 'translateY(5px)' },
-              { opacity: 1, transform: 'translateY(0)' },
-            ],
-            { duration: 220, easing: 'ease-out', fill: 'forwards' },
-          );
-        })
-        .catch(updateModel);
-    });
-  }
 
   const renderCommandDetail = (key: string) => {
     const view = commandViewMap.get(key);
@@ -171,7 +76,7 @@ import { commandViews, modelOptions } from '../data/landing';
       });
       row.classList.add('active');
       row.setAttribute('aria-pressed', 'true');
-      renderCommandDetail(row.dataset.command || 'model');
+      renderCommandDetail(row.dataset.command || 'behavior');
     });
   });
 

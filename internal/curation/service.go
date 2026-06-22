@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sn0w/panda2/internal/billing"
 	"github.com/sn0w/panda2/internal/memory"
 	"github.com/sn0w/panda2/internal/security"
 	"github.com/sn0w/panda2/internal/store"
@@ -19,9 +20,10 @@ type AuditRecorder interface {
 }
 
 type Service struct {
-	memory *memory.Service
-	audit  AuditRecorder
-	now    func() time.Time
+	memory  *memory.Service
+	audit   AuditRecorder
+	billing *billing.Service
+	now     func() time.Time
 }
 
 type Interaction struct {
@@ -30,7 +32,6 @@ type Interaction struct {
 	UserID    string
 	MessageID string
 	Command   string
-	Model     string
 	Prompt    string
 	Response  string
 }
@@ -47,6 +48,11 @@ func NewService(memoryService *memory.Service) *Service {
 
 func (s *Service) WithAuditRecorder(recorder AuditRecorder) *Service {
 	s.audit = recorder
+	return s
+}
+
+func (s *Service) WithBilling(billingService *billing.Service) *Service {
+	s.billing = billingService
 	return s
 }
 
@@ -85,7 +91,6 @@ func (s *Service) CurateAssistantInteraction(ctx context.Context, interaction In
 		"channel_id":  interaction.ChannelID,
 		"message_id":  interaction.MessageID,
 		"command":     interaction.Command,
-		"model":       interaction.Model,
 	})
 	expiresAt := s.now().UTC().Add(180 * 24 * time.Hour)
 	if candidate.Confidence >= 0.9 {
@@ -104,9 +109,29 @@ func (s *Service) CurateAssistantInteraction(ctx context.Context, interaction In
 	if !expiresAt.IsZero() {
 		request.ExpiresAt = &expiresAt
 	}
+	var reservation billing.Reservation
+	if s.billing != nil {
+		currentBytes, err := s.memory.StorageBytes(ctx, interaction.GuildID)
+		if err != nil {
+			return Result{}, err
+		}
+		reservation, err = s.billing.BeginCurrentUsage(ctx, interaction.GuildID, billing.MetricKnowledgeStorageByte, currentBytes, int64(len([]byte(strings.TrimSpace(candidate.Content)))))
+		if err != nil {
+			return Result{}, err
+		}
+		defer func() {
+			if reservation.ID != "" {
+				_ = s.billing.ReleaseUsage(context.Background(), reservation)
+			}
+		}()
+	}
 	document, err := s.memory.AddDocument(ctx, request)
 	if err != nil {
 		return Result{}, err
+	}
+	if s.billing != nil && reservation.ID != "" {
+		_ = s.billing.CommitUsage(ctx, reservation)
+		reservation.ID = ""
 	}
 	s.recordAudit(ctx, interaction, document, candidate)
 	return Result{Saved: true, Document: document, Reason: candidate.Reason}, nil

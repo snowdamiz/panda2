@@ -152,7 +152,6 @@ type Spec struct {
 type RunnerSpec struct {
 	Type                  string   `json:"type"`
 	SystemPrompt          string   `json:"system_prompt"`
-	Model                 string   `json:"model,omitempty"`
 	Temperature           float64  `json:"temperature"`
 	MaxTokens             int      `json:"max_tokens"`
 	ToolAllowlist         []string `json:"tool_allowlist"`
@@ -257,7 +256,6 @@ type DraftRequest struct {
 	ChannelName     string
 	SourceChannelID string
 	WelcomeText     string
-	DefaultModel    string
 }
 
 type DraftResult struct {

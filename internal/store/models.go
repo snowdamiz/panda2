@@ -10,9 +10,6 @@ type SchemaMigration struct {
 
 type GuildConfig struct {
 	GuildID             string    `gorm:"primaryKey;size:32"`
-	DefaultModel        string    `gorm:"not null"`
-	ClassifierModel     string    `gorm:"not null;default:''"`
-	FallbackModels      string    `gorm:"not null;default:'[]'"`
 	Temperature         float64   `gorm:"not null;default:0.3"`
 	MaxResponseTokens   int       `gorm:"not null;default:900"`
 	ToolPolicy          string    `gorm:"not null;default:'admin_only'"`
@@ -30,7 +27,6 @@ type UsageEvent struct {
 	UserID           string    `gorm:"index;size:32"`
 	ChannelID        string    `gorm:"index;size:32"`
 	Command          string    `gorm:"index;not null"`
-	Model            string    `gorm:"not null;default:''"`
 	PromptTokens     int       `gorm:"not null;default:0"`
 	CompletionTokens int       `gorm:"not null;default:0"`
 	TotalTokens      int       `gorm:"not null;default:0"`
@@ -124,7 +120,6 @@ type AssistantMessage struct {
 	Role             string    `gorm:"index;not null"`
 	ContentHash      string    `gorm:"not null;default:''"`
 	ContentPreview   string    `gorm:"not null;default:''"`
-	Model            string    `gorm:"not null;default:''"`
 	PromptTokens     int       `gorm:"not null;default:0"`
 	CompletionTokens int       `gorm:"not null;default:0"`
 	TotalTokens      int       `gorm:"not null;default:0"`
@@ -285,7 +280,6 @@ type ComposedToolRun struct {
 	TriggeringEventID string     `gorm:"index;not null;default:'';size:64"`
 	Status            string     `gorm:"index;not null;default:'queued'"`
 	AttemptCount      int        `gorm:"not null;default:0"`
-	Model             string     `gorm:"not null;default:''"`
 	InputJSON         string     `gorm:"not null;default:'{}'"`
 	OutputJSON        string     `gorm:"not null;default:'{}'"`
 	TranscriptJSON    string     `gorm:"not null;default:'[]'"`
@@ -351,7 +345,6 @@ type FeedbackTarget struct {
 	ChannelID   string    `gorm:"index;not null;size:32"`
 	UserID      string    `gorm:"index;not null;size:32"`
 	Command     string    `gorm:"index;not null;size:64"`
-	Model       string    `gorm:"index;not null;default:'';size:128"`
 	ContentHash string    `gorm:"index;not null;default:'';size:128"`
 	Metadata    string    `gorm:"not null;default:'{}'"`
 	CreatedAt   time.Time `gorm:"index;not null"`
@@ -402,4 +395,122 @@ type MusicPlaylist struct {
 	TracksJSON string    `gorm:"not null;default:'[]'"`
 	CreatedAt  time.Time `gorm:"not null"`
 	UpdatedAt  time.Time `gorm:"not null"`
+}
+
+type CustomerAccount struct {
+	ID                 uint      `gorm:"primaryKey"`
+	GuildID            string    `gorm:"uniqueIndex;not null;size:32"`
+	BillingOwnerUserID string    `gorm:"index;not null;size:32"`
+	Email              string    `gorm:"not null;default:'';size:320"`
+	TaxCountry         string    `gorm:"not null;default:'';size:2"`
+	SupportContact     string    `gorm:"not null;default:'';size:320"`
+	StripeCustomerID   string    `gorm:"uniqueIndex:idx_customer_accounts_stripe_customer_present,where:stripe_customer_id <> '';not null;default:'';size:128"`
+	CreatedAt          time.Time `gorm:"not null"`
+	UpdatedAt          time.Time `gorm:"not null"`
+}
+
+type GuildSubscription struct {
+	ID                     uint       `gorm:"primaryKey"`
+	GuildID                string     `gorm:"uniqueIndex:idx_guild_subscriptions_active;index;not null;size:32"`
+	CustomerAccountID      uint       `gorm:"index;not null;default:0"`
+	Plan                   string     `gorm:"index;not null;size:32"`
+	Status                 string     `gorm:"index;not null;size:32"`
+	GraceState             string     `gorm:"index;not null;size:32"`
+	PaymentProvider        string     `gorm:"index;not null;default:'trial';size:32"`
+	ExternalSubscriptionID string     `gorm:"index;not null;default:'';size:128"`
+	ExternalEntitlementID  string     `gorm:"index;not null;default:'';size:128"`
+	BillingOwnerUserID     string     `gorm:"index;not null;default:'';size:32"`
+	CurrentPeriodStart     time.Time  `gorm:"index;not null"`
+	CurrentPeriodEnd       time.Time  `gorm:"index;not null"`
+	TrialEndsAt            *time.Time `gorm:"index"`
+	CancelAtPeriodEnd      bool       `gorm:"not null;default:false"`
+	CreatedAt              time.Time  `gorm:"not null"`
+	UpdatedAt              time.Time  `gorm:"not null"`
+}
+
+type EntitlementSnapshot struct {
+	ID                         uint       `gorm:"primaryKey"`
+	GuildID                    string     `gorm:"index;not null;size:32"`
+	SubscriptionID             uint       `gorm:"index;not null"`
+	Plan                       string     `gorm:"index;not null;size:32"`
+	Status                     string     `gorm:"index;not null;size:32"`
+	GraceState                 string     `gorm:"index;not null;size:32"`
+	AIResponsesLimit           int        `gorm:"not null;default:0"`
+	WebSearchesLimit           int        `gorm:"not null;default:0"`
+	KnowledgeStorageBytesLimit int64      `gorm:"not null;default:0"`
+	SchedulesLimit             int        `gorm:"not null;default:0"`
+	RetentionDays              int        `gorm:"not null;default:0"`
+	MusicEnabled               bool       `gorm:"not null;default:false"`
+	PremiumToolsEnabled        bool       `gorm:"not null;default:false"`
+	CreatedAt                  time.Time  `gorm:"index;not null"`
+	ExpiresAt                  *time.Time `gorm:"index"`
+}
+
+type InvoicePaymentEvent struct {
+	ID             uint      `gorm:"primaryKey"`
+	Provider       string    `gorm:"index;not null;size:32"`
+	ExternalID     string    `gorm:"index;not null;size:128"`
+	GuildID        string    `gorm:"index;not null;default:'';size:32"`
+	SubscriptionID uint      `gorm:"index;not null;default:0"`
+	AmountCents    int64     `gorm:"not null;default:0"`
+	Currency       string    `gorm:"not null;default:'usd';size:8"`
+	Status         string    `gorm:"index;not null;size:32"`
+	IdempotencyKey string    `gorm:"uniqueIndex;not null;size:160"`
+	RawPayload     string    `gorm:"not null;default:'{}'"`
+	CreatedAt      time.Time `gorm:"index;not null"`
+}
+
+type UsagePeriod struct {
+	ID                            uint      `gorm:"primaryKey"`
+	GuildID                       string    `gorm:"uniqueIndex:idx_usage_periods_guild_window;index;not null;size:32"`
+	SubscriptionID                uint      `gorm:"index;not null"`
+	Plan                          string    `gorm:"index;not null;size:32"`
+	PeriodStart                   time.Time `gorm:"uniqueIndex:idx_usage_periods_guild_window;index;not null"`
+	PeriodEnd                     time.Time `gorm:"uniqueIndex:idx_usage_periods_guild_window;index;not null"`
+	AIResponsesConsumed           int       `gorm:"not null;default:0"`
+	AIResponsesReserved           int       `gorm:"not null;default:0"`
+	WebSearchesConsumed           int       `gorm:"not null;default:0"`
+	WebSearchesReserved           int       `gorm:"not null;default:0"`
+	KnowledgeStorageBytesConsumed int64     `gorm:"not null;default:0"`
+	KnowledgeStorageBytesReserved int64     `gorm:"not null;default:0"`
+	ScheduledRunsConsumed         int       `gorm:"not null;default:0"`
+	ScheduledRunsReserved         int       `gorm:"not null;default:0"`
+	MusicPlaybackMinutesConsumed  int       `gorm:"not null;default:0"`
+	MusicPlaybackMinutesReserved  int       `gorm:"not null;default:0"`
+	CreatedAt                     time.Time `gorm:"not null"`
+	UpdatedAt                     time.Time `gorm:"not null"`
+}
+
+type UsageReservation struct {
+	ID             uint      `gorm:"primaryKey"`
+	ReservationID  string    `gorm:"uniqueIndex;not null;size:64"`
+	GuildID        string    `gorm:"index;not null;size:32"`
+	SubscriptionID uint      `gorm:"index;not null"`
+	UsagePeriodID  uint      `gorm:"index;not null"`
+	Metric         string    `gorm:"index;not null;size:32"`
+	Units          int64     `gorm:"not null"`
+	Status         string    `gorm:"index;not null;size:32"`
+	ExpiresAt      time.Time `gorm:"index;not null"`
+	CreatedAt      time.Time `gorm:"not null"`
+	UpdatedAt      time.Time `gorm:"not null"`
+}
+
+type CostLedgerEvent struct {
+	ID                  uint      `gorm:"primaryKey"`
+	GuildID             string    `gorm:"index;not null;default:'';size:32"`
+	RequestID           string    `gorm:"index;not null;default:'';size:64"`
+	Source              string    `gorm:"index;not null;size:64"`
+	Operation           string    `gorm:"index;not null;size:64"`
+	Command             string    `gorm:"index;not null;default:'';size:64"`
+	Provider            string    `gorm:"index;not null;default:'';size:64"`
+	Model               string    `gorm:"index;not null;default:'';size:160"`
+	PromptTokens        int       `gorm:"not null;default:0"`
+	CompletionTokens    int       `gorm:"not null;default:0"`
+	CachedInputTokens   int       `gorm:"not null;default:0"`
+	TotalTokens         int       `gorm:"not null;default:0"`
+	EstimatedCostMicros int64     `gorm:"not null;default:0"`
+	FinalCostMicros     int64     `gorm:"not null;default:0"`
+	Success             bool      `gorm:"not null;default:false"`
+	ErrorCode           string    `gorm:"not null;default:'';size:64"`
+	CreatedAt           time.Time `gorm:"index;not null"`
 }

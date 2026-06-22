@@ -1,211 +1,86 @@
 # Panda Discord Assistant
 
-Panda is a Discord bot. People can use slash commands, or they can talk to it by saying `Panda` in a server message.
+Panda is a hosted Discord assistant sold per server. Server admins install Panda, start a trial, configure behavior and permissions in Discord, and upgrade when the server needs more included usage.
 
-This guide is for getting Panda online with Fly.io.
+Customers do not need provider, search, hosting, or database accounts. Panda operates those services and enforces plan limits before paid work begins.
 
-## What You Need
+## What Panda Does
 
-- A Discord account with permission to create a Discord app.
-- A Fly.io account.
-- An OpenRouter account with an API key.
-- A terminal on your computer.
+- Answers natural Discord messages when members mention Panda.
+- Summarizes, explains, rewrites, and translates messages through slash commands or context menu actions.
+- Uses server knowledge, memory consent, web search, schedules, reminders, composed tools, and music within the server's plan.
+- Lets admins control channels, roles, tool access, response length, memory, billing, and audit history.
+- Shows plan, renewal, AI response usage, web search usage, storage, and quota state through `/billing` and `/admin status`.
 
-Fly.io and OpenRouter may charge money depending on usage. Keep your keys private.
+## Plans
 
-## 1. Make The Discord App
+| Plan | Price | AI responses | Web searches | Knowledge storage | Retention |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Trial | $0 for 14 days | 250 total | 20 total | 25 MB | 14 days |
+| Starter | $19/server/month | 2,000/month | 100/month | 100 MB | 30 days |
+| Plus | $49/server/month | 5,000/month | 400/month | 500 MB | 90 days |
+| Pro | $99/server/month | 10,000/month | 1,000/month | 2 GB | 180 days |
+| Business | $249/server/month | 25,000/month | 2,000/month | 10 GB | 365 days |
 
-1. Go to the Discord Developer Portal.
-2. Create a new application.
-3. Open the Bot page.
-4. Copy the bot token. This becomes `DISCORD_BOT_TOKEN`.
-5. Turn on these bot settings:
-   - Server Members Intent
-   - Message Content Intent
-6. Open the General Information page.
-7. Copy the Application ID. This becomes `DISCORD_APPLICATION_ID`.
-8. Copy the Public Key. This becomes `DISCORD_PUBLIC_KEY`.
-9. Copy your own Discord user ID. This becomes `OWNER_USER_IDS`.
+Trials do not auto-convert without payment approval. Servers use the included limits for their active subscription tier; when a limit is exhausted, paid usage pauses until renewal or a plan upgrade.
 
-To copy your Discord user ID, turn on Developer Mode in Discord, then right-click your user and choose Copy User ID.
+## Install Panda
 
-## 2. Make The OpenRouter Key
+1. Open the Panda install link from the landing page or Discord app directory.
+2. Choose the Discord server.
+3. Grant the requested Discord permissions.
+4. Run `/billing` to confirm the trial and billing owner.
+5. Run `/admin status` to review setup, usage, memory, web search, and permission state.
 
-1. Go to OpenRouter.
-2. Create an API key.
-3. Copy it. This becomes `OPENROUTER_API_KEY`.
+The installer becomes the billing owner for that server. The Discord server owner retains management access.
 
-## 3. Create The Fly App
+## Buy A Plan
 
-Install Fly's command line tool if you do not already have it:
+The billing owner purchases from Discord:
 
-```bash
-brew install flyctl
-```
+- `/billing action:upgrade plan:starter|plus|pro|business` creates a Stripe Checkout session for the selected monthly plan.
+- `/billing action:portal` opens Stripe Customer Portal after the first completed Stripe checkout records the server's customer ID.
 
-If that command does not work, use the Fly install guide linked at the bottom of this README.
+Panda grants plans only from verified Stripe webhooks or Discord Premium App entitlement events. Client-side success redirects never grant access.
 
-Log in:
+## Admin Setup
 
-```bash
-fly auth login
-```
+Common setup commands:
 
-Pick one app name. Use lowercase letters, numbers, and dashes only.
-Use that same name everywhere you see `my-panda-bot` below.
+- `/admin behavior answer_length:brief|standard|detailed tool_policy:<policy>` changes response length and tool access.
+- `/admin channel action:list|allow|deny|remove channel:#channel` limits where Panda can answer.
+- `/admin role action:list|set|remove profile:admin|moderator role:@Role` maps Panda admin and moderator profiles.
+- `/admin tool action:list|add|remove tool_name:<tool> role:@Role` narrows tool access.
+- `/admin prompt` sets server instructions.
+- `/admin billing` or `/billing` shows plan, renewal, usage, quota, checkout, and portal actions.
+- `/admin audit` shows recent privileged changes.
+- `/support` creates a safe support bundle without raw prompts or raw Discord messages.
+- `/data export` shows a safe data export summary.
+- `/data delete scope:knowledge|memory|conversations|billing|all` deletes scoped Panda data after confirmation.
 
-Example app name:
+Panda does not expose model names, provider names, fallback routing, token prices, or provider diagnostics to normal users or guild admins.
 
-```text
-my-panda-bot
-```
+## Data And Safety
 
-Open `fly.toml` and change the app name to your app name:
+- User memory is off by default and requires consent.
+- Server knowledge is admin-managed and counted against the active plan.
+- Conversation retention follows the active plan unless a shorter policy is configured.
+- Suspended or canceled servers keep help, billing, export, delete, and support access while paid AI/search features are disabled.
+- Support bundles avoid raw prompts, raw Discord messages, provider model names, API keys, and billing secrets by default.
 
-```toml
-app = "my-panda-bot"
-```
+## Legal And Support
 
-Create the app:
+- Terms: `/terms`
+- Privacy: `/privacy`
+- Data Processing Addendum: `/dpa`
+- Refund and Cancellation Policy: `/refunds`
+- Acceptable Use Policy: `/acceptable-use`
+- Security and Vulnerability Disclosure: `/security`
+- Status and incidents: `/status`
+- Support: `/support`
 
-```bash
-fly apps create my-panda-bot
-```
+## Operator Notes
 
-Create storage for Panda's database:
+This repository also contains the operator runtime for Panda. Deployment, backups, billing webhooks, spend alerts, restore drills, and internal provider configuration are documented in `OPERATIONS.md`.
 
-```bash
-fly volumes create data --app my-panda-bot --region sjc --size 1
-```
-
-## 4. Add The Secrets
-
-Replace each `paste_here` value, then run this command:
-
-```bash
-fly secrets set DISCORD_BOT_TOKEN="paste_here" DISCORD_APPLICATION_ID="paste_here" DISCORD_PUBLIC_KEY="paste_here" OPENROUTER_API_KEY="paste_here" OWNER_USER_IDS="paste_here" --app my-panda-bot
-```
-
-Optional: add Brave Search if you want Panda to search the web:
-
-```bash
-fly secrets set BRAVE_SEARCH_API_KEY="paste_here" --app my-panda-bot
-```
-
-## 5. Deploy
-
-Run:
-
-```bash
-fly deploy --app my-panda-bot
-```
-
-The first deploy can take a few minutes.
-
-## 6. Connect Discord To The Live Bot
-
-Your bot's web address will be:
-
-```text
-https://my-panda-bot.fly.dev
-```
-
-In the Discord Developer Portal:
-
-1. Open your application.
-2. Open the Webhooks page.
-3. Set the webhook events endpoint to:
-
-```text
-https://my-panda-bot.fly.dev/discord/webhook-events
-```
-
-4. Enable webhook events.
-5. Subscribe to `APPLICATION_AUTHORIZED`.
-6. Open the Installation page.
-7. Use the install link to add Panda to your Discord server.
-
-If Discord asks for scopes, Panda needs `bot` and `applications.commands`.
-
-If Discord asks for bot permissions, start with View Channels, Send Messages, Read Message History, Connect, and Speak. Add Manage Roles only if you want Panda to assign roles.
-
-After Panda is installed, it can answer in any channel where Discord permissions allow it. The user who installed Panda becomes the Panda owner for that server, and the Discord server owner always retains management access.
-
-Admins can restrict Panda to chosen channels later:
-
-```text
-/admin channel action:allow channel:#panda
-```
-
-When at least one channel is allowed, regular assistant use is limited to allowed channels. Admins can still use admin commands elsewhere to fix access. Use the same Discord role in both `/admin role` profile commands when a server does not split admin and moderator roles.
-
-## 7. Check It Worked
-
-Check Fly:
-
-```bash
-fly status --app my-panda-bot
-```
-
-Watch logs:
-
-```bash
-fly logs --app my-panda-bot
-```
-
-In Discord, try:
-
-```text
-/ping
-```
-
-Then try:
-
-```text
-Panda hello
-```
-
-To try music, join a voice channel and say:
-
-```text
-Panda play one more time daft punk
-```
-
-Then use natural controls like `Panda pause`, `Panda resume`, `Panda skip`, `Panda queue`, or `Panda stop`.
-
-Slash commands can take a few minutes to show up in Discord.
-
-## Updating Panda Later
-
-After changing the bot, deploy again:
-
-```bash
-fly deploy --app my-panda-bot
-```
-
-## Common Problems
-
-If `fly` is not found, install Fly's command line tool and reopen your terminal.
-
-If Panda joins the server but does not answer messages, make sure Message Content Intent is turned on in the Discord Bot page.
-
-If Panda cannot see members or roles correctly, make sure Server Members Intent is turned on in the Discord Bot page.
-
-If Panda says the server-side audio tools are not ready yet, try again after a moment. Panda provisions its own music sidecars in the data volume.
-
-If deploy says the database path is missing or not writable, make sure the Fly volume was created with the name `data`.
-
-If Panda says OpenRouter is missing, set `OPENROUTER_API_KEY` again.
-
-## More Details
-
-Use `OPERATIONS.md` for backups, rollbacks, health checks, and incident steps.
-
-Helpful links:
-
-- [Fly install guide](https://fly.io/docs/flyctl/install/)
-- [Fly deploy command](https://fly.io/docs/flyctl/deploy/)
-- [Fly secrets command](https://fly.io/docs/flyctl/secrets-set/)
-- [Fly volumes command](https://fly.io/docs/flyctl/volumes-create/)
-- [Discord privileged intents](https://support-dev.discord.com/hc/en-us/articles/6207308062871-What-are-Privileged-Intents)
-- [OpenRouter authentication](https://openrouter.ai/docs/api/reference/authentication)
+Do not send operator runbooks, provider configuration, model routing, cost math, or hidden diagnostics to customers unless an approved enterprise contract explicitly requires it.

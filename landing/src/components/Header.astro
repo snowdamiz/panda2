@@ -12,8 +12,8 @@ import BrandLink from './ui/BrandLink.astro';
     </nav>
 
     <div class="nav-actions">
-      <a class="nav-github" href={siteMeta.repositoryUrl} target="_blank" rel="noreferrer">
-        GitHub
+      <a class="nav-github" href={siteMeta.installUrl} target="_blank" rel="noreferrer">
+        Start trial
         <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M5 11 11 5M6 5h5v5" /></svg>
       </a>
       <button
@@ -31,6 +31,6 @@ import BrandLink from './ui/BrandLink.astro';
 
   <nav class="mobile-nav" id="mobile-nav" aria-label="Mobile navigation" data-mobile-nav hidden>
     {navLinks.map((link) => <a href={link.href}>{link.label}</a>)}
-    <a href={siteMeta.repositoryUrl} target="_blank" rel="noreferrer">View source</a>
+    <a href={siteMeta.installUrl} target="_blank" rel="noreferrer">Start trial</a>
   </nav>
 </header>

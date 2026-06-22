@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/sn0w/panda2/internal/admin"
+	"github.com/sn0w/panda2/internal/billing"
 	"github.com/sn0w/panda2/internal/curation"
 	"github.com/sn0w/panda2/internal/llm"
 	"github.com/sn0w/panda2/internal/memory"
@@ -24,6 +25,131 @@ import (
 
 var ErrAssistantDisabled = errors.New("assistant is disabled for this guild")
 
+var disabledConversationToolNames = map[string]struct{}{
+	"discord.add_member_role":             {},
+	"discord.add_reaction":                {},
+	"discord.add_thread_member":           {},
+	"discord.archive_thread":              {},
+	"discord.ban_member":                  {},
+	"discord.bulk_ban_members":            {},
+	"discord.bulk_delete_messages":        {},
+	"discord.create_auto_moderation_rule": {},
+	"discord.create_invite":               {},
+	"discord.create_poll":                 {},
+	"discord.create_role":                 {},
+	"discord.create_scheduled_event":      {},
+	"discord.create_thread":               {},
+	"discord.create_webhook":              {},
+	"discord.delete_auto_moderation_rule": {},
+	"discord.delete_invite":               {},
+	"discord.delete_message":              {},
+	"discord.delete_own_message":          {},
+	"discord.delete_scheduled_event":      {},
+	"discord.delete_webhook":              {},
+	"discord.edit_own_message":            {},
+	"discord.end_poll":                    {},
+	"discord.get_audit_logs":              {},
+	"discord.get_invite":                  {},
+	"discord.kick_member":                 {},
+	"discord.list_auto_moderation_rules":  {},
+	"discord.list_bans":                   {},
+	"discord.list_invites":                {},
+	"discord.list_members":                {},
+	"discord.list_webhooks":               {},
+	"discord.lock_thread":                 {},
+	"discord.modify_channel_permissions":  {},
+	"discord.pin_message":                 {},
+	"discord.remove_member_role":          {},
+	"discord.remove_own_reaction":         {},
+	"discord.remove_thread_member":        {},
+	"discord.remove_timeout":              {},
+	"discord.rename_thread":               {},
+	"discord.reply_message":               {},
+	"discord.search_messages":             {},
+	"discord.send_message":                {},
+	"discord.set_channel_slowmode":        {},
+	"discord.set_member_nick":             {},
+	"discord.timeout_member":              {},
+	"discord.unban_member":                {},
+	"discord.unpin_message":               {},
+	"discord.update_auto_moderation_rule": {},
+	"discord.update_scheduled_event":      {},
+	"discord.update_webhook":              {},
+	"draft_moderator_note":                {},
+	"panda.manage_budget_limit":           {},
+	"panda.manage_channel_rule":           {},
+	"panda.manage_composed_tool":          {},
+	"panda.manage_discord_role":           {},
+	"panda.manage_knowledge":              {},
+	"panda.manage_member_role":            {},
+	"panda.manage_role_permission":        {},
+	"panda.manage_schedule":               {},
+	"panda.manage_soul":                   {},
+	"panda.manage_tool_access":            {},
+	"panda.usage_report":                  {},
+	"read_config":                         {},
+	"discord_add_member_role":             {},
+	"discord_add_reaction":                {},
+	"discord_add_thread_member":           {},
+	"discord_archive_thread":              {},
+	"discord_ban_member":                  {},
+	"discord_bulk_ban_members":            {},
+	"discord_bulk_delete_messages":        {},
+	"discord_create_auto_moderation_rule": {},
+	"discord_create_invite":               {},
+	"discord_create_poll":                 {},
+	"discord_create_role":                 {},
+	"discord_create_scheduled_event":      {},
+	"discord_create_thread":               {},
+	"discord_create_webhook":              {},
+	"discord_delete_auto_moderation_rule": {},
+	"discord_delete_invite":               {},
+	"discord_delete_message":              {},
+	"discord_delete_own_message":          {},
+	"discord_delete_scheduled_event":      {},
+	"discord_delete_webhook":              {},
+	"discord_edit_own_message":            {},
+	"discord_end_poll":                    {},
+	"discord_get_audit_logs":              {},
+	"discord_get_invite":                  {},
+	"discord_kick_member":                 {},
+	"discord_list_auto_moderation_rules":  {},
+	"discord_list_bans":                   {},
+	"discord_list_invites":                {},
+	"discord_list_members":                {},
+	"discord_list_webhooks":               {},
+	"discord_lock_thread":                 {},
+	"discord_modify_channel_permissions":  {},
+	"discord_pin_message":                 {},
+	"discord_remove_member_role":          {},
+	"discord_remove_own_reaction":         {},
+	"discord_remove_thread_member":        {},
+	"discord_remove_timeout":              {},
+	"discord_rename_thread":               {},
+	"discord_reply_message":               {},
+	"discord_search_messages":             {},
+	"discord_send_message":                {},
+	"discord_set_channel_slowmode":        {},
+	"discord_set_member_nick":             {},
+	"discord_timeout_member":              {},
+	"discord_unban_member":                {},
+	"discord_unpin_message":               {},
+	"discord_update_auto_moderation_rule": {},
+	"discord_update_scheduled_event":      {},
+	"discord_update_webhook":              {},
+	"panda_manage_budget_limit":           {},
+	"panda_manage_channel_rule":           {},
+	"panda_manage_composed_tool":          {},
+	"panda_manage_discord_role":           {},
+	"panda_manage_knowledge":              {},
+	"panda_manage_member_role":            {},
+	"panda_manage_role_permission":        {},
+	"panda_manage_schedule":               {},
+	"panda_manage_soul":                   {},
+	"panda_manage_tool_access":            {},
+	"panda_usage_report":                  {},
+}
+
 type Service struct {
 	llm                    llm.Client
 	usage                  *repository.UsageRepository
@@ -32,6 +158,7 @@ type Service struct {
 	conversations          *repository.ConversationRepository
 	toolExecutor           *tools.Executor
 	curator                *curation.Service
+	billing                *billing.Service
 	defaultModel           string
 	defaultClassifierModel string
 	defaultFallbackModels  []string
@@ -196,6 +323,11 @@ func (s *Service) WithToolExecutor(executor *tools.Executor) *Service {
 	return s
 }
 
+func (s *Service) WithBilling(billingService *billing.Service) *Service {
+	s.billing = billingService
+	return s
+}
+
 func (s *Service) WithCurator(curator *curation.Service) *Service {
 	s.curator = curator
 	return s
@@ -345,7 +477,6 @@ func (s *Service) Chat(ctx context.Context, request AskRequest) (AskResponse, er
 		UserID:           request.UserID,
 		Role:             "assistant",
 		ContentPreview:   content,
-		Model:            response.Model,
 		PromptTokens:     response.Usage.PromptTokens,
 		CompletionTokens: response.Usage.CompletionTokens,
 		TotalTokens:      response.Usage.TotalTokens,
@@ -356,7 +487,6 @@ func (s *Service) Chat(ctx context.Context, request AskRequest) (AskResponse, er
 		UserID:    request.UserID,
 		MessageID: request.RequestID,
 		Command:   "chat",
-		Model:     response.Model,
 		Prompt:    request.Question,
 		Response:  content,
 	})
@@ -445,7 +575,6 @@ func (s *Service) complete(ctx context.Context, request TaskRequest) (AskRespons
 		UserID:    request.UserID,
 		MessageID: request.RequestID,
 		Command:   firstNonEmpty(request.Command, "ask"),
-		Model:     response.Model,
 		Prompt:    request.Input,
 		Response:  content,
 	})
@@ -606,8 +735,6 @@ func extractJSONObject(content string) string {
 func (s *Service) guildConfig(ctx context.Context, guildID string) (store.GuildConfig, bool, error) {
 	if guildID == "" || s.configs == nil {
 		return store.GuildConfig{
-			DefaultModel:      s.defaultModel,
-			ClassifierModel:   s.defaultClassifierModel,
 			Temperature:       0.3,
 			MaxResponseTokens: 900,
 			ToolPolicy:        tools.ToolPolicyAdminOnly,
@@ -622,8 +749,6 @@ func (s *Service) guildConfig(ctx context.Context, guildID string) (store.GuildC
 	if !ok {
 		return store.GuildConfig{
 			GuildID:           guildID,
-			DefaultModel:      s.defaultModel,
-			ClassifierModel:   s.defaultClassifierModel,
 			Temperature:       0.3,
 			MaxResponseTokens: 900,
 			ToolPolicy:        tools.ToolPolicyAdminOnly,
@@ -644,6 +769,7 @@ func (s *Service) completeWithTools(ctx context.Context, config store.GuildConfi
 			Access:         access,
 			InvocationType: "chat_tool",
 		})
+		request.Tools = filterDisabledConversationTools(request.Tools)
 		var preferredToolMessage llm.Message
 		request.Tools, preferredToolMessage = applyPreferredToolSelection(request.Tools, toolContext.PreferredTool)
 		if preferredToolMessage.Content != "" {
@@ -661,6 +787,15 @@ func (s *Service) completeWithTools(ctx context.Context, config store.GuildConfi
 			response.Content = ""
 		} else if containsTextToolCallMarkup(response.Content) {
 			response.Content = textToolCallUnavailableMessage()
+		}
+	}
+	if len(response.ToolCalls) > 0 {
+		filteredToolCalls := filterUnavailableToolCalls(response.ToolCalls, request.Tools)
+		if len(filteredToolCalls) == 0 {
+			response.ToolCalls = nil
+			response.Content = textToolCallUnavailableMessage()
+		} else {
+			response.ToolCalls = filteredToolCalls
 		}
 	}
 	if len(response.ToolCalls) == 0 {
@@ -724,6 +859,41 @@ func isWebSearchToolName(toolName string) bool {
 	default:
 		return false
 	}
+}
+
+func filterDisabledConversationTools(availableTools []llm.Tool) []llm.Tool {
+	if len(availableTools) == 0 {
+		return availableTools
+	}
+	filtered := availableTools[:0]
+	for _, tool := range availableTools {
+		name := strings.ToLower(strings.TrimSpace(tool.Function.Name))
+		if _, disabled := disabledConversationToolNames[name]; disabled {
+			continue
+		}
+		filtered = append(filtered, tool)
+	}
+	return filtered
+}
+
+func filterUnavailableToolCalls(toolCalls []llm.ToolCall, availableTools []llm.Tool) []llm.ToolCall {
+	if len(toolCalls) == 0 || len(availableTools) == 0 {
+		return nil
+	}
+	available := map[string]struct{}{}
+	for _, tool := range availableTools {
+		name := strings.TrimSpace(tool.Function.Name)
+		if name != "" {
+			available[name] = struct{}{}
+		}
+	}
+	filtered := toolCalls[:0]
+	for _, call := range toolCalls {
+		if _, ok := available[strings.TrimSpace(call.Function.Name)]; ok {
+			filtered = append(filtered, call)
+		}
+	}
+	return filtered
 }
 
 func applyPreferredToolSelection(availableTools []llm.Tool, preferredTool string) ([]llm.Tool, llm.Message) {
@@ -1217,6 +1387,7 @@ func (s *Service) chatWithFallback(ctx context.Context, config store.GuildConfig
 	for index, model := range models {
 		request.Model = model
 		response, err := s.llm.Chat(ctx, sanitizeChatRequest(request))
+		s.recordCost(ctx, config.GuildID, task, model, response, err)
 		if err == nil {
 			return response, nil
 		}
@@ -1226,6 +1397,40 @@ func (s *Service) chatWithFallback(ctx context.Context, config store.GuildConfig
 		}
 	}
 	return llm.ChatResponse{}, lastErr
+}
+
+func (s *Service) recordCost(ctx context.Context, guildID string, task modelTask, model string, response llm.ChatResponse, err error) {
+	if s.billing == nil {
+		return
+	}
+	usage := response.Usage
+	_ = s.billing.RecordCost(ctx, billing.CostEvent{
+		GuildID:             guildID,
+		Source:              "assistant",
+		Operation:           string(task),
+		Provider:            "openrouter",
+		Model:               firstNonEmpty(response.Model, model),
+		PromptTokens:        usage.PromptTokens,
+		CompletionTokens:    usage.CompletionTokens,
+		TotalTokens:         usage.TotalTokens,
+		EstimatedCostMicros: estimateLLMCostMicros(task, usage),
+		Success:             err == nil,
+		ErrorCode:           errorCode(err),
+	})
+}
+
+func estimateLLMCostMicros(task modelTask, usage llm.Usage) int64 {
+	promptMicros := 0.25
+	completionMicros := 0.75
+	if task == modelTaskClassifier {
+		promptMicros = 0.01
+		completionMicros = 0.03
+	}
+	estimate := (float64(usage.PromptTokens)*promptMicros + float64(usage.CompletionTokens)*completionMicros) * 1.2
+	if estimate < 0 {
+		return 0
+	}
+	return int64(estimate + 0.5)
 }
 
 func sanitizeChatRequest(request llm.ChatRequest) llm.ChatRequest {
@@ -1241,19 +1446,15 @@ func sanitizeChatRequest(request llm.ChatRequest) llm.ChatRequest {
 }
 
 func (s *Service) modelSequence(config store.GuildConfig, task modelTask) []string {
-	fallbacks := decodeFallbackModels(config.FallbackModels)
-	if len(fallbacks) == 0 {
-		fallbacks = s.defaultFallbackModels
-	}
-	return normalizeModelSequence(append([]string{s.primaryModel(config, task)}, fallbacks...))
+	return normalizeModelSequence(append([]string{s.primaryModel(task)}, s.defaultFallbackModels...))
 }
 
-func (s *Service) primaryModel(config store.GuildConfig, task modelTask) string {
+func (s *Service) primaryModel(task modelTask) string {
 	switch task {
 	case modelTaskClassifier:
-		return firstConfiguredModel(config.ClassifierModel, s.defaultClassifierModel, config.DefaultModel, s.defaultModel)
+		return firstConfiguredModel(s.defaultClassifierModel, s.defaultModel)
 	default:
-		return firstNonEmpty(config.DefaultModel, s.defaultModel)
+		return s.defaultModel
 	}
 }
 
@@ -1279,7 +1480,6 @@ func (s *Service) recordUsage(ctx context.Context, request AskRequest, command s
 		LatencyMS: latency,
 	}
 	if err == nil {
-		usageEvent.Model = response.Model
 		usageEvent.PromptTokens = response.Usage.PromptTokens
 		usageEvent.CompletionTokens = response.Usage.CompletionTokens
 		usageEvent.TotalTokens = response.Usage.TotalTokens
@@ -1290,6 +1490,9 @@ func (s *Service) recordUsage(ctx context.Context, request AskRequest, command s
 }
 
 func errorCode(err error) string {
+	if err == nil {
+		return ""
+	}
 	var openRouterErr llm.Error
 	if errors.As(err, &openRouterErr) {
 		return openRouterErr.Code
@@ -1396,14 +1599,6 @@ func clonePermissions(values map[string]struct{}) map[string]struct{} {
 		permissions[permission] = struct{}{}
 	}
 	return permissions
-}
-
-func decodeFallbackModels(value string) []string {
-	var models []string
-	if err := json.Unmarshal([]byte(value), &models); err != nil {
-		return nil
-	}
-	return normalizeModelSequence(models)
 }
 
 func normalizeModelSequence(values []string) []string {

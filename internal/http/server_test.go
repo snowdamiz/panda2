@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sn0w/panda2/internal/billing"
 	"github.com/sn0w/panda2/internal/config"
 	discordbot "github.com/sn0w/panda2/internal/discord"
 	"github.com/sn0w/panda2/internal/store"
@@ -22,7 +23,16 @@ type fakeDiscordWebhookHandler struct {
 	events []discordbot.WebhookEvent
 }
 
+type fakeBillingWebhookHandler struct {
+	events []billing.StripeEvent
+}
+
 func (f *fakeDiscordWebhookHandler) HandleWebhookEvent(_ context.Context, event discordbot.WebhookEvent) error {
+	f.events = append(f.events, event)
+	return nil
+}
+
+func (f *fakeBillingWebhookHandler) HandleStripeEvent(_ context.Context, event billing.StripeEvent) error {
 	f.events = append(f.events, event)
 	return nil
 }
@@ -59,8 +69,8 @@ func TestHealthReportsMissingOptionalIntegrations(t *testing.T) {
 	if body.Checks["discord"].Status != "missing" {
 		t.Fatalf("expected discord missing, got %+v", body.Checks["discord"])
 	}
-	if body.Checks["openrouter"].Status != "missing" {
-		t.Fatalf("expected openrouter missing, got %+v", body.Checks["openrouter"])
+	if body.Checks["ai_service"].Status != "missing" {
+		t.Fatalf("expected AI service missing, got %+v", body.Checks["ai_service"])
 	}
 	if body.Checks["brave_search"].Status != "missing" {
 		t.Fatalf("expected brave search missing, got %+v", body.Checks["brave_search"])
@@ -207,6 +217,79 @@ func TestDiscordWebhookDispatchesVerifiedEvent(t *testing.T) {
 	}
 	if len(handler.events) != 1 || handler.events[0].Type != "APPLICATION_AUTHORIZED" || !strings.Contains(string(handler.events[0].Data), `"ok":true`) {
 		t.Fatalf("unexpected dispatched events: %+v", handler.events)
+	}
+}
+
+func TestStripeCheckoutSessionPayloadParsesPlanMetadata(t *testing.T) {
+	body := []byte(`{
+		"id":"evt_checkout",
+		"type":"checkout.session.completed",
+		"data":{"object":{
+			"id":"cs_plan",
+			"customer":"cus_1",
+			"mode":"subscription",
+			"metadata":{
+				"guild_id":"guild-1",
+				"billing_owner_user_id":"owner-1",
+				"kind":"plan",
+				"plan":"plus"
+			},
+			"amount_total":4900,
+			"currency":"usd",
+			"customer_details":{"email":"owner@example.com"}
+		}}
+	}`)
+	var payload stripeWebhookPayload
+	if err := json.Unmarshal(body, &payload); err != nil {
+		t.Fatalf("unmarshal payload: %v", err)
+	}
+	event, ok, err := stripeEventFromPayload(payload, body)
+	if err != nil || !ok {
+		t.Fatalf("stripeEventFromPayload ok=%t err=%v", ok, err)
+	}
+	if event.EventID != "evt_checkout" || event.CheckoutSessionID != "cs_plan" || event.CustomerID != "cus_1" {
+		t.Fatalf("unexpected checkout identifiers: %+v", event)
+	}
+	if event.GuildID != "guild-1" || event.BillingOwnerUserID != "owner-1" || event.Plan != "plus" {
+		t.Fatalf("unexpected plan metadata: %+v", event)
+	}
+	if event.AmountCents != 4900 || event.Currency != "usd" || event.CustomerEmail != "owner@example.com" {
+		t.Fatalf("unexpected payment fields: %+v", event)
+	}
+}
+
+func TestBillingRedirectPagesRender(t *testing.T) {
+	db, err := store.Open(t.Context(), "file::memory:?cache=shared")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer db.Close()
+
+	server := New(config.Config{
+		SQLitePath:          ":memory:",
+		DataDir:             t.TempDir(),
+		OpenRouterBaseURL:   "https://openrouter.ai/api/v1",
+		OpenRouterModel:     "openrouter/auto",
+		Port:                "8080",
+		UserRateLimit:       5,
+		UserRateLimitWindow: time.Minute,
+	}, db)
+	for _, path := range []string{"/billing/success", "/billing/cancel"} {
+		req, _ := stdhttp.NewRequest(stdhttp.MethodGet, path, nil)
+		resp, err := server.Test(req)
+		if err != nil {
+			t.Fatalf("%s request failed: %v", path, err)
+		}
+		if resp.StatusCode != stdhttp.StatusOK {
+			t.Fatalf("expected 200 for %s, got %d", path, resp.StatusCode)
+		}
+		data, err := io.ReadAll(resp.Body)
+		if err != nil {
+			t.Fatalf("read %s body: %v", path, err)
+		}
+		if !strings.Contains(string(data), "/billing") {
+			t.Fatalf("expected billing guidance in %s body, got %s", path, string(data))
+		}
 	}
 }
 

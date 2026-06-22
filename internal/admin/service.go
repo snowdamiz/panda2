@@ -9,23 +9,22 @@ import (
 	"strings"
 	"time"
 
-	"github.com/sn0w/panda2/internal/llm"
+	"github.com/sn0w/panda2/internal/billing"
 	"github.com/sn0w/panda2/internal/memory"
 	"github.com/sn0w/panda2/internal/repository"
 	"github.com/sn0w/panda2/internal/store"
 )
 
 type Service struct {
-	configs      *repository.GuildConfigRepository
-	usage        *repository.UsageRepository
-	audit        *repository.AuditRepository
-	memory       *memory.Service
-	access       *repository.AccessRepository
-	budgets      *repository.BudgetRepository
-	members      *repository.MemberRepository
-	guilds       *repository.GuildRepository
-	models       llm.ModelLister
-	defaultModel string
+	configs *repository.GuildConfigRepository
+	usage   *repository.UsageRepository
+	audit   *repository.AuditRepository
+	memory  *memory.Service
+	access  *repository.AccessRepository
+	budgets *repository.BudgetRepository
+	members *repository.MemberRepository
+	guilds  *repository.GuildRepository
+	billing *billing.Service
 }
 
 const (
@@ -52,13 +51,12 @@ const (
 	PermissionToolComposeAudit     = "tool.compose.audit"
 	PermissionOwnerOps             = "owner.ops"
 
-	maxFallbackModels      = 5
-	minTemperature         = 0
-	maxTemperature         = 2
-	minMaxResponseTokens   = 64
-	maxMaxResponseTokens   = 4000
-	maxInstructionChars    = 4000
-	defaultModelToolPolicy = "admin_only"
+	minTemperature       = 0
+	maxTemperature       = 2
+	minMaxResponseTokens = 64
+	maxMaxResponseTokens = 4000
+	maxInstructionChars  = 4000
+	defaultToolPolicy    = "admin_only"
 )
 
 var allPermissionNames = []string{
@@ -91,15 +89,13 @@ type AssistantAccessRequest struct {
 	IsOwner      bool
 }
 
-type ModelSettings struct {
-	DefaultModel         string
-	ClassifierModel      string
-	FallbackModels       []string
-	FallbackModelsSet    bool
+type BehaviorSettings struct {
 	Temperature          float64
 	TemperatureSet       bool
 	MaxResponseTokens    int
 	MaxResponseTokensSet bool
+	AnswerLength         string
+	AnswerLengthSet      bool
 	ToolPolicy           string
 	ToolPolicySet        bool
 }
@@ -155,81 +151,44 @@ func (s *Service) WithGuildRepository(guilds *repository.GuildRepository) *Servi
 	return s
 }
 
+func (s *Service) WithBilling(billingService *billing.Service) *Service {
+	s.billing = billingService
+	return s
+}
+
 type UsageReport struct {
 	Summary   repository.UsageSummary
 	Breakdown []repository.UsageBreakdownRow
 	Dimension string
 }
 
-func NewService(configs *repository.GuildConfigRepository, usage *repository.UsageRepository, audit *repository.AuditRepository, memoryService *memory.Service, access *repository.AccessRepository, budgets *repository.BudgetRepository, models llm.ModelLister, defaultModel string, members ...*repository.MemberRepository) *Service {
+func NewService(configs *repository.GuildConfigRepository, usage *repository.UsageRepository, audit *repository.AuditRepository, memoryService *memory.Service, access *repository.AccessRepository, budgets *repository.BudgetRepository, members ...*repository.MemberRepository) *Service {
 	var memberRepo *repository.MemberRepository
 	if len(members) > 0 {
 		memberRepo = members[0]
 	}
 	return &Service{
-		configs:      configs,
-		usage:        usage,
-		audit:        audit,
-		memory:       memoryService,
-		access:       access,
-		budgets:      budgets,
-		members:      memberRepo,
-		models:       models,
-		defaultModel: defaultModel,
+		configs: configs,
+		usage:   usage,
+		audit:   audit,
+		memory:  memoryService,
+		access:  access,
+		budgets: budgets,
+		members: memberRepo,
 	}
 }
 
 func (s *Service) ensureGuildConfig(ctx context.Context, guildID string) (store.GuildConfig, error) {
-	return s.configs.EnsureDefault(ctx, guildID, s.defaultModel)
+	return s.configs.EnsureDefault(ctx, guildID)
 }
 
 func (s *Service) Config(ctx context.Context, guildID string) (store.GuildConfig, error) {
 	return s.ensureGuildConfig(ctx, guildID)
 }
 
-func (s *Service) SetModel(ctx context.Context, guildID, actorID, model string) (store.GuildConfig, error) {
-	return s.ConfigureModel(ctx, guildID, actorID, ModelSettings{DefaultModel: model})
-}
-
-func (s *Service) ConfigureModel(ctx context.Context, guildID, actorID string, settings ModelSettings) (store.GuildConfig, error) {
+func (s *Service) ConfigureBehavior(ctx context.Context, guildID, actorID string, settings BehaviorSettings) (store.GuildConfig, error) {
 	updates := map[string]any{}
 	meta := map[string]string{}
-
-	defaultModel := strings.TrimSpace(settings.DefaultModel)
-	if defaultModel != "" {
-		if err := s.validateModel(ctx, defaultModel); err != nil {
-			return store.GuildConfig{}, err
-		}
-		updates["default_model"] = defaultModel
-		meta["default_model"] = defaultModel
-	}
-
-	classifierModel := strings.TrimSpace(settings.ClassifierModel)
-	if classifierModel != "" {
-		if err := s.validateModel(ctx, classifierModel); err != nil {
-			return store.GuildConfig{}, err
-		}
-		updates["classifier_model"] = classifierModel
-		meta["classifier_model"] = classifierModel
-	}
-
-	if settings.FallbackModelsSet {
-		models, err := normalizeFallbackModels(settings.FallbackModels)
-		if err != nil {
-			return store.GuildConfig{}, err
-		}
-		for _, model := range models {
-			if err := s.validateModel(ctx, model); err != nil {
-				return store.GuildConfig{}, err
-			}
-		}
-		data, err := json.Marshal(models)
-		if err != nil {
-			return store.GuildConfig{}, err
-		}
-		updates["fallback_models"] = string(data)
-		meta["fallback_count"] = strconv.Itoa(len(models))
-	}
 
 	if settings.TemperatureSet {
 		if settings.Temperature < minTemperature || settings.Temperature > maxTemperature {
@@ -237,6 +196,15 @@ func (s *Service) ConfigureModel(ctx context.Context, guildID, actorID string, s
 		}
 		updates["temperature"] = settings.Temperature
 		meta["temperature"] = strconv.FormatFloat(settings.Temperature, 'f', -1, 64)
+	}
+
+	if settings.AnswerLengthSet {
+		tokens, err := maxTokensForAnswerLength(settings.AnswerLength)
+		if err != nil {
+			return store.GuildConfig{}, err
+		}
+		updates["max_response_tokens"] = tokens
+		meta["answer_length"] = normalizedAnswerLength(settings.AnswerLength)
 	}
 
 	if settings.MaxResponseTokensSet {
@@ -250,7 +218,7 @@ func (s *Service) ConfigureModel(ctx context.Context, guildID, actorID string, s
 	if settings.ToolPolicySet {
 		policy := strings.ToLower(strings.TrimSpace(settings.ToolPolicy))
 		if policy == "" {
-			policy = defaultModelToolPolicy
+			policy = defaultToolPolicy
 		}
 		if !allowedToolPolicy(policy) {
 			return store.GuildConfig{}, fmt.Errorf("tool policy must be off, read_only, assistive, admin_only, moderator, write_confirmed, or owner_ops")
@@ -260,42 +228,25 @@ func (s *Service) ConfigureModel(ctx context.Context, guildID, actorID string, s
 	}
 
 	if len(updates) == 0 {
-		return store.GuildConfig{}, fmt.Errorf("model setting is required")
+		return store.GuildConfig{}, fmt.Errorf("behavior setting is required")
 	}
 
 	if _, err := s.ensureGuildConfig(ctx, guildID); err != nil {
 		return store.GuildConfig{}, err
 	}
-	config, err := s.configs.UpdateModelSettings(ctx, guildID, updates)
+	config, err := s.configs.UpdateBehaviorSettings(ctx, guildID, updates)
 	if err != nil {
 		return store.GuildConfig{}, err
 	}
 	_ = s.audit.Record(ctx, store.AuditEvent{
 		GuildID:    guildID,
 		ActorID:    actorID,
-		Action:     "admin.model.configure",
+		Action:     "admin.behavior.configure",
 		TargetType: "guild_config",
 		TargetID:   guildID,
 		Metadata:   metadata(meta),
 	})
 	return config, nil
-}
-
-func (s *Service) validateModel(ctx context.Context, model string) error {
-	if strings.TrimSpace(model) == "" {
-		return fmt.Errorf("model is required")
-	}
-	if s.models == nil {
-		return nil
-	}
-	ok, err := s.models.ValidateModel(ctx, model)
-	if err != nil {
-		return fmt.Errorf("validate model: %w", err)
-	}
-	if !ok {
-		return fmt.Errorf("model %q is not available from OpenRouter", model)
-	}
-	return nil
 }
 
 func (s *Service) SetPrompt(ctx context.Context, guildID, actorID, prompt string) (store.GuildConfig, error) {
@@ -418,9 +369,32 @@ func (s *Service) RecentAudit(ctx context.Context, guildID string, limit int) ([
 }
 
 func (s *Service) AddMemoryDocument(ctx context.Context, request memory.AddDocumentRequest) (store.KnowledgeDocument, error) {
+	var reservation billing.Reservation
+	if s.billing != nil && s.memory != nil {
+		currentBytes, err := s.memory.StorageBytes(ctx, request.GuildID)
+		if err != nil {
+			return store.KnowledgeDocument{}, err
+		}
+		units := int64(len([]byte(strings.TrimSpace(request.Content))))
+		if units > 0 {
+			reservation, err = s.billing.BeginCurrentUsage(ctx, request.GuildID, billing.MetricKnowledgeStorageByte, currentBytes, units)
+			if err != nil {
+				return store.KnowledgeDocument{}, err
+			}
+			defer func() {
+				if reservation.ID != "" {
+					_ = s.billing.ReleaseUsage(context.Background(), reservation)
+				}
+			}()
+		}
+	}
 	document, err := s.memory.AddDocument(ctx, request)
 	if err != nil {
 		return store.KnowledgeDocument{}, err
+	}
+	if s.billing != nil && reservation.ID != "" {
+		_ = s.billing.CommitUsage(ctx, reservation)
+		reservation.ID = ""
 	}
 	_ = s.audit.Record(ctx, store.AuditEvent{
 		GuildID:    request.GuildID,
@@ -440,6 +414,11 @@ func (s *Service) SearchMemory(ctx context.Context, guildID, query string, limit
 func (s *Service) DeleteMemoryDocument(ctx context.Context, guildID, actorID string, documentID uint) error {
 	if err := s.memory.DeleteDocument(ctx, guildID, documentID); err != nil {
 		return err
+	}
+	if s.billing != nil && s.memory != nil {
+		if currentBytes, err := s.memory.StorageBytes(ctx, guildID); err == nil {
+			_ = s.billing.SyncCurrentUsage(ctx, guildID, billing.MetricKnowledgeStorageByte, currentBytes)
+		}
 	}
 	_ = s.audit.Record(ctx, store.AuditEvent{
 		GuildID:    guildID,
@@ -1022,34 +1001,38 @@ func (s *Service) canUsePermission(ctx context.Context, guildID string, roleIDs 
 	return s.access.AnyRoleHasPermission(ctx, guildID, roleIDs, permission)
 }
 
-func normalizeFallbackModels(values []string) ([]string, error) {
-	seen := map[string]struct{}{}
-	models := make([]string, 0, len(values))
-	for _, value := range values {
-		for _, part := range strings.Split(value, ",") {
-			model := strings.TrimSpace(part)
-			if model == "" {
-				continue
-			}
-			if _, ok := seen[model]; ok {
-				continue
-			}
-			seen[model] = struct{}{}
-			models = append(models, model)
-			if len(models) > maxFallbackModels {
-				return nil, fmt.Errorf("at most %d fallback models are supported", maxFallbackModels)
-			}
-		}
-	}
-	return models, nil
-}
-
 func allowedToolPolicy(policy string) bool {
 	switch strings.ToLower(strings.TrimSpace(policy)) {
 	case "off", "read_only", "assistive", "admin_only", "moderator", "write_confirmed", "owner_ops":
 		return true
 	default:
 		return false
+	}
+}
+
+func maxTokensForAnswerLength(value string) (int, error) {
+	switch normalizedAnswerLength(value) {
+	case "brief":
+		return 500, nil
+	case "standard":
+		return 900, nil
+	case "detailed":
+		return 1600, nil
+	default:
+		return 0, fmt.Errorf("answer_length must be brief, standard, or detailed")
+	}
+}
+
+func normalizedAnswerLength(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "short", "brief", "concise":
+		return "brief"
+	case "", "normal", "standard":
+		return "standard"
+	case "long", "detailed", "deep":
+		return "detailed"
+	default:
+		return strings.ToLower(strings.TrimSpace(value))
 	}
 }
 

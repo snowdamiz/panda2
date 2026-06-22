@@ -97,5 +97,4 @@ var usageBreakdownColumns = map[string]string{
 	"user":    "user_id",
 	"channel": "channel_id",
 	"command": "command",
-	"model":   "model",
 }

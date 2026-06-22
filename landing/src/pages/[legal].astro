@@ -1,0 +1,43 @@
+---
+import Footer from '../components/Footer.astro';
+import Header from '../components/Header.astro';
+import BaseLayout from '../layouts/BaseLayout.astro';
+import { legalDocuments } from '../data/legal';
+
+export function getStaticPaths() {
+  return legalDocuments.map((document) => ({
+    params: { legal: document.slug },
+    props: { document },
+  }));
+}
+
+const { document } = Astro.props;
+---
+
+<BaseLayout title={`${document.title} - Panda`} description={document.description}>
+  <Header />
+  <main id="main" class="legal-page">
+    <section class="legal-hero">
+      <div class="shell legal-shell">
+        <p class="kicker">{document.eyebrow}</p>
+        <h1>{document.title}</h1>
+        <p>{document.description}</p>
+        <small>Effective {document.updated}</small>
+      </div>
+    </section>
+
+    <section class="legal-body">
+      <div class="shell legal-shell">
+        {
+          document.sections.map((section) => (
+            <article class="legal-section">
+              <h2>{section.heading}</h2>
+              {section.body.map((paragraph) => <p>{paragraph}</p>)}
+            </article>
+          ))
+        }
+      </div>
+    </section>
+  </main>
+  <Footer />
+</BaseLayout>

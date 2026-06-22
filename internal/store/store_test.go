@@ -150,7 +150,7 @@ func TestBackupCreatesRestorableSQLiteFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open source: %v", err)
 	}
-	if err := source.DB.Exec(`INSERT INTO guild_configs (guild_id, default_model, created_at, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`, "guild-1", "openrouter/auto").Error; err != nil {
+	if err := source.DB.Exec(`INSERT INTO guild_configs (guild_id, created_at, updated_at) VALUES (?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`, "guild-1").Error; err != nil {
 		t.Fatalf("insert fixture: %v", err)
 	}
 	if err := source.Backup(ctx, backupPath); err != nil {

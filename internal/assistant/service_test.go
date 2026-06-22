@@ -36,6 +36,18 @@ func (f fakeAssistantWebSearch) Search(context.Context, websearch.Request) (webs
 	return f.response, f.err
 }
 
+type fakeAssistantDynamicTools struct {
+	tools []llm.Tool
+}
+
+func (f fakeAssistantDynamicTools) OpenRouterTools(context.Context, tools.DynamicToolListRequest) ([]llm.Tool, error) {
+	return f.tools, nil
+}
+
+func (f fakeAssistantDynamicTools) ExecuteDynamicTool(context.Context, tools.DynamicExecutionRequest) (tools.ExecutionResult, error) {
+	return tools.ExecutionResult{Message: llm.Message{Role: "tool", Content: `{}`}}, nil
+}
+
 func (f *fakeClient) Chat(_ context.Context, request llm.ChatRequest) (llm.ChatResponse, error) {
 	f.requests = append(f.requests, request)
 	if len(f.errors) > 0 {
@@ -61,6 +73,11 @@ func (f *fakeClient) Chat(_ context.Context, request llm.ChatRequest) (llm.ChatR
 
 func newTestService(t *testing.T, client *fakeClient) (*Service, *store.Store) {
 	t.Helper()
+	return newTestServiceWithModelConfig(t, client, "openrouter/auto", "", nil)
+}
+
+func newTestServiceWithModelConfig(t *testing.T, client *fakeClient, defaultModel, classifierModel string, fallbackModels []string) (*Service, *store.Store) {
+	t.Helper()
 	db, err := store.Open(context.Background(), "file::memory:?cache=shared")
 	if err != nil {
 		t.Fatalf("open store: %v", err)
@@ -72,7 +89,7 @@ func newTestService(t *testing.T, client *fakeClient) (*Service, *store.Store) {
 	knowledge := repository.NewKnowledgeRepository(db.DB)
 	memoryService := memory.NewService(knowledge)
 	conversations := repository.NewConversationRepository(db.DB)
-	return NewService(client, usage, configs, memoryService, conversations, "openrouter/auto", "", nil), db
+	return NewService(client, usage, configs, memoryService, conversations, defaultModel, classifierModel, fallbackModels), db
 }
 
 func TestAskUsesGuildPromptAndMemory(t *testing.T) {
@@ -82,7 +99,7 @@ func TestAskUsesGuildPromptAndMemory(t *testing.T) {
 	configs := repository.NewGuildConfigRepository(db.DB)
 	knowledge := repository.NewKnowledgeRepository(db.DB)
 
-	if _, err := configs.EnsureDefault(ctx, "guild-1", "openrouter/auto"); err != nil {
+	if _, err := configs.EnsureDefault(ctx, "guild-1"); err != nil {
 		t.Fatalf("EnsureDefault: %v", err)
 	}
 	if _, err := configs.UpdatePrompt(ctx, "guild-1", "Prefer short answers."); err != nil {
@@ -180,7 +197,7 @@ func TestAskAppendsWebSearchSourcesWhenModelOmitsLinks(t *testing.T) {
 		},
 	}))
 
-	if _, err := configs.EnsureDefault(ctx, "guild-1", "openrouter/auto"); err != nil {
+	if _, err := configs.EnsureDefault(ctx, "guild-1"); err != nil {
 		t.Fatalf("EnsureDefault: %v", err)
 	}
 
@@ -229,7 +246,7 @@ func TestAskRespectsDisabledGuild(t *testing.T) {
 	service, db := newTestService(t, client)
 	configs := repository.NewGuildConfigRepository(db.DB)
 
-	if _, err := configs.EnsureDefault(ctx, "guild-1", "openrouter/auto"); err != nil {
+	if _, err := configs.EnsureDefault(ctx, "guild-1"); err != nil {
 		t.Fatalf("EnsureDefault: %v", err)
 	}
 	if _, err := configs.SetAssistantEnabled(ctx, "guild-1", false); err != nil {
@@ -277,20 +294,17 @@ func TestClassifyNaturalMessageUsesLLMDecision(t *testing.T) {
 	}
 }
 
-func TestConfiguredClassifierModelIsSeparateFromResponseModel(t *testing.T) {
+func TestOperatorClassifierModelIsSeparateFromResponseModel(t *testing.T) {
 	ctx := context.Background()
 	client := &fakeClient{responses: []llm.ChatResponse{
 		{Content: `{"respond":true,"prompt":"answer this"}`},
 		{Content: "response answer"},
 	}}
-	service, db := newTestService(t, client)
+	service, db := newTestServiceWithModelConfig(t, client, "provider/response", "provider/classifier", nil)
 	configs := repository.NewGuildConfigRepository(db.DB)
 
-	if _, err := configs.EnsureDefault(ctx, "guild-1", "provider/response"); err != nil {
+	if _, err := configs.EnsureDefault(ctx, "guild-1"); err != nil {
 		t.Fatalf("EnsureDefault: %v", err)
-	}
-	if _, err := configs.UpdateModelSettings(ctx, "guild-1", map[string]any{"classifier_model": "provider/classifier"}); err != nil {
-		t.Fatalf("UpdateModelSettings: %v", err)
 	}
 
 	decision, err := service.ClassifyNaturalMessage(ctx, NaturalMessageRequest{
@@ -625,11 +639,11 @@ func TestAskListsActualAvailableToolNamesInPrompt(t *testing.T) {
 	}
 	service.WithToolExecutor(tools.NewExecutor(registry, nil, configs))
 
-	if _, err := configs.EnsureDefault(ctx, "guild-1", "openrouter/auto"); err != nil {
+	if _, err := configs.EnsureDefault(ctx, "guild-1"); err != nil {
 		t.Fatalf("EnsureDefault: %v", err)
 	}
-	if _, err := configs.UpdateModelSettings(ctx, "guild-1", map[string]any{"tool_policy": "read_only"}); err != nil {
-		t.Fatalf("UpdateModelSettings: %v", err)
+	if _, err := configs.UpdateBehaviorSettings(ctx, "guild-1", map[string]any{"tool_policy": "read_only"}); err != nil {
+		t.Fatalf("UpdateBehaviorSettings: %v", err)
 	}
 
 	if _, err := service.Ask(ctx, AskRequest{
@@ -652,6 +666,63 @@ func TestAskListsActualAvailableToolNamesInPrompt(t *testing.T) {
 	}
 	if strings.Contains(joined, "`image_generation`") || strings.Contains(joined, "`code_execution`") {
 		t.Fatalf("unavailable generic tools should not appear as current tools: %s", joined)
+	}
+}
+
+func TestAskFiltersDisabledConversationToolsBeforeModelRequest(t *testing.T) {
+	ctx := context.Background()
+	client := &fakeClient{response: llm.ChatResponse{Model: "fixture/model", Content: "ok"}}
+	service, db := newTestService(t, client)
+	configs := repository.NewGuildConfigRepository(db.DB)
+	registry, err := tools.NewDefaultRegistry()
+	if err != nil {
+		t.Fatalf("NewDefaultRegistry: %v", err)
+	}
+	executor := tools.NewExecutor(registry, nil, configs).WithDynamicToolProvider(fakeAssistantDynamicTools{tools: []llm.Tool{
+		{Type: "function", Function: llm.ToolFunction{Name: "discord_send_message", Parameters: []byte(`{"type":"object"}`)}},
+		{Type: "function", Function: llm.ToolFunction{Name: "panda_manage_composed_tool", Parameters: []byte(`{"type":"object"}`)}},
+		{Type: "function", Function: llm.ToolFunction{Name: "read_config", Parameters: []byte(`{"type":"object"}`)}},
+		{Type: "function", Function: llm.ToolFunction{Name: "custom_safe_reader", Parameters: []byte(`{"type":"object"}`)}},
+	}})
+	service.WithToolExecutor(executor)
+
+	if _, err := configs.EnsureDefault(ctx, "guild-1"); err != nil {
+		t.Fatalf("EnsureDefault: %v", err)
+	}
+	if _, err := configs.UpdateBehaviorSettings(ctx, "guild-1", map[string]any{"tool_policy": tools.ToolPolicyOwnerOps}); err != nil {
+		t.Fatalf("UpdateBehaviorSettings: %v", err)
+	}
+
+	_, err = service.Ask(ctx, AskRequest{
+		GuildID:   "guild-1",
+		UserID:    "admin",
+		ChannelID: "channel-1",
+		Question:  "What tools do you have access to?",
+		AllowedPermissions: map[string]struct{}{
+			admin.PermissionAssistantUse:      {},
+			admin.PermissionToolComposeInvoke: {},
+			admin.PermissionOwnerOps:          {},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Ask: %v", err)
+	}
+	if len(client.requests) != 1 {
+		t.Fatalf("expected one LLM request, got %d", len(client.requests))
+	}
+	for _, disabled := range []string{"discord_send_message", "panda_manage_composed_tool", "read_config"} {
+		if toolNamePresent(client.requests[0].Tools, disabled) {
+			t.Fatalf("disabled tool %s was exposed to model: %+v", disabled, client.requests[0].Tools)
+		}
+	}
+	if !toolNamePresent(client.requests[0].Tools, "custom_safe_reader") {
+		t.Fatalf("expected non-disabled dynamic tool to remain available: %+v", client.requests[0].Tools)
+	}
+	joined := joinMessages(client.requests[0].Messages)
+	for _, disabled := range []string{"discord_send_message", "panda_manage_composed_tool", "read_config"} {
+		if strings.Contains(joined, disabled) {
+			t.Fatalf("disabled tool %s leaked into tool availability prompt: %s", disabled, joined)
+		}
 	}
 }
 
@@ -717,7 +788,7 @@ func TestAskCapabilityQuestionCanUseListToolsWhenDefaultAdminOnly(t *testing.T) 
 	}
 	service.WithToolExecutor(tools.NewExecutor(registry, nil, configs))
 
-	if _, err := configs.EnsureDefault(ctx, "guild-1", "openrouter/auto"); err != nil {
+	if _, err := configs.EnsureDefault(ctx, "guild-1"); err != nil {
 		t.Fatalf("EnsureDefault: %v", err)
 	}
 
@@ -767,7 +838,7 @@ func TestAskExecutesTextToolCallFallback(t *testing.T) {
 	}
 	service.WithToolExecutor(tools.NewExecutor(registry, nil, configs))
 
-	if _, err := configs.EnsureDefault(ctx, "guild-1", "openrouter/auto"); err != nil {
+	if _, err := configs.EnsureDefault(ctx, "guild-1"); err != nil {
 		t.Fatalf("EnsureDefault: %v", err)
 	}
 
@@ -817,7 +888,7 @@ func TestAskSuppressesUnavailableTextToolCallFallback(t *testing.T) {
 	}
 	service.WithToolExecutor(tools.NewExecutor(registry, nil, configs))
 
-	if _, err := configs.EnsureDefault(ctx, "guild-1", "openrouter/auto"); err != nil {
+	if _, err := configs.EnsureDefault(ctx, "guild-1"); err != nil {
 		t.Fatalf("EnsureDefault: %v", err)
 	}
 
@@ -841,6 +912,51 @@ func TestAskSuppressesUnavailableTextToolCallFallback(t *testing.T) {
 	}
 	if len(client.requests) != 1 {
 		t.Fatalf("unavailable text tool call should not start a tool loop, got %d requests", len(client.requests))
+	}
+}
+
+func TestAskRejectsUnavailableStructuredToolCall(t *testing.T) {
+	ctx := context.Background()
+	client := &fakeClient{response: llm.ChatResponse{
+		Model: "fixture/model",
+		ToolCalls: []llm.ToolCall{{
+			ID:   "call-disabled",
+			Type: "function",
+			Function: llm.ToolCallFunction{
+				Name:      "discord_send_message",
+				Arguments: `{"channel_id":"channel-1","content":"hello"}`,
+			},
+		}},
+	}}
+	service, db := newTestService(t, client)
+	configs := repository.NewGuildConfigRepository(db.DB)
+	registry, err := tools.NewDefaultRegistry()
+	if err != nil {
+		t.Fatalf("NewDefaultRegistry: %v", err)
+	}
+	service.WithToolExecutor(tools.NewExecutor(registry, nil, configs))
+
+	if _, err := configs.EnsureDefault(ctx, "guild-1"); err != nil {
+		t.Fatalf("EnsureDefault: %v", err)
+	}
+
+	response, err := service.Ask(ctx, AskRequest{
+		GuildID:   "guild-1",
+		UserID:    "user-1",
+		ChannelID: "channel-1",
+		Question:  "Send a message.",
+		AllowedPermissions: map[string]struct{}{
+			admin.PermissionAssistantUse: {},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Ask: %v", err)
+	}
+	if !strings.Contains(response.Content, "not available") || !strings.Contains(response.Content, "did not take any action") {
+		t.Fatalf("expected unavailable tool response, got %q", response.Content)
+	}
+	if len(client.requests) != 1 {
+		t.Fatalf("unavailable structured tool call should not start a tool loop, got %d requests", len(client.requests))
 	}
 }
 
@@ -910,7 +1026,7 @@ func TestAskReturnsToolPayloadRejection(t *testing.T) {
 	}
 	service.WithToolExecutor(tools.NewExecutor(registry, nil, configs))
 
-	if _, err := configs.EnsureDefault(ctx, "guild-1", "openrouter/auto"); err != nil {
+	if _, err := configs.EnsureDefault(ctx, "guild-1"); err != nil {
 		t.Fatalf("EnsureDefault: %v", err)
 	}
 
@@ -963,13 +1079,10 @@ func TestAskFallsBackToConfiguredModelOnTransientFailure(t *testing.T) {
 			"provider/fallback": {Model: "provider/fallback", Content: "fallback answer"},
 		},
 	}
-	service, db := newTestService(t, client)
+	service, db := newTestServiceWithModelConfig(t, client, "provider/primary", "", []string{"provider/fallback"})
 	configs := repository.NewGuildConfigRepository(db.DB)
-	if _, err := configs.EnsureDefault(ctx, "guild-1", "provider/primary"); err != nil {
+	if _, err := configs.EnsureDefault(ctx, "guild-1"); err != nil {
 		t.Fatalf("EnsureDefault: %v", err)
-	}
-	if _, err := configs.UpdateModelSettings(ctx, "guild-1", map[string]any{"fallback_models": `["provider/fallback"]`}); err != nil {
-		t.Fatalf("UpdateModelSettings: %v", err)
 	}
 
 	response, err := service.Ask(ctx, AskRequest{GuildID: "guild-1", UserID: "user-1", ChannelID: "channel-1", Question: "hi"})
@@ -994,13 +1107,10 @@ func TestAskDoesNotFallbackOnNonRetryableFailure(t *testing.T) {
 			"provider/fallback": {Content: "should not be used"},
 		},
 	}
-	service, db := newTestService(t, client)
+	service, db := newTestServiceWithModelConfig(t, client, "provider/primary", "", []string{"provider/fallback"})
 	configs := repository.NewGuildConfigRepository(db.DB)
-	if _, err := configs.EnsureDefault(ctx, "guild-1", "provider/primary"); err != nil {
+	if _, err := configs.EnsureDefault(ctx, "guild-1"); err != nil {
 		t.Fatalf("EnsureDefault: %v", err)
-	}
-	if _, err := configs.UpdateModelSettings(ctx, "guild-1", map[string]any{"fallback_models": `["provider/fallback"]`}); err != nil {
-		t.Fatalf("UpdateModelSettings: %v", err)
 	}
 
 	_, err := service.Ask(ctx, AskRequest{GuildID: "guild-1", UserID: "user-1", ChannelID: "channel-1", Question: "hi"})
@@ -1038,14 +1148,14 @@ func TestAskExecutesKnowledgeSearchTool(t *testing.T) {
 	}
 	service.WithToolExecutor(tools.NewExecutor(registry, memoryService, configs))
 
-	if _, err := configs.EnsureDefault(ctx, "guild-1", "openrouter/auto"); err != nil {
+	if _, err := configs.EnsureDefault(ctx, "guild-1"); err != nil {
 		t.Fatalf("EnsureDefault: %v", err)
 	}
 	if _, err := configs.SetMemoryEnabled(ctx, "guild-1", true); err != nil {
 		t.Fatalf("SetMemoryEnabled: %v", err)
 	}
-	if _, err := configs.UpdateModelSettings(ctx, "guild-1", map[string]any{"tool_policy": "read_only"}); err != nil {
-		t.Fatalf("UpdateModelSettings: %v", err)
+	if _, err := configs.UpdateBehaviorSettings(ctx, "guild-1", map[string]any{"tool_policy": "read_only"}); err != nil {
+		t.Fatalf("UpdateBehaviorSettings: %v", err)
 	}
 	if _, err := knowledge.AddDocument(ctx, store.KnowledgeDocument{GuildID: "guild-1", Title: "Deploy notes"}, "Deploys happen Friday after review."); err != nil {
 		t.Fatalf("AddDocument: %v", err)

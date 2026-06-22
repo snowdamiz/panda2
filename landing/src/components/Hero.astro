@@ -1,6 +1,6 @@
 ---
 import LogoMark from './LogoMark.astro';
-import { heroMeta, marqueeItems, modelOptions, siteMeta } from '../data/landing';
+import { heroMeta, marqueeItems, planOptions, siteMeta } from '../data/landing';
 import Button from './ui/Button.astro';
 ---
 
@@ -8,15 +8,15 @@ import Button from './ui/Button.astro';
   <div class="hero-grid" aria-hidden="true"></div>
   <div class="shell hero-layout">
     <div class="hero-copy reveal">
-      <div class="eyebrow"><span></span> Open-source Discord intelligence</div>
+      <div class="eyebrow"><span></span> Hosted Discord assistant</div>
       <h1>Your server,<br /><em>with a better brain.</em></h1>
       <p class="hero-lede">
-        Panda brings the LLM you choose through OpenRouter into Discord—grounded in your
-        community, governed by your roles, and private by design.
+        Panda brings managed AI responses, server knowledge, web search, schedules, and
+        usage controls into Discord without asking your members to wire up provider accounts.
       </p>
       <div class="hero-actions">
-        <Button href={siteMeta.repositoryUrl} external>
-          Deploy Panda
+        <Button href={siteMeta.installUrl} external>
+          Start a trial
           <svg viewBox="0 0 18 18" aria-hidden="true"><path d="M4 9h10M10 5l4 4-4 4" /></svg>
         </Button>
       </div>
@@ -46,35 +46,12 @@ import Button from './ui/Button.astro';
           </div>
         </div>
 
-        <div class="model-bar">
-          <span class="model-status"><i></i> Panda is online</span>
-          <button
-            class="model-switch"
-            type="button"
-            data-model-button
-            aria-label="Change demo model"
-            aria-controls="model-menu"
-            aria-haspopup="menu"
-          >
-            <span class="model-label">MODEL</span>
-            <span data-model-name>{modelOptions[0].label}</span>
-            <svg viewBox="0 0 16 16" aria-hidden="true"><path d="m5 6 3 3 3-3" /></svg>
-          </button>
-          <div class="model-menu" id="model-menu" role="menu" data-model-menu hidden>
-            {
-              modelOptions.map((model) => (
-                <button
-                  type="button"
-                  data-model={model.label}
-                  data-provider={model.provider}
-                  role="menuitem"
-                >
-                  {model.label}
-                  {model.badge && <span>{model.badge}</span>}
-                </button>
-              ))
-            }
-          </div>
+        <div class="status-bar">
+          <span class="status-indicator"><i></i> Panda is online</span>
+          <span class="trial-pill">
+            <span class="trial-label">TRIAL</span>
+            <span>{planOptions[0].aiResponses}</span>
+          </span>
         </div>
 
         <div class="chat-body">
@@ -102,11 +79,11 @@ import Button from './ui/Button.astro';
                 <p>The launch is on track. Three decisions still need owners:</p>
                 <ol>
                   <li><span>Finalize onboarding copy</span><small>Owner needed · #launch</small></li>
-                  <li><span>Confirm fallback model limits</span><small>Assigned to Maya · #infra</small></li>
+                  <li><span>Confirm plan limits</span><small>Assigned to Maya · #ops</small></li>
                   <li><span>Schedule moderator walkthrough</span><small>Due Friday · #community</small></li>
                 </ol>
                 <div class="response-footer">
-                  <span data-model-provider>{modelOptions[0].provider}</span>
+                  <span>{planOptions[0].label} plan</span>
                   <span>3 sources</span>
                   <span>1.8s</span>
                 </div>

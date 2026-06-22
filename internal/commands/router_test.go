@@ -210,7 +210,7 @@ func newTestRouter(t *testing.T, client *fakeLLM, limit int, configureExecutor .
 	worker := queue.NewWorker(jobs, "test-worker")
 	opsService := ops.NewService(config.Config{DataDir: t.TempDir()}, db, configs, jobs, worker)
 	assistantService := assistant.NewService(client, usage, configs, memoryService, conversations, "openrouter/auto", "", nil)
-	adminService := admin.NewService(configs, usage, audit, memoryService, access, budgets, nil, "openrouter/auto", members)
+	adminService := admin.NewService(configs, usage, audit, memoryService, access, budgets, members)
 	registry, err := tools.NewDefaultRegistry()
 	if err != nil {
 		t.Fatalf("tool registry: %v", err)
@@ -232,7 +232,7 @@ func newTestRouter(t *testing.T, client *fakeLLM, limit int, configureExecutor .
 		assistantService,
 		opsService,
 		ratelimit.New(limit, time.Minute),
-	).WithComposedService(composedService).WithScheduler(schedulerService).WithToolExecutor(toolExecutor)
+	).WithComposedService(composedService).WithScheduler(schedulerService).WithDataRepository(repository.NewGuildDataRepository(db.DB)).WithToolExecutor(toolExecutor)
 }
 
 func seedScheduledComposedTool(t *testing.T, router *Router, guildID, actorID, name string) {
@@ -365,35 +365,13 @@ func TestRouterHelpShowsAdminGuidanceToGuildAdmins(t *testing.T) {
 	if !response.Ephemeral {
 		t.Fatalf("expected help response to be ephemeral: %+v", response)
 	}
-	for _, want := range []string{
-		"**Admin commands**",
-		"- `/admin role action:list|set|remove profile:admin|moderator role:@Role` - Panda role profiles",
-		"- `/admin member-role action:add|remove user:@User role:@Role` - assign Discord roles to users",
-		"- `/admin tool action:list|add|remove tool_name:<tool> role:@Role` - role tool grants",
-		"- `/admin channel action:list|allow|deny|remove channel:#Channel`",
-		"- `/admin model model:<response> classifier_model:<classifier> ...` - model routing, fallbacks, temperature, tokens, and tools",
-		"- Policies: `off`, `read_only`, `assistive`, `admin_only`, `moderator`, `write_confirmed`, `owner_ops`",
-		"- `/admin prompt prompt:<text> dry_run:<bool>` - server instructions; omit `prompt` for modal",
-		"- `/admin audit` - recent privileged changes",
-		"- `/admin enable dry_run:<bool>` / `/admin disable confirm:<token> dry_run:<bool>`",
-		"- `/admin soul soul:<text>` - personality/tone; natural chat can brainstorm/set",
-		"**Moderator tools**",
-		"**Composed tools**",
-		"- Ask Panda to draft or preview new server tools.",
-		"- Ask Panda to list/show tools or export approved spec JSON.",
-		"- Ask Panda to approve, pause, resume, disable, archive, or roll back tools. Approval/rollback use buttons.",
-		"- Ask Panda to run/simulate/schedule/list/cancel approved tools.",
-		"Moderation guidance",
-	} {
-		if !strings.Contains(response.Content, want) {
-			t.Fatalf("admin help response missing %q:\n%s", want, response.Content)
+	for _, hidden := range []string{"**Admin commands**", "**Moderator tools**", "**Composed tools**", "`/admin", "tool_policy", "Role/channel access"} {
+		if strings.Contains(response.Content, hidden) {
+			t.Fatalf("admin help should not include disabled guidance %q:\n%s", hidden, response.Content)
 		}
 	}
-	if strings.Contains(response.Content, "`/tool") {
-		t.Fatalf("admin help should describe composed tools as natural-language requests, got:\n%s", response.Content)
-	}
 	if len(response.Content) > discordMessageContentLimit {
-		t.Fatalf("admin help must fit Discord content limit: %d > %d\n%s", len(response.Content), discordMessageContentLimit, response.Content)
+		t.Fatalf("help must fit Discord content limit: %d > %d\n%s", len(response.Content), discordMessageContentLimit, response.Content)
 	}
 }
 
@@ -408,17 +386,11 @@ func TestRouterHelpShowsOnlyAllowedElevatedGuidanceToModerators(t *testing.T) {
 	if !response.Ephemeral {
 		t.Fatalf("expected help response to be ephemeral: %+v", response)
 	}
-	for _, want := range []string{
+	for _, hidden := range []string{
 		"**Moderator tools**",
 		"Moderation guidance",
-	} {
-		if !strings.Contains(response.Content, want) {
-			t.Fatalf("moderator help response missing %q:\n%s", want, response.Content)
-		}
-	}
-	for _, hidden := range []string{
 		"`/admin role`",
-		"`/admin model`",
+		"`/admin behavior`",
 		"`/admin soul`",
 		"Composed tools",
 		"`/tool draft`",
@@ -441,15 +413,9 @@ func TestRouterHelpShowsOnlyAllowedComposedToolGuidance(t *testing.T) {
 	if !response.Ephemeral {
 		t.Fatalf("expected help response to be ephemeral: %+v", response)
 	}
-	for _, want := range []string{
-		"**Composed tools**",
-		"- Ask Panda to run/simulate/schedule/list/cancel approved tools.",
-	} {
-		if !strings.Contains(response.Content, want) {
-			t.Fatalf("composed invoke help missing %q:\n%s", want, response.Content)
-		}
-	}
 	for _, hidden := range []string{
+		"**Composed tools**",
+		"schedule/list/cancel approved tools",
 		"draft or preview",
 		"approve, pause, resume",
 		"export the approved spec",
@@ -461,7 +427,103 @@ func TestRouterHelpShowsOnlyAllowedComposedToolGuidance(t *testing.T) {
 	}
 }
 
+func TestSupportBundleRedactsRawContent(t *testing.T) {
+	ctx := context.Background()
+	router := newTestRouter(t, &fakeLLM{}, 5)
+	if _, err := router.admin.AddMemoryDocument(ctx, memory.AddDocumentRequest{
+		GuildID:   "guild-1",
+		Title:     "Launch secret",
+		Content:   "raw content that should not appear in support",
+		CreatedBy: "admin",
+	}); err != nil {
+		t.Fatalf("AddMemoryDocument: %v", err)
+	}
+
+	response := router.Handle(ctx, Request{
+		Command:      "support",
+		RequestID:    "req-1",
+		GuildID:      "guild-1",
+		ChannelID:    "channel-1",
+		UserID:       "admin",
+		IsGuildAdmin: true,
+	})
+	if !response.Ephemeral || !strings.Contains(response.Content, "Support bundle") || !strings.Contains(response.Content, "Knowledge documents: `1`") {
+		t.Fatalf("unexpected support bundle: %+v", response)
+	}
+	for _, leaked := range []string{"raw content", "Launch secret", "provider/model"} {
+		if strings.Contains(response.Content, leaked) {
+			t.Fatalf("support bundle leaked %q:\n%s", leaked, response.Content)
+		}
+	}
+}
+
+func TestDataExportAndConfirmedDelete(t *testing.T) {
+	ctx := context.Background()
+	router := newTestRouter(t, &fakeLLM{}, 5)
+	if _, err := router.admin.AddMemoryDocument(ctx, memory.AddDocumentRequest{
+		GuildID:   "guild-1",
+		Title:     "Refund policy",
+		Content:   "Refunds are available within 14 days with a receipt.",
+		CreatedBy: "admin",
+	}); err != nil {
+		t.Fatalf("AddMemoryDocument: %v", err)
+	}
+
+	export := router.Handle(ctx, Request{
+		Command:      "data",
+		Subcommand:   "export",
+		GuildID:      "guild-1",
+		UserID:       "admin",
+		IsGuildAdmin: true,
+	})
+	if !export.Ephemeral || !strings.Contains(export.Content, "Safe Panda data export summary") || !strings.Contains(export.Content, "1 document") {
+		t.Fatalf("unexpected data export: %+v", export)
+	}
+	if strings.Contains(export.Content, "Refunds are available") {
+		t.Fatalf("data export should not include raw knowledge content:\n%s", export.Content)
+	}
+
+	pending := router.Handle(ctx, Request{
+		Command:      "data",
+		Subcommand:   "delete",
+		GuildID:      "guild-1",
+		UserID:       "admin",
+		IsGuildAdmin: true,
+		Options:      map[string]string{"scope": "knowledge"},
+	})
+	if !pending.Ephemeral || !strings.Contains(pending.Content, "admin and moderation controls are disabled") || pending.Confirmation != nil {
+		t.Fatalf("expected data deletion to be disabled, got %+v", pending)
+	}
+
+	after := router.Handle(ctx, Request{
+		Command:      "data",
+		Subcommand:   "export",
+		GuildID:      "guild-1",
+		UserID:       "admin",
+		IsGuildAdmin: true,
+	})
+	if !strings.Contains(after.Content, "1 document") {
+		t.Fatalf("expected knowledge export to remain after disabled deletion:\n%s", after.Content)
+	}
+}
+
+func TestAdminOpsAndScheduleCommandsAreDisabled(t *testing.T) {
+	router := newTestRouter(t, &fakeLLM{}, 5)
+	for _, command := range []string{"admin", "ops", "schedule", "schedules"} {
+		response := router.Handle(context.Background(), Request{
+			Command:      command,
+			GuildID:      "guild-1",
+			UserID:       "admin",
+			IsGuildAdmin: true,
+		})
+		if !response.Ephemeral || !strings.Contains(response.Content, "admin and moderation controls are disabled") {
+			t.Fatalf("expected %s to be disabled, got %+v", command, response)
+		}
+	}
+}
+
 func TestAdminRoleProfileRequiresGuildControl(t *testing.T) {
+	t.Skip("admin, ops, composed, and Discord write controls are disabled in this build")
 	router := newTestRouter(t, &fakeLLM{}, 5)
 	response := router.Handle(context.Background(), Request{
 		Command:    "admin",
@@ -476,6 +538,7 @@ func TestAdminRoleProfileRequiresGuildControl(t *testing.T) {
 }
 
 func TestAdminRoleProfileConfiguresDelegatedAdminRole(t *testing.T) {
+	t.Skip("admin, ops, composed, and Discord write controls are disabled in this build")
 	ctx := context.Background()
 	router := newTestRouter(t, &fakeLLM{response: llm.ChatResponse{Content: "ok"}}, 5)
 	profile := router.Handle(ctx, Request{
@@ -502,20 +565,21 @@ func TestAdminRoleProfileConfiguresDelegatedAdminRole(t *testing.T) {
 		}
 	}
 
-	model := router.Handle(ctx, Request{
+	behavior := router.Handle(ctx, Request{
 		Command:    "admin",
-		Subcommand: "model",
+		Subcommand: "behavior",
 		GuildID:    "guild-1",
 		UserID:     "mod",
 		RoleIDs:    []string{"role-mod"},
-		Options:    map[string]string{"model": "provider/new"},
+		Options:    map[string]string{"tool_policy": "read_only"},
 	})
-	if !strings.Contains(model.Content, "Model settings updated") {
-		t.Fatalf("expected admin role profile to allow admin model update, got %+v", model)
+	if !strings.Contains(behavior.Content, "Behavior settings updated") {
+		t.Fatalf("expected admin role profile to allow behavior update, got %+v", behavior)
 	}
 }
 
 func TestAdminChannelAccessAllowListsAssistantUse(t *testing.T) {
+	t.Skip("admin, ops, composed, and Discord write controls are disabled in this build")
 	ctx := context.Background()
 	router := newTestRouter(t, &fakeLLM{response: llm.ChatResponse{Content: "ok"}}, 5)
 
@@ -595,6 +659,7 @@ func TestAdminChannelAccessAllowListsAssistantUse(t *testing.T) {
 }
 
 func TestAdminRoleProfileConfiguresModeratorRole(t *testing.T) {
+	t.Skip("admin, ops, composed, and Discord write controls are disabled in this build")
 	ctx := context.Background()
 	router := newTestRouter(t, &fakeLLM{}, 5)
 	response := router.Handle(ctx, Request{
@@ -624,6 +689,7 @@ func TestAdminRoleProfileConfiguresModeratorRole(t *testing.T) {
 }
 
 func TestAdminRoleProfileCanReuseSameRoleForAdminAndModerator(t *testing.T) {
+	t.Skip("admin, ops, composed, and Discord write controls are disabled in this build")
 	ctx := context.Background()
 	router := newTestRouter(t, &fakeLLM{}, 5)
 	ownerRequest := Request{
@@ -685,6 +751,7 @@ func TestAdminRoleProfileCanReuseSameRoleForAdminAndModerator(t *testing.T) {
 }
 
 func TestAdminMemberRoleAssignsDiscordRole(t *testing.T) {
+	t.Skip("admin, ops, composed, and Discord write controls are disabled in this build")
 	ctx := context.Background()
 	manager := &fakeMemberRoleManager{}
 	router := newTestRouter(t, &fakeLLM{}, 5).WithMemberRoleManager(manager)
@@ -712,6 +779,7 @@ func TestAdminMemberRoleAssignsDiscordRole(t *testing.T) {
 }
 
 func TestAdminToolConfiguresRoleToolAccess(t *testing.T) {
+	t.Skip("admin, ops, composed, and Discord write controls are disabled in this build")
 	ctx := context.Background()
 	router := newTestRouter(t, &fakeLLM{}, 5)
 
@@ -800,7 +868,8 @@ func TestAskRateLimit(t *testing.T) {
 	}
 }
 
-func TestAdminModelAffectsAsk(t *testing.T) {
+func TestAdminModelCommandIsLegacyAndDoesNotAffectAsk(t *testing.T) {
+	t.Skip("admin, ops, composed, and Discord write controls are disabled in this build")
 	client := &fakeLLM{response: llm.ChatResponse{Content: "ok"}}
 	router := newTestRouter(t, client, 5)
 
@@ -812,8 +881,8 @@ func TestAdminModelAffectsAsk(t *testing.T) {
 		IsGuildAdmin: true,
 		Options:      map[string]string{"model": "anthropic/claude-fixture"},
 	})
-	if !strings.Contains(model.Content, "anthropic/claude-fixture") {
-		t.Fatalf("unexpected model response: %+v", model)
+	if !strings.Contains(model.Content, "Unknown admin command") || strings.Contains(model.Content, "anthropic/claude-fixture") {
+		t.Fatalf("expected legacy model command to be rejected without echoing slug, got %+v", model)
 	}
 
 	response := router.Handle(context.Background(), Request{
@@ -826,32 +895,30 @@ func TestAdminModelAffectsAsk(t *testing.T) {
 	if response.Content != "ok" {
 		t.Fatalf("unexpected ask response: %+v", response)
 	}
-	if len(client.requests) != 1 || client.requests[0].Model != "anthropic/claude-fixture" {
-		t.Fatalf("expected ask to use configured model, got %+v", client.requests)
+	if len(client.requests) != 1 || client.requests[0].Model != "openrouter/auto" {
+		t.Fatalf("expected ask to use operator model, got %+v", client.requests)
 	}
 }
 
-func TestAdminModelSetsRuntimeOptions(t *testing.T) {
+func TestAdminBehaviorSetsRuntimeOptions(t *testing.T) {
+	t.Skip("admin, ops, composed, and Discord write controls are disabled in this build")
 	client := &fakeLLM{response: llm.ChatResponse{Content: "ok"}}
 	router := newTestRouter(t, client, 5)
 
-	model := router.Handle(context.Background(), Request{
+	behavior := router.Handle(context.Background(), Request{
 		Command:      "admin",
-		Subcommand:   "model",
+		Subcommand:   "behavior",
 		GuildID:      "guild-1",
 		UserID:       "admin",
 		IsGuildAdmin: true,
 		Options: map[string]string{
-			"model":               "provider/primary",
-			"classifier_model":    "provider/classifier",
-			"fallback_models":     "provider/fallback-a, provider/fallback-b",
 			"temperature":         "0.7",
 			"max_response_tokens": "1234",
 			"tool_policy":         "read_only",
 		},
 	})
-	if !strings.Contains(model.Content, "classifier `provider/classifier`") || !strings.Contains(model.Content, "2 fallback") || !strings.Contains(model.Content, "0.70") || !strings.Contains(model.Content, "1234") || !strings.Contains(model.Content, "read_only") {
-		t.Fatalf("unexpected model settings response: %+v", model)
+	if !strings.Contains(behavior.Content, "Behavior settings updated") || !strings.Contains(behavior.Content, "read_only") || strings.Contains(behavior.Content, "provider/") {
+		t.Fatalf("unexpected behavior settings response: %+v", behavior)
 	}
 
 	response := router.Handle(context.Background(), Request{
@@ -868,12 +935,13 @@ func TestAdminModelSetsRuntimeOptions(t *testing.T) {
 		t.Fatalf("expected one LLM request, got %d", len(client.requests))
 	}
 	request := client.requests[0]
-	if request.Model != "provider/primary" || request.Temperature != 0.7 || request.MaxTokens != 1234 {
+	if request.Model != "openrouter/auto" || request.Temperature != 0.7 || request.MaxTokens != 1234 {
 		t.Fatalf("unexpected LLM settings: %+v", request)
 	}
 }
 
 func TestAdminDisableRequiresConfirmation(t *testing.T) {
+	t.Skip("admin, ops, composed, and Discord write controls are disabled in this build")
 	router := newTestRouter(t, &fakeLLM{response: llm.ChatResponse{Content: "ok"}}, 20)
 
 	request := Request{Command: "admin", Subcommand: "disable", GuildID: "guild-1", UserID: "admin", IsGuildAdmin: true}
@@ -908,19 +976,20 @@ func TestAdminDisableRequiresConfirmation(t *testing.T) {
 }
 
 func TestAdminDryRunDoesNotMutateState(t *testing.T) {
+	t.Skip("admin, ops, composed, and Discord write controls are disabled in this build")
 	client := &fakeLLM{response: llm.ChatResponse{Content: "ok"}}
 	router := newTestRouter(t, client, 20)
 
-	model := router.Handle(context.Background(), Request{
+	behavior := router.Handle(context.Background(), Request{
 		Command:      "admin",
-		Subcommand:   "model",
+		Subcommand:   "behavior",
 		GuildID:      "guild-1",
 		UserID:       "admin",
 		IsGuildAdmin: true,
-		Options:      map[string]string{"model": "provider/new", "dry_run": "true"},
+		Options:      map[string]string{"answer_length": "detailed", "dry_run": "true"},
 	})
-	if !strings.Contains(model.Content, "Dry run") || !strings.Contains(model.Content, "provider/new") {
-		t.Fatalf("expected model dry run response, got %+v", model)
+	if !strings.Contains(behavior.Content, "Dry run") || !strings.Contains(behavior.Content, "detailed") || strings.Contains(behavior.Content, "provider/") {
+		t.Fatalf("expected behavior dry run response, got %+v", behavior)
 	}
 	ask := router.Handle(context.Background(), Request{
 		Command:   "ask",
@@ -929,8 +998,8 @@ func TestAdminDryRunDoesNotMutateState(t *testing.T) {
 		UserID:    "user-1",
 		Options:   map[string]string{"question": "hi"},
 	})
-	if ask.Content != "ok" || len(client.requests) != 1 || client.requests[0].Model != "openrouter/auto" {
-		t.Fatalf("dry-run model change should not affect ask request, response=%+v requests=%+v", ask, client.requests)
+	if ask.Content != "ok" || len(client.requests) != 1 || client.requests[0].MaxTokens != 900 {
+		t.Fatalf("dry-run behavior change should not affect ask request, response=%+v requests=%+v", ask, client.requests)
 	}
 
 	disabled := router.Handle(context.Background(), Request{
@@ -958,6 +1027,7 @@ func TestAdminDryRunDoesNotMutateState(t *testing.T) {
 }
 
 func TestAdminPromptWithoutTextUsesModal(t *testing.T) {
+	t.Skip("admin, ops, composed, and Discord write controls are disabled in this build")
 	router := newTestRouter(t, &fakeLLM{}, 20)
 
 	prompt := router.Handle(context.Background(), Request{
@@ -997,6 +1067,7 @@ func TestAdminPromptWithoutTextUsesModal(t *testing.T) {
 }
 
 func TestAdminSoulUpdatesSystemPrompt(t *testing.T) {
+	t.Skip("admin, ops, composed, and Discord write controls are disabled in this build")
 	client := &fakeLLM{response: llm.ChatResponse{Content: "ok"}}
 	router := newTestRouter(t, client, 20)
 
@@ -1028,6 +1099,7 @@ func TestAdminSoulUpdatesSystemPrompt(t *testing.T) {
 }
 
 func TestAdminSoulWithoutTextUsesModal(t *testing.T) {
+	t.Skip("admin, ops, composed, and Discord write controls are disabled in this build")
 	router := newTestRouter(t, &fakeLLM{}, 20)
 
 	soul := router.Handle(context.Background(), Request{
@@ -1082,9 +1154,21 @@ func TestConfirmationIDRestoresCommandRequest(t *testing.T) {
 		t.Fatalf("unexpected request from confirmation id: %+v", request)
 	}
 
+	dataID := dataDeleteConfirmationID("admin", "knowledge")
+	request, ok = RequestFromConfirmationID(dataID, base)
+	if !ok {
+		t.Fatal("expected data deletion confirmation id to parse")
+	}
+	if request.Command != "data" || request.Subcommand != "delete" || request.Options["confirm"] != dataID || request.Options["scope"] != "knowledge" {
+		t.Fatalf("unexpected data request from confirmation id: %+v", request)
+	}
+
 	base.UserID = "other-admin"
 	if _, ok := RequestFromConfirmationID(id, base); ok {
 		t.Fatal("confirmation id should be scoped to the original user")
+	}
+	if _, ok := RequestFromConfirmationID(dataID, base); ok {
+		t.Fatal("data confirmation id should be scoped to the original user")
 	}
 }
 
@@ -1145,6 +1229,7 @@ func TestToolConfirmationIDRestoresScopedRequest(t *testing.T) {
 }
 
 func TestHandleToolConfirmationRemovesChannelRule(t *testing.T) {
+	t.Skip("admin, ops, composed, and Discord write controls are disabled in this build")
 	router := newTestRouter(t, &fakeLLM{}, 20)
 	if _, err := router.admin.SetChannelRule(context.Background(), "guild-1", "admin", "channel-1", "deny"); err != nil {
 		t.Fatalf("seed channel rule: %v", err)
@@ -1173,6 +1258,7 @@ func TestHandleToolConfirmationRemovesChannelRule(t *testing.T) {
 }
 
 func TestHandleToolConfirmationSetsChannelRule(t *testing.T) {
+	t.Skip("admin, ops, composed, and Discord write controls are disabled in this build")
 	router := newTestRouter(t, &fakeLLM{}, 20)
 
 	response := router.HandleToolConfirmation(context.Background(), ToolConfirmationRequest{
@@ -1198,6 +1284,7 @@ func TestHandleToolConfirmationSetsChannelRule(t *testing.T) {
 }
 
 func TestHandleToolConfirmationAppliesRoleProfile(t *testing.T) {
+	t.Skip("admin, ops, composed, and Discord write controls are disabled in this build")
 	router := newTestRouter(t, &fakeLLM{}, 20)
 
 	response := router.HandleToolConfirmation(context.Background(), ToolConfirmationRequest{
@@ -1219,6 +1306,7 @@ func TestHandleToolConfirmationAppliesRoleProfile(t *testing.T) {
 }
 
 func TestHandleToolConfirmationAssignsMemberRole(t *testing.T) {
+	t.Skip("admin, ops, composed, and Discord write controls are disabled in this build")
 	manager := &fakeMemberRoleManager{}
 	router := newTestRouter(t, &fakeLLM{}, 20).WithMemberRoleManager(manager)
 
@@ -1240,6 +1328,7 @@ func TestHandleToolConfirmationAssignsMemberRole(t *testing.T) {
 }
 
 func TestNaturalDiscordRoleCreateRendersConfirmationThroughAgentTool(t *testing.T) {
+	t.Skip("admin, ops, composed, and Discord write controls are disabled in this build")
 	client := &fakeLLM{responses: []llm.ChatResponse{
 		{Content: `{"respond":true,"prompt":"create a new role called test"}`},
 		{ToolCalls: []llm.ToolCall{{
@@ -1277,6 +1366,7 @@ func TestNaturalDiscordRoleCreateRendersConfirmationThroughAgentTool(t *testing.
 }
 
 func TestNaturalComposedScheduleCreatesThroughAgentTool(t *testing.T) {
+	t.Skip("admin, ops, composed, and Discord write controls are disabled in this build")
 	client := &fakeLLM{responses: []llm.ChatResponse{
 		{Content: `{"respond":true,"prompt":"schedule welcome_builder in 10 minutes with input topic standup"}`},
 		{ToolCalls: []llm.ToolCall{{
@@ -1331,6 +1421,7 @@ func TestNaturalComposedScheduleCreatesThroughAgentTool(t *testing.T) {
 }
 
 func TestNaturalComposedScheduleListsAndCancelsThroughAgentTool(t *testing.T) {
+	t.Skip("admin, ops, composed, and Discord write controls are disabled in this build")
 	client := &fakeLLM{responses: []llm.ChatResponse{
 		{Content: `{"respond":true,"prompt":"list composed schedules for welcome_builder"}`},
 		{ToolCalls: []llm.ToolCall{{
@@ -1418,6 +1509,7 @@ func createdIDString(id uint) string {
 }
 
 func TestHandleToolConfirmationCreatesDiscordRole(t *testing.T) {
+	t.Skip("admin, ops, composed, and Discord write controls are disabled in this build")
 	manager := &fakeDiscordRoleManager{role: DiscordRole{ID: "role-test", Name: "test"}}
 	router := newTestRouter(t, &fakeLLM{}, 20).WithDiscordRoleManager(manager)
 
@@ -1439,6 +1531,7 @@ func TestHandleToolConfirmationCreatesDiscordRole(t *testing.T) {
 }
 
 func TestHandleToolConfirmationExplainsDiscordRoleSetupFailure(t *testing.T) {
+	t.Skip("admin, ops, composed, and Discord write controls are disabled in this build")
 	manager := &fakeDiscordRoleManager{err: ErrDiscordRoleSetup}
 	router := newTestRouter(t, &fakeLLM{}, 20).WithDiscordRoleManager(manager)
 
@@ -1457,6 +1550,7 @@ func TestHandleToolConfirmationExplainsDiscordRoleSetupFailure(t *testing.T) {
 }
 
 func TestLLMToolConfirmationRendersButton(t *testing.T) {
+	t.Skip("admin, ops, composed, and Discord write controls are disabled in this build")
 	const channelID = "100000000000000123"
 	client := &fakeLLM{responses: []llm.ChatResponse{
 		{
@@ -1474,16 +1568,16 @@ func TestLLMToolConfirmationRendersButton(t *testing.T) {
 		{Model: "fixture/model", Content: "I found the channel rule and prepared the removal."},
 	}}
 	router := newTestRouter(t, client, 20)
-	model := router.Handle(context.Background(), Request{
+	behavior := router.Handle(context.Background(), Request{
 		Command:      "admin",
-		Subcommand:   "model",
+		Subcommand:   "behavior",
 		GuildID:      "guild-1",
 		UserID:       "admin",
 		IsGuildAdmin: true,
 		Options:      map[string]string{"tool_policy": "write_confirmed"},
 	})
-	if !strings.Contains(model.Content, "write_confirmed") {
-		t.Fatalf("expected tool policy update, got %+v", model)
+	if !strings.Contains(behavior.Content, "write_confirmed") {
+		t.Fatalf("expected tool policy update, got %+v", behavior)
 	}
 
 	response := router.Handle(context.Background(), Request{
@@ -1659,6 +1753,7 @@ func TestNaturalMessageUsesInlineChat(t *testing.T) {
 }
 
 func TestNaturalMessageSetsSoulThroughAgentTool(t *testing.T) {
+	t.Skip("admin, ops, composed, and Discord write controls are disabled in this build")
 	client := &fakeLLM{responses: []llm.ChatResponse{
 		{Content: `{"respond":true,"prompt":"set your soul to Be crystalline and kind."}`},
 		{ToolCalls: []llm.ToolCall{{
@@ -1709,6 +1804,7 @@ func TestNaturalMessageSetsSoulThroughAgentTool(t *testing.T) {
 }
 
 func TestNaturalMessageDraftsEventAutomationThroughAgentTool(t *testing.T) {
+	t.Skip("admin, ops, composed, and Discord write controls are disabled in this build")
 	const channelID = "100000000000000123"
 	client := &fakeLLM{responses: []llm.ChatResponse{
 		{Content: `{"respond":true,"prompt":"draft an automation for new role announcements"}`},
@@ -1780,6 +1876,7 @@ func TestNaturalMessageDraftsEventAutomationThroughAgentTool(t *testing.T) {
 }
 
 func TestNaturalMessageDraftsEveryTimeEventAutomationThroughAgentTool(t *testing.T) {
+	t.Skip("admin, ops, composed, and Discord write controls are disabled in this build")
 	client := &fakeLLM{responses: []llm.ChatResponse{
 		{Content: `{"respond":true,"prompt":"draft a member welcome automation"}`},
 		{ToolCalls: []llm.ToolCall{{
@@ -1823,6 +1920,7 @@ func TestNaturalMessageDraftsEveryTimeEventAutomationThroughAgentTool(t *testing
 }
 
 func TestNaturalMessageExecutesTextToolCallFallbackForComposedTool(t *testing.T) {
+	t.Skip("admin, ops, composed, and Discord write controls are disabled in this build")
 	client := &fakeLLM{responses: []llm.ChatResponse{
 		{Content: `{"respond":true,"prompt":"please draft the requested composed automation"}`},
 		{Content: `<tool_call>panda_manage_composed_tool
@@ -1874,6 +1972,7 @@ func TestNaturalMessageExecutesTextToolCallFallbackForComposedTool(t *testing.T)
 }
 
 func TestNaturalMessageCreatesNativePollThroughAgentTool(t *testing.T) {
+	t.Skip("admin, ops, composed, and Discord write controls are disabled in this build")
 	discordProvider := &fakeCommandDiscordProvider{}
 	client := &fakeLLM{responses: []llm.ChatResponse{
 		{Content: `{"respond":true,"prompt":"make a poll about fable 5 versus gpt 5.6"}`},
@@ -2032,8 +2131,8 @@ func TestNaturalMessageExposesMusicWhenToolPolicyOff(t *testing.T) {
 		{Content: "music tool unavailable"},
 	}}
 	router := newTestRouter(t, client, 5)
-	if _, err := router.admin.ConfigureModel(context.Background(), "guild-1", "admin", admin.ModelSettings{ToolPolicy: tools.ToolPolicyOff, ToolPolicySet: true}); err != nil {
-		t.Fatalf("ConfigureModel: %v", err)
+	if _, err := router.admin.ConfigureBehavior(context.Background(), "guild-1", "admin", admin.BehaviorSettings{ToolPolicy: tools.ToolPolicyOff, ToolPolicySet: true}); err != nil {
+		t.Fatalf("ConfigureBehavior: %v", err)
 	}
 
 	response := router.HandleNaturalMessage(context.Background(), Request{
@@ -2061,6 +2160,7 @@ func TestNaturalMessageExposesMusicWhenToolPolicyOff(t *testing.T) {
 }
 
 func TestNaturalMessageSoulWriterCanBrainstormWithoutAssistantUse(t *testing.T) {
+	t.Skip("admin, ops, composed, and Discord write controls are disabled in this build")
 	ctx := context.Background()
 	client := &fakeLLM{responses: []llm.ChatResponse{
 		{Content: `{"respond":true,"prompt":"let's brainstorm your soul before setting it"}`},
@@ -2128,6 +2228,7 @@ func TestNaturalMessagePassesReplyContextToChat(t *testing.T) {
 }
 
 func TestNaturalMessageAdminGetsManagementToolsWhenPolicyOff(t *testing.T) {
+	t.Skip("admin, ops, composed, and Discord write controls are disabled in this build")
 	client := &fakeLLM{responses: []llm.ChatResponse{
 		{Content: `{"respond":true,"prompt":"what can you do"}`},
 		{Content: "chat fixture"},
@@ -2183,6 +2284,7 @@ func TestNaturalMessageClassifiesTrailingPandaMention(t *testing.T) {
 }
 
 func TestGuildControlDoesNotGrantOwnerOpsTools(t *testing.T) {
+	t.Skip("admin, ops, composed, and Discord write controls are disabled in this build")
 	router := newTestRouter(t, &fakeLLM{}, 5)
 
 	adminPermissions := router.allowedToolPermissions(context.Background(), Request{
@@ -2375,16 +2477,6 @@ func TestExplainCanFetchReferencedMessageContext(t *testing.T) {
 	joined := joinLLMMessages(client.requests[0].Messages)
 	if !strings.Contains(joined, "[S1]") || !strings.Contains(joined, "message_id=message-1") {
 		t.Fatalf("expected cited context in LLM request, got %s", joined)
-	}
-	audit := router.Handle(context.Background(), Request{
-		Command:      "admin",
-		Subcommand:   "audit",
-		GuildID:      "guild-1",
-		UserID:       "admin",
-		IsGuildAdmin: true,
-	})
-	if !strings.Contains(audit.Content, "context.read") {
-		t.Fatalf("expected context read audit event, got %+v", audit)
 	}
 }
 
@@ -2591,6 +2683,7 @@ func TestChannelDenyGatesAssistantUse(t *testing.T) {
 }
 
 func TestOpsHealthRequiresOwner(t *testing.T) {
+	t.Skip("admin, ops, composed, and Discord write controls are disabled in this build")
 	router := newTestRouter(t, &fakeLLM{}, 5)
 	denied := router.Handle(context.Background(), Request{Command: "ops", Subcommand: "health", UserID: "user-1"})
 	if !denied.Ephemeral || !strings.Contains(denied.Content, "owner") {
@@ -2604,6 +2697,7 @@ func TestOpsHealthRequiresOwner(t *testing.T) {
 }
 
 func TestOpsDrainAndIncident(t *testing.T) {
+	t.Skip("admin, ops, composed, and Discord write controls are disabled in this build")
 	router := newTestRouter(t, &fakeLLM{}, 5)
 	drain := router.Handle(context.Background(), Request{Command: "ops", Subcommand: "drain", UserID: "owner", IsOwner: true})
 	if !strings.Contains(drain.Content, "draining") {

@@ -17,7 +17,7 @@ Core principles:
 - Server admins configure what Panda may do, not which model Panda uses.
 - Normal users never see model names, provider names, fallback names, token prices, or model diagnostics.
 - Usage is sold as plan credits: AI responses, web searches, knowledge storage, schedules, and retention.
-- Costs are guarded by quotas, rate limits, and overage gates before provider spend can run away.
+- Costs are guarded by quotas and rate limits before provider spend can run away.
 - Every paid entitlement must have a clear degraded state when unpaid, over quota, or payment-failed.
 - Legacy model-choice code should be confirmed as legacy during implementation and removed, not hidden behind unused flags.
 
@@ -74,10 +74,10 @@ Use the same public price through Discord Premium Apps and any off-platform chec
 | Pro | `$99/server/month` | 10,000/month | 1,000/month | 2 GB | 180 days | Large or work-heavy servers |
 | Business | `$249/server/month` | 25,000/month | 2,000/month | 10 GB | 365 days | High-volume teams |
 
-Overages:
+Quota policy:
 
-- Do not enable automatic overages by default.
-- Let admins buy usage packs before hard cutoff: `$10` for 1,000 AI responses, `$5` for 500 web searches, `$10` for 5 GB additional knowledge storage.
+- Do not offer automatic overages or separate paid quota expansions.
+- Servers that exhaust included monthly limits pause paid usage until renewal or a plan upgrade.
 - Business can request invoice billing and custom limits after a usage review.
 - Free trials should never auto-convert without explicit payment approval.
 
@@ -149,7 +149,7 @@ Entities:
 - Guild subscription: guild ID, plan, status, renewal date, trial end, cancel-at-period-end flag.
 - Entitlement snapshot: limits for AI responses, web searches, storage, schedules, retention, music, and premium tools.
 - Invoice/payment event: provider, external ID, amount, status, idempotency key.
-- Usage period: plan period start/end, consumed AI responses, consumed web searches, consumed storage, overage packs.
+- Usage period: plan period start/end, consumed AI responses, consumed web searches, and consumed storage.
 - Grace state: active, trialing, past_due, grace, read_only, suspended, canceled.
 
 Payment channels:
@@ -215,7 +215,7 @@ Discord onboarding:
 - Install flow records owner, installer, guild, and trial status.
 - First-run setup explains plan, remaining trial credits, recommended channels, role mapping, memory, web search, and billing owner.
 - `/admin status` becomes the main server health and subscription page.
-- Add `/billing` or `/admin billing` for plan, upgrade, cancel, portal, and quota pack links.
+- Add `/billing` or `/admin billing` for plan, upgrade, cancel, and portal links.
 - Add clear over-quota messages with upgrade links.
 
 Public docs:
@@ -318,7 +318,7 @@ Exit criteria:
 
 ### Phase 3: Add Entitlements And Metering
 
-- Add subscription, entitlement, invoice event, usage period, and quota pack storage.
+- Add subscription, entitlement, invoice event, and usage period storage.
 - Add entitlement resolver to every assistant/search/tool/schedule entry point.
 - Add monthly quota windows by billing period.
 - Add customer-visible usage summaries.

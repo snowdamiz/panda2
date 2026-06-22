@@ -45,6 +45,8 @@ func TestDefaultSQLitePathUsesFlyDataDirInProduction(t *testing.T) {
 	t.Setenv("DISCORD_BOT_TOKEN", "token")
 	t.Setenv("DISCORD_APPLICATION_ID", "123")
 	t.Setenv("OPENROUTER_API_KEY", "key")
+	t.Setenv("PUBLIC_APP_URL", "https://panda.example")
+	t.Setenv("DISCORD_STARTER_SKU_ID", "sku_starter")
 
 	cfg, _, err := Load()
 	if err != nil {
@@ -340,6 +342,38 @@ func TestLoadOptionalRuntimeEnvOverrides(t *testing.T) {
 	}
 }
 
+func TestLoadBillingPurchaseEnvOverrides(t *testing.T) {
+	clearConfigEnv(t)
+	t.Setenv("ENVIRONMENT", "development")
+	t.Setenv("SQLITE_PATH", ":memory:")
+	t.Setenv("PORT", "8081")
+	t.Setenv("PUBLIC_APP_URL", "https://panda.example")
+	t.Setenv("BILLING_SUCCESS_URL", "https://panda.example/success")
+	t.Setenv("BILLING_CANCEL_URL", "https://panda.example/cancel")
+	t.Setenv("STRIPE_SECRET_KEY", "sk_test_123")
+	t.Setenv("STRIPE_API_BASE_URL", "https://stripe.test")
+	t.Setenv("STRIPE_WEBHOOK_SECRET", "whsec_123")
+	t.Setenv("STRIPE_PLUS_PRICE_ID", "price_plus")
+	t.Setenv("DISCORD_PLUS_SKU_ID", "sku_plus")
+
+	cfg, _, err := Load()
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	if cfg.BillingSuccessURL != "https://panda.example/success" || cfg.BillingCancelURL != "https://panda.example/cancel" {
+		t.Fatalf("unexpected billing redirects: success=%q cancel=%q", cfg.BillingSuccessURL, cfg.BillingCancelURL)
+	}
+	if cfg.StripeSecretKey != "sk_test_123" || cfg.StripeAPIBaseURL != "https://stripe.test" || cfg.StripeWebhookSecret != "whsec_123" {
+		t.Fatalf("unexpected Stripe config: key=%q base=%q webhook=%q", cfg.StripeSecretKey, cfg.StripeAPIBaseURL, cfg.StripeWebhookSecret)
+	}
+	if cfg.StripePricePlans["price_plus"] != "plus" {
+		t.Fatalf("expected plus price mapping, got %#v", cfg.StripePricePlans)
+	}
+	if cfg.DiscordSKUPlans["sku_plus"] != "plus" {
+		t.Fatalf("expected Discord plus SKU mapping, got %#v", cfg.DiscordSKUPlans)
+	}
+}
+
 func TestExplicitMissingConfigFileFails(t *testing.T) {
 	clearConfigEnv(t)
 	t.Setenv("PANDA_CONFIG", filepath.Join(t.TempDir(), "missing.json"))
@@ -381,6 +415,24 @@ func clearConfigEnv(t *testing.T) {
 		"OPENROUTER_CIRCUIT_COOLDOWN",
 		"BRAVE_SEARCH_API_KEY",
 		"BRAVE_SEARCH_BASE_URL",
+		"PUBLIC_APP_URL",
+		"BILLING_SUCCESS_URL",
+		"BILLING_CANCEL_URL",
+		"STRIPE_SECRET_KEY",
+		"STRIPE_API_BASE_URL",
+		"STRIPE_WEBHOOK_SECRET",
+		"DISCORD_SKU_PLAN_MAP",
+		"DISCORD_TRIAL_SKU_ID",
+		"DISCORD_STARTER_SKU_ID",
+		"DISCORD_PLUS_SKU_ID",
+		"DISCORD_PRO_SKU_ID",
+		"DISCORD_BUSINESS_SKU_ID",
+		"STRIPE_PRICE_PLAN_MAP",
+		"STRIPE_TRIAL_PRICE_ID",
+		"STRIPE_STARTER_PRICE_ID",
+		"STRIPE_PLUS_PRICE_ID",
+		"STRIPE_PRO_PRICE_ID",
+		"STRIPE_BUSINESS_PRICE_ID",
 		"YTDLP_PATH",
 		"FFMPEG_PATH",
 		"MUSIC_SIDECAR_DIR",

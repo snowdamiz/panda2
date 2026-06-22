@@ -1,0 +1,95 @@
+---
+import { planOptions, siteMeta } from '../data/landing';
+import Kicker from './ui/Kicker.astro';
+
+const planRows = [
+  {
+    label: 'AI responses',
+    values: planOptions.map((plan) => plan.aiResponses.replace(' AI responses', '')),
+  },
+  {
+    label: 'Web search',
+    values: planOptions.map((plan) => plan.searches.replace(' web searches', '')),
+  },
+  {
+    label: 'Knowledge',
+    values: planOptions.map((plan) => plan.storage.replace(' knowledge', '')),
+  },
+  {
+    label: 'Retention',
+    values: planOptions.map((plan) => plan.retention.replace(' retention', '')),
+  },
+];
+---
+
+<section class="section pricing-section" id="pricing">
+  <div class="shell pricing-shell">
+    <div class="pricing-top reveal">
+      <div>
+        <Kicker tone="paper">Plans by server</Kicker>
+        <h2>Choose the server plan.</h2>
+      </div>
+      <div class="pricing-summary">
+        <p>
+          Monthly per-server pricing, readable before anyone buys. Install starts a
+          14-day trial, then the billing owner upgrades from Discord when usage is real.
+        </p>
+        <a class="pricing-start" href={siteMeta.installUrl} target="_blank" rel="noreferrer">Start trial <span>↗</span></a>
+      </div>
+    </div>
+
+    <div class="pricing-board reveal">
+      <div class="pricing-board-header">
+        <span>SERVER RATE SHEET</span>
+        <span>Trial: 14 days / 250 AI / 20 search / 25 MB storage</span>
+      </div>
+
+      <div class="pricing-table-wrap">
+        <table class="pricing-table">
+          <colgroup>
+            <col />
+            {planOptions.map((plan) => <col class:list={[plan.featured && 'featured-col']} />)}
+          </colgroup>
+          <thead>
+            <tr>
+              <th scope="col">
+                <span>Plan</span>
+                <strong>Monthly</strong>
+              </th>
+              {
+                planOptions.map((plan) => (
+                  <th scope="col" class:list={[plan.featured && 'featured']}>
+                    <span>{plan.badge}</span>
+                    <strong>{plan.label}</strong>
+                    <em>{plan.price} {plan.cadence}</em>
+                  </th>
+                ))
+              }
+            </tr>
+          </thead>
+          <tbody>
+            {
+              planRows.map((row) => (
+                <tr>
+                  <th scope="row">{row.label}</th>
+                  {row.values.map((value) => <td>{value}</td>)}
+                </tr>
+              ))
+            }
+            <tr class="checkout-row">
+              <th scope="row">Checkout command</th>
+              {planOptions.map((plan) => <td><code>{plan.command}</code></td>)}
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="pricing-footer">
+        <p>Payment success, failure, cancellation, upgrades, and downgrades apply only from verified Stripe webhooks or Discord entitlement events.</p>
+        <a class="text-link" href={siteMeta.termsUrl}>
+          Review terms <span>↗</span>
+        </a>
+      </div>
+    </div>
+  </div>
+</section>

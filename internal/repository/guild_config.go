@@ -17,13 +17,10 @@ func NewGuildConfigRepository(db *gorm.DB) *GuildConfigRepository {
 	return &GuildConfigRepository{db: db}
 }
 
-func (r *GuildConfigRepository) EnsureDefault(ctx context.Context, guildID, defaultModel string) (store.GuildConfig, error) {
+func (r *GuildConfigRepository) EnsureDefault(ctx context.Context, guildID string) (store.GuildConfig, error) {
 	now := time.Now().UTC()
 	config := store.GuildConfig{
 		GuildID:           guildID,
-		DefaultModel:      defaultModel,
-		ClassifierModel:   "",
-		FallbackModels:    "[]",
 		Temperature:       0.3,
 		MaxResponseTokens: 900,
 		ToolPolicy:        "admin_only",
@@ -60,7 +57,7 @@ func (r *GuildConfigRepository) Get(ctx context.Context, guildID string) (store.
 	return store.GuildConfig{}, false, err
 }
 
-func (r *GuildConfigRepository) UpdateModelSettings(ctx context.Context, guildID string, values map[string]any) (store.GuildConfig, error) {
+func (r *GuildConfigRepository) UpdateBehaviorSettings(ctx context.Context, guildID string, values map[string]any) (store.GuildConfig, error) {
 	values["updated_at"] = time.Now().UTC()
 	return r.update(ctx, guildID, values)
 }

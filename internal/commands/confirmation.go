@@ -7,10 +7,15 @@ const (
 	ConfirmationCancelID = "p2c:cancel"
 
 	confirmationOpAdminDisable = "ad"
+	confirmationOpDataDelete   = "dd"
 )
 
 func adminDisableConfirmationID(userID string) string {
 	return confirmationID(confirmationOpAdminDisable, userID)
+}
+
+func dataDeleteConfirmationID(userID, scope string) string {
+	return strings.Join([]string{confirmationPrefix, confirmationOpDataDelete, cleanConfirmationPart(userID), cleanConfirmationPart(scope)}, ":")
 }
 
 func confirmationID(op, userID string) string {
@@ -64,6 +69,13 @@ func RequestFromConfirmationID(id string, base Request) (Request, bool) {
 			return Request{}, false
 		}
 		base.Subcommand = "disable"
+	case confirmationOpDataDelete:
+		if len(parts) != 4 {
+			return Request{}, false
+		}
+		base.Command = "data"
+		base.Subcommand = "delete"
+		base.Options["scope"] = parts[3]
 	default:
 		return Request{}, false
 	}

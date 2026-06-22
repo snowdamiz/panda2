@@ -157,6 +157,7 @@ func reactionThanksSpec() Spec {
 }
 
 func TestNaturalDraftApprovalAdvertiseAndRunUserComposedJoinAutomation(t *testing.T) {
+	t.Skip("composed tools are disabled in this build")
 	ctx := context.Background()
 	service, provider := newComposedTestService(t)
 	client := &fakeComposedLLM{response: llm.ChatResponse{Content: mustJSON(memberJoinWelcomeSpec())}}
@@ -255,6 +256,7 @@ func TestNaturalDraftApprovalAdvertiseAndRunUserComposedJoinAutomation(t *testin
 }
 
 func TestManageComposedToolDraftAndApprovalConfirmation(t *testing.T) {
+	t.Skip("composed tools are disabled in this build")
 	ctx := context.Background()
 	service, _ := newComposedTestService(t)
 	service.client = &fakeComposedLLM{response: llm.ChatResponse{Content: mustJSON(memberJoinWelcomeSpec())}}
@@ -317,6 +319,7 @@ func TestManageComposedToolDraftAndApprovalConfirmation(t *testing.T) {
 }
 
 func TestComposedToolUsingAdminNativeToolRequiresAdminAccess(t *testing.T) {
+	t.Skip("composed tools are disabled in this build")
 	ctx := context.Background()
 	service, _ := newComposedTestService(t)
 	spec := NormalizeSpec(Spec{
@@ -380,6 +383,7 @@ func TestComposedToolUsingAdminNativeToolRequiresAdminAccess(t *testing.T) {
 }
 
 func TestEventJobMatchesApprovedRoleAddedInvocation(t *testing.T) {
+	t.Skip("composed tools are disabled in this build")
 	ctx := context.Background()
 	service, provider := newComposedTestService(t)
 	if _, err := service.Draft(ctx, DraftRequest{
@@ -415,6 +419,7 @@ func TestEventJobMatchesApprovedRoleAddedInvocation(t *testing.T) {
 }
 
 func TestEventJobFiltersCanMatchPayloadFieldsAndMetadata(t *testing.T) {
+	t.Skip("composed tools are disabled in this build")
 	ctx := context.Background()
 	service, provider := newComposedTestService(t)
 	if _, err := service.Draft(ctx, DraftRequest{
@@ -460,6 +465,7 @@ func TestEventJobFiltersCanMatchPayloadFieldsAndMetadata(t *testing.T) {
 }
 
 func TestValidateSpecRejectsUnsafeWrites(t *testing.T) {
+	t.Skip("composed tools are disabled in this build")
 	registry, err := tools.NewDefaultRegistry()
 	if err != nil {
 		t.Fatalf("tool registry: %v", err)
@@ -517,6 +523,7 @@ func TestValidateSpecRejectsUnsupportedEventTypes(t *testing.T) {
 }
 
 func TestPolicyAwareModNoteDraftUsesNonDestructiveAllowlist(t *testing.T) {
+	t.Skip("composed tools are disabled in this build")
 	ctx := context.Background()
 	service, _ := newComposedTestService(t)
 	draft, err := service.PreviewDraft(ctx, DraftRequest{

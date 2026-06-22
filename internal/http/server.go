@@ -3,6 +3,9 @@ package http
 import (
 	"context"
 	"crypto/ed25519"
+	"crypto/hmac"
+	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -14,6 +17,7 @@ import (
 	"time"
 
 	"github.com/gofiber/fiber/v2"
+	"github.com/sn0w/panda2/internal/billing"
 	"github.com/sn0w/panda2/internal/config"
 	discordbot "github.com/sn0w/panda2/internal/discord"
 	"github.com/sn0w/panda2/internal/store"
@@ -24,10 +28,15 @@ type Server struct {
 	cfg            config.Config
 	store          *store.Store
 	discordWebhook DiscordWebhookHandler
+	billingWebhook BillingWebhookHandler
 }
 
 type DiscordWebhookHandler interface {
 	HandleWebhookEvent(ctx context.Context, event discordbot.WebhookEvent) error
+}
+
+type BillingWebhookHandler interface {
+	HandleStripeEvent(ctx context.Context, event billing.StripeEvent) error
 }
 
 type healthResponse struct {
@@ -59,6 +68,11 @@ func (s *Server) WithDiscordWebhookHandler(handler DiscordWebhookHandler) *Serve
 	return s
 }
 
+func (s *Server) WithBillingWebhookHandler(handler BillingWebhookHandler) *Server {
+	s.billingWebhook = handler
+	return s
+}
+
 func (s *Server) Listen(addr string) error {
 	return s.app.Listen(addr)
 }
@@ -82,6 +96,9 @@ func (s *Server) routes() {
 		return c.SendString(s.metrics(c.Context()))
 	})
 	s.app.Post("/discord/webhook-events", s.discordWebhookEvents)
+	s.app.Post("/billing/stripe/webhook", s.stripeWebhook)
+	s.app.Get("/billing/success", s.billingSuccess)
+	s.app.Get("/billing/cancel", s.billingCancel)
 }
 
 func (s *Server) health(c *fiber.Ctx) error {
@@ -98,6 +115,16 @@ func (s *Server) ready(c *fiber.Ctx) error {
 	return c.Status(statusCode).JSON(response)
 }
 
+func (s *Server) billingSuccess(c *fiber.Ctx) error {
+	c.Set(fiber.HeaderContentType, fiber.MIMETextHTMLCharsetUTF8)
+	return c.SendString(`<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Panda billing updated</title></head><body><main style="font-family:system-ui,sans-serif;max-width:42rem;margin:12vh auto;padding:0 1rem;line-height:1.5"><h1>Panda billing is processing</h1><p>Stripe confirmed the checkout. Panda grants plans from the verified webhook, which usually lands within a moment.</p><p>Return to Discord and run <strong>/billing</strong> to see the updated plan.</p></main></body></html>`)
+}
+
+func (s *Server) billingCancel(c *fiber.Ctx) error {
+	c.Set(fiber.HeaderContentType, fiber.MIMETextHTMLCharsetUTF8)
+	return c.SendString(`<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Panda checkout canceled</title></head><body><main style="font-family:system-ui,sans-serif;max-width:42rem;margin:12vh auto;padding:0 1rem;line-height:1.5"><h1>Checkout canceled</h1><p>No Panda plan changes were made. Return to Discord and run <strong>/billing</strong> when you are ready to choose a plan.</p></main></body></html>`)
+}
+
 func (s *Server) healthPayload(ctx context.Context) (healthResponse, int) {
 	checks := map[string]componentStatus{
 		"config":  {Status: "ok"},
@@ -105,7 +132,7 @@ func (s *Server) healthPayload(ctx context.Context) (healthResponse, int) {
 		"discord": configuredStatus(s.cfg.DiscordConfigured(), "credentials missing; gateway disabled"),
 		"discord_webhook": configuredStatus(s.cfg.DiscordWebhookConfigured(),
 			"public key missing; owner-only install webhooks disabled"),
-		"openrouter":    configuredStatus(s.cfg.OpenRouterConfigured(), "api key missing; natural-language assistant disabled"),
+		"ai_service":    configuredStatus(s.cfg.OpenRouterConfigured(), "AI service key missing; natural-language assistant disabled"),
 		"brave_search":  configuredStatus(s.cfg.BraveSearchConfigured(), "api key missing; web search disabled"),
 		"local_storage": localStorageStatus(s.cfg.DataDir),
 	}
@@ -140,7 +167,7 @@ func (s *Server) metrics(ctx context.Context) string {
 	writeGauge(&builder, "panda_discord_configured", "Discord credentials configured", boolInt(s.cfg.DiscordConfigured()))
 	writeGauge(&builder, "panda_discord_webhook_configured", "Discord webhook public key configured", boolInt(s.cfg.DiscordWebhookConfigured()))
 	writeGauge(&builder, "panda_discord_owner_install_enforced", "Discord owner-only install webhook enforcement enabled", boolInt(s.cfg.DiscordWebhookConfigured()))
-	writeGauge(&builder, "panda_openrouter_configured", "OpenRouter API key configured", boolInt(s.cfg.OpenRouterConfigured()))
+	writeGauge(&builder, "panda_ai_service_configured", "AI service key configured", boolInt(s.cfg.OpenRouterConfigured()))
 	writeGauge(&builder, "panda_brave_search_configured", "Brave Search API key configured", boolInt(s.cfg.BraveSearchConfigured()))
 
 	var migrationVersion int
@@ -171,8 +198,15 @@ func (s *Server) metrics(ctx context.Context) string {
 	_ = s.store.DB.Table("discord_events").Where("expires_at IS NOT NULL AND expires_at <= ?", time.Now().UTC()).Count(&expiredDiscordEvents).Error
 	writeGauge(&builder, "panda_discord_event_cache_expired", "Expired Discord gateway events awaiting cleanup", expiredDiscordEvents)
 
-	var latestDiscordEvent time.Time
-	_ = s.store.DB.Raw("SELECT COALESCE(MAX(created_at), ?) FROM discord_events", time.Time{}).Scan(&latestDiscordEvent).Error
+	var latestDiscordEventRow struct {
+		CreatedAt time.Time
+	}
+	_ = s.store.DB.Table("discord_events").
+		Select("created_at").
+		Order("created_at DESC").
+		Limit(1).
+		Scan(&latestDiscordEventRow).Error
+	latestDiscordEvent := latestDiscordEventRow.CreatedAt
 	lagSeconds := 0
 	if !latestDiscordEvent.IsZero() {
 		lagSeconds = int(time.Since(latestDiscordEvent).Seconds())
@@ -239,6 +273,275 @@ func (s *Server) discordWebhookEvents(c *fiber.Ctx) error {
 	default:
 		return c.SendStatus(fiber.StatusBadRequest)
 	}
+}
+
+type stripeWebhookPayload struct {
+	ID   string `json:"id"`
+	Type string `json:"type"`
+	Data struct {
+		Object json.RawMessage `json:"object"`
+	} `json:"data"`
+}
+
+type stripeSubscriptionObject struct {
+	ID                 string            `json:"id"`
+	Customer           string            `json:"customer"`
+	Status             string            `json:"status"`
+	Metadata           map[string]string `json:"metadata"`
+	CustomerEmail      string            `json:"customer_email"`
+	CurrentPeriodStart int64             `json:"current_period_start"`
+	CurrentPeriodEnd   int64             `json:"current_period_end"`
+	CancelAtPeriodEnd  bool              `json:"cancel_at_period_end"`
+	Items              struct {
+		Data []struct {
+			Price struct {
+				ID string `json:"id"`
+			} `json:"price"`
+		} `json:"data"`
+	} `json:"items"`
+}
+
+type stripeCheckoutSessionObject struct {
+	ID              string            `json:"id"`
+	Customer        string            `json:"customer"`
+	Subscription    string            `json:"subscription"`
+	Mode            string            `json:"mode"`
+	Metadata        map[string]string `json:"metadata"`
+	AmountTotal     int64             `json:"amount_total"`
+	Currency        string            `json:"currency"`
+	CustomerDetails struct {
+		Email string `json:"email"`
+	} `json:"customer_details"`
+}
+
+type stripeInvoiceObject struct {
+	ID            string            `json:"id"`
+	Customer      string            `json:"customer"`
+	Subscription  string            `json:"subscription"`
+	Status        string            `json:"status"`
+	AmountPaid    int64             `json:"amount_paid"`
+	AmountDue     int64             `json:"amount_due"`
+	Currency      string            `json:"currency"`
+	CustomerEmail string            `json:"customer_email"`
+	Metadata      map[string]string `json:"metadata"`
+	Lines         struct {
+		Data []struct {
+			Price struct {
+				ID string `json:"id"`
+			} `json:"price"`
+			Period struct {
+				Start int64 `json:"start"`
+				End   int64 `json:"end"`
+			} `json:"period"`
+		} `json:"data"`
+	} `json:"lines"`
+	SubscriptionDetails struct {
+		Metadata map[string]string `json:"metadata"`
+	} `json:"subscription_details"`
+	Parent struct {
+		SubscriptionDetails struct {
+			Metadata map[string]string `json:"metadata"`
+		} `json:"subscription_details"`
+	} `json:"parent"`
+}
+
+func (s *Server) stripeWebhook(c *fiber.Ctx) error {
+	if s.billingWebhook == nil {
+		return c.SendStatus(fiber.StatusServiceUnavailable)
+	}
+	body := c.BodyRaw()
+	if err := verifyStripeSignature(s.cfg.StripeWebhookSecret, c.Get("Stripe-Signature"), body, time.Now); err != nil {
+		if errors.Is(err, errStripeWebhookNotConfigured) {
+			return c.SendStatus(fiber.StatusServiceUnavailable)
+		}
+		return c.SendStatus(fiber.StatusUnauthorized)
+	}
+	var payload stripeWebhookPayload
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return c.SendStatus(fiber.StatusBadRequest)
+	}
+	event, ok, err := stripeEventFromPayload(payload, body)
+	if err != nil {
+		return c.SendStatus(fiber.StatusBadRequest)
+	}
+	if !ok {
+		return c.SendStatus(fiber.StatusNoContent)
+	}
+	if err := s.billingWebhook.HandleStripeEvent(c.Context(), event); err != nil {
+		return c.SendStatus(fiber.StatusInternalServerError)
+	}
+	return c.SendStatus(fiber.StatusNoContent)
+}
+
+func stripeEventFromPayload(payload stripeWebhookPayload, raw []byte) (billing.StripeEvent, bool, error) {
+	switch payload.Type {
+	case "customer.subscription.created", "customer.subscription.updated", "customer.subscription.deleted":
+		var object stripeSubscriptionObject
+		if err := json.Unmarshal(payload.Data.Object, &object); err != nil {
+			return billing.StripeEvent{}, false, err
+		}
+		priceID := ""
+		if len(object.Items.Data) > 0 {
+			priceID = object.Items.Data[0].Price.ID
+		}
+		return billing.StripeEvent{
+			EventID:            payload.ID,
+			EventType:          payload.Type,
+			GuildID:            firstMetadata(object.Metadata, "guild_id"),
+			Plan:               firstMetadata(object.Metadata, "plan"),
+			CustomerEmail:      object.CustomerEmail,
+			BillingOwnerUserID: firstMetadata(object.Metadata, "billing_owner_user_id"),
+			CustomerID:         object.Customer,
+			SubscriptionID:     object.ID,
+			PriceID:            priceID,
+			Status:             object.Status,
+			CurrentPeriodStart: unixTime(object.CurrentPeriodStart),
+			CurrentPeriodEnd:   unixTime(object.CurrentPeriodEnd),
+			CancelAtPeriodEnd:  object.CancelAtPeriodEnd,
+			RawPayload:         string(raw),
+		}, true, nil
+	case "checkout.session.completed":
+		var object stripeCheckoutSessionObject
+		if err := json.Unmarshal(payload.Data.Object, &object); err != nil {
+			return billing.StripeEvent{}, false, err
+		}
+		return billing.StripeEvent{
+			EventID:            payload.ID,
+			EventType:          payload.Type,
+			GuildID:            firstMetadata(object.Metadata, "guild_id"),
+			Plan:               firstMetadata(object.Metadata, "plan"),
+			CustomerEmail:      object.CustomerDetails.Email,
+			BillingOwnerUserID: firstMetadata(object.Metadata, "billing_owner_user_id"),
+			CustomerID:         object.Customer,
+			CheckoutSessionID:  object.ID,
+			SubscriptionID:     object.Subscription,
+			Status:             "active",
+			AmountCents:        object.AmountTotal,
+			Currency:           object.Currency,
+			RawPayload:         string(raw),
+		}, true, nil
+	case "invoice.payment_succeeded", "invoice.payment_failed":
+		var object stripeInvoiceObject
+		if err := json.Unmarshal(payload.Data.Object, &object); err != nil {
+			return billing.StripeEvent{}, false, err
+		}
+		priceID := ""
+		var periodStart, periodEnd time.Time
+		if len(object.Lines.Data) > 0 {
+			priceID = object.Lines.Data[0].Price.ID
+			periodStart = unixTime(object.Lines.Data[0].Period.Start)
+			periodEnd = unixTime(object.Lines.Data[0].Period.End)
+		}
+		metadata := mergedStripeMetadata(object.Metadata, object.SubscriptionDetails.Metadata, object.Parent.SubscriptionDetails.Metadata)
+		status := object.Status
+		if payload.Type == "invoice.payment_failed" {
+			status = "past_due"
+		}
+		amount := object.AmountPaid
+		if amount == 0 {
+			amount = object.AmountDue
+		}
+		return billing.StripeEvent{
+			EventID:            payload.ID,
+			EventType:          payload.Type,
+			GuildID:            firstMetadata(metadata, "guild_id"),
+			Plan:               firstMetadata(metadata, "plan"),
+			CustomerEmail:      object.CustomerEmail,
+			BillingOwnerUserID: firstMetadata(metadata, "billing_owner_user_id"),
+			CustomerID:         object.Customer,
+			SubscriptionID:     object.Subscription,
+			PriceID:            priceID,
+			Status:             status,
+			CurrentPeriodStart: periodStart,
+			CurrentPeriodEnd:   periodEnd,
+			AmountCents:        amount,
+			Currency:           object.Currency,
+			RawPayload:         string(raw),
+		}, true, nil
+	default:
+		return billing.StripeEvent{}, false, nil
+	}
+}
+
+var errStripeWebhookNotConfigured = errors.New("stripe webhook secret is not configured")
+
+func verifyStripeSignature(secret, header string, body []byte, now func() time.Time) error {
+	secret = strings.TrimSpace(secret)
+	if secret == "" {
+		return errStripeWebhookNotConfigured
+	}
+	timestamp, signatures, err := stripeSignatureParts(header)
+	if err != nil {
+		return err
+	}
+	signedAt, err := strconv.ParseInt(timestamp, 10, 64)
+	if err != nil {
+		return errors.New("invalid stripe signature timestamp")
+	}
+	eventTime := time.Unix(signedAt, 0)
+	if diff := now().Sub(eventTime); diff > 5*time.Minute || diff < -5*time.Minute {
+		return errors.New("stale stripe signature timestamp")
+	}
+	mac := hmac.New(sha256.New, []byte(secret))
+	_, _ = mac.Write([]byte(timestamp))
+	_, _ = mac.Write([]byte("."))
+	_, _ = mac.Write(body)
+	expected := hex.EncodeToString(mac.Sum(nil))
+	for _, signature := range signatures {
+		if subtle.ConstantTimeCompare([]byte(signature), []byte(expected)) == 1 {
+			return nil
+		}
+	}
+	return errors.New("invalid stripe signature")
+}
+
+func stripeSignatureParts(header string) (string, []string, error) {
+	var timestamp string
+	var signatures []string
+	for _, part := range strings.Split(header, ",") {
+		key, value, ok := strings.Cut(strings.TrimSpace(part), "=")
+		if !ok {
+			continue
+		}
+		switch strings.TrimSpace(key) {
+		case "t":
+			timestamp = strings.TrimSpace(value)
+		case "v1":
+			if value = strings.TrimSpace(value); value != "" {
+				signatures = append(signatures, value)
+			}
+		}
+	}
+	if timestamp == "" || len(signatures) == 0 {
+		return "", nil, errors.New("missing stripe signature")
+	}
+	return timestamp, signatures, nil
+}
+
+func firstMetadata(metadata map[string]string, key string) string {
+	if metadata == nil {
+		return ""
+	}
+	return strings.TrimSpace(metadata[key])
+}
+
+func mergedStripeMetadata(values ...map[string]string) map[string]string {
+	merged := map[string]string{}
+	for _, metadata := range values {
+		for key, value := range metadata {
+			if strings.TrimSpace(value) != "" {
+				merged[key] = value
+			}
+		}
+	}
+	return merged
+}
+
+func unixTime(value int64) time.Time {
+	if value <= 0 {
+		return time.Time{}
+	}
+	return time.Unix(value, 0).UTC()
 }
 
 var errDiscordWebhookNotConfigured = errors.New("discord webhook public key is not configured")

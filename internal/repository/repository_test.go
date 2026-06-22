@@ -19,26 +19,20 @@ func TestGuildConfigEnsureDefaultIsIdempotent(t *testing.T) {
 	defer db.Close()
 
 	repo := NewGuildConfigRepository(db.DB)
-	config, err := repo.EnsureDefault(ctx, "guild-1", "openrouter/auto")
+	config, err := repo.EnsureDefault(ctx, "guild-1")
 	if err != nil {
 		t.Fatalf("EnsureDefault: %v", err)
-	}
-	if config.DefaultModel != "openrouter/auto" {
-		t.Fatalf("unexpected model %q", config.DefaultModel)
-	}
-	if config.ClassifierModel != "" {
-		t.Fatalf("expected classifier model to default to empty, got %q", config.ClassifierModel)
 	}
 	if config.ToolPolicy != "admin_only" || !config.MemoryEnabled {
 		t.Fatalf("unexpected defaults: tool_policy=%q memory_enabled=%t", config.ToolPolicy, config.MemoryEnabled)
 	}
 
-	again, err := repo.EnsureDefault(ctx, "guild-1", "different/model")
+	again, err := repo.EnsureDefault(ctx, "guild-1")
 	if err != nil {
 		t.Fatalf("EnsureDefault again: %v", err)
 	}
-	if again.DefaultModel != "openrouter/auto" {
-		t.Fatalf("expected existing model to remain, got %q", again.DefaultModel)
+	if again.GuildID != "guild-1" || again.ToolPolicy != config.ToolPolicy {
+		t.Fatalf("expected existing config to remain, got %+v", again)
 	}
 }
 
@@ -63,7 +57,7 @@ func TestUsageRecord(t *testing.T) {
 	}
 }
 
-func TestUsageBreakdownByModel(t *testing.T) {
+func TestUsageBreakdownByCommandRejectsModelDimension(t *testing.T) {
 	ctx := context.Background()
 	db, err := store.Open(ctx, "file::memory:?cache=shared")
 	if err != nil {
@@ -73,23 +67,23 @@ func TestUsageBreakdownByModel(t *testing.T) {
 
 	repo := NewUsageRepository(db.DB)
 	events := []store.UsageEvent{
-		{GuildID: "guild-1", UserID: "user-1", ChannelID: "channel-1", Command: "ask", Model: "model-a", TotalTokens: 10, Success: true},
-		{GuildID: "guild-1", UserID: "user-2", ChannelID: "channel-1", Command: "chat", Model: "model-a", TotalTokens: 20, Success: false},
-		{GuildID: "guild-1", UserID: "user-2", ChannelID: "channel-2", Command: "ask", Model: "model-b", TotalTokens: 5, Success: true},
+		{GuildID: "guild-1", UserID: "user-1", ChannelID: "channel-1", Command: "ask", TotalTokens: 10, Success: true},
+		{GuildID: "guild-1", UserID: "user-2", ChannelID: "channel-1", Command: "chat", TotalTokens: 20, Success: false},
+		{GuildID: "guild-1", UserID: "user-2", ChannelID: "channel-2", Command: "ask", TotalTokens: 5, Success: true},
 	}
 	for _, event := range events {
 		if err := repo.Record(ctx, event); err != nil {
 			t.Fatalf("Record: %v", err)
 		}
 	}
-	rows, err := repo.BreakdownByGuild(ctx, "guild-1", time.Time{}, "model", 5)
+	rows, err := repo.BreakdownByGuild(ctx, "guild-1", time.Time{}, "command", 5)
 	if err != nil {
 		t.Fatalf("BreakdownByGuild: %v", err)
 	}
-	if len(rows) != 2 || rows[0].Label != "model-a" || rows[0].TotalRequests != 2 || rows[0].Failed != 1 || rows[0].TotalTokens != 30 {
+	if len(rows) != 2 || rows[0].Label != "ask" || rows[0].TotalRequests != 2 || rows[0].Failed != 0 || rows[0].TotalTokens != 15 {
 		t.Fatalf("unexpected breakdown rows: %+v", rows)
 	}
-	if _, err := repo.BreakdownByGuild(ctx, "guild-1", time.Time{}, "model; drop table usage_events", 5); err == nil {
+	if _, err := repo.BreakdownByGuild(ctx, "guild-1", time.Time{}, "model", 5); err == nil {
 		t.Fatal("expected unsupported dimension to fail")
 	}
 }

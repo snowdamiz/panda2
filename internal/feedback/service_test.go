@@ -22,7 +22,6 @@ func TestRecordFeedbackUpsertsAndSummarizes(t *testing.T) {
 		ChannelID: "channel-1",
 		UserID:    "requester",
 		Command:   "ask",
-		Model:     "model-a",
 		Content:   "answer",
 	})
 	if err != nil {

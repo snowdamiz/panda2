@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sn0w/panda2/internal/billing"
 	"github.com/sn0w/panda2/internal/repository"
 	"github.com/sn0w/panda2/internal/store"
 )
@@ -24,8 +25,9 @@ type WebhookEvent struct {
 }
 
 type InstallService struct {
-	guilds *repository.GuildRepository
-	audit  *repository.AuditRepository
+	guilds  *repository.GuildRepository
+	audit   *repository.AuditRepository
+	billing *billing.Service
 }
 
 type applicationAuthorizedData struct {
@@ -50,6 +52,11 @@ type webhookGuildInstall struct {
 
 func NewInstallService(guilds *repository.GuildRepository, audit *repository.AuditRepository) *InstallService {
 	return &InstallService{guilds: guilds, audit: audit}
+}
+
+func (s *InstallService) WithBilling(billingService *billing.Service) *InstallService {
+	s.billing = billingService
+	return s
 }
 
 func (s *InstallService) HandleWebhookEvent(ctx context.Context, event WebhookEvent) error {
@@ -77,6 +84,15 @@ func (s *InstallService) HandleWebhookEvent(ctx context.Context, event WebhookEv
 func (s *InstallService) acceptGuildInstall(ctx context.Context, install repository.GuildInstall, scopes []string) error {
 	if _, err := s.guilds.RecordAuthorizedInstall(ctx, install); err != nil {
 		return err
+	}
+	if s.billing != nil {
+		if _, err := s.billing.EnsureTrial(ctx, billing.TrialSeed{
+			GuildID:            install.GuildID,
+			BillingOwnerUserID: install.InstalledByUserID,
+			AuthorizedAt:       install.AuthorizedAt,
+		}); err != nil {
+			return err
+		}
 	}
 	if err := s.recordInstallAudit(ctx, "discord.install.authorized", install, map[string]any{
 		"status": "active",

@@ -90,6 +90,13 @@ func (s *Service) HasExactContent(ctx context.Context, guildID, content string) 
 	return s.knowledge.HasContentHash(ctx, guildID, hex.EncodeToString(sum[:]))
 }
 
+func (s *Service) StorageBytes(ctx context.Context, guildID string) (int64, error) {
+	if s == nil || s.knowledge == nil {
+		return 0, nil
+	}
+	return s.knowledge.StorageBytes(ctx, guildID)
+}
+
 func (s *Service) DisableExpired(ctx context.Context, now time.Time) (int64, error) {
 	return s.knowledge.DisableExpired(ctx, now)
 }

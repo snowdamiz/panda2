@@ -40,6 +40,14 @@ type Config struct {
 	OpenRouterCircuitBreakerCooldown         time.Duration
 	BraveSearchAPIKey                        string
 	BraveSearchBaseURL                       string
+	PublicAppURL                             string
+	BillingSuccessURL                        string
+	BillingCancelURL                         string
+	StripeSecretKey                          string
+	StripeAPIBaseURL                         string
+	StripeWebhookSecret                      string
+	DiscordSKUPlans                          map[string]string
+	StripePricePlans                         map[string]string
 	MusicYTDLPPath                           string
 	MusicFFmpegPath                          string
 	MusicSidecarDir                          string
@@ -57,6 +65,7 @@ type fileConfig struct {
 	Discord     fileDiscordConfig     `json:"discord"`
 	OpenRouter  fileOpenRouterConfig  `json:"openrouter"`
 	BraveSearch fileBraveSearchConfig `json:"brave_search"`
+	Billing     fileBillingConfig     `json:"billing"`
 	Music       fileMusicConfig       `json:"music"`
 	Runtime     fileRuntimeConfig     `json:"runtime"`
 	Storage     fileStorageConfig     `json:"storage"`
@@ -87,6 +96,15 @@ type fileCircuitBreakerConfig struct {
 
 type fileBraveSearchConfig struct {
 	BaseURL string `json:"base_url"`
+}
+
+type fileBillingConfig struct {
+	PublicURL        string            `json:"public_url"`
+	SuccessURL       string            `json:"success_url"`
+	CancelURL        string            `json:"cancel_url"`
+	StripeAPIBaseURL string            `json:"stripe_api_base_url"`
+	DiscordSKUPlans  map[string]string `json:"discord_sku_plans"`
+	StripePricePlans map[string]string `json:"stripe_price_plans"`
 }
 
 type fileMusicConfig struct {
@@ -143,6 +161,12 @@ func (c Config) Validate() ([]string, error) {
 	if c.BraveSearchBaseURL == "" {
 		return nil, errors.New("brave_search.base_url (BRAVE_SEARCH_BASE_URL) must not be empty")
 	}
+	if c.DiscordSKUPlans == nil {
+		c.DiscordSKUPlans = map[string]string{}
+	}
+	if c.StripePricePlans == nil {
+		c.StripePricePlans = map[string]string{}
+	}
 	if c.MusicSidecarDir == "" {
 		return nil, errors.New("music.sidecar_dir (MUSIC_SIDECAR_DIR) must not be empty")
 	}
@@ -177,6 +201,18 @@ func (c Config) Validate() ([]string, error) {
 	if !c.OpenRouterConfigured() {
 		warnings = append(warnings, "OPENROUTER_API_KEY is not configured; natural-language assistant responses are disabled")
 	}
+	if c.PublicAppURL == "" {
+		warnings = append(warnings, "PUBLIC_APP_URL is not configured; billing and support links will be limited")
+	}
+	if len(c.DiscordSKUPlans) == 0 && len(c.StripePricePlans) == 0 {
+		warnings = append(warnings, "No billing plan SKU or price mappings are configured; paid plan entitlements cannot be granted automatically")
+	}
+	if len(c.StripePricePlans) > 0 && c.StripeSecretKey == "" {
+		warnings = append(warnings, "Stripe price mappings are configured without STRIPE_SECRET_KEY; Stripe Checkout and portal sessions cannot be created")
+	}
+	if len(c.StripePricePlans) > 0 && c.StripeWebhookSecret == "" {
+		warnings = append(warnings, "Stripe price mappings are configured without STRIPE_WEBHOOK_SECRET; Stripe payment events cannot grant entitlements")
+	}
 
 	if strings.EqualFold(c.Environment, "production") {
 		if !c.DiscordConfigured() {
@@ -184,6 +220,18 @@ func (c Config) Validate() ([]string, error) {
 		}
 		if !c.OpenRouterConfigured() {
 			return warnings, errors.New("production requires OPENROUTER_API_KEY")
+		}
+		if c.PublicAppURL == "" {
+			return warnings, errors.New("production requires PUBLIC_APP_URL")
+		}
+		if len(c.DiscordSKUPlans) == 0 && len(c.StripePricePlans) == 0 {
+			return warnings, errors.New("production requires Discord SKU or Stripe price mappings")
+		}
+		if len(c.StripePricePlans) > 0 && c.StripeSecretKey == "" {
+			return warnings, errors.New("production Stripe billing requires STRIPE_SECRET_KEY")
+		}
+		if len(c.StripePricePlans) > 0 && c.StripeWebhookSecret == "" {
+			return warnings, errors.New("production Stripe billing requires STRIPE_WEBHOOK_SECRET")
 		}
 	}
 
@@ -220,6 +268,9 @@ func defaultConfig() Config {
 		OpenRouterCircuitBreakerFailureThreshold: 5,
 		OpenRouterCircuitBreakerCooldown:         30 * time.Second,
 		BraveSearchBaseURL:                       "https://api.search.brave.com/res/v1",
+		DiscordSKUPlans:                          map[string]string{},
+		StripePricePlans:                         map[string]string{},
+		StripeAPIBaseURL:                         "https://api.stripe.com",
 		Port:                                     "8080",
 		Environment:                              defaultEnvironment(),
 		LogLevel:                                 "info",
@@ -497,6 +548,24 @@ func applyFileConfig(cfg *Config, file fileConfig) error {
 	if value := strings.TrimSpace(file.BraveSearch.BaseURL); value != "" {
 		cfg.BraveSearchBaseURL = value
 	}
+	if value := strings.TrimSpace(file.Billing.PublicURL); value != "" {
+		cfg.PublicAppURL = value
+	}
+	if value := strings.TrimSpace(file.Billing.SuccessURL); value != "" {
+		cfg.BillingSuccessURL = value
+	}
+	if value := strings.TrimSpace(file.Billing.CancelURL); value != "" {
+		cfg.BillingCancelURL = value
+	}
+	if value := strings.TrimSpace(file.Billing.StripeAPIBaseURL); value != "" {
+		cfg.StripeAPIBaseURL = value
+	}
+	if file.Billing.DiscordSKUPlans != nil {
+		cfg.DiscordSKUPlans = normalizePlanMap(file.Billing.DiscordSKUPlans)
+	}
+	if file.Billing.StripePricePlans != nil {
+		cfg.StripePricePlans = normalizePlanMap(file.Billing.StripePricePlans)
+	}
 
 	if value := strings.TrimSpace(file.Music.YTDLPPath); value != "" {
 		cfg.MusicYTDLPPath = value
@@ -560,6 +629,28 @@ func applyEnvValues(cfg *Config, lookup func(string) (string, bool)) {
 	cfg.OpenRouterCircuitBreakerCooldown = durationFromLookup(lookup, "OPENROUTER_CIRCUIT_COOLDOWN", cfg.OpenRouterCircuitBreakerCooldown)
 	cfg.BraveSearchAPIKey = stringFromLookup(lookup, "BRAVE_SEARCH_API_KEY", cfg.BraveSearchAPIKey)
 	cfg.BraveSearchBaseURL = nonEmptyStringFromLookup(lookup, "BRAVE_SEARCH_BASE_URL", cfg.BraveSearchBaseURL)
+	cfg.PublicAppURL = nonEmptyStringFromLookup(lookup, "PUBLIC_APP_URL", cfg.PublicAppURL)
+	cfg.BillingSuccessURL = nonEmptyStringFromLookup(lookup, "BILLING_SUCCESS_URL", cfg.BillingSuccessURL)
+	cfg.BillingCancelURL = nonEmptyStringFromLookup(lookup, "BILLING_CANCEL_URL", cfg.BillingCancelURL)
+	cfg.StripeSecretKey = stringFromLookup(lookup, "STRIPE_SECRET_KEY", cfg.StripeSecretKey)
+	cfg.StripeAPIBaseURL = nonEmptyStringFromLookup(lookup, "STRIPE_API_BASE_URL", cfg.StripeAPIBaseURL)
+	cfg.StripeWebhookSecret = stringFromLookup(lookup, "STRIPE_WEBHOOK_SECRET", cfg.StripeWebhookSecret)
+	if value, ok := planMapFromLookup(lookup, "DISCORD_SKU_PLAN_MAP"); ok {
+		cfg.DiscordSKUPlans = value
+	}
+	if value, ok := planMapFromLookup(lookup, "STRIPE_PRICE_PLAN_MAP"); ok {
+		cfg.StripePricePlans = value
+	}
+	applyPlanIDEnv(cfg.DiscordSKUPlans, lookup, "DISCORD_TRIAL_SKU_ID", "trial")
+	applyPlanIDEnv(cfg.DiscordSKUPlans, lookup, "DISCORD_STARTER_SKU_ID", "starter")
+	applyPlanIDEnv(cfg.DiscordSKUPlans, lookup, "DISCORD_PLUS_SKU_ID", "plus")
+	applyPlanIDEnv(cfg.DiscordSKUPlans, lookup, "DISCORD_PRO_SKU_ID", "pro")
+	applyPlanIDEnv(cfg.DiscordSKUPlans, lookup, "DISCORD_BUSINESS_SKU_ID", "business")
+	applyPlanIDEnv(cfg.StripePricePlans, lookup, "STRIPE_TRIAL_PRICE_ID", "trial")
+	applyPlanIDEnv(cfg.StripePricePlans, lookup, "STRIPE_STARTER_PRICE_ID", "starter")
+	applyPlanIDEnv(cfg.StripePricePlans, lookup, "STRIPE_PLUS_PRICE_ID", "plus")
+	applyPlanIDEnv(cfg.StripePricePlans, lookup, "STRIPE_PRO_PRICE_ID", "pro")
+	applyPlanIDEnv(cfg.StripePricePlans, lookup, "STRIPE_BUSINESS_PRICE_ID", "business")
 	cfg.MusicYTDLPPath = nonEmptyStringFromLookup(lookup, "YTDLP_PATH", cfg.MusicYTDLPPath)
 	cfg.MusicFFmpegPath = nonEmptyStringFromLookup(lookup, "FFMPEG_PATH", cfg.MusicFFmpegPath)
 	cfg.MusicSidecarDir = nonEmptyStringFromLookup(lookup, "MUSIC_SIDECAR_DIR", cfg.MusicSidecarDir)
@@ -633,6 +724,29 @@ func csvListFromLookup(lookup func(string) (string, bool), name string) ([]strin
 	return parseCSVList(value), true
 }
 
+func planMapFromLookup(lookup func(string) (string, bool), name string) (map[string]string, bool) {
+	value, ok := lookup(name)
+	if !ok {
+		return nil, false
+	}
+	return parsePlanMap(value), true
+}
+
+func applyPlanIDEnv(target map[string]string, lookup func(string) (string, bool), name string, plan string) {
+	if target == nil {
+		return
+	}
+	value, ok := lookup(name)
+	if !ok {
+		return
+	}
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return
+	}
+	target[value] = strings.ToLower(strings.TrimSpace(plan))
+}
+
 func intFromLookup(lookup func(string) (string, bool), name string, fallback int) int {
 	value, ok := lookup(name)
 	if !ok {
@@ -694,6 +808,43 @@ func normalizeList(values []string) []string {
 		}
 		seen[value] = struct{}{}
 		result = append(result, value)
+	}
+	return result
+}
+
+func normalizePlanMap(values map[string]string) map[string]string {
+	result := map[string]string{}
+	for key, value := range values {
+		key = strings.TrimSpace(key)
+		value = strings.ToLower(strings.TrimSpace(value))
+		if key == "" || value == "" {
+			continue
+		}
+		result[key] = value
+	}
+	return result
+}
+
+func parsePlanMap(value string) map[string]string {
+	result := map[string]string{}
+	for _, part := range strings.Split(value, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		key, plan, ok := strings.Cut(part, ":")
+		if !ok {
+			key, plan, ok = strings.Cut(part, "=")
+		}
+		if !ok {
+			continue
+		}
+		key = strings.TrimSpace(key)
+		plan = strings.ToLower(strings.TrimSpace(plan))
+		if key == "" || plan == "" {
+			continue
+		}
+		result[key] = plan
 	}
 	return result
 }

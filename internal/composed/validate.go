@@ -47,11 +47,38 @@ func NormalizeSpec(spec Spec) Spec {
 }
 
 func ParseSpec(data []byte) (Spec, error) {
+	if err := rejectLegacyModelFields(data); err != nil {
+		return Spec{}, err
+	}
 	var spec Spec
 	if err := json.Unmarshal(data, &spec); err != nil {
 		return Spec{}, err
 	}
 	return NormalizeSpec(spec), nil
+}
+
+func rejectLegacyModelFields(data []byte) error {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	for _, field := range []string{"model", "default_model", "classifier_model", "fallback_models"} {
+		if _, ok := raw[field]; ok {
+			return fmt.Errorf("%s is legacy model-routing configuration and is not supported in composed-tool specs", field)
+		}
+	}
+	if runnerRaw, ok := raw["runner"]; ok {
+		var runner map[string]json.RawMessage
+		if err := json.Unmarshal(runnerRaw, &runner); err != nil {
+			return fmt.Errorf("runner must be an object: %w", err)
+		}
+		for _, field := range []string{"model", "default_model", "classifier_model", "fallback_models"} {
+			if _, ok := runner[field]; ok {
+				return fmt.Errorf("runner.%s is legacy model-routing configuration and is not supported in composed-tool specs", field)
+			}
+		}
+	}
+	return nil
 }
 
 func ValidateSpec(spec Spec, registry *tools.Registry) ValidationReport {

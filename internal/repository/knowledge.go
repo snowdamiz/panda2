@@ -153,6 +153,17 @@ func (r *KnowledgeRepository) HasContentHash(ctx context.Context, guildID, hash 
 	return count > 0, err
 }
 
+func (r *KnowledgeRepository) StorageBytes(ctx context.Context, guildID string) (int64, error) {
+	var total int64
+	err := r.db.WithContext(ctx).Raw(`
+		SELECT COALESCE(SUM(length(CAST(chunks.content AS BLOB))), 0)
+		FROM knowledge_chunks AS chunks
+		INNER JOIN knowledge_documents AS documents ON documents.id = chunks.document_id
+		WHERE chunks.guild_id = ? AND documents.enabled = 1
+	`, strings.TrimSpace(guildID)).Scan(&total).Error
+	return total, err
+}
+
 func (r *KnowledgeRepository) DisableExpired(ctx context.Context, now time.Time) (int64, error) {
 	result := r.db.WithContext(ctx).Model(&store.KnowledgeDocument{}).
 		Where("enabled = ? AND expires_at IS NOT NULL AND expires_at <= ?", true, now.UTC()).

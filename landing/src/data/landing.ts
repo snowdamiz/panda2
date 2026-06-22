@@ -1,15 +1,20 @@
 export const siteMeta = {
-  title: 'Panda — Discord intelligence, your way',
+  title: 'Panda - Hosted Discord assistant for busy servers',
   description:
-    'Panda is an open-source Discord assistant that lets your server choose its LLM through OpenRouter.',
-  ogTitle: 'Panda — Your server, with a better brain',
+    'Panda is a hosted Discord assistant with server plans, managed AI responses, knowledge, schedules, web search, and admin-controlled usage.',
+  ogTitle: 'Panda - Hosted Discord assistant',
   ogDescription:
-    'A Discord-native LLM assistant with model choice, governed tools, private memory, and operational control.',
+    'Install Panda, start a server trial, and give your community a reliable assistant with predictable usage limits.',
   repositoryUrl: 'https://github.com/snowdamiz/panda2',
-  setupUrl: 'https://github.com/snowdamiz/panda2#local-development',
-  commandsUrl: 'https://github.com/snowdamiz/panda2#commands',
-  architectureUrl:
-    'https://github.com/snowdamiz/panda2/blob/main/PLAN.md#safety-privacy-and-abuse-controls',
+  installUrl: 'https://discord.com/oauth2/authorize',
+  supportUrl: '/support',
+  statusUrl: '/status',
+  privacyUrl: '/privacy',
+  termsUrl: '/terms',
+  dpaUrl: '/dpa',
+  refundsUrl: '/refunds',
+  acceptableUseUrl: '/acceptable-use',
+  securityUrl: '/security',
   operationsUrl: 'https://github.com/snowdamiz/panda2/blob/main/OPERATIONS.md',
   siteUrl: 'https://panda2-landing.fly.dev',
   ogImagePath: '/og-image.png',
@@ -17,66 +22,80 @@ export const siteMeta = {
   name: 'Panda',
   keywords: [
     'Discord AI assistant',
-    'Discord LLM bot',
-    'OpenRouter Discord bot',
-    'self-hosted Discord bot',
-    'open-source AI assistant',
+    'Discord assistant',
+    'Discord server assistant',
     'Discord automation',
+    'Discord knowledge bot',
+    'Discord moderation assistant',
   ],
 } as const;
 
 export const navLinks = [
   { href: '#features', label: 'Features' },
-  { href: '#models', label: 'Models' },
+  { href: '#pricing', label: 'Pricing' },
   { href: '#control', label: 'Control' },
   { href: '#privacy', label: 'Privacy' },
 ] as const;
 
-export const heroMeta = ['Go', 'Discord', 'OpenRouter', 'SQLite'] as const;
+export const heroMeta = ['14-day trial', 'Usage limits', 'Admin controls', 'Server knowledge'] as const;
 
-export const modelOptions = [
+export const planOptions = [
   {
-    label: 'Auto Router',
-    provider: 'Best-fit routing',
-    slug: 'openrouter/auto',
-    route: 'AUTO ROUTER',
-    badge: 'Recommended',
+    label: 'Starter',
+    price: '$19',
+    cadence: '/server/mo',
+    aiResponses: '2,000 AI responses',
+    searches: '100 web searches',
+    storage: '100 MB knowledge',
+    retention: '30 day retention',
+    badge: 'Small servers',
+    command: '/billing action:upgrade plan:starter',
+    featured: false,
   },
   {
-    label: 'Claude',
-    provider: 'Anthropic via OpenRouter',
-    slug: 'anthropic/<model>',
-    route: 'ANTHROPIC MODEL',
-    badge: '',
+    label: 'Plus',
+    price: '$49',
+    cadence: '/server/mo',
+    aiResponses: '5,000 AI responses',
+    searches: '400 web searches',
+    storage: '500 MB knowledge',
+    retention: '90 day retention',
+    badge: 'Active communities',
+    command: '/billing action:upgrade plan:plus',
+    featured: true,
   },
   {
-    label: 'GPT',
-    provider: 'OpenAI via OpenRouter',
-    slug: 'openai/<model>',
-    route: 'OPENAI MODEL',
-    badge: '',
+    label: 'Pro',
+    price: '$99',
+    cadence: '/server/mo',
+    aiResponses: '10,000 AI responses',
+    searches: '1,000 web searches',
+    storage: '2 GB knowledge',
+    retention: '180 day retention',
+    badge: 'Large servers',
+    command: '/billing action:upgrade plan:pro',
+    featured: false,
   },
   {
-    label: 'Gemini',
-    provider: 'Google via OpenRouter',
-    slug: 'google/<model>',
-    route: 'GOOGLE MODEL',
-    badge: '',
-  },
-  {
-    label: 'Grok',
-    provider: 'xAI via OpenRouter',
-    slug: 'x-ai/<model>',
-    route: 'XAI MODEL',
-    badge: '',
+    label: 'Business',
+    price: '$249',
+    cadence: '/server/mo',
+    aiResponses: '25,000 AI responses',
+    searches: '2,000 web searches',
+    storage: '10 GB knowledge',
+    retention: '365 day retention',
+    badge: 'High-volume teams',
+    command: '/billing action:upgrade plan:business',
+    featured: false,
   },
 ] as const;
 
 export const marqueeItems = [
-  'CHOOSE ANY MODEL',
+  'START A SERVER TRIAL',
+  'UPGRADE FROM /BILLING',
   'ASK NATURALLY',
   'CONTROL EVERY TOOL',
-  'REMEMBER BY CONSENT',
+  'SEE USAGE BEFORE CUTOFF',
 ] as const;
 
 export const featureCards = [
@@ -88,15 +107,15 @@ export const featureCards = [
   },
   {
     index: '02',
-    title: 'Reliable model routing',
+    title: 'Managed answer quality',
     body:
-      'Set a primary model and an ordered fallback list, with retries and a circuit breaker when providers have a bad day.',
+      'Panda owns the AI routing, retries, and degraded states so admins configure behavior and limits instead of vendor details.',
   },
   {
     index: '03',
-    title: 'Knowledge that belongs to you',
+    title: 'Knowledge with quotas',
     body:
-      'Add server knowledge deliberately, search it locally, and enrich it with embeddings only when you choose to.',
+      'Add server knowledge deliberately, track storage by plan, and keep retention clear for admins and members.',
   },
   {
     index: '04',
@@ -109,70 +128,58 @@ export const featureCards = [
 export const policyRows = [
   { tool: 'web.search', role: 'MEMBERS', enabled: true },
   { tool: 'thread.summarize', role: 'MODS', enabled: true },
-  { tool: 'admin.remove', role: 'ADMINS', enabled: false },
-] as const;
-
-export const consoleFallbacks = [
-  { number: '01', label: 'AUTO ROUTER', state: 'PRIMARY', primary: true },
-  { number: '02', label: 'FALLBACK_01', state: 'STANDBY', primary: false },
-  { number: '03', label: 'FALLBACK_02', state: 'STANDBY', primary: false },
-] as const;
-
-export const consoleSettings = [
-  { label: 'TEMPERATURE', value: '0.4', meterClass: 'value-40' },
-  { label: 'MAX RESPONSE', value: '2,000', meterClass: 'value-68' },
-  { label: 'TOOL POLICY', value: 'READ + SAFE WRITE', meterClass: 'value-82' },
+  { tool: 'billing.manage', role: 'OWNER', enabled: false },
 ] as const;
 
 export const workflowSteps = [
   {
     number: '1',
-    title: 'Ask naturally',
+    title: 'Install and start trial',
     body:
-      'Say “Panda” in a normal message or use a context menu when you want a focused summary or explanation.',
+      'The installer becomes the billing owner for that server. Panda creates a trial with credits, storage, and retention already defined.',
     icon: 'mention',
   },
   {
     number: '2',
-    title: 'Gather approved context',
+    title: 'Configure access',
     body:
-      'Panda resolves permissions, fetches only allowed context, and runs tools within your server’s policy.',
+      'Admins map roles, allowed channels, web search, memory consent, knowledge sources, and response behavior from Discord.',
     icon: 'nodes',
   },
   {
     number: '3',
-    title: 'Get the answer',
+    title: 'Answer with limits',
     body:
-      'Your selected model responds in Discord, with long tasks queued safely and fallbacks ready when needed.',
+      'Panda checks subscription state and quota before paid work, then replies in Discord with usage counted against the server plan.',
     icon: 'check',
   },
 ] as const;
 
 export const commandRows = [
   {
-    key: 'model',
-    symbol: '⌁',
-    command: '/admin model',
-    description: 'Model, fallbacks, generation',
+    key: 'behavior',
+    symbol: 'B',
+    command: '/admin behavior',
+    description: 'Answer length and tool policy',
     order: '01',
   },
   {
-    key: 'prompt',
-    symbol: '¶',
-    command: '/admin prompt',
-    description: 'Server-level instructions',
+    key: 'billing',
+    symbol: '$',
+    command: '/billing',
+    description: 'Status, checkout, and portal',
     order: '02',
   },
   {
     key: 'tool',
-    symbol: '◇',
+    symbol: 'T',
     command: '/admin tool',
     description: 'Role-based tool access',
     order: '03',
   },
   {
     key: 'audit',
-    symbol: '≡',
+    symbol: 'A',
     command: '/admin audit',
     description: 'Privileged action history',
     order: '04',
@@ -181,22 +188,22 @@ export const commandRows = [
 
 export const commandViews = [
   {
-    key: 'model',
+    key: 'behavior',
     values: [
-      ['PRIMARY', 'openrouter/auto'],
-      ['FALLBACKS', '2 models'],
-      ['TOOL POLICY', 'read + safe write'],
+      ['ANSWER LENGTH', 'Standard'],
+      ['TOOL POLICY', 'Confirm writes'],
+      ['WEB SEARCH', 'Allowed by plan'],
     ],
-    status: 'Saved for this server',
+    status: 'Behavior is saved for this server',
   },
   {
-    key: 'prompt',
+    key: 'billing',
     values: [
-      ['SYSTEM OVERLAY', 'Community assistant'],
-      ['STYLE', 'concise'],
-      ['LAST EDITED', 'today'],
+      ['PLAN', 'Starter'],
+      ['AI REMAINING', '1,842'],
+      ['RENEWAL', 'Monthly'],
     ],
-    status: 'Prompt version is active',
+    status: '/billing action:upgrade creates checkout',
   },
   {
     key: 'tool',
@@ -231,32 +238,32 @@ export const controlPoints = [
   },
   {
     number: '03',
-    lead: 'Operational',
-    body: 'health, metrics, queues, and degraded mode are built in.',
+    lead: 'Usage-aware',
+    body: 'plan, renewal, quota, and degraded states are visible before spend runs away.',
   },
 ] as const;
 
 export const privacyItems = [
   {
-    icon: '○',
+    icon: 'M',
     title: 'User memory',
     detail: 'Off by default',
     state: 'OPT-IN',
   },
   {
-    icon: '⌗',
+    icon: 'K',
     title: 'Server knowledge',
     detail: 'Admin-managed sources',
     state: 'CONTROLLED',
   },
   {
-    icon: '↺',
+    icon: 'R',
     title: 'Conversation content',
-    detail: 'Configurable retention',
+    detail: 'Plan-based retention',
     state: 'EXPIRING',
   },
   {
-    icon: '✓',
+    icon: 'C',
     title: 'Destructive actions',
     detail: 'Fresh permission checks',
     state: 'CONFIRMED',
@@ -268,16 +275,28 @@ export const footerGroups = [
     title: 'PRODUCT',
     links: [
       { href: '#features', label: 'Features', external: false },
-      { href: '#models', label: 'Models', external: false },
+      { href: '#pricing', label: 'Pricing', external: false },
       { href: '#privacy', label: 'Privacy', external: false },
+      { href: siteMeta.statusUrl, label: 'Status', external: false },
     ],
   },
   {
-    title: 'PROJECT',
+    title: 'LEGAL',
     links: [
-      { href: siteMeta.repositoryUrl, label: 'GitHub', external: true },
-      { href: siteMeta.setupUrl, label: 'Setup', external: true },
-      { href: siteMeta.operationsUrl, label: 'Operations', external: true },
+      { href: siteMeta.termsUrl, label: 'Terms', external: false },
+      { href: siteMeta.privacyUrl, label: 'Privacy', external: false },
+      { href: siteMeta.dpaUrl, label: 'DPA', external: false },
+      { href: siteMeta.refundsUrl, label: 'Refunds', external: false },
+      { href: siteMeta.acceptableUseUrl, label: 'Acceptable Use', external: false },
+      { href: siteMeta.securityUrl, label: 'Security', external: false },
+    ],
+  },
+  {
+    title: 'SUPPORT',
+    links: [
+      { href: siteMeta.installUrl, label: 'Install', external: true },
+      { href: siteMeta.supportUrl, label: 'Support', external: false },
+      { href: siteMeta.operationsUrl, label: 'Operator Runbook', external: true },
     ],
   },
 ] as const;

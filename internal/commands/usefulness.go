@@ -25,7 +25,7 @@ type MusicAdminService interface {
 
 func (r *Router) adminPermissionForSubcommand(subcommand string) (func(context.Context, admin.AssistantAccessRequest) (bool, error), string) {
 	switch subcommand {
-	case "status":
+	case "status", "billing":
 		return r.admin.CanReadConfig, "You do not have permission to read Panda admin status."
 	case "audit":
 		return r.admin.CanReadAudit, "You do not have permission to read Panda audit events."
@@ -116,6 +116,9 @@ func (r *Router) handleSchedule(ctx context.Context, request Request) Response {
 			Interval:    interval,
 		})
 		if err != nil {
+			if response, ok := billingErrorResponseIfBilling(err); ok {
+				return response
+			}
 			return Response{Content: "Composed schedule could not be created.", Ephemeral: true}
 		}
 		return Response{Content: fmt.Sprintf("Scheduled `%s` as schedule `%d` for %s.", toolName, schedule.ID, schedule.NextRunAt.Format(time.RFC3339)), Ephemeral: true}
@@ -155,6 +158,9 @@ func (r *Router) createReminder(ctx context.Context, request Request, followUp b
 		FollowUp:        followUp,
 	})
 	if err != nil {
+		if response, ok := billingErrorResponseIfBilling(err); ok {
+			return response
+		}
 		return Response{Content: "Reminder could not be created.", Ephemeral: true}
 	}
 	return Response{Content: fmt.Sprintf("Created %s `%d` for %s.", schedule.Kind, schedule.ID, schedule.NextRunAt.Format(time.RFC3339)), Ephemeral: true, Presentation: Presentation{Title: "Reminder created", Accent: AccentSuccess}}
@@ -259,13 +265,25 @@ func (r *Router) handleAdminStatus(ctx context.Context, request Request) Respons
 	toolRoles, _ := r.admin.ListToolRoles(ctx, request.GuildID)
 	budgets, _ := r.admin.ListBudgetLimits(ctx, request.GuildID)
 	var queueDepth int64
-	openRouterStatus := "unknown"
+	aiServiceStatus := "unknown"
 	discordStatus := "unknown"
 	if r.ops != nil {
 		if health, err := r.ops.Health(ctx); err == nil {
 			queueDepth = health.QueuedJobs
-			openRouterStatus = health.OpenRouter
+			aiServiceStatus = health.AIService
 			discordStatus = health.Discord
+		}
+	}
+	billingStatus := "not configured"
+	aiUsage := "not available"
+	webUsage := "not available"
+	retention := 0
+	if r.billing != nil {
+		if entitlement, err := r.billing.Resolve(ctx, request.GuildID); err == nil {
+			billingStatus = fmt.Sprintf("%s (%s)", entitlement.Plan.DisplayName, entitlement.Status)
+			aiUsage = entitlement.UsageLine("ai_response")
+			webUsage = entitlement.UsageLine("web_search")
+			retention = entitlement.Plan.RetentionDays
 		}
 	}
 	var scheduleStats repository.ScheduleStats
@@ -278,14 +296,16 @@ func (r *Router) handleAdminStatus(ctx context.Context, request Request) Respons
 	}
 	lines := []string{
 		"Admin status:",
+		fmt.Sprintf("- subscription: `%s`", billingStatus),
+		fmt.Sprintf("- AI responses: `%s`", aiUsage),
+		fmt.Sprintf("- web searches: `%s`", webUsage),
+		fmt.Sprintf("- retention: `%d days`", retention),
 		fmt.Sprintf("- assistant: `%t`", config.AssistantEnabled),
 		fmt.Sprintf("- memory: `%t`", config.MemoryEnabled),
-		fmt.Sprintf("- default model: `%s`", config.DefaultModel),
-		fmt.Sprintf("- classifier model: `%s`", classifierModelDisplay(config)),
-		fmt.Sprintf("- fallback models: `%d`", fallbackModelCount(config.FallbackModels)),
+		fmt.Sprintf("- answer length: `%s`", answerLengthFromMaxTokens(config.MaxResponseTokens)),
 		fmt.Sprintf("- tool policy: `%s`", config.ToolPolicy),
 		fmt.Sprintf("- discord: `%s`", discordStatus),
-		fmt.Sprintf("- openrouter: `%s`", openRouterStatus),
+		fmt.Sprintf("- AI service: `%s`", aiServiceStatus),
 		fmt.Sprintf("- role mappings: `%d`", len(roles)),
 		fmt.Sprintf("- tool role grants: `%d`", len(toolRoles)),
 		fmt.Sprintf("- channel rules: `%d`", len(channelRules)),
@@ -527,9 +547,6 @@ func adminStatusWarnings(config store.GuildConfig, roles []store.GuildRole, chan
 	var warnings []string
 	if !config.AssistantEnabled {
 		warnings = append(warnings, "Assistant responses are disabled.")
-	}
-	if config.DefaultModel == "" {
-		warnings = append(warnings, "No default model is configured.")
 	}
 	if len(roleIDsForPermission(roles, admin.PermissionAdminBadge)) == 0 {
 		warnings = append(warnings, "No Panda admin role is configured; only server admins/owners can manage Panda.")

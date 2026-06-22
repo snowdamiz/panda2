@@ -44,9 +44,6 @@ func (p *ToolProvider) ExecuteDiscordTool(ctx context.Context, request tools.Dis
 		return nil, fmt.Errorf("discord REST adapter is not configured")
 	}
 	if err := p.preflight(request); err != nil {
-		if request.ToolName == "discord.create_role" && isRoleSetupError(err) {
-			return nil, fmt.Errorf("%w: %v", commands.ErrDiscordRoleSetup, err)
-		}
 		return nil, err
 	}
 	handler, ok := p.discordToolHandlers()[request.ToolName]
@@ -58,75 +55,26 @@ func (p *ToolProvider) ExecuteDiscordTool(ctx context.Context, request tools.Dis
 
 func (p *ToolProvider) discordToolHandlers() map[string]discordToolHandler {
 	return map[string]discordToolHandler{
-		"discord.fetch_message":               p.withoutContext(p.fetchMessage),
-		"discord.fetch_messages":              p.withoutContext(p.fetchMessages),
-		"discord.fetch_thread_context":        p.withoutContext(p.fetchThreadContext),
-		"discord.fetch_reply_chain":           p.withoutContext(p.fetchReplyChain),
-		"discord.list_pins":                   p.withoutContext(p.listPins),
-		"discord.search_messages":             p.searchMessages,
-		"discord.get_guild":                   p.withoutContext(p.getGuild),
-		"discord.list_channels":               p.withoutContext(p.listChannels),
-		"discord.get_channel":                 p.withoutContext(p.getChannel),
-		"discord.list_active_threads":         p.withoutContext(p.listActiveThreads),
-		"discord.list_archived_threads":       p.withoutContext(p.listArchivedThreads),
-		"discord.list_roles":                  p.withoutContext(p.listRoles),
-		"discord.get_role":                    p.withoutContext(p.getRole),
-		"discord.create_role":                 p.withoutContext(p.createRole),
-		"discord.get_member":                  p.withoutContext(p.getMember),
-		"discord.list_members":                p.withoutContext(p.listMembers),
-		"discord.list_bans":                   p.withoutContext(p.listBans),
-		"discord.get_invite":                  p.withoutContext(p.getInvite),
-		"discord.list_invites":                p.withoutContext(p.listInvites),
-		"discord.list_webhooks":               p.withoutContext(p.listWebhooks),
-		"discord.list_scheduled_events":       p.withoutContext(p.listScheduledEvents),
-		"discord.get_audit_logs":              p.withoutContext(p.getAuditLogs),
-		"discord.list_auto_moderation_rules":  p.withoutContext(p.listAutoModerationRules),
-		"discord.list_emojis":                 p.withoutContext(p.listEmojis),
-		"discord.list_stickers":               p.withoutContext(p.listStickers),
-		"discord.list_soundboard_sounds":      p.withoutContext(p.listSoundboardSounds),
-		"discord.recent_events":               p.recentEvents,
-		"discord.channel_activity_summary":    p.channelActivitySummary,
-		"discord.send_message":                p.withoutContext(p.sendMessage),
-		"discord.reply_message":               p.withoutContext(p.replyMessage),
-		"discord.edit_own_message":            p.withoutContext(p.editOwnMessage),
-		"discord.delete_own_message":          p.withoutContext(p.deleteOwnMessage),
-		"discord.create_poll":                 p.withoutContext(p.createPoll),
-		"discord.get_poll_answer_voters":      p.withoutContext(p.getPollAnswerVoters),
-		"discord.end_poll":                    p.withoutContext(p.endPoll),
-		"discord.add_reaction":                p.withoutContext(p.addReaction),
-		"discord.remove_own_reaction":         p.withoutContext(p.removeOwnReaction),
-		"discord.create_thread":               p.withoutContext(p.createThread),
-		"discord.rename_thread":               p.withoutContext(p.renameThread),
-		"discord.archive_thread":              p.withoutContext(p.archiveThread),
-		"discord.add_thread_member":           p.withoutContext(p.addThreadMember),
-		"discord.remove_thread_member":        p.withoutContext(p.removeThreadMember),
-		"discord.pin_message":                 p.withoutContext(p.pinMessage),
-		"discord.unpin_message":               p.withoutContext(p.unpinMessage),
-		"discord.timeout_member":              p.withoutContext(p.timeoutMember),
-		"discord.remove_timeout":              p.withoutContext(p.removeTimeout),
-		"discord.kick_member":                 p.withoutContext(p.kickMember),
-		"discord.ban_member":                  p.withoutContext(p.banMember),
-		"discord.unban_member":                p.withoutContext(p.unbanMember),
-		"discord.bulk_ban_members":            p.withoutContext(p.bulkBanMembers),
-		"discord.add_member_role":             p.withoutContext(p.addMemberRole),
-		"discord.remove_member_role":          p.withoutContext(p.removeMemberRole),
-		"discord.set_member_nick":             p.withoutContext(p.setMemberNick),
-		"discord.delete_message":              p.withoutContext(p.deleteMessage),
-		"discord.bulk_delete_messages":        p.withoutContext(p.bulkDeleteMessages),
-		"discord.set_channel_slowmode":        p.withoutContext(p.setChannelSlowmode),
-		"discord.lock_thread":                 p.withoutContext(p.lockThread),
-		"discord.modify_channel_permissions":  p.withoutContext(p.modifyChannelPermissions),
-		"discord.create_auto_moderation_rule": p.withoutContext(p.createAutoModerationRule),
-		"discord.update_auto_moderation_rule": p.withoutContext(p.updateAutoModerationRule),
-		"discord.delete_auto_moderation_rule": p.withoutContext(p.deleteAutoModerationRule),
-		"discord.create_invite":               p.withoutContext(p.createInvite),
-		"discord.delete_invite":               p.withoutContext(p.deleteInvite),
-		"discord.create_webhook":              p.withoutContext(p.createWebhook),
-		"discord.update_webhook":              p.withoutContext(p.updateWebhook),
-		"discord.delete_webhook":              p.withoutContext(p.deleteWebhook),
-		"discord.create_scheduled_event":      p.withoutContext(p.createScheduledEvent),
-		"discord.update_scheduled_event":      p.withoutContext(p.updateScheduledEvent),
-		"discord.delete_scheduled_event":      p.withoutContext(p.deleteScheduledEvent),
+		"discord.fetch_message":            p.withoutContext(p.fetchMessage),
+		"discord.fetch_messages":           p.withoutContext(p.fetchMessages),
+		"discord.fetch_thread_context":     p.withoutContext(p.fetchThreadContext),
+		"discord.fetch_reply_chain":        p.withoutContext(p.fetchReplyChain),
+		"discord.list_pins":                p.withoutContext(p.listPins),
+		"discord.get_guild":                p.withoutContext(p.getGuild),
+		"discord.list_channels":            p.withoutContext(p.listChannels),
+		"discord.get_channel":              p.withoutContext(p.getChannel),
+		"discord.list_active_threads":      p.withoutContext(p.listActiveThreads),
+		"discord.list_archived_threads":    p.withoutContext(p.listArchivedThreads),
+		"discord.list_roles":               p.withoutContext(p.listRoles),
+		"discord.get_role":                 p.withoutContext(p.getRole),
+		"discord.get_member":               p.withoutContext(p.getMember),
+		"discord.list_scheduled_events":    p.withoutContext(p.listScheduledEvents),
+		"discord.list_emojis":              p.withoutContext(p.listEmojis),
+		"discord.list_stickers":            p.withoutContext(p.listStickers),
+		"discord.list_soundboard_sounds":   p.withoutContext(p.listSoundboardSounds),
+		"discord.recent_events":            p.recentEvents,
+		"discord.channel_activity_summary": p.channelActivitySummary,
+		"discord.get_poll_answer_voters":   p.withoutContext(p.getPollAnswerVoters),
 	}
 }
 
@@ -1659,7 +1607,7 @@ func allowedMentionsArg(arguments map[string]any) *disgoDiscord.AllowedMentions 
 	if boolArg(raw, "roles") {
 		allowed.Parse = append(allowed.Parse, disgoDiscord.AllowedMentionTypeRoles)
 	}
-	// Everyone mentions remain suppressed for composed and model-driven sends.
+	// Everyone mentions remain suppressed for composed and assistant-driven sends.
 	allowed.RepliedUser = boolArg(raw, "replied_user")
 	return allowed
 }

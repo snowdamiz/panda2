@@ -27,7 +27,6 @@ func (r *FeedbackRepository) CreateTarget(ctx context.Context, target store.Feed
 	target.ChannelID = strings.TrimSpace(target.ChannelID)
 	target.UserID = strings.TrimSpace(target.UserID)
 	target.Command = firstNonEmpty(strings.TrimSpace(target.Command), "assistant")
-	target.Model = strings.TrimSpace(target.Model)
 	target.Metadata = firstNonEmpty(target.Metadata, "{}")
 	if target.CreatedAt.IsZero() {
 		target.CreatedAt = time.Now().UTC()

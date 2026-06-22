@@ -564,7 +564,7 @@ svg {
   border-radius: var(--radius-xs);
 }
 
-.model-bar {
+.status-bar {
   position: relative;
   min-height: 52px;
   padding: 0 18px 0 22px;
@@ -575,7 +575,7 @@ svg {
   background: var(--color-panel-875);
 }
 
-.model-status {
+.status-indicator {
   display: flex;
   align-items: center;
   gap: 8px;
@@ -586,7 +586,7 @@ svg {
   text-transform: uppercase;
 }
 
-.model-status i,
+.status-indicator i,
 .console-live i,
 .detail-status i {
   width: 6px;
@@ -596,7 +596,7 @@ svg {
   box-shadow: var(--shadow-live-dot);
 }
 
-.model-switch {
+.trial-pill {
   min-width: 180px;
   padding: 8px 12px;
   display: flex;
@@ -606,87 +606,20 @@ svg {
   border-radius: var(--radius-control);
   color: color-mix(in oklab, var(--color-white) 80%, transparent);
   background: color-mix(in oklab, var(--color-white) 3.5%, transparent);
-  cursor: pointer;
   font-size: .68rem;
   font-weight: 650;
   text-align: left;
-  transition: border-color .2s ease, background .2s ease;
 }
 
-.model-switch:hover,
-.model-switch:focus-visible,
-.model-switch[aria-expanded="true"] {
-  border-color: color-mix(in oklab, var(--color-white) 28%, transparent);
-  background: color-mix(in oklab, var(--color-white) 6%, transparent);
-}
-
-.model-switch .model-label {
+.trial-pill .trial-label {
   color: color-mix(in oklab, var(--color-white) 28%, transparent);
   font-family: var(--font-mono);
   font-size: .56rem;
   letter-spacing: .09em;
 }
 
-.model-switch > span:nth-child(2) {
+.trial-pill > span:nth-child(2) {
   flex: 1;
-}
-
-.model-switch svg {
-  width: 14px;
-  height: 14px;
-  fill: none;
-  stroke: currentColor;
-  stroke-width: 1.5;
-}
-
-.model-menu {
-  position: absolute;
-  top: 47px;
-  right: 18px;
-  z-index: 12;
-  width: 214px;
-  padding: 7px;
-  border: 1px solid color-mix(in oklab, var(--color-white) 15%, transparent);
-  border-radius: var(--radius-menu);
-  background: var(--color-panel-750);
-  box-shadow: var(--shadow-menu);
-}
-
-.model-menu:not([hidden]) {
-  display: grid;
-  animation: menuIn .18s var(--ease-fluid);
-}
-
-@keyframes menuIn {
-  from { opacity: 0; transform: translateY(-5px) scale(.98); }
-  to { opacity: 1; transform: none; }
-}
-
-.model-menu button {
-  padding: 10px 9px;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  border: 0;
-  border-radius: var(--radius-sm);
-  color: color-mix(in oklab, var(--color-white) 72%, transparent);
-  background: transparent;
-  cursor: pointer;
-  font-size: .7rem;
-  text-align: left;
-}
-
-.model-menu button:hover,
-.model-menu button:focus-visible {
-  color: var(--color-white);
-  background: color-mix(in oklab, var(--color-white) 7%, transparent);
-}
-
-.model-menu button span {
-  color: color-mix(in oklab, var(--color-white) 28%, transparent);
-  font-size: .52rem;
-  letter-spacing: .06em;
-  text-transform: uppercase;
 }
 
 .chat-body {
@@ -1021,7 +954,7 @@ svg {
 .workflow-heading h2,
 .control-copy h2,
 .privacy-copy h2,
-.models-copy h2 {
+.pricing-top h2 {
   font-size: clamp(3rem, 5.4vw, 5.6rem);
 }
 
@@ -1296,13 +1229,13 @@ svg {
   background: var(--color-ink-soft);
 }
 
-.models-section {
+.pricing-section {
   overflow: hidden;
   color: var(--color-paper-bright);
   background: var(--color-ink);
 }
 
-.models-section::before {
+.pricing-section::before {
   content: "";
   position: absolute;
   width: 780px;
@@ -1311,26 +1244,38 @@ svg {
   top: -250px;
   border: 1px solid color-mix(in oklab, var(--color-white) 7%, transparent);
   border-radius: 50%;
-  box-shadow: var(--shadow-model-orbit);
+  box-shadow: var(--shadow-plan-orbit);
 }
 
-.models-layout {
+.pricing-shell {
   position: relative;
-  display: grid;
-  grid-template-columns: minmax(300px, .75fr) minmax(500px, 1.25fr);
-  align-items: center;
-  gap: 90px;
 }
 
-.models-copy > p:not(.kicker) {
-  max-width: 480px;
-  margin: 30px 0 0;
+.pricing-top {
+  display: grid;
+  grid-template-columns: minmax(0, .9fr) minmax(360px, .7fr);
+  align-items: end;
+  gap: 64px;
+  margin-bottom: 28px;
+}
+
+.pricing-top h2 {
+  max-width: 780px;
+}
+
+.pricing-summary {
+  max-width: 520px;
+  justify-self: end;
+}
+
+.pricing-summary > p {
+  margin: 0;
   color: color-mix(in oklab, var(--color-paper-bright) 53%, transparent);
   line-height: 1.8;
 }
 
+.pricing-start,
 .text-link {
-  margin-top: 30px;
   display: inline-flex;
   align-items: center;
   gap: 12px;
@@ -1341,16 +1286,27 @@ svg {
   text-transform: uppercase;
 }
 
+.pricing-start {
+  margin-top: 24px;
+}
+
+.text-link {
+  margin-top: 30px;
+}
+
+.pricing-start span,
 .text-link span {
   transition: transform .2s ease;
 }
 
+.pricing-start:hover span,
+.pricing-start:focus-visible span,
 .text-link:hover span,
 .text-link:focus-visible span {
   transform: translate(3px, -3px);
 }
 
-.model-console {
+.pricing-board {
   position: relative;
   overflow: hidden;
   border: 1px solid color-mix(in oklab, var(--color-white) 14%, transparent);
@@ -1359,223 +1315,178 @@ svg {
   box-shadow: var(--shadow-console);
 }
 
-.model-console::before {
+.pricing-board::before {
   content: "";
   position: absolute;
   inset: 0;
   pointer-events: none;
-  opacity: .25;
+  opacity: .23;
   background-image: linear-gradient(color-mix(in oklab, var(--color-white) 4%, transparent) 1px, transparent 1px), linear-gradient(90deg, color-mix(in oklab, var(--color-white) 4%, transparent) 1px, transparent 1px);
   background-size: 28px 28px;
 }
 
-.console-header,
-.console-primary,
-.console-fallbacks,
-.console-settings,
-.console-command {
+.pricing-board > * {
   position: relative;
   z-index: 1;
 }
 
-.console-header {
-  height: 58px;
-  padding: 0 20px;
+.pricing-board-header {
+  min-height: 58px;
+  padding: 0 22px;
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 18px;
   border-bottom: 1px solid color-mix(in oklab, var(--color-white) 10%, transparent);
-  color: color-mix(in oklab, var(--color-white) 35%, transparent);
   font-family: var(--font-mono);
-  font-size: .58rem;
+}
+
+.pricing-board-header,
+.pricing-table thead span,
+.pricing-table tbody th {
+  color: color-mix(in oklab, var(--color-white) 38%, transparent);
+  font-size: .56rem;
+  font-weight: 760;
   letter-spacing: .13em;
+  text-transform: uppercase;
 }
 
-.console-live {
-  display: flex;
-  align-items: center;
-  gap: 9px;
-  color: color-mix(in oklab, var(--color-white) 55%, transparent);
+.pricing-board-header span:last-child {
+  color: color-mix(in oklab, var(--color-white) 50%, transparent);
+  text-transform: none;
 }
 
-.console-primary {
-  min-height: 150px;
-  padding: 30px;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 24px;
-  border-bottom: 1px solid color-mix(in oklab, var(--color-white) 10%, transparent);
+.pricing-table-wrap {
+  overflow-x: auto;
 }
 
-.console-primary small,
-.detail-value small {
-  display: block;
-  margin-bottom: 8px;
-  color: color-mix(in oklab, var(--color-white) 30%, transparent);
-  font-size: .52rem;
-  font-weight: 700;
-  letter-spacing: .13em;
+.pricing-table {
+  width: 100%;
+  border-collapse: collapse;
+  table-layout: fixed;
 }
 
-.console-primary strong {
-  display: block;
-  max-width: 510px;
-  overflow: hidden;
-  color: color-mix(in oklab, var(--color-white) 92%, transparent);
-  font-family: var(--font-mono);
-  font-size: clamp(1.2rem, 2.4vw, 2.3rem);
-  font-weight: 500;
-  letter-spacing: -.04em;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+.pricing-table {
+  min-width: 980px;
 }
 
-.console-primary button {
-  flex: 0 0 auto;
-  padding: 11px 14px;
-  display: flex;
-  align-items: center;
-  gap: 9px;
-  border: 1px solid color-mix(in oklab, var(--color-white) 17%, transparent);
-  border-radius: var(--radius-control);
-  color: color-mix(in oklab, var(--color-white) 68%, transparent);
-  background: color-mix(in oklab, var(--color-white) 4%, transparent);
-  cursor: pointer;
-  font-size: .57rem;
-  font-weight: 700;
-  letter-spacing: .1em;
-  transition: background .2s ease, border-color .2s ease;
+.pricing-table col.featured-col {
+  background: color-mix(in oklab, var(--color-white) 4.5%, transparent);
 }
 
-.console-primary button:hover,
-.console-primary button:focus-visible {
-  border-color: color-mix(in oklab, var(--color-white) 34%, transparent);
-  background: color-mix(in oklab, var(--color-white) 8%, transparent);
+.pricing-table th,
+.pricing-table td {
+  border-bottom: 1px solid color-mix(in oklab, var(--color-white) 8%, transparent);
 }
 
-.console-primary button svg {
-  width: 15px;
-  height: 15px;
-  fill: none;
-  stroke: currentColor;
-  stroke-width: 1.4;
-  stroke-linecap: round;
-  stroke-linejoin: round;
-}
-
-.console-fallbacks {
-  padding: 16px 30px;
-  display: grid;
-  border-bottom: 1px solid color-mix(in oklab, var(--color-white) 10%, transparent);
-}
-
-.route-line {
-  min-height: 49px;
-  display: grid;
-  grid-template-columns: 42px 1fr auto;
-  align-items: center;
-  border-bottom: 1px solid color-mix(in oklab, var(--color-white) 7%, transparent);
-  font-family: var(--font-mono);
-}
-
-.route-line:last-child {
-  border-bottom: 0;
-}
-
-.route-line span,
-.route-line em {
-  color: color-mix(in oklab, var(--color-white) 25%, transparent);
-  font-size: .52rem;
-  font-style: normal;
-  letter-spacing: .08em;
-}
-
-.route-line b {
-  color: color-mix(in oklab, var(--color-white) 58%, transparent);
-  font-size: .65rem;
-  font-weight: 500;
-  letter-spacing: .06em;
-}
-
-.route-line:first-child b {
-  color: color-mix(in oklab, var(--color-white) 90%, transparent);
-}
-
-.console-settings {
-  padding: 22px 30px 28px;
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 14px;
-}
-
-.console-settings > div {
-  padding: 17px 15px;
-  border: 1px solid color-mix(in oklab, var(--color-white) 8%, transparent);
-  border-radius: var(--radius-tile);
-  background: color-mix(in oklab, var(--color-white) 2.5%, transparent);
-}
-
-.console-settings span {
-  display: block;
-  margin-bottom: 12px;
-  color: color-mix(in oklab, var(--color-white) 25%, transparent);
-  font-size: .48rem;
-  font-weight: 700;
-  letter-spacing: .1em;
-}
-
-.console-settings b {
-  display: block;
-  min-height: 28px;
-  color: color-mix(in oklab, var(--color-white) 65%, transparent);
-  font-family: var(--font-mono);
-  font-size: .6rem;
-  font-weight: 500;
-}
-
-.console-settings i {
+.pricing-table thead th {
   position: relative;
+  height: 168px;
+  padding: 26px 22px;
+  border-right: 1px solid color-mix(in oklab, var(--color-white) 8%, transparent);
+  text-align: left;
+  vertical-align: bottom;
+}
+
+.pricing-table thead th:last-child,
+.pricing-table tbody td:last-child {
+  border-right: 0;
+}
+
+.pricing-table thead th:first-child {
+  width: 180px;
+}
+
+.pricing-table thead strong {
   display: block;
-  height: 2px;
-  margin-top: 12px;
-  overflow: hidden;
-  background: color-mix(in oklab, var(--color-white) 9%, transparent);
+  margin-top: 14px;
+  color: var(--color-paper-bright);
+  font-size: 1.55rem;
+  font-weight: 540;
+  letter-spacing: 0;
+  line-height: 1;
 }
 
-.console-settings i::after {
-  content: "";
+.pricing-table thead em {
+  display: block;
+  margin-top: 18px;
+  color: color-mix(in oklab, var(--color-white) 76%, transparent);
+  font-family: var(--font-mono);
+  font-size: .78rem;
+  font-style: normal;
+  font-weight: 500;
+}
+
+.pricing-table thead th.featured::after {
+  content: "POPULAR";
   position: absolute;
-  inset: 0 auto 0 0;
-  width: 0;
-  background: color-mix(in oklab, var(--color-white) 65%, transparent);
+  top: 20px;
+  right: 18px;
+  padding: 5px 7px;
+  border: 1px solid color-mix(in oklab, var(--color-white) 18%, transparent);
+  border-radius: var(--radius-xs);
+  color: color-mix(in oklab, var(--color-white) 76%, transparent);
+  background: color-mix(in oklab, var(--color-white) 6%, transparent);
+  font-size: .48rem;
+  font-weight: 800;
+  letter-spacing: .1em;
 }
 
-.console-command {
-  height: 62px;
-  padding: 0 30px;
+.pricing-table tbody th {
+  padding: 20px 22px;
+  border-right: 1px solid color-mix(in oklab, var(--color-white) 8%, transparent);
+  text-align: left;
+}
+
+.pricing-table tbody td {
+  padding: 20px 22px;
+  border-right: 1px solid color-mix(in oklab, var(--color-white) 8%, transparent);
+  color: color-mix(in oklab, var(--color-white) 78%, transparent);
+  font-family: var(--font-mono);
+  font-size: .72rem;
+  text-align: right;
+}
+
+.pricing-table code {
+  color: color-mix(in oklab, var(--color-white) 68%, transparent);
+  font-family: var(--font-mono);
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.checkout-row th,
+.checkout-row td {
+  vertical-align: top;
+}
+
+.checkout-row td {
+  font-size: .55rem;
+  text-align: left;
+}
+
+.pricing-footer {
+  min-height: 70px;
+  padding: 18px 22px;
   display: flex;
   align-items: center;
-  gap: 12px;
+  justify-content: space-between;
+  gap: 22px;
   border-top: 1px solid color-mix(in oklab, var(--color-white) 10%, transparent);
-  color: color-mix(in oklab, var(--color-white) 47%, transparent);
-  background: color-mix(in oklab, var(--color-white) 2.5%, transparent);
-  font-family: var(--font-mono);
-  font-size: .64rem;
+  background: color-mix(in oklab, var(--color-white) 2%, transparent);
 }
 
-.console-command > span {
-  color: color-mix(in oklab, var(--color-white) 25%, transparent);
+.pricing-footer p {
+  max-width: 760px;
+  margin: 0;
+  color: color-mix(in oklab, var(--color-paper-bright) 48%, transparent);
+  font-size: .82rem;
+  line-height: 1.65;
 }
 
-.cursor {
-  width: 6px;
-  height: 12px;
-  background: color-mix(in oklab, var(--color-white) 60%, transparent);
-  animation: blink 1s steps(2, start) infinite;
+.pricing-footer .text-link {
+  flex: 0 0 auto;
+  margin-top: 0;
 }
-
-@keyframes blink { 50% { opacity: 0; } }
 
 .workflow-section {
   padding-top: 130px;
@@ -2159,7 +2070,7 @@ svg {
 
 .footer-links {
   display: grid;
-  grid-template-columns: repeat(2, 150px);
+  grid-template-columns: repeat(3, minmax(120px, 150px));
   gap: 50px;
 }
 
@@ -2199,6 +2110,79 @@ svg {
   font-size: .55rem;
   letter-spacing: .06em;
   text-transform: uppercase;
+}
+
+.legal-page {
+  min-height: 100vh;
+  background:
+    linear-gradient(180deg, var(--color-ink) 0%, color-mix(in oklab, var(--color-ink) 92%, var(--color-moss)) 42%, var(--color-paper) 42%);
+}
+
+.legal-shell {
+  max-width: 860px;
+}
+
+.legal-hero {
+  padding: calc(var(--space-10) + 76px) 0 var(--space-8);
+  color: var(--color-paper);
+}
+
+.legal-hero h1 {
+  max-width: 760px;
+  margin: var(--space-3) 0;
+  color: var(--color-white);
+  font-family: var(--font-serif);
+  font-size: clamp(3rem, 10vw, 6.8rem);
+  font-weight: 600;
+  letter-spacing: 0;
+  line-height: .9;
+}
+
+.legal-hero p:not(.kicker) {
+  max-width: 680px;
+  color: color-mix(in oklab, var(--color-paper) 80%, transparent);
+  font-size: clamp(1.05rem, 2vw, 1.35rem);
+  line-height: 1.6;
+}
+
+.legal-hero small {
+  display: inline-flex;
+  margin-top: var(--space-5);
+  color: color-mix(in oklab, var(--color-paper) 60%, transparent);
+  font-family: var(--font-mono);
+  font-size: .78rem;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
+
+.legal-body {
+  padding: var(--space-8) 0 var(--space-11);
+}
+
+.legal-section {
+  border-top: 1px solid color-mix(in oklab, var(--color-ink) 18%, transparent);
+  padding: var(--space-6) 0;
+}
+
+.legal-section h2 {
+  margin: 0 0 var(--space-3);
+  color: var(--color-ink);
+  font-family: var(--font-serif);
+  font-size: clamp(1.8rem, 4vw, 3rem);
+  font-weight: 600;
+  letter-spacing: 0;
+  line-height: 1;
+}
+
+.legal-section p {
+  margin: 0;
+  color: color-mix(in oklab, var(--color-ink) 72%, transparent);
+  font-size: 1.02rem;
+  line-height: 1.75;
+}
+
+.legal-section p + p {
+  margin-top: var(--space-3);
 }
 
 .reveal {
@@ -2252,7 +2236,7 @@ svg {
     display: none;
   }
 
-  .models-layout,
+  .pricing-top,
   .control-layout {
     gap: 54px;
   }
@@ -2337,21 +2321,21 @@ svg {
     column-gap: 30px;
   }
 
-  .models-layout,
+  .pricing-top,
   .control-layout,
   .privacy-layout {
     grid-template-columns: 1fr;
     gap: 64px;
   }
 
-  .models-copy,
+  .pricing-summary,
   .control-copy,
   .privacy-copy {
     max-width: 720px;
   }
 
-  .model-console {
-    max-width: 800px;
+  .pricing-summary {
+    justify-self: stretch;
   }
 
   .control-panel {
@@ -2420,22 +2404,15 @@ svg {
     border-radius: var(--radius-nav) var(--radius-nav) 0 0;
   }
 
-  .model-bar {
+  .status-bar {
     align-items: stretch;
     flex-direction: column;
     gap: 9px;
     padding: 12px 14px;
   }
 
-  .model-switch {
+  .trial-pill {
     width: 100%;
-  }
-
-  .model-menu {
-    top: 79px;
-    right: 14px;
-    left: 14px;
-    width: auto;
   }
 
   .chat-body {
@@ -2466,7 +2443,7 @@ svg {
   .workflow-heading h2,
   .control-copy h2,
   .privacy-copy h2,
-  .models-copy h2 {
+  .pricing-top h2 {
     font-size: clamp(2.9rem, 13vw, 4.2rem);
   }
 
@@ -2511,27 +2488,46 @@ svg {
     margin-top: 42px;
   }
 
-  .console-primary {
-    min-height: 130px;
-    padding: 22px;
+  .pricing-top {
+    gap: 28px;
+    margin-bottom: 22px;
+  }
+
+  .pricing-board-header {
+    align-items: flex-start;
+    flex-direction: column;
+    padding: 18px;
+  }
+
+  .pricing-table {
+    min-width: 820px;
+  }
+
+  .pricing-table thead th {
+    height: 142px;
+    padding: 22px 18px;
+  }
+
+  .pricing-table thead strong {
+    font-size: 1.3rem;
+  }
+
+  .pricing-table tbody th,
+  .pricing-table tbody td {
+    padding: 16px 18px;
+  }
+
+  .pricing-footer {
+    padding: 18px;
+  }
+
+  .pricing-footer {
     align-items: flex-start;
     flex-direction: column;
   }
 
-  .console-primary strong {
-    white-space: normal;
-    word-break: break-word;
-  }
-
-  .console-fallbacks,
-  .console-settings,
-  .console-command {
-    padding-left: 20px;
-    padding-right: 20px;
-  }
-
-  .console-settings {
-    grid-template-columns: 1fr;
+  .pricing-footer .text-link {
+    width: 100%;
   }
 
   .workflow-grid {
@@ -2613,7 +2609,7 @@ svg {
   }
 
   .footer-links {
-    grid-template-columns: 1fr 1fr;
+    grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
   }
 
   .footer-bottom {
@@ -2691,7 +2687,3 @@ svg {
     transform: none;
   }
 }
-
-.console-settings i.value-40::after { width: 40%; }
-.console-settings i.value-68::after { width: 68%; }
-.console-settings i.value-82::after { width: 82%; }

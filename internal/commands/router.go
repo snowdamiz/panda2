@@ -15,6 +15,7 @@ import (
 	"github.com/sn0w/panda2/internal/admin"
 	"github.com/sn0w/panda2/internal/alerts"
 	"github.com/sn0w/panda2/internal/assistant"
+	"github.com/sn0w/panda2/internal/billing"
 	"github.com/sn0w/panda2/internal/composed"
 	contextsvc "github.com/sn0w/panda2/internal/context"
 	"github.com/sn0w/panda2/internal/feedback"
@@ -45,6 +46,8 @@ type Router struct {
 	feedback    *feedback.Service
 	scheduler   *scheduler.Service
 	alerts      *alerts.Service
+	billing     *billing.Service
+	data        *repository.GuildDataRepository
 	setup       SetupChecker
 	tools       *toolsvc.Executor
 	rateLimit   *ratelimit.Limiter
@@ -102,7 +105,7 @@ func (access helpAccess) composedTools() bool {
 const baseHelpMessage = "### Panda Help\n\n" +
 	"**Chat naturally**\n" +
 	"- Mention `Panda` in a normal message: `Panda is this true?`\n" +
-	"- Panda checks intent before replying, so casual mentions do not always trigger it.\n\n" +
+	"- Casual mentions may not trigger a reply.\n\n" +
 	"**Music**\n" +
 	"- Join a voice channel, then say `Panda play <song>`.\n" +
 	"- Natural controls: `pause`, `resume`, `skip`, `stop`, `queue`, `clear queue`, `now playing`.\n\n" +
@@ -181,6 +184,16 @@ func (r *Router) WithAlertService(alertService *alerts.Service) *Router {
 	return r
 }
 
+func (r *Router) WithBilling(billingService *billing.Service) *Router {
+	r.billing = billingService
+	return r
+}
+
+func (r *Router) WithDataRepository(dataRepository *repository.GuildDataRepository) *Router {
+	r.data = dataRepository
+	return r
+}
+
 func (r *Router) WithSetupChecker(checker SetupChecker) *Router {
 	r.setup = checker
 	return r
@@ -199,14 +212,16 @@ func (r *Router) Handle(ctx context.Context, request Request) Response {
 		return r.handleHelp(ctx, request)
 	case "poll":
 		return r.handlePoll(request)
-	case "admin":
-		return r.handleAdmin(ctx, request)
-	case "ops":
-		return r.handleOps(ctx, request)
+	case "admin", "ops", "schedule", "schedules":
+		return adminDisabledResponse()
+	case "billing":
+		return r.handleBilling(ctx, request)
+	case "support":
+		return r.handleSupport(ctx, request)
+	case "data":
+		return r.handleData(ctx, request)
 	case "reminder", "reminders":
 		return r.handleReminder(ctx, request)
-	case "schedule", "schedules":
-		return r.handleSchedule(ctx, request)
 	case "ask":
 		return r.handleAsk(ctx, request, "ask")
 	case "chat":
@@ -225,7 +240,7 @@ func (r *Router) handleHelp(ctx context.Context, request Request) Response {
 		Presentation: Presentation{
 			Title:  "Panda Help",
 			Accent: AccentInfo,
-			Footer: "Open-source Discord assistant",
+			Footer: "Hosted Discord assistant",
 		},
 		Actions: []Action{
 			{Label: "Commands", URL: pandaCommandsURL},
@@ -235,12 +250,19 @@ func (r *Router) handleHelp(ctx context.Context, request Request) Response {
 	}
 }
 
-func (r *Router) helpMessage(ctx context.Context, request Request) string {
-	access := r.helpAccess(ctx, request)
-	if !access.elevated() {
-		return regularHelpMessage
+func adminDisabledResponse() Response {
+	return Response{
+		Content:   "Panda admin and moderation controls are disabled in this build.",
+		Ephemeral: true,
+		Presentation: Presentation{
+			Title:  "Admin controls disabled",
+			Accent: AccentWarning,
+		},
 	}
-	return elevatedHelpMessage(access)
+}
+
+func (r *Router) helpMessage(ctx context.Context, request Request) string {
+	return regularHelpMessage
 }
 
 func (r *Router) handlePoll(request Request) Response {
@@ -296,7 +318,8 @@ func elevatedHelpMessage(access helpAccess) string {
 			builder.WriteString("- `/admin member-role action:add|remove user:@User role:@Role` - assign Discord roles to users\n")
 			builder.WriteString("- `/admin tool action:list|add|remove tool_name:<tool> role:@Role` - role tool grants\n")
 			builder.WriteString("- `/admin channel action:list|allow|deny|remove channel:#Channel`\n")
-			builder.WriteString("- `/admin model model:<response> classifier_model:<classifier> ...` - model routing, fallbacks, temperature, tokens, and tools\n")
+			builder.WriteString("- `/admin behavior answer_length:brief|standard|detailed tool_policy:<policy>` - response length and tool access\n")
+			builder.WriteString("- `/admin billing` or `/billing` - plan, renewal, and quota status\n")
 			builder.WriteString("- Policies: `off`, `read_only`, `assistive`, `admin_only`, `moderator`, `write_confirmed`, `owner_ops`\n")
 			builder.WriteString("- `/admin prompt prompt:<text> dry_run:<bool>` - server instructions; omit `prompt` for modal\n")
 			builder.WriteString("- `/admin audit` - recent privileged changes\n")
@@ -346,6 +369,9 @@ func (r *Router) HandleNaturalMessage(ctx context.Context, request Request) Resp
 	}
 	if !r.canHandleNaturalMessage(ctx, request) {
 		return Response{}
+	}
+	if denied := r.checkAIUsageAvailable(ctx, request); denied.Content != "" {
+		return denied
 	}
 	decision, err := r.assistant.ClassifyNaturalMessage(ctx, assistant.NaturalMessageRequest{
 		GuildID:          request.GuildID,
@@ -406,7 +432,7 @@ func (r *Router) handleOps(ctx context.Context, request Request) Response {
 		if err != nil {
 			return Response{Content: "Ops health check failed.", Ephemeral: true}
 		}
-		return Response{Content: fmt.Sprintf("Health: sqlite=%s discord=%s shards=%s openrouter=%s queued_jobs=%d guild_configs=%d draining=%t incident=%t data_dir=`%s`.", health.SQLite, health.Discord, health.Shards, health.OpenRouter, health.QueuedJobs, health.ConfiguredGuildCount, health.Draining, health.Incident, health.DataDir), Ephemeral: true}
+		return Response{Content: fmt.Sprintf("Health: sqlite=%s discord=%s shards=%s ai_service=%s queued_jobs=%d guild_configs=%d draining=%t incident=%t data_dir=`%s`.", health.SQLite, health.Discord, health.Shards, health.AIService, health.QueuedJobs, health.ConfiguredGuildCount, health.Draining, health.Incident, health.DataDir), Ephemeral: true}
 	case "guilds":
 		health, err := r.ops.Health(ctx)
 		if err != nil {
@@ -445,6 +471,262 @@ func (r *Router) handleOps(ctx context.Context, request Request) Response {
 	}
 }
 
+func (r *Router) handleSupport(ctx context.Context, request Request) Response {
+	if request.GuildID == "" {
+		return Response{Content: "Support is managed per Discord server. Run this inside the server where Panda is installed.", Ephemeral: true}
+	}
+	lines := []string{
+		"Support bundle (safe to share with Panda support):",
+		"- Guild ID: `" + request.GuildID + "`",
+		"- User ID: `" + firstNonEmpty(request.UserID, "unknown") + "`",
+		"- Request ID: `" + firstNonEmpty(request.RequestID, "not provided") + "`",
+		"- Raw prompts/messages: not included",
+	}
+	if r.billing != nil {
+		if entitlement, err := r.billing.Resolve(ctx, request.GuildID); err == nil {
+			lines = append(lines,
+				fmt.Sprintf("- Plan: `%s`", entitlement.Plan.DisplayName),
+				fmt.Sprintf("- Subscription: `%s`", entitlement.Status),
+				fmt.Sprintf("- AI responses: `%s`", entitlement.UsageLine(billing.MetricAIResponse)),
+				fmt.Sprintf("- Web searches: `%s`", entitlement.UsageLine(billing.MetricWebSearch)),
+				fmt.Sprintf("- Knowledge storage: `%s`", entitlement.UsageLine(billing.MetricKnowledgeStorageByte)),
+			)
+		} else if errors.Is(err, billing.ErrNoSubscription) {
+			lines = append(lines, "- Subscription: `none`")
+		} else {
+			lines = append(lines, "- Subscription: `lookup failed`")
+		}
+	}
+	if r.data != nil {
+		if summary, err := r.data.Summary(ctx, request.GuildID); err == nil {
+			lines = append(lines,
+				fmt.Sprintf("- Knowledge documents: `%d`", summary.KnowledgeDocuments),
+				fmt.Sprintf("- Conversation records: `%d conversations / %d messages`", summary.Conversations, summary.Messages),
+				fmt.Sprintf("- Memory consent records: `%d`", summary.MemoryConsentRecords),
+				fmt.Sprintf("- Billing records: `%d account(s) / %d subscription(s)`", summary.CustomerAccounts, summary.Subscriptions),
+			)
+		}
+	}
+	if r.setup != nil {
+		if setup, err := r.setup.CheckSetup(ctx, request.GuildID, request.ChannelID); err == nil {
+			lines = append(lines, fmt.Sprintf("- Discord connected: `%t`", setup.Connected))
+			if len(setup.Warnings) > 0 {
+				lines = append(lines, fmt.Sprintf("- Setup warnings: `%d`", len(setup.Warnings)))
+			}
+		}
+	}
+	return Response{Content: strings.Join(lines, "\n"), Ephemeral: true, Presentation: Presentation{Title: "Panda Support", Accent: AccentInfo}}
+}
+
+func (r *Router) handleData(ctx context.Context, request Request) Response {
+	if request.GuildID == "" {
+		return Response{Content: "Data commands must be run inside a Discord server.", Ephemeral: true}
+	}
+	if r.data == nil {
+		return Response{Content: "Data export and deletion are not configured for this runtime.", Ephemeral: true, Presentation: Presentation{Title: "Data unavailable", Accent: AccentWarning}}
+	}
+	action := strings.ToLower(strings.TrimSpace(firstNonEmpty(request.Subcommand, request.Options["action"])))
+	if action == "" {
+		action = "export"
+	}
+	switch action {
+	case "export":
+		if denied := r.ensureDataPermission(ctx, request, false); denied.Content != "" {
+			return denied
+		}
+		summary, err := r.data.Summary(ctx, request.GuildID)
+		if err != nil {
+			return Response{Content: "Data export could not be generated.", Ephemeral: true}
+		}
+		return Response{Content: renderDataSummary(summary), Ephemeral: true, Presentation: Presentation{Title: "Panda Data Export", Accent: AccentInfo}}
+	case "delete":
+		return adminDisabledResponse()
+	default:
+		return Response{Content: "Data action must be `export` or `delete`.", Ephemeral: true}
+	}
+}
+
+func (r *Router) ensureDataPermission(ctx context.Context, request Request, write bool) Response {
+	if request.IsOwner || request.IsGuildAdmin {
+		return Response{}
+	}
+	if r.admin == nil {
+		return Response{Content: "You do not have permission to manage Panda data.", Ephemeral: true}
+	}
+	check := r.admin.CanReadConfig
+	denial := "You do not have permission to export Panda data."
+	if write {
+		check = r.admin.CanWriteConfig
+		denial = "You do not have permission to delete Panda data."
+	}
+	allowed, err := check(ctx, assistantAccessRequest(request))
+	if err != nil {
+		return Response{Content: "Permission lookup failed. Please try again later.", Ephemeral: true}
+	}
+	if !allowed {
+		return Response{Content: denial, Ephemeral: true}
+	}
+	return Response{}
+}
+
+func (r *Router) handleBilling(ctx context.Context, request Request) Response {
+	if request.GuildID == "" {
+		return Response{Content: "Billing is managed per Discord server.", Ephemeral: true}
+	}
+	if r.billing == nil {
+		return Response{Content: "Billing is not configured for this runtime.", Ephemeral: true, Presentation: Presentation{Title: "Billing unavailable", Accent: AccentWarning}}
+	}
+	action := strings.ToLower(strings.TrimSpace(firstNonEmpty(request.Subcommand, request.Options["action"])))
+	switch action {
+	case "upgrade", "plan", "checkout":
+		return r.handleBillingCheckout(ctx, request, billing.CheckoutKindPlan)
+	case "portal", "manage", "cancel":
+		return r.handleBillingPortal(ctx, request)
+	}
+
+	entitlement, err := r.billing.Resolve(ctx, request.GuildID)
+	if err != nil && !errors.Is(err, billing.ErrNoSubscription) {
+		return Response{Content: "Billing status could not be loaded.", Ephemeral: true, Presentation: Presentation{Title: "Billing lookup failed", Accent: AccentWarning}}
+	}
+	if errors.Is(err, billing.ErrNoSubscription) {
+		content := "No Panda subscription is active for this server."
+		content += "\nUse `/billing action:upgrade plan:starter` to create a checkout session."
+		return Response{Content: content, Ephemeral: true, Presentation: Presentation{Title: "No active subscription", Accent: AccentWarning}}
+	}
+	content := entitlement.SummaryText()
+	content += "\n\nUse `/billing action:upgrade plan:plus` to change plans."
+	content += "\nUse `/billing action:portal` to manage payment details or cancellation."
+	return Response{Content: content, Ephemeral: true, Presentation: Presentation{Title: "Panda Billing", Accent: AccentInfo}}
+}
+
+func (r *Router) handleBillingCheckout(ctx context.Context, request Request, kind billing.CheckoutKind) Response {
+	checkout := billing.CheckoutRequest{
+		GuildID:         request.GuildID,
+		ActorUserID:     request.UserID,
+		ActorIsOperator: request.IsOwner,
+		ActorCanClaim:   request.IsGuildAdmin,
+		Kind:            kind,
+		CustomerEmail:   request.Options["email"],
+	}
+	var label string
+	switch kind {
+	case billing.CheckoutKindPlan:
+		plan, ok := billing.NormalizePlan(request.Options["plan"])
+		if !ok || plan == billing.PlanTrial {
+			return Response{Content: "Choose a paid plan: `starter`, `plus`, `pro`, or `business`.", Ephemeral: true, Presentation: Presentation{Title: "Choose a plan", Accent: AccentWarning}}
+		}
+		limits, _ := billing.LimitsForPlan(plan)
+		checkout.Plan = plan
+		label = limits.DisplayName
+	default:
+		return Response{Content: "Unsupported billing checkout action.", Ephemeral: true}
+	}
+	session, err := r.billing.CreateCheckoutSession(ctx, checkout)
+	if err != nil {
+		return billingCheckoutErrorResponse(err)
+	}
+	return Response{
+		Content:   fmt.Sprintf("Stripe checkout is ready for `%s`. Panda will apply the plan only after the verified Stripe webhook arrives.", label),
+		Ephemeral: true,
+		Presentation: Presentation{
+			Title:  "Checkout ready",
+			Accent: AccentSuccess,
+		},
+		Actions: []Action{{Label: "Open checkout", URL: session.URL}},
+	}
+}
+
+func (r *Router) handleBillingPortal(ctx context.Context, request Request) Response {
+	if denied := r.ensureBillingManager(ctx, request); denied.Content != "" {
+		return denied
+	}
+	session, err := r.billing.CreatePortalSession(ctx, billing.PortalRequest{
+		GuildID:         request.GuildID,
+		ActorUserID:     request.UserID,
+		ActorIsOperator: request.IsOwner,
+	})
+	if err != nil {
+		return billingCheckoutErrorResponse(err)
+	}
+	return Response{
+		Content:      "Stripe billing portal is ready. Use it to update payment details, change the active subscription, or cancel renewal.",
+		Ephemeral:    true,
+		Presentation: Presentation{Title: "Billing portal ready", Accent: AccentInfo},
+		Actions:      []Action{{Label: "Open billing portal", URL: session.URL}},
+	}
+}
+
+func (r *Router) ensureBillingManager(ctx context.Context, request Request) Response {
+	allowed, err := r.billing.CanManageBilling(ctx, request.GuildID, request.UserID, request.IsOwner)
+	if err != nil {
+		return Response{Content: "Billing ownership could not be verified.", Ephemeral: true, Presentation: Presentation{Title: "Billing lookup failed", Accent: AccentWarning}}
+	}
+	if !allowed {
+		return Response{Content: "Only the current billing owner can change plans or open the billing portal.", Ephemeral: true, Presentation: Presentation{Title: "Billing owner required", Accent: AccentWarning}}
+	}
+	return Response{}
+}
+
+func billingCheckoutErrorResponse(err error) Response {
+	switch {
+	case errors.Is(err, billing.ErrStripeNotConfigured):
+		return Response{Content: "Stripe billing is not configured for this runtime.", Ephemeral: true, Presentation: Presentation{Title: "Checkout unavailable", Accent: AccentWarning}}
+	case errors.Is(err, billing.ErrStripeCustomerMissing):
+		return Response{Content: "Stripe does not have a customer record for this server yet. Complete checkout first, then run `/billing action:portal` after the webhook updates Panda.", Ephemeral: true, Presentation: Presentation{Title: "Portal unavailable", Accent: AccentWarning}}
+	case errors.Is(err, billing.ErrBillingAccess):
+		return Response{Content: "Only the current billing owner can manage Panda billing for this server.", Ephemeral: true, Presentation: Presentation{Title: "Billing owner required", Accent: AccentWarning}}
+	case errors.Is(err, billing.ErrUnknownPlan):
+		return Response{Content: "Choose a paid plan: `starter`, `plus`, `pro`, or `business`.", Ephemeral: true, Presentation: Presentation{Title: "Choose a plan", Accent: AccentWarning}}
+	default:
+		return Response{Content: "Billing checkout could not be created. Please try again later or contact Panda support.", Ephemeral: true, Presentation: Presentation{Title: "Checkout failed", Accent: AccentWarning}}
+	}
+}
+
+func renderDataSummary(summary repository.GuildDataSummary) string {
+	lines := []string{
+		"Safe Panda data export summary:",
+		fmt.Sprintf("- Guild ID: `%s`", summary.GuildID),
+		fmt.Sprintf("- Knowledge: `%d document(s), %d chunk(s), %s`", summary.KnowledgeDocuments, summary.KnowledgeChunks, formatDataBytes(summary.KnowledgeStorageBytes)),
+		fmt.Sprintf("- Conversations: `%d conversation(s), %d message metadata row(s), %d Discord event(s), %d attachment record(s)`", summary.Conversations, summary.Messages, summary.DiscordEvents, summary.Attachments),
+		fmt.Sprintf("- Memory consent records: `%d`", summary.MemoryConsentRecords),
+		fmt.Sprintf("- Billing: `%d account(s), %d subscription(s), %d invoice/payment event(s)`", summary.CustomerAccounts, summary.Subscriptions, summary.InvoicePaymentEvents),
+		fmt.Sprintf("- Usage and cost: `%d usage period(s), %d reservation(s), %d cost ledger event(s)`", summary.UsagePeriods, summary.UsageReservations, summary.CostLedgerEvents),
+		fmt.Sprintf("- Automations: `%d schedule(s), %d alert rule(s), %d composed tool(s), %d composed run(s)`", summary.Schedules, summary.AlertRules, summary.ComposedTools, summary.ComposedToolRuns),
+		fmt.Sprintf("- Music: `%d queue item(s), %d playlist(s)`", summary.MusicQueueItems, summary.MusicPlaylists),
+		"- Raw prompts/messages and provider diagnostics are not included in this Discord export.",
+	}
+	if summary.CurrentSubscriptionPlan != "" || summary.CurrentSubscriptionState != "" {
+		lines = append(lines, fmt.Sprintf("- Current subscription: `%s / %s`", firstNonEmpty(summary.CurrentSubscriptionPlan, "none"), firstNonEmpty(summary.CurrentSubscriptionState, "none")))
+	}
+	return strings.Join(lines, "\n")
+}
+
+func renderDataDeletion(summary repository.GuildDataSummary) string {
+	keys := repository.SortedDeletionKeys(summary.Deleted)
+	if len(keys) == 0 {
+		return "No matching Panda data rows were found for deletion."
+	}
+	lines := []string{"Deleted Panda data rows:"}
+	for _, key := range keys {
+		lines = append(lines, fmt.Sprintf("- `%s`: `%d`", key, summary.Deleted[key]))
+	}
+	lines = append(lines, "Audit logs were retained.")
+	return strings.Join(lines, "\n")
+}
+
+func formatDataBytes(value int64) string {
+	const unit = 1024
+	if value < unit {
+		return fmt.Sprintf("%d B", value)
+	}
+	div, exp := int64(unit), 0
+	for n := value / unit; n >= unit; n /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %ciB", float64(value)/float64(div), "KMGTPE"[exp])
+}
+
 func (r *Router) handleAdmin(ctx context.Context, request Request) Response {
 	if request.GuildID == "" {
 		return Response{Content: "Admin commands must be run inside a Discord server.", Ephemeral: true}
@@ -481,8 +763,8 @@ func (r *Router) handleAdmin(ctx context.Context, request Request) Response {
 		return r.handleAdminToolAccess(ctx, request)
 	case "channel", "channels":
 		return r.handleAdminChannelAccess(ctx, request)
-	case "model":
-		return r.handleAdminModel(ctx, request)
+	case "behavior":
+		return r.handleAdminBehavior(ctx, request)
 	case "prompt":
 		return r.handleAdminPrompt(ctx, request)
 	case "soul":
@@ -491,6 +773,8 @@ func (r *Router) handleAdmin(ctx context.Context, request Request) Response {
 		return r.handleAdminAudit(ctx, request)
 	case "status":
 		return r.handleAdminStatus(ctx, request)
+	case "billing":
+		return r.handleBilling(ctx, request)
 	case "setup":
 		return r.handleAdminSetup(ctx, request)
 	case "alerts", "alert":
@@ -805,19 +1089,19 @@ func renderChannelRules(rules []store.GuildChannelRule) string {
 	return strings.Join(lines, "\n")
 }
 
-func (r *Router) handleAdminModel(ctx context.Context, request Request) Response {
-	settings, parseErr := modelSettingsFromOptions(request.Options)
+func (r *Router) handleAdminBehavior(ctx context.Context, request Request) Response {
+	settings, parseErr := behaviorSettingsFromOptions(request.Options)
 	if parseErr != nil {
 		return Response{Content: parseErr.Error(), Ephemeral: true}
 	}
 	if dryRunRequested(request) {
-		return dryRunResponse("model settings would be updated. %s", renderModelSettingsDryRun(settings))
+		return dryRunResponse("behavior settings would be updated. %s", renderBehaviorSettingsDryRun(settings))
 	}
-	config, err := r.admin.ConfigureModel(ctx, request.GuildID, request.UserID, settings)
+	config, err := r.admin.ConfigureBehavior(ctx, request.GuildID, request.UserID, settings)
 	if err != nil {
-		return Response{Content: "Model update failed.", Ephemeral: true}
+		return Response{Content: "Behavior update failed.", Ephemeral: true}
 	}
-	return Response{Content: fmt.Sprintf("Model settings updated. Default `%s`, classifier `%s`, %d fallback model(s), temperature %.2f, max response %d tokens, tool policy `%s`.", config.DefaultModel, classifierModelDisplay(config), fallbackModelCount(config.FallbackModels), config.Temperature, config.MaxResponseTokens, config.ToolPolicy), Ephemeral: true}
+	return Response{Content: fmt.Sprintf("Behavior settings updated. Answer length `%s`, tool policy `%s`.", answerLengthFromMaxTokens(config.MaxResponseTokens), config.ToolPolicy), Ephemeral: true}
 }
 
 func (r *Router) handleAdminPrompt(ctx context.Context, request Request) Response {
@@ -916,6 +1200,10 @@ func (r *Router) handleAsk(ctx context.Context, request Request, command string)
 	if denied := r.ensureBudgetAvailable(ctx, request); denied.Content != "" {
 		return denied
 	}
+	reservation, denied := r.beginAIUsage(ctx, request)
+	if denied.Content != "" {
+		return denied
+	}
 
 	toolFilter := r.toolFilter(ctx, request)
 	invocationContext := r.invocationContext(ctx, request)
@@ -936,11 +1224,14 @@ func (r *Router) handleAsk(ctx context.Context, request Request, command string)
 		RequireExplicitComposedTools: toolFilter.requireExplicitComposed,
 	})
 	if err != nil {
+		r.releaseAIUsage(ctx, reservation)
 		return assistantError(err)
 	}
 	if strings.TrimSpace(answer.Content) == "" {
-		return Response{Content: "The model returned an empty response.", Ephemeral: true}
+		r.releaseAIUsage(ctx, reservation)
+		return Response{Content: "Panda returned an empty response. Please try again.", Ephemeral: true}
 	}
+	r.commitAIUsage(ctx, reservation)
 	return r.responseFromAssistantAnswer(ctx, request, answer, "", "")
 }
 
@@ -973,6 +1264,10 @@ func (r *Router) handleChatModeWithAccess(ctx context.Context, request Request, 
 	if denied := r.ensureBudgetAvailable(ctx, request); denied.Content != "" {
 		return denied
 	}
+	reservation, denied := r.beginAIUsage(ctx, request)
+	if denied.Content != "" {
+		return denied
+	}
 
 	chatChannelID := request.ChannelID
 	threadID := ""
@@ -985,6 +1280,7 @@ func (r *Router) handleChatModeWithAccess(ctx context.Context, request Request, 
 			Title:     chatThreadTitle(question),
 		})
 		if err != nil {
+			r.releaseAIUsage(ctx, reservation)
 			return Response{Content: "I could not create a chat thread here. Please check my thread permissions.", Ephemeral: true}
 		}
 		chatChannelID = thread.ID
@@ -1016,8 +1312,10 @@ func (r *Router) handleChatModeWithAccess(ctx context.Context, request Request, 
 		RequireExplicitComposedTools: toolFilter.requireExplicitComposed,
 	})
 	if err != nil {
+		r.releaseAIUsage(ctx, reservation)
 		return assistantError(err)
 	}
+	r.commitAIUsage(ctx, reservation)
 	return r.responseFromAssistantAnswer(ctx, request, answer, threadID, threadName)
 }
 
@@ -1059,6 +1357,9 @@ func (r *Router) handleTask(ctx context.Context, request Request) Response {
 		RequireExplicitComposedTools: toolFilter.requireExplicitComposed,
 	}
 	if shouldBackgroundTask(request, input) {
+		if denied := r.checkAIUsageAvailable(ctx, request); denied.Content != "" {
+			return denied
+		}
 		return Response{
 			Content:      "Queued long summary. The result will replace this response when it is ready.",
 			Presentation: Presentation{Title: "Summary queued", Accent: AccentInfo},
@@ -1069,6 +1370,16 @@ func (r *Router) handleTask(ctx context.Context, request Request) Response {
 }
 
 func (r *Router) HandleBackgroundTask(ctx context.Context, task BackgroundTask) Response {
+	reservation, denied := r.beginAIUsage(ctx, Request{
+		RequestID: task.RequestID,
+		Command:   task.Command,
+		GuildID:   task.GuildID,
+		ChannelID: task.ChannelID,
+		UserID:    task.UserID,
+	})
+	if denied.Content != "" {
+		return denied
+	}
 	answer, err := r.assistant.CompleteTask(ctx, assistant.TaskRequest{
 		RequestID:                    task.RequestID,
 		GuildID:                      task.GuildID,
@@ -1090,8 +1401,10 @@ func (r *Router) HandleBackgroundTask(ctx context.Context, task BackgroundTask) 
 		RequireExplicitComposedTools: task.RequireExplicitComposedTools,
 	})
 	if err != nil {
+		r.releaseAIUsage(ctx, reservation)
 		return assistantError(err)
 	}
+	r.commitAIUsage(ctx, reservation)
 	return r.responseFromAssistantAnswer(ctx, Request{
 		RequestID: task.RequestID,
 		Command:   task.Command,
@@ -1104,6 +1417,9 @@ func (r *Router) HandleBackgroundTask(ctx context.Context, task BackgroundTask) 
 func (r *Router) HandleToolConfirmation(ctx context.Context, request ToolConfirmationRequest) Response {
 	if request.Request.GuildID == "" {
 		return Response{Content: "This confirmation must be used inside a Discord server.", Ephemeral: true}
+	}
+	if adminToolConfirmationDisabled(request.Action) {
+		return adminDisabledResponse()
 	}
 	switch request.Action {
 	case toolActionKnowledgeDelete:
@@ -1353,6 +1669,30 @@ func (r *Router) HandleToolConfirmation(ctx context.Context, request ToolConfirm
 		return Response{Content: fmt.Sprintf("Rolled `%s` back to version %d.", result.Tool, result.Version), Ephemeral: true}
 	default:
 		return Response{Content: "That confirmation is no longer supported.", Ephemeral: true}
+	}
+}
+
+func adminToolConfirmationDisabled(action string) bool {
+	switch action {
+	case toolActionKnowledgeDelete,
+		toolActionBudgetLimitSet,
+		toolActionBudgetLimitRemove,
+		toolActionRolePermissionAdd,
+		toolActionRolePermissionRemove,
+		toolActionRoleProfileAdd,
+		toolActionRoleProfileRemove,
+		toolActionDiscordRoleCreate,
+		toolActionMemberRoleAdd,
+		toolActionMemberRoleRemove,
+		toolActionToolAccessAdd,
+		toolActionToolAccessRemove,
+		toolActionChannelRuleSet,
+		toolActionChannelRuleRemove,
+		toolActionComposedToolApprove,
+		toolActionComposedToolRollback:
+		return true
+	default:
+		return false
 	}
 }
 
@@ -1620,40 +1960,15 @@ func (r *Router) toolAccess(ctx context.Context, request Request, policy string)
 }
 
 func (r *Router) allowedToolPermissions(ctx context.Context, request Request) map[string]struct{} {
-	if r.admin != nil {
-		hasControl, err := r.admin.HasGuildControl(ctx, assistantAccessRequest(request))
-		if err == nil && hasControl {
-			permissions := permissionsFromNames(admin.GuildControlPermissionNames())
-			if request.IsOwner {
-				permissions[admin.PermissionOwnerOps] = struct{}{}
-			}
-			return permissions
-		}
-	}
 	permissions := map[string]struct{}{}
+	if r.admin == nil {
+		return permissions
+	}
 	r.addPermissionIfAllowed(ctx, request, permissions, admin.PermissionAssistantUse, r.admin.CanUseAssistant)
 	r.addPermissionIfAllowed(ctx, request, permissions, admin.PermissionAssistantUseThreads, r.admin.CanUseThreads)
 	r.addPermissionIfAllowed(ctx, request, permissions, admin.PermissionAssistantAttachments, r.admin.CanUseAttachments)
 	r.addPermissionIfAllowed(ctx, request, permissions, admin.PermissionAssistantMemoryRead, r.admin.CanReadMemory)
 	r.addPermissionIfAllowed(ctx, request, permissions, admin.PermissionAssistantWebSearch, r.admin.CanUseWebSearch)
-	r.addPermissionIfAllowed(ctx, request, permissions, admin.PermissionAssistantSoulWrite, r.admin.CanWriteSoul)
-	r.addPermissionIfAllowed(ctx, request, permissions, admin.PermissionModerationUse, r.admin.CanUseModeration)
-	r.addPermissionIfAllowed(ctx, request, permissions, admin.PermissionAdminConfigRead, r.admin.CanReadConfig)
-	r.addPermissionIfAllowed(ctx, request, permissions, admin.PermissionAdminConfigWrite, r.admin.CanWriteConfig)
-	r.addPermissionIfAllowed(ctx, request, permissions, admin.PermissionAdminUsageRead, r.admin.CanReadUsage)
-	r.addPermissionIfAllowed(ctx, request, permissions, admin.PermissionAdminAuditRead, r.admin.CanReadAudit)
-	r.addPermissionIfAllowed(ctx, request, permissions, admin.PermissionAdminMemoryManage, r.admin.CanManageMemory)
-	r.addPermissionIfAllowed(ctx, request, permissions, admin.PermissionToolComposeDraft, r.admin.CanDraftComposedTool)
-	r.addPermissionIfAllowed(ctx, request, permissions, admin.PermissionToolComposeApprove, r.admin.CanApproveComposedTool)
-	r.addPermissionIfAllowed(ctx, request, permissions, admin.PermissionToolComposeInvoke, r.admin.CanInvokeComposedTool)
-	r.addPermissionIfAllowed(ctx, request, permissions, admin.PermissionToolComposeAudit, r.admin.CanAuditComposedTool)
-	r.addPermissionIfAllowed(ctx, request, permissions, admin.PermissionOwnerOps, r.admin.CanUseOwnerOps)
-	if _, ok := permissions[admin.PermissionToolComposeInvoke]; !ok {
-		filter := r.toolFilter(ctx, request)
-		if filter.requireExplicitComposed && len(filter.allowed) > 0 {
-			permissions[admin.PermissionToolComposeInvoke] = struct{}{}
-		}
-	}
 	return permissions
 }
 
@@ -1714,6 +2029,64 @@ func (r *Router) ensureBudgetAvailable(ctx context.Context, request Request) Res
 	return Response{}
 }
 
+func (r *Router) checkAIUsageAvailable(ctx context.Context, request Request) Response {
+	if r.billing == nil || request.GuildID == "" {
+		return Response{}
+	}
+	_, err := r.billing.Check(ctx, request.GuildID, billing.MetricAIResponse, 1)
+	return billingErrorResponse(err)
+}
+
+func (r *Router) beginAIUsage(ctx context.Context, request Request) (billing.Reservation, Response) {
+	if r.billing == nil || request.GuildID == "" {
+		return billing.Reservation{}, Response{}
+	}
+	reservation, err := r.billing.BeginUsage(ctx, request.GuildID, billing.MetricAIResponse, 1)
+	return reservation, billingErrorResponse(err)
+}
+
+func (r *Router) commitAIUsage(ctx context.Context, reservation billing.Reservation) {
+	if r.billing != nil && reservation.ID != "" {
+		_ = r.billing.CommitUsage(ctx, reservation)
+	}
+}
+
+func (r *Router) releaseAIUsage(ctx context.Context, reservation billing.Reservation) {
+	if r.billing != nil && reservation.ID != "" {
+		_ = r.billing.ReleaseUsage(ctx, reservation)
+	}
+}
+
+func billingErrorResponse(err error) Response {
+	if err == nil {
+		return Response{}
+	}
+	var quotaErr billing.QuotaError
+	if errors.As(err, &quotaErr) {
+		content := fmt.Sprintf("This server has used its included %s for the current billing period.", billing.MetricLabel(quotaErr.Metric))
+		content += "\nThe billing owner can run `/billing action:upgrade plan:plus` to move to a higher tier."
+		return Response{Content: content, Ephemeral: true, Presentation: Presentation{Title: "Usage limit reached", Accent: AccentWarning}}
+	}
+	if errors.Is(err, billing.ErrNoSubscription) {
+		return Response{Content: "This server does not have an active Panda subscription. Use `/billing` to start a trial or choose a plan.", Ephemeral: true, Presentation: Presentation{Title: "Subscription required", Accent: AccentWarning}}
+	}
+	if errors.Is(err, billing.ErrReadOnly) {
+		return Response{Content: "This server's Panda subscription is read-only. Billing, help, export/delete, and support access remain available.", Ephemeral: true, Presentation: Presentation{Title: "Subscription read-only", Accent: AccentWarning}}
+	}
+	return Response{Content: "Billing status could not be checked. Please try again later.", Ephemeral: true, Presentation: Presentation{Title: "Billing check failed", Accent: AccentWarning}}
+}
+
+func billingErrorResponseIfBilling(err error) (Response, bool) {
+	if err == nil {
+		return Response{}, false
+	}
+	var quotaErr billing.QuotaError
+	if errors.As(err, &quotaErr) || errors.Is(err, billing.ErrNoSubscription) || errors.Is(err, billing.ErrReadOnly) {
+		return billingErrorResponse(err), true
+	}
+	return Response{}, false
+}
+
 func (r *Router) allowUser(userID string) Response {
 	if ok, retryAfter := r.rateLimit.Allow(userID); !ok {
 		return Response{Content: fmt.Sprintf("You are sending requests too quickly. Try again in %s.", retryAfter.Round(time.Second)), Ephemeral: true}
@@ -1724,12 +2097,12 @@ func (r *Router) allowUser(userID string) Response {
 func assistantError(err error) Response {
 	switch {
 	case errors.Is(err, llm.ErrNotConfigured):
-		return Response{Content: "I cannot answer yet because `OPENROUTER_API_KEY` is not configured.", Ephemeral: true, Presentation: Presentation{Title: "Assistant not configured", Accent: AccentWarning}}
+		return Response{Content: "I cannot answer yet because Panda's AI service is not configured.", Ephemeral: true, Presentation: Presentation{Title: "Assistant not configured", Accent: AccentWarning}}
 	case errors.Is(err, assistant.ErrAssistantDisabled):
 		return Response{Content: "Assistant responses are disabled for this server.", Ephemeral: true, Presentation: Presentation{Title: "Assistant disabled", Accent: AccentWarning}}
 	default:
 		slog.Warn("assistant request failed", slog.Any("err", err))
-		return Response{Content: "The model request failed. Please try again later.", Ephemeral: true, Presentation: Presentation{Title: "Model request failed", Accent: AccentDanger}}
+		return Response{Content: "Panda is having trouble with AI responses right now. Please try again later.", Ephemeral: true, Presentation: Presentation{Title: "AI response failed", Accent: AccentDanger}}
 	}
 }
 
@@ -1759,7 +2132,6 @@ func (r *Router) responseFromAssistantAnswer(ctx context.Context, request Reques
 			ChannelID: request.ChannelID,
 			UserID:    request.UserID,
 			Command:   firstNonEmpty(request.Command, "assistant"),
-			Model:     answer.Model,
 			Content:   response.Content,
 			Metadata: map[string]string{
 				"request_id":      request.RequestID,
@@ -1896,30 +2268,27 @@ func renderAudit(events []store.AuditEvent) string {
 	return security.SafeDiscordContent(builder.String())
 }
 
-func modelSettingsFromOptions(options map[string]string) (admin.ModelSettings, error) {
-	settings := admin.ModelSettings{
-		DefaultModel:    strings.TrimSpace(options["model"]),
-		ClassifierModel: strings.TrimSpace(options["classifier_model"]),
-	}
-
-	if raw, ok := options["fallback_models"]; ok {
-		settings.FallbackModelsSet = true
-		settings.FallbackModels = csvValues(raw)
-	}
+func behaviorSettingsFromOptions(options map[string]string) (admin.BehaviorSettings, error) {
+	settings := admin.BehaviorSettings{}
 
 	if raw := strings.TrimSpace(options["temperature"]); raw != "" {
 		value, err := strconv.ParseFloat(raw, 64)
 		if err != nil {
-			return admin.ModelSettings{}, fmt.Errorf("Provide a numeric `temperature` between 0 and 2.")
+			return admin.BehaviorSettings{}, fmt.Errorf("Provide a numeric `temperature` between 0 and 2.")
 		}
 		settings.Temperature = value
 		settings.TemperatureSet = true
 	}
 
+	if raw := strings.TrimSpace(options["answer_length"]); raw != "" {
+		settings.AnswerLength = raw
+		settings.AnswerLengthSet = true
+	}
+
 	if raw := firstNonEmpty(options["max_response_tokens"], options["max_tokens"]); strings.TrimSpace(raw) != "" {
 		value, err := strconv.Atoi(strings.TrimSpace(raw))
 		if err != nil {
-			return admin.ModelSettings{}, fmt.Errorf("Provide a numeric `max_response_tokens` value.")
+			return admin.BehaviorSettings{}, fmt.Errorf("Provide a numeric `max_response_tokens` value.")
 		}
 		settings.MaxResponseTokens = value
 		settings.MaxResponseTokensSet = true
@@ -1933,19 +2302,13 @@ func modelSettingsFromOptions(options map[string]string) (admin.ModelSettings, e
 	return settings, nil
 }
 
-func renderModelSettingsDryRun(settings admin.ModelSettings) string {
+func renderBehaviorSettingsDryRun(settings admin.BehaviorSettings) string {
 	var parts []string
-	if strings.TrimSpace(settings.DefaultModel) != "" {
-		parts = append(parts, fmt.Sprintf("default `%s`", settings.DefaultModel))
-	}
-	if strings.TrimSpace(settings.ClassifierModel) != "" {
-		parts = append(parts, fmt.Sprintf("classifier `%s`", settings.ClassifierModel))
-	}
-	if settings.FallbackModelsSet {
-		parts = append(parts, fmt.Sprintf("%d fallback model(s)", len(settings.FallbackModels)))
-	}
 	if settings.TemperatureSet {
 		parts = append(parts, fmt.Sprintf("temperature %.2f", settings.Temperature))
+	}
+	if settings.AnswerLengthSet {
+		parts = append(parts, fmt.Sprintf("answer length `%s`", settings.AnswerLength))
 	}
 	if settings.MaxResponseTokensSet {
 		parts = append(parts, fmt.Sprintf("max response %d tokens", settings.MaxResponseTokens))
@@ -1954,13 +2317,20 @@ func renderModelSettingsDryRun(settings admin.ModelSettings) string {
 		parts = append(parts, fmt.Sprintf("tool policy `%s`", settings.ToolPolicy))
 	}
 	if len(parts) == 0 {
-		return "No model setting changes were provided."
+		return "No behavior setting changes were provided."
 	}
 	return strings.Join(parts, ", ") + "."
 }
 
-func classifierModelDisplay(config store.GuildConfig) string {
-	return firstNonEmpty(config.ClassifierModel, config.DefaultModel)
+func answerLengthFromMaxTokens(tokens int) string {
+	switch {
+	case tokens <= 500:
+		return "brief"
+	case tokens >= 1600:
+		return "detailed"
+	default:
+		return "standard"
+	}
 }
 
 func dryRunRequested(request Request) bool {
@@ -1987,26 +2357,6 @@ func validBudgetScope(scope string) bool {
 	default:
 		return false
 	}
-}
-
-func csvValues(value string) []string {
-	parts := strings.Split(value, ",")
-	values := make([]string, 0, len(parts))
-	for _, part := range parts {
-		part = strings.TrimSpace(part)
-		if part != "" {
-			values = append(values, part)
-		}
-	}
-	return values
-}
-
-func fallbackModelCount(value string) int {
-	var models []string
-	if err := json.Unmarshal([]byte(value), &models); err != nil {
-		return 0
-	}
-	return len(models)
 }
 
 func hasContextOptions(options map[string]string) bool {

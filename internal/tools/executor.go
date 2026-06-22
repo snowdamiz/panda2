@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/sn0w/panda2/internal/admin"
+	"github.com/sn0w/panda2/internal/billing"
 	contextsvc "github.com/sn0w/panda2/internal/context"
 	"github.com/sn0w/panda2/internal/llm"
 	"github.com/sn0w/panda2/internal/memory"
@@ -119,6 +120,7 @@ type Executor struct {
 	discord     DiscordToolProvider
 	audit       AuditRecorder
 	adminOps    AdminOperations
+	billing     *billing.Service
 	dynamic     DynamicToolProvider
 	composed    ComposedToolManager
 	schedule    ScheduleManager
@@ -188,7 +190,6 @@ type ComposedToolManagementRequest struct {
 	ChannelID       string
 	ChannelName     string
 	WelcomeText     string
-	DefaultModel    string
 	Input           map[string]any
 	DryRun          bool
 }
@@ -290,6 +291,11 @@ func (e *Executor) WithAuditRecorder(recorder AuditRecorder) *Executor {
 
 func (e *Executor) WithAdminOperations(adminOps AdminOperations) *Executor {
 	e.adminOps = adminOps
+	return e
+}
+
+func (e *Executor) WithBilling(billingService *billing.Service) *Executor {
+	e.billing = billingService
 	return e
 }
 
@@ -404,7 +410,7 @@ func (e *Executor) Execute(ctx context.Context, request ExecutionRequest) (Execu
 	case "search_knowledge":
 		payload, err = e.searchKnowledge(toolCtx, request.GuildID, arguments)
 	case "web.search":
-		payload, err = e.searchWeb(toolCtx, arguments)
+		payload, err = e.searchWeb(toolCtx, request, arguments)
 	case "summarize_text_file":
 		payload, err = e.summarizeTextFile(toolCtx, request.GuildID, arguments)
 	case "read_config":
@@ -516,7 +522,7 @@ func (e *Executor) executeDiscordTool(ctx context.Context, definition Definition
 		return map[string]any{
 			"confirmation_required": true,
 			"tool":                  definition.Name,
-			"message":               "This Discord write is prepared as a dry-run only from the model tool loop. Use an explicit Discord confirmation flow before execution.",
+			"message":               "This Discord write is prepared as a dry-run from the assistant tool flow. Use an explicit Discord confirmation flow before execution.",
 			"discord_permissions":   discordPermissions,
 			"preview":               safePreviewArguments(arguments),
 		}, nil
@@ -717,7 +723,7 @@ func (e *Executor) searchKnowledge(ctx context.Context, guildID string, argument
 	return map[string]any{"results": output}, nil
 }
 
-func (e *Executor) searchWeb(ctx context.Context, arguments string) (any, error) {
+func (e *Executor) searchWeb(ctx context.Context, request ExecutionRequest, arguments string) (any, error) {
 	if e.webSearch == nil {
 		return nil, fmt.Errorf("web search is not configured")
 	}
@@ -728,6 +734,19 @@ func (e *Executor) searchWeb(ctx context.Context, arguments string) (any, error)
 	query := firstNonEmpty(stringArgument(args, "query"), stringArgument(args, "q"))
 	if query == "" {
 		return nil, fmt.Errorf("query is required")
+	}
+	var reservation billing.Reservation
+	if e.billing != nil {
+		var err error
+		reservation, err = e.billing.BeginUsage(ctx, request.GuildID, billing.MetricWebSearch, 1)
+		if err != nil {
+			return nil, err
+		}
+		defer func() {
+			if reservation.ID != "" {
+				_ = e.billing.ReleaseUsage(context.Background(), reservation)
+			}
+		}()
 	}
 	extraSnippets := true
 	if _, ok := args["extra_snippets"]; ok {
@@ -745,7 +764,33 @@ func (e *Executor) searchWeb(ctx context.Context, arguments string) (any, error)
 		ExtraSnippets: extraSnippets,
 	})
 	if err != nil {
+		if e.billing != nil {
+			_ = e.billing.RecordCost(ctx, billing.CostEvent{
+				GuildID:   request.GuildID,
+				RequestID: request.RequestID,
+				Source:    "tool",
+				Operation: "web_search",
+				Command:   request.InvocationType,
+				Provider:  "brave",
+				Success:   false,
+				ErrorCode: "web_search_failed",
+			})
+		}
 		return nil, err
+	}
+	if e.billing != nil {
+		_ = e.billing.CommitUsage(ctx, reservation)
+		reservation.ID = ""
+		_ = e.billing.RecordCost(ctx, billing.CostEvent{
+			GuildID:             request.GuildID,
+			RequestID:           request.RequestID,
+			Source:              "tool",
+			Operation:           "web_search",
+			Command:             request.InvocationType,
+			Provider:            "brave",
+			EstimatedCostMicros: 5000,
+			Success:             true,
+		})
 	}
 	results := make([]map[string]any, 0, len(response.Results))
 	for index, result := range response.Results {
@@ -762,7 +807,6 @@ func (e *Executor) searchWeb(ctx context.Context, arguments string) (any, error)
 		})
 	}
 	return map[string]any{
-		"provider":               response.Provider,
 		"query":                  response.Query,
 		"altered_query":          response.AlteredQuery,
 		"more_results_available": response.MoreResultsAvailable,
@@ -853,16 +897,25 @@ func (e *Executor) readConfig(ctx context.Context, request ExecutionRequest, arg
 		return map[string]any{"configured": false}, nil
 	}
 	return map[string]any{
-		"configured":          true,
-		"guild_id":            config.GuildID,
-		"default_model":       config.DefaultModel,
-		"classifier_model":    config.ClassifierModel,
-		"assistant_enabled":   config.AssistantEnabled,
-		"memory_enabled":      config.MemoryEnabled,
-		"tool_policy":         config.ToolPolicy,
-		"max_response_tokens": config.MaxResponseTokens,
-		"agent_soul":          config.AgentSoul,
+		"configured":        true,
+		"guild_id":          config.GuildID,
+		"assistant_enabled": config.AssistantEnabled,
+		"memory_enabled":    config.MemoryEnabled,
+		"tool_policy":       config.ToolPolicy,
+		"answer_length":     answerLengthFromMaxTokens(config.MaxResponseTokens),
+		"agent_soul":        config.AgentSoul,
 	}, nil
+}
+
+func answerLengthFromMaxTokens(maxTokens int) string {
+	switch {
+	case maxTokens <= 600:
+		return "brief"
+	case maxTokens >= 1400:
+		return "detailed"
+	default:
+		return "standard"
+	}
 }
 
 func (e *Executor) manageSoul(ctx context.Context, request ExecutionRequest, arguments string) (any, error) {
@@ -1407,7 +1460,6 @@ func (e *Executor) manageComposedTool(ctx context.Context, request ExecutionRequ
 		ChannelID:       stringArgument(args, "channel_id"),
 		ChannelName:     stringArgument(args, "channel_name"),
 		WelcomeText:     stringArgument(args, "welcome_text"),
-		DefaultModel:    stringArgument(args, "model"),
 		Input:           input,
 		DryRun:          boolArgument(args, "dry_run") || action == "preview" || action == "simulate",
 	})
@@ -1489,6 +1541,12 @@ func (e *Executor) manageMusic(ctx context.Context, request ExecutionRequest, ar
 	if err != nil {
 		return nil, err
 	}
+	action := normalizeMusicManagementAction(stringArgument(args, "action"))
+	if action == "play" || (action == "playlist" && musicPlaylistModeConsumesEntitlement(stringArgument(args, "mode"))) {
+		if err := e.musicEntitlementAvailable(ctx, request.GuildID); err != nil {
+			return nil, err
+		}
+	}
 	return e.music.ManageMusic(ctx, MusicManagementRequest{
 		GuildID:        request.GuildID,
 		ChannelID:      request.ChannelID,
@@ -1500,7 +1558,7 @@ func (e *Executor) manageMusic(ctx context.Context, request ExecutionRequest, ar
 		IsGuildAdmin:   request.IsGuildAdmin,
 		IsOwner:        request.IsOwner,
 		Access:         request.Access,
-		Action:         normalizeMusicManagementAction(stringArgument(args, "action")),
+		Action:         action,
 		Query:          firstNonEmpty(stringArgument(args, "query"), firstNonEmpty(stringArgument(args, "song"), stringArgument(args, "track"))),
 		Mode:           stringArgument(args, "mode"),
 		Name:           stringArgument(args, "name"),
@@ -1508,6 +1566,29 @@ func (e *Executor) manageMusic(ctx context.Context, request ExecutionRequest, ar
 		To:             intArgument(args, "to", 0),
 		Volume:         intArgument(args, "volume", 0),
 	})
+}
+
+func (e *Executor) musicEntitlementAvailable(ctx context.Context, guildID string) error {
+	if e == nil || e.billing == nil || strings.TrimSpace(guildID) == "" {
+		return nil
+	}
+	entitlement, err := e.billing.Resolve(ctx, guildID)
+	if err != nil {
+		return err
+	}
+	if !entitlement.CanUsePaidFeatures || entitlement.ReadOnly || !entitlement.Plan.MusicEnabled {
+		return billing.ErrReadOnly
+	}
+	return nil
+}
+
+func musicPlaylistModeConsumesEntitlement(mode string) bool {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "save", "load":
+		return true
+	default:
+		return false
+	}
 }
 
 func (e *Executor) manageChannelRule(ctx context.Context, request ExecutionRequest, arguments string) (any, error) {
@@ -1700,18 +1781,18 @@ func (e *Executor) listAvailableTools(ctx context.Context, request ExecutionRequ
 				continue
 			}
 			item := map[string]any{
-				"kind":                   "native",
-				"name":                   definition.ModelName(),
-				"native_name":            definition.Name,
-				"wire_name":              definition.ModelName(),
-				"description":            definition.Description,
-				"tool_class":             definition.ToolClass,
-				"required_permission":    definition.RequiredPermission,
-				"requires_confirmation":  definition.RequiresConfirmation,
-				"supports_dry_run":       definition.SupportsDryRun,
-				"max_limit":              definition.MaxLimit,
-				"discord_permissions":    definition.DiscordPermissions,
-				"include_in_model_tools": definition.IncludeInModelContext,
+				"kind":                  "native",
+				"name":                  definition.ModelName(),
+				"native_name":           definition.Name,
+				"wire_name":             definition.ModelName(),
+				"description":           definition.Description,
+				"tool_class":            definition.ToolClass,
+				"required_permission":   definition.RequiredPermission,
+				"requires_confirmation": definition.RequiresConfirmation,
+				"supports_dry_run":      definition.SupportsDryRun,
+				"max_limit":             definition.MaxLimit,
+				"discord_permissions":   definition.DiscordPermissions,
+				"available_in_chat":     definition.IncludeInModelContext,
 			}
 			if includeSchemas {
 				item["input_schema"] = definition.InputSchema
@@ -1916,8 +1997,10 @@ func userNativeCapabilities(definitions map[string]Definition) []map[string]any 
 	if has("discord.edit_own_message", "discord.delete_own_message") {
 		add("manage_panda_messages_with_confirmation", "Manage Panda's own messages with confirmation", "Prepare edits or deletions for Panda-authored messages only, then wait for explicit confirmation.", true)
 	}
-	if has("discord.create_poll", "discord.get_poll_answer_voters", "discord.end_poll") {
-		add("native_discord_polls", "Create and inspect native Discord polls", "Create native Discord polls, inspect voters for poll answers, or prepare closing Panda-authored polls.", true)
+	if has("discord.create_poll", "discord.end_poll") {
+		add("native_discord_polls", "Create and manage native Discord polls", "Create native Discord polls or prepare closing Panda-authored polls.", true)
+	} else if has("discord.get_poll_answer_voters") {
+		add("inspect_native_discord_poll_voters", "Inspect native Discord poll voters", "List users who voted for a visible native Discord poll answer.", false)
 	}
 	if has("discord.add_reaction", "discord.remove_own_reaction") {
 		add("manage_reactions_with_confirmation", "Manage reactions with confirmation", "Prepare adding or removing Panda's own reaction on visible messages, then wait for explicit confirmation.", true)
@@ -2036,7 +2119,7 @@ func confirmationRequired(action string, preview map[string]any) map[string]any 
 		"result": map[string]any{
 			"confirmation_required": true,
 			"action":                action,
-			"message":               "This change is prepared as a dry-run only from the model tool loop. Use an explicit confirmation flow before execution.",
+			"message":               "This change is prepared as a dry-run from the assistant tool flow. Use an explicit confirmation flow before execution.",
 			"preview":               preview,
 		},
 	}

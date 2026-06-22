@@ -1,7 +1,7 @@
 {
   "name": "Panda",
   "short_name": "Panda",
-  "description": "Open-source Discord intelligence with OpenRouter model choice, governed tools, private memory, and operational control.",
+  "description": "Hosted Discord assistant with server plans, governed tools, private memory, and usage controls.",
   "start_url": "/",
   "scope": "/",
   "display": "standalone",

@@ -40,11 +40,13 @@ const structuredData = [
     description,
     url: siteUrl.toString(),
     codeRepository: siteMeta.repositoryUrl,
-    isAccessibleForFree: true,
+    isAccessibleForFree: false,
     offers: {
-      '@type': 'Offer',
-      price: '0',
+      '@type': 'AggregateOffer',
+      lowPrice: '19',
+      highPrice: '249',
       priceCurrency: 'USD',
+      offerCount: '4',
     },
   },
 ];
