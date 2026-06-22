@@ -10,8 +10,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"html"
 	"math/big"
 	stdhttp "net/http"
+	stdurl "net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -177,6 +179,8 @@ func (s *Server) routes() {
 		return c.SendString(s.metrics(c.Context()))
 	})
 	s.app.Post("/discord/webhook-events", s.discordWebhookEvents)
+	s.app.Get("/install/success", s.installSuccessResult)
+	s.app.Get("/install/failed", s.installFailedResult)
 	s.app.Get("/install/features", s.installFeatures)
 	s.app.Post("/install/intents", s.createInstallIntent)
 	s.app.Get("/discord/install/callback", s.discordInstallCallback)
@@ -261,10 +265,7 @@ func (s *Server) discordInstallCallback(c *fiber.Ctx) error {
 		if redirectURL := installLocalDevelopmentSuccessRedirect(s.cfg.PublicAppURL, s.cfg.Environment, c.Query("guild_id")); redirectURL != "" {
 			return c.Redirect(redirectURL, fiber.StatusFound)
 		}
-		if redirectURL := installFailureRedirect(s.cfg.PublicAppURL, err); redirectURL != "" {
-			return c.Redirect(redirectURL, fiber.StatusFound)
-		}
-		return writeInstallError(c, err)
+		return c.Redirect(installFailureResultPath(err), fiber.StatusFound)
 	}
 	if result.RedirectURL != "" {
 		return c.Redirect(result.RedirectURL, fiber.StatusFound)
@@ -276,6 +277,75 @@ func (s *Server) discordInstallCallback(c *fiber.Ctx) error {
 		"intent_id":         result.IntentID,
 		"feature_ids":       result.FeatureIDs,
 	})
+}
+
+func (s *Server) installSuccessResult(c *fiber.Ctx) error {
+	guildID := strings.TrimSpace(c.Query("guild_id"))
+	discordHref := "https://discord.com/channels/@me"
+	if guildID != "" {
+		discordHref = "https://discord.com/channels/" + stdurl.PathEscape(guildID)
+	}
+	return c.Type(fiber.MIMETextHTMLCharsetUTF8).SendString(installResultHTML(
+		"Panda is installed",
+		"Install complete",
+		"Panda is installed.",
+		"Open Discord and configure Panda from your server.",
+		discordHref,
+		"Open Discord",
+	))
+}
+
+func (s *Server) installFailedResult(c *fiber.Ctx) error {
+	errorCode := strings.TrimSpace(c.Query("error"))
+	if errorCode == "" {
+		errorCode = "install_failed"
+	}
+	installHref := strings.TrimRight(strings.TrimSpace(s.cfg.PublicAppURL), "/")
+	if installHref == "" {
+		installHref = "https://pandaclanker.xyz"
+	}
+	return c.Type(fiber.MIMETextHTMLCharsetUTF8).SendString(installResultHTML(
+		"Panda install needs attention",
+		"Install failed",
+		"Panda could not finish the install.",
+		"Return to Panda and start a fresh Discord install link.",
+		installHref+"/#install",
+		"Try again",
+		"Error: "+errorCode,
+	))
+}
+
+func installResultHTML(title, eyebrow, heading, body, actionHref, actionLabel string, details ...string) string {
+	var detailHTML string
+	if len(details) > 0 && strings.TrimSpace(details[0]) != "" {
+		detailHTML = `<p class="details">` + html.EscapeString(details[0]) + `</p>`
+	}
+	return `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>` + html.EscapeString(title) + `</title>
+<style>
+:root{color-scheme:dark;--bg:#09090b;--fg:#f7f7f8;--muted:#a1a1aa;--line:#27272a;--accent:#f4c95d}
+*{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;background:radial-gradient(circle at 20% 20%,#1f2937,transparent 32rem),var(--bg);color:var(--fg);font:16px/1.5 Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+main{width:min(92vw,42rem);padding:3rem;border:1px solid var(--line);background:rgba(24,24,27,.88)}
+span{display:block;margin-bottom:1rem;color:var(--accent);font-size:.78rem;font-weight:800;letter-spacing:.12em;text-transform:uppercase}
+h1{margin:0 0 1rem;font-size:clamp(2rem,7vw,4.5rem);line-height:.95;letter-spacing:0}
+p{margin:0 0 1.5rem;color:var(--muted);font-size:1.05rem}.details{font-size:.9rem}
+a{display:inline-flex;align-items:center;min-height:2.75rem;padding:0 1.1rem;background:var(--fg);color:#09090b;text-decoration:none;font-weight:800}
+</style>
+</head>
+<body>
+<main>
+<span>` + html.EscapeString(eyebrow) + `</span>
+<h1>` + html.EscapeString(heading) + `</h1>
+<p>` + html.EscapeString(body) + `</p>
+` + detailHTML + `
+<a href="` + html.EscapeString(actionHref) + `">` + html.EscapeString(actionLabel) + `</a>
+</main>
+</body>
+</html>`
 }
 
 func installLocalDevelopmentSuccessRedirect(publicURL, environment, guildID string) string {
@@ -312,20 +382,13 @@ func installSuccessRedirect(publicURL, guildID string) string {
 	return u.URL.String()
 }
 
-func installFailureRedirect(publicURL string, err error) string {
-	publicURL = strings.TrimSpace(publicURL)
-	if publicURL == "" {
-		return ""
-	}
-	u, parseErr := stdhttp.NewRequest(stdhttp.MethodGet, strings.TrimRight(publicURL, "/")+"/install/failed", nil)
-	if parseErr != nil {
-		return ""
-	}
-	q := u.URL.Query()
+func installFailureResultPath(err error) string {
+	u := stdurl.URL{Path: "/install/failed"}
+	q := u.Query()
 	q.Set("status", "failed")
 	q.Set("error", installErrorCode(err))
-	u.URL.RawQuery = q.Encode()
-	return u.URL.String()
+	u.RawQuery = q.Encode()
+	return u.String()
 }
 
 func writeInstallError(c *fiber.Ctx, err error) error {

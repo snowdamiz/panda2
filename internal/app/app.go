@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"log/slog"
-	"strings"
 	"sync"
 	"time"
 
@@ -163,8 +162,6 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 		WithToolExecutor(toolExecutor).
 		WithBilling(billingService).
 		WithCurator(curator)
-	successRedirect := installRedirect(cfg.PublicAppURL, "/install/success")
-	failureRedirect := installRedirect(cfg.PublicAppURL, "/install/failed")
 	installService := discordbot.NewInstallService(guilds, audit).
 		WithBilling(billingService).
 		WithFeatureRepository(featureRepo).
@@ -173,8 +170,8 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 			ApplicationID:   cfg.DiscordApplicationID,
 			ClientSecret:    cfg.DiscordClientSecret,
 			RedirectURI:     cfg.DiscordInstallRedirectURI,
-			SuccessRedirect: successRedirect,
-			FailureRedirect: failureRedirect,
+			SuccessRedirect: "/install/success",
+			FailureRedirect: "/install/failed",
 		})
 	router := commands.NewRouter(adminService, assistantService, opsService, ratelimit.New(cfg.UserRateLimit, cfg.UserRateLimitWindow)).
 		WithComposedService(composedService).
@@ -275,17 +272,6 @@ func (a *App) Run(ctx context.Context) error {
 	a.discord.Close(shutdownCtx)
 	wg.Wait()
 	return ctx.Err()
-}
-
-func installRedirect(publicURL, path string) string {
-	publicURL = strings.TrimRight(strings.TrimSpace(publicURL), "/")
-	if publicURL == "" {
-		return ""
-	}
-	if !strings.HasPrefix(path, "/") {
-		path = "/" + path
-	}
-	return publicURL + path
 }
 
 func (a *App) Close(ctx context.Context) {
