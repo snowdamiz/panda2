@@ -315,7 +315,7 @@ func (b *Bot) Start(ctx context.Context) error {
 			slog.String("err", err.Error()),
 			slog.String("environment", b.cfg.Environment),
 			slog.String("guild_id", b.cfg.DiscordGuildID),
-			slog.String("hint", "install the app in this guild or clear DISCORD_GUILD_ID to skip guild-scoped command sync"),
+			slog.String("hint", "verify DISCORD_GUILD_ID is a server where this Discord app is installed, or clear it to use global command sync"),
 		)
 	}
 	if err := b.client.OpenGateway(ctx); err != nil {
@@ -354,19 +354,16 @@ func syncApplicationCommands(syncer commandSyncer, applicationID snowflake.ID, g
 	if err != nil {
 		return fmt.Errorf("parse DISCORD_GUILD_ID: %w", err)
 	}
-	if _, err := syncer.SetGlobalCommands(applicationID, []disgoDiscord.ApplicationCommandCreate{}); err != nil {
-		return fmt.Errorf("clear global commands before guild sync: %w", err)
-	}
 	if _, err := syncer.SetGuildCommands(applicationID, guildID, commands); err != nil {
 		return fmt.Errorf("set guild commands: %w", err)
+	}
+	if _, err := syncer.SetGlobalCommands(applicationID, []disgoDiscord.ApplicationCommandCreate{}); err != nil {
+		return fmt.Errorf("clear global commands after guild sync: %w", err)
 	}
 	return nil
 }
 
 func (b *Bot) canContinueAfterCommandRegistrationError(err error) bool {
-	if strings.EqualFold(b.cfg.Environment, "production") {
-		return false
-	}
 	if b.cfg.DiscordGuildID == "" {
 		return false
 	}
