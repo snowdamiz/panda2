@@ -59,6 +59,7 @@ type fakeCommandSyncer struct {
 	globalCommands        [][]disgoDiscord.ApplicationCommandCreate
 	globalApplicationIDs  []snowflake.ID
 	guildCommands         []syncedGuildCommands
+	calls                 []string
 	globalRegistrationErr error
 	guildRegistrationErr  error
 }
@@ -103,12 +104,14 @@ func (f *fakeGuildGetter) GetGuild(guildID snowflake.ID, withCounts bool, _ ...r
 }
 
 func (f *fakeCommandSyncer) SetGlobalCommands(applicationID snowflake.ID, commands []disgoDiscord.ApplicationCommandCreate, _ ...rest.RequestOpt) ([]disgoDiscord.ApplicationCommand, error) {
+	f.calls = append(f.calls, "global")
 	f.globalApplicationIDs = append(f.globalApplicationIDs, applicationID)
 	f.globalCommands = append(f.globalCommands, append([]disgoDiscord.ApplicationCommandCreate(nil), commands...))
 	return nil, f.globalRegistrationErr
 }
 
 func (f *fakeCommandSyncer) SetGuildCommands(applicationID snowflake.ID, guildID snowflake.ID, commands []disgoDiscord.ApplicationCommandCreate, _ ...rest.RequestOpt) ([]disgoDiscord.ApplicationCommand, error) {
+	f.calls = append(f.calls, "guild")
 	f.guildCommands = append(f.guildCommands, syncedGuildCommands{
 		applicationID: applicationID,
 		guildID:       guildID,
@@ -180,7 +183,7 @@ func TestGlobalCommandRegistrationSetsGlobalCommands(t *testing.T) {
 	}
 }
 
-func TestGuildCommandRegistrationClearsGlobalCommandsBeforeGuildSync(t *testing.T) {
+func TestGuildCommandRegistrationClearsGlobalCommandsAfterGuildSync(t *testing.T) {
 	syncer := &fakeCommandSyncer{}
 	applicationID := snowflake.MustParse("100000000000000010")
 	guildID := snowflake.MustParse("100000000000000011")
@@ -194,10 +197,13 @@ func TestGuildCommandRegistrationClearsGlobalCommandsBeforeGuildSync(t *testing.
 		t.Fatalf("expected one global clear, got %d", len(syncer.globalCommands))
 	}
 	if len(syncer.globalCommands[0]) != 0 {
-		t.Fatalf("expected global commands to be cleared before guild sync, got %d commands", len(syncer.globalCommands[0]))
+		t.Fatalf("expected global commands to be cleared after guild sync, got %d commands", len(syncer.globalCommands[0]))
 	}
 	if len(syncer.guildCommands) != 1 {
 		t.Fatalf("expected one guild sync, got %d", len(syncer.guildCommands))
+	}
+	if got, want := strings.Join(syncer.calls, ","), "guild,global"; got != want {
+		t.Fatalf("expected guild sync before global clear, got %q", got)
 	}
 	guildSync := syncer.guildCommands[0]
 	if guildSync.applicationID != applicationID || guildSync.guildID != guildID {
@@ -220,12 +226,12 @@ func TestDevelopmentGuildCommandRegistrationAccessErrorIsRecoverable(t *testing.
 	}
 }
 
-func TestProductionGuildCommandRegistrationAccessErrorIsFatal(t *testing.T) {
+func TestProductionGuildCommandRegistrationAccessErrorIsRecoverable(t *testing.T) {
 	bot := &Bot{cfg: config.Config{Environment: "production", DiscordGuildID: "100000000000000001"}}
 	err := &rest.Error{Code: rest.JSONErrorCodeMissingAccess, Message: "Missing Access"}
 
-	if bot.canContinueAfterCommandRegistrationError(err) {
-		t.Fatal("expected production guild command access error to stay fatal")
+	if !bot.canContinueAfterCommandRegistrationError(err) {
+		t.Fatal("expected production guild command access error to be recoverable")
 	}
 }
 
