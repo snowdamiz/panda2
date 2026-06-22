@@ -1,9 +1,11 @@
 package commands
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"strconv"
 	"strings"
 	"testing"
@@ -938,6 +940,26 @@ func TestAskHandlesMissingOpenRouterKey(t *testing.T) {
 	})
 	if !response.Ephemeral || response.Content == "" {
 		t.Fatalf("expected configuration error response, got %+v", response)
+	}
+}
+
+func TestAssistantErrorLogsFailedModelDetails(t *testing.T) {
+	var logs bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	defer slog.SetDefault(previous)
+
+	response := assistantError(&assistant.ModelRequestError{
+		Task:  "response",
+		Model: "inception/mercury-2",
+		Err:   errors.New("openrouter error 404"),
+	})
+	if !response.Ephemeral || response.Content == "" {
+		t.Fatalf("expected generic assistant failure response, got %+v", response)
+	}
+	logged := logs.String()
+	if !strings.Contains(logged, "assistant request failed") || !strings.Contains(logged, "model=inception/mercury-2") || !strings.Contains(logged, "task=response") {
+		t.Fatalf("expected failed model details in log, got %q", logged)
 	}
 }
 

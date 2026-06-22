@@ -2,7 +2,6 @@ package repository
 
 import (
 	"context"
-	"errors"
 	"time"
 
 	"github.com/sn0w/panda2/internal/store"
@@ -31,14 +30,13 @@ func (r *GuildConfigRepository) EnsureDefault(ctx context.Context, guildID strin
 	}
 
 	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		var existing store.GuildConfig
-		err := tx.Where("guild_id = ?", guildID).First(&existing).Error
-		if err == nil {
+		existing, ok, err := findGuildConfigByGuild(tx, guildID)
+		if err != nil {
+			return err
+		}
+		if ok {
 			config = existing
 			return nil
-		}
-		if err != gorm.ErrRecordNotFound {
-			return err
 		}
 		return tx.Create(&config).Error
 	})
@@ -46,15 +44,7 @@ func (r *GuildConfigRepository) EnsureDefault(ctx context.Context, guildID strin
 }
 
 func (r *GuildConfigRepository) Get(ctx context.Context, guildID string) (store.GuildConfig, bool, error) {
-	var config store.GuildConfig
-	err := r.db.WithContext(ctx).Where("guild_id = ?", guildID).First(&config).Error
-	if err == nil {
-		return config, true, nil
-	}
-	if err == gorm.ErrRecordNotFound {
-		return store.GuildConfig{}, false, nil
-	}
-	return store.GuildConfig{}, false, err
+	return findGuildConfigByGuild(r.db.WithContext(ctx), guildID)
 }
 
 func (r *GuildConfigRepository) UpdateBehaviorSettings(ctx context.Context, guildID string, values map[string]any) (store.GuildConfig, error) {
@@ -93,12 +83,14 @@ func (r *GuildConfigRepository) SetMemoryEnabled(ctx context.Context, guildID st
 func (r *GuildConfigRepository) update(ctx context.Context, guildID string, values map[string]any) (store.GuildConfig, error) {
 	var config store.GuildConfig
 	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		if err := tx.Where("guild_id = ?", guildID).First(&config).Error; err != nil {
-			if errors.Is(err, gorm.ErrRecordNotFound) {
-				return ErrNotFound
-			}
+		existing, ok, err := findGuildConfigByGuild(tx, guildID)
+		if err != nil {
 			return err
 		}
+		if !ok {
+			return ErrNotFound
+		}
+		config = existing
 		if err := tx.Model(&config).Updates(values).Error; err != nil {
 			return err
 		}
@@ -111,4 +103,16 @@ func (r *GuildConfigRepository) Count(ctx context.Context) (int64, error) {
 	var count int64
 	err := r.db.WithContext(ctx).Model(&store.GuildConfig{}).Count(&count).Error
 	return count, err
+}
+
+func findGuildConfigByGuild(tx *gorm.DB, guildID string) (store.GuildConfig, bool, error) {
+	var config store.GuildConfig
+	result := tx.Where("guild_id = ?", guildID).Limit(1).Find(&config)
+	if result.Error != nil {
+		return store.GuildConfig{}, false, result.Error
+	}
+	if result.RowsAffected == 0 {
+		return store.GuildConfig{}, false, nil
+	}
+	return config, true, nil
 }
