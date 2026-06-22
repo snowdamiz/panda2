@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -41,19 +42,7 @@ func TestProductionRequiresCredentials(t *testing.T) {
 
 func TestDefaultSQLitePathUsesFlyDataDirInProduction(t *testing.T) {
 	clearConfigEnv(t)
-	t.Setenv("ENVIRONMENT", "production")
-	t.Setenv("DISCORD_BOT_TOKEN", "token")
-	t.Setenv("DISCORD_APPLICATION_ID", "123")
-	t.Setenv("DISCORD_CLIENT_SECRET", "secret")
-	t.Setenv("DISCORD_INSTALL_REDIRECT_URI", "https://api.panda.example/discord/install/callback")
-	t.Setenv("OPENROUTER_API_KEY", "key")
-	t.Setenv("PUBLIC_APP_URL", "https://panda.example")
-	t.Setenv("SOLANA_RPC_URL", "https://api.devnet.solana.com")
-	t.Setenv("SOLANA_TREASURY_WALLET", "treasury-wallet")
-	t.Setenv("SOLANA_STARTER_LAMPORTS", "19000000")
-	t.Setenv("SOLANA_PLUS_LAMPORTS", "49000000")
-	t.Setenv("SOLANA_PRO_LAMPORTS", "99000000")
-	t.Setenv("SOLANA_BUSINESS_LAMPORTS", "249000000")
+	setRequiredProductionEnv(t)
 
 	cfg, _, err := Load()
 	if err != nil {
@@ -61,6 +50,21 @@ func TestDefaultSQLitePathUsesFlyDataDirInProduction(t *testing.T) {
 	}
 	if cfg.SQLitePath != "/data/panda.db" {
 		t.Fatalf("expected /data/panda.db, got %q", cfg.SQLitePath)
+	}
+}
+
+func TestProductionRejectsPublicAppURLWithInternalPort(t *testing.T) {
+	clearConfigEnv(t)
+	setRequiredProductionEnv(t)
+	t.Setenv("PUBLIC_APP_URL", "https://pandaclanker.xyz:8080")
+	t.Setenv("PORT", "8080")
+
+	_, _, err := Load()
+	if err == nil {
+		t.Fatal("expected production config to reject PUBLIC_APP_URL with internal runtime port")
+	}
+	if !strings.Contains(err.Error(), "must not include internal runtime port") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
 
@@ -416,6 +420,8 @@ func clearConfigEnv(t *testing.T) {
 		"DISCORD_APPLICATION_ID",
 		"DISCORD_GUILD_ID",
 		"DISCORD_PUBLIC_KEY",
+		"DISCORD_CLIENT_SECRET",
+		"DISCORD_INSTALL_REDIRECT_URI",
 		"OPENROUTER_API_KEY",
 		"OPENROUTER_BASE_URL",
 		"OPENROUTER_DEFAULT_MODEL",
@@ -469,6 +475,23 @@ func clearConfigEnv(t *testing.T) {
 		}(name, oldValue, hadValue))
 	}
 	t.Setenv("PANDA_ENV_FILE", "")
+}
+
+func setRequiredProductionEnv(t *testing.T) {
+	t.Helper()
+	t.Setenv("ENVIRONMENT", "production")
+	t.Setenv("DISCORD_BOT_TOKEN", "token")
+	t.Setenv("DISCORD_APPLICATION_ID", "123")
+	t.Setenv("DISCORD_CLIENT_SECRET", "secret")
+	t.Setenv("DISCORD_INSTALL_REDIRECT_URI", "https://api.panda.example/discord/install/callback")
+	t.Setenv("OPENROUTER_API_KEY", "key")
+	t.Setenv("PUBLIC_APP_URL", "https://panda.example")
+	t.Setenv("SOLANA_RPC_URL", "https://api.devnet.solana.com")
+	t.Setenv("SOLANA_TREASURY_WALLET", "treasury-wallet")
+	t.Setenv("SOLANA_STARTER_LAMPORTS", "19000000")
+	t.Setenv("SOLANA_PLUS_LAMPORTS", "49000000")
+	t.Setenv("SOLANA_PRO_LAMPORTS", "99000000")
+	t.Setenv("SOLANA_BUSINESS_LAMPORTS", "249000000")
 }
 
 func writeConfigFile(t *testing.T, path string, content string) {

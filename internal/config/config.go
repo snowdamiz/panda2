@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -261,6 +262,9 @@ func (c Config) Validate() ([]string, error) {
 		if c.PublicAppURL == "" {
 			return warnings, errors.New("production requires PUBLIC_APP_URL")
 		}
+		if err := validateProductionPublicAppURL(c.PublicAppURL, c.Port); err != nil {
+			return warnings, err
+		}
 		if c.SolanaRPCURL == "" {
 			return warnings, errors.New("production SOL billing requires SOLANA_RPC_URL")
 		}
@@ -273,6 +277,25 @@ func (c Config) Validate() ([]string, error) {
 	}
 
 	return warnings, nil
+}
+
+func validateProductionPublicAppURL(publicURL, runtimePort string) error {
+	publicURL = strings.TrimSpace(publicURL)
+	if publicURL == "" {
+		return nil
+	}
+	parsed, err := url.Parse(publicURL)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return fmt.Errorf("PUBLIC_APP_URL must be an absolute URL, got %q", publicURL)
+	}
+	host := strings.ToLower(parsed.Hostname())
+	if host == "localhost" || host == "127.0.0.1" || host == "::1" {
+		return nil
+	}
+	if port := parsed.Port(); port != "" && port == strings.TrimSpace(runtimePort) {
+		return fmt.Errorf("PUBLIC_APP_URL %q must not include internal runtime port %s for a non-local production host", publicURL, runtimePort)
+	}
+	return nil
 }
 
 func (c Config) DiscordConfigured() bool {
