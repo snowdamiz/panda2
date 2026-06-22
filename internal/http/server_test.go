@@ -16,6 +16,7 @@ import (
 	"github.com/sn0w/panda2/internal/billing"
 	"github.com/sn0w/panda2/internal/config"
 	discordbot "github.com/sn0w/panda2/internal/discord"
+	"github.com/sn0w/panda2/internal/repository"
 	"github.com/sn0w/panda2/internal/store"
 )
 
@@ -23,16 +24,7 @@ type fakeDiscordWebhookHandler struct {
 	events []discordbot.WebhookEvent
 }
 
-type fakeBillingWebhookHandler struct {
-	events []billing.StripeEvent
-}
-
 func (f *fakeDiscordWebhookHandler) HandleWebhookEvent(_ context.Context, event discordbot.WebhookEvent) error {
-	f.events = append(f.events, event)
-	return nil
-}
-
-func (f *fakeBillingWebhookHandler) HandleStripeEvent(_ context.Context, event billing.StripeEvent) error {
 	f.events = append(f.events, event)
 	return nil
 }
@@ -74,6 +66,9 @@ func TestHealthReportsMissingOptionalIntegrations(t *testing.T) {
 	}
 	if body.Checks["brave_search"].Status != "missing" {
 		t.Fatalf("expected brave search missing, got %+v", body.Checks["brave_search"])
+	}
+	if body.Checks["sol_payments"].Status != "missing" {
+		t.Fatalf("expected SOL payments missing, got %+v", body.Checks["sol_payments"])
 	}
 	if body.Checks["local_storage"].Status != "ok" {
 		t.Fatalf("expected local storage ok, got %+v", body.Checks["local_storage"])
@@ -220,77 +215,119 @@ func TestDiscordWebhookDispatchesVerifiedEvent(t *testing.T) {
 	}
 }
 
-func TestStripeCheckoutSessionPayloadParsesPlanMetadata(t *testing.T) {
-	body := []byte(`{
-		"id":"evt_checkout",
-		"type":"checkout.session.completed",
-		"data":{"object":{
-			"id":"cs_plan",
-			"customer":"cus_1",
-			"mode":"subscription",
-			"metadata":{
-				"guild_id":"guild-1",
-				"billing_owner_user_id":"owner-1",
-				"kind":"plan",
-				"plan":"plus"
-			},
-			"amount_total":4900,
-			"currency":"usd",
-			"customer_details":{"email":"owner@example.com"}
-		}}
-	}`)
-	var payload stripeWebhookPayload
-	if err := json.Unmarshal(body, &payload); err != nil {
-		t.Fatalf("unmarshal payload: %v", err)
-	}
-	event, ok, err := stripeEventFromPayload(payload, body)
-	if err != nil || !ok {
-		t.Fatalf("stripeEventFromPayload ok=%t err=%v", ok, err)
-	}
-	if event.EventID != "evt_checkout" || event.CheckoutSessionID != "cs_plan" || event.CustomerID != "cus_1" {
-		t.Fatalf("unexpected checkout identifiers: %+v", event)
-	}
-	if event.GuildID != "guild-1" || event.BillingOwnerUserID != "owner-1" || event.Plan != "plus" {
-		t.Fatalf("unexpected plan metadata: %+v", event)
-	}
-	if event.AmountCents != 4900 || event.Currency != "usd" || event.CustomerEmail != "owner@example.com" {
-		t.Fatalf("unexpected payment fields: %+v", event)
-	}
-}
-
-func TestBillingRedirectPagesRender(t *testing.T) {
+func TestSolPaymentOrderEndpointsCreateAndFetchOrders(t *testing.T) {
 	db, err := store.Open(t.Context(), "file::memory:?cache=shared")
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
 	defer db.Close()
 
-	server := New(config.Config{
-		SQLitePath:          ":memory:",
-		DataDir:             t.TempDir(),
-		OpenRouterBaseURL:   "https://openrouter.ai/api/v1",
-		OpenRouterModel:     "openrouter/auto",
-		Port:                "8080",
-		UserRateLimit:       5,
-		UserRateLimitWindow: time.Minute,
-	}, db)
-	for _, path := range []string{"/billing/success", "/billing/cancel"} {
-		req, _ := stdhttp.NewRequest(stdhttp.MethodGet, path, nil)
-		resp, err := server.Test(req)
-		if err != nil {
-			t.Fatalf("%s request failed: %v", path, err)
-		}
-		if resp.StatusCode != stdhttp.StatusOK {
-			t.Fatalf("expected 200 for %s, got %d", path, resp.StatusCode)
-		}
-		data, err := io.ReadAll(resp.Body)
-		if err != nil {
-			t.Fatalf("read %s body: %v", path, err)
-		}
-		if !strings.Contains(string(data), "/billing") {
-			t.Fatalf("expected billing guidance in %s body, got %s", path, string(data))
-		}
+	server := New(solHTTPConfig(t), db).WithBillingService(solBillingService(db))
+	req, _ := stdhttp.NewRequest(stdhttp.MethodOptions, "/billing/sol/orders", nil)
+	req.Header.Set("Origin", "https://panda.example")
+	req.Header.Set("Access-Control-Request-Method", stdhttp.MethodPost)
+	resp, err := server.Test(req)
+	if err != nil {
+		t.Fatalf("payment preflight request failed: %v", err)
 	}
+	if resp.StatusCode != stdhttp.StatusNoContent || resp.Header.Get("Access-Control-Allow-Origin") != "https://panda.example" {
+		t.Fatalf("unexpected payment preflight response: status=%d origin=%q", resp.StatusCode, resp.Header.Get("Access-Control-Allow-Origin"))
+	}
+
+	req, _ = stdhttp.NewRequest(stdhttp.MethodPost, "/billing/sol/orders", strings.NewReader(`{
+		"guild_id": "guild-1",
+		"billing_owner_user_id": "owner-1",
+		"plan": "plus",
+		"support_email": "owner@example.com"
+	}`))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err = server.Test(req)
+	if err != nil {
+		t.Fatalf("create SOL order request failed: %v", err)
+	}
+	if resp.StatusCode != stdhttp.StatusCreated {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("expected 201, got %d: %s", resp.StatusCode, body)
+	}
+	var order billing.SolPaymentOrderView
+	if err := json.NewDecoder(resp.Body).Decode(&order); err != nil {
+		t.Fatalf("decode create response: %v", err)
+	}
+	if order.OrderID == "" || order.Reference == "" || order.Status != billing.SolOrderStatusPending {
+		t.Fatalf("unexpected created order identifiers: %+v", order)
+	}
+	if order.ExpectedLamports != 49_000_000 || order.DestinationWallet != "treasury-wallet" || order.Cluster != "devnet" {
+		t.Fatalf("unexpected created order payment fields: %+v", order)
+	}
+	if !strings.Contains(order.PaymentURL, "solana:treasury-wallet?") || !strings.Contains(order.PaymentURL, order.Reference) {
+		t.Fatalf("expected payment URL to include treasury wallet and reference, got %q", order.PaymentURL)
+	}
+
+	req, _ = stdhttp.NewRequest(stdhttp.MethodGet, "/billing/sol/orders/"+order.OrderID, nil)
+	resp, err = server.Test(req)
+	if err != nil {
+		t.Fatalf("get SOL order request failed: %v", err)
+	}
+	if resp.StatusCode != stdhttp.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("expected 200, got %d: %s", resp.StatusCode, body)
+	}
+	var fetched billing.SolPaymentOrderView
+	if err := json.NewDecoder(resp.Body).Decode(&fetched); err != nil {
+		t.Fatalf("decode get response: %v", err)
+	}
+	if fetched.OrderID != order.OrderID || fetched.Reference != order.Reference || fetched.Plan != billing.PlanPlus {
+		t.Fatalf("unexpected fetched order: %+v", fetched)
+	}
+
+	req, _ = stdhttp.NewRequest(stdhttp.MethodPost, "/billing/sol/orders/"+order.OrderID+"/activation-key", nil)
+	resp, err = server.Test(req)
+	if err != nil {
+		t.Fatalf("pending activation key request failed: %v", err)
+	}
+	if resp.StatusCode != stdhttp.StatusConflict {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("expected 409 for pending order key reveal, got %d: %s", resp.StatusCode, body)
+	}
+}
+
+func solHTTPConfig(t *testing.T) config.Config {
+	t.Helper()
+	return config.Config{
+		SQLitePath:             ":memory:",
+		DataDir:                t.TempDir(),
+		PublicAppURL:           "https://panda.example",
+		OpenRouterBaseURL:      "https://openrouter.ai/api/v1",
+		OpenRouterModel:        "openrouter/auto",
+		Port:                   "8080",
+		UserRateLimit:          50,
+		UserRateLimitWindow:    time.Minute,
+		SolanaRPCURL:           "https://api.devnet.solana.com",
+		SolanaCluster:          "devnet",
+		SolanaTreasuryWallet:   "treasury-wallet",
+		SolanaConfirmation:     "finalized",
+		SolanaOrderExpiration:  time.Hour,
+		SolanaActivationKeyTTL: time.Hour,
+		SolanaPlanLamports:     map[string]int64{billing.PlanStarter: 19_000_000, billing.PlanPlus: 49_000_000, billing.PlanPro: 99_000_000, billing.PlanBusiness: 249_000_000},
+	}
+}
+
+func solBillingService(db *store.Store) *billing.Service {
+	return billing.NewService(repository.NewBillingRepository(db.DB), billing.Config{
+		PublicURL:              "https://panda.example",
+		SolanaRPCURL:           "https://api.devnet.solana.com",
+		SolanaCluster:          "devnet",
+		SolanaTreasuryWallet:   "treasury-wallet",
+		SolanaConfirmation:     "finalized",
+		SolanaOrderExpiration:  time.Hour,
+		SolanaActivationKeyTTL: time.Hour,
+		SolanaPlanLamports: map[string]int64{
+			billing.PlanStarter:  19_000_000,
+			billing.PlanPlus:     49_000_000,
+			billing.PlanPro:      99_000_000,
+			billing.PlanBusiness: 249_000_000,
+		},
+	})
 }
 
 func signedDiscordWebhookRequest(t *testing.T, body string, privateKey ed25519.PrivateKey) *stdhttp.Request {

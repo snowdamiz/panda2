@@ -26,7 +26,6 @@ import (
 	"github.com/disgoorg/snowflake/v2"
 	alertsvc "github.com/sn0w/panda2/internal/alerts"
 	"github.com/sn0w/panda2/internal/attachments"
-	"github.com/sn0w/panda2/internal/billing"
 	"github.com/sn0w/panda2/internal/commands"
 	"github.com/sn0w/panda2/internal/config"
 	contextsvc "github.com/sn0w/panda2/internal/context"
@@ -47,7 +46,6 @@ type Bot struct {
 	attachments AttachmentRecorder
 	events      DiscordEventRecorder
 	alerts      DiscordAlertHandler
-	billing     BillingEventHandler
 	httpClient  *http.Client
 	music       *music.Manager
 	closeOnce   sync.Once
@@ -67,10 +65,6 @@ type InteractionJobQueue interface {
 
 type DiscordAlertHandler interface {
 	HandleDiscordEvent(ctx context.Context, event store.DiscordEvent)
-}
-
-type BillingEventHandler interface {
-	HandleDiscordEntitlement(ctx context.Context, event billing.DiscordEntitlementEvent) error
 }
 
 type typingSender interface {
@@ -131,9 +125,6 @@ func New(cfg config.Config, router *commands.Router, logger *slog.Logger) (*Bot,
 		bot.WithEventListenerFunc(instance.onApplicationCommand),
 		bot.WithEventListenerFunc(instance.onComponentInteraction),
 		bot.WithEventListenerFunc(instance.onModalSubmit),
-		bot.WithEventListenerFunc(instance.onEntitlementCreate),
-		bot.WithEventListenerFunc(instance.onEntitlementUpdate),
-		bot.WithEventListenerFunc(instance.onEntitlementDelete),
 		bot.WithEventListenerFunc(instance.onMessageCreate),
 		bot.WithEventListenerFunc(instance.onGuildMessageUpdate),
 		bot.WithEventListenerFunc(instance.onGuildMessageDelete),
@@ -222,11 +213,6 @@ func (b *Bot) WithJobQueue(jobs InteractionJobQueue) *Bot {
 
 func (b *Bot) WithAlertHandler(handler DiscordAlertHandler) *Bot {
 	b.alerts = handler
-	return b
-}
-
-func (b *Bot) WithBillingHandler(handler BillingEventHandler) *Bot {
-	b.billing = handler
 	return b
 }
 
@@ -448,7 +434,8 @@ func applicationCommands() []disgoDiscord.ApplicationCommandCreate {
 			{Name: "Moderator", Value: "moderator"},
 		},
 	}
-	maxEmailLength := 320
+	maxActivationKeyLength := 128
+	maxPaymentOrderIDLength := 80
 
 	commands := []disgoDiscord.ApplicationCommandCreate{
 		disgoDiscord.SlashCommandCreate{
@@ -469,26 +456,21 @@ func applicationCommands() []disgoDiscord.ApplicationCommandCreate {
 					Required:    false,
 					Choices: []disgoDiscord.ApplicationCommandOptionChoiceString{
 						{Name: "Status", Value: "status"},
-						{Name: "Upgrade plan", Value: "upgrade"},
-						{Name: "Billing portal", Value: "portal"},
+						{Name: "Activate", Value: "activate"},
+						{Name: "Revoke activation key", Value: "revoke"},
 					},
 				},
 				disgoDiscord.ApplicationCommandOptionString{
-					Name:        "plan",
-					Description: "Paid plan for action:upgrade",
+					Name:        "api_key",
+					Description: "One-time Panda activation API key",
 					Required:    false,
-					Choices: []disgoDiscord.ApplicationCommandOptionChoiceString{
-						{Name: "Starter", Value: "starter"},
-						{Name: "Plus", Value: "plus"},
-						{Name: "Pro", Value: "pro"},
-						{Name: "Business", Value: "business"},
-					},
+					MaxLength:   &maxActivationKeyLength,
 				},
 				disgoDiscord.ApplicationCommandOptionString{
-					Name:        "email",
-					Description: "Optional billing email for a new Stripe customer",
+					Name:        "order_id",
+					Description: "SOL payment order ID for operator revocation",
 					Required:    false,
-					MaxLength:   &maxEmailLength,
+					MaxLength:   &maxPaymentOrderIDLength,
 				},
 			},
 		},
@@ -922,47 +904,6 @@ func applicationCommands() []disgoDiscord.ApplicationCommandCreate {
 		},
 	}
 	return publicApplicationCommands(commands)
-}
-
-func (b *Bot) onEntitlementCreate(event *events.EntitlementCreate) {
-	b.handleEntitlementEvent(context.Background(), "create", event.Entitlement, event.SequenceNumber())
-}
-
-func (b *Bot) onEntitlementUpdate(event *events.EntitlementUpdate) {
-	b.handleEntitlementEvent(context.Background(), "update", event.Entitlement, event.SequenceNumber())
-}
-
-func (b *Bot) onEntitlementDelete(event *events.EntitlementDelete) {
-	b.handleEntitlementEvent(context.Background(), "delete", event.Entitlement, event.SequenceNumber())
-}
-
-func (b *Bot) handleEntitlementEvent(ctx context.Context, eventType string, entitlement disgoDiscord.Entitlement, sequenceNumber int) {
-	if b.billing == nil {
-		return
-	}
-	raw, _ := json.Marshal(entitlement)
-	event := billing.DiscordEntitlementEvent{
-		EventID:       fmt.Sprintf("discord:%s:%s:%d", eventType, entitlement.ID.String(), sequenceNumber),
-		EventType:     eventType,
-		SKUID:         entitlement.SkuID.String(),
-		EntitlementID: entitlement.ID.String(),
-		Deleted:       entitlement.Deleted,
-		StartsAt:      entitlement.StartsAt,
-		EndsAt:        entitlement.EndsAt,
-		RawPayload:    string(raw),
-	}
-	if entitlement.GuildID != nil {
-		event.GuildID = entitlement.GuildID.String()
-	}
-	if entitlement.UserID != nil {
-		event.UserID = entitlement.UserID.String()
-	}
-	if entitlement.SubscriptionID != nil {
-		event.SubscriptionID = entitlement.SubscriptionID.String()
-	}
-	if err := b.billing.HandleDiscordEntitlement(ctx, event); err != nil && b.logger != nil {
-		b.logger.Warn("billing entitlement event failed", slog.Any("err", err), slog.String("event_type", eventType), slog.String("entitlement_id", event.EntitlementID), slog.String("guild_id", event.GuildID))
-	}
 }
 
 func (b *Bot) onApplicationCommand(event *events.ApplicationCommandInteractionCreate) {

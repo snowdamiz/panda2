@@ -16,6 +16,7 @@
   --color-tag-fg: #121212;
   --color-tag-bg: #d8d8d2;
   --color-status: #dfdfd8;
+  --color-status-error: #ffb4a8;
   --color-white: #ffffff;
 
   --font-sans: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;

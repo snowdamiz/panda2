@@ -404,7 +404,6 @@ type CustomerAccount struct {
 	Email              string    `gorm:"not null;default:'';size:320"`
 	TaxCountry         string    `gorm:"not null;default:'';size:2"`
 	SupportContact     string    `gorm:"not null;default:'';size:320"`
-	StripeCustomerID   string    `gorm:"uniqueIndex:idx_customer_accounts_stripe_customer_present,where:stripe_customer_id <> '';not null;default:'';size:128"`
 	CreatedAt          time.Time `gorm:"not null"`
 	UpdatedAt          time.Time `gorm:"not null"`
 }
@@ -453,11 +452,68 @@ type InvoicePaymentEvent struct {
 	GuildID        string    `gorm:"index;not null;default:'';size:32"`
 	SubscriptionID uint      `gorm:"index;not null;default:0"`
 	AmountCents    int64     `gorm:"not null;default:0"`
+	AmountLamports int64     `gorm:"not null;default:0"`
 	Currency       string    `gorm:"not null;default:'usd';size:8"`
 	Status         string    `gorm:"index;not null;size:32"`
 	IdempotencyKey string    `gorm:"uniqueIndex;not null;size:160"`
 	RawPayload     string    `gorm:"not null;default:'{}'"`
 	CreatedAt      time.Time `gorm:"index;not null"`
+}
+
+type SolPaymentOrder struct {
+	ID                           uint       `gorm:"primaryKey"`
+	OrderID                      string     `gorm:"uniqueIndex;not null;size:64"`
+	GuildID                      string     `gorm:"index;not null;size:32"`
+	BillingOwnerUserID           string     `gorm:"index;not null;default:'';size:32"`
+	SupportEmail                 string     `gorm:"not null;default:'';size:320"`
+	Plan                         string     `gorm:"index;not null;size:32"`
+	ExpectedLamports             int64      `gorm:"not null"`
+	DestinationWallet            string     `gorm:"index;not null;size:64"`
+	Reference                    string     `gorm:"uniqueIndex;not null;size:96"`
+	Status                       string     `gorm:"index;not null;size:32"`
+	Cluster                      string     `gorm:"index;not null;size:32"`
+	ConfirmationThreshold        string     `gorm:"not null;size:16"`
+	VerifiedTransactionSignature string     `gorm:"uniqueIndex:idx_sol_payment_orders_verified_signature,where:verified_transaction_signature <> '';not null;default:'';size:128"`
+	VerifiedAt                   *time.Time `gorm:"index"`
+	ActivationKeyRevealedAt      *time.Time `gorm:"index"`
+	ActivatedAt                  *time.Time `gorm:"index"`
+	ExpiresAt                    time.Time  `gorm:"index;not null"`
+	CreatedAt                    time.Time  `gorm:"index;not null"`
+	UpdatedAt                    time.Time  `gorm:"not null"`
+}
+
+type SolPaymentTransaction struct {
+	ID                 uint      `gorm:"primaryKey"`
+	Signature          string    `gorm:"uniqueIndex;not null;size:128"`
+	OrderID            string    `gorm:"index;not null;size:64"`
+	GuildID            string    `gorm:"index;not null;size:32"`
+	PayerWallet        string    `gorm:"index;not null;default:'';size:64"`
+	DestinationWallet  string    `gorm:"index;not null;default:'';size:64"`
+	Reference          string    `gorm:"index;not null;default:'';size:96"`
+	AmountLamports     int64     `gorm:"not null;default:0"`
+	ConfirmationStatus string    `gorm:"index;not null;default:'';size:16"`
+	Status             string    `gorm:"index;not null;size:32"`
+	ErrorMessage       string    `gorm:"not null;default:'';size:512"`
+	RawPayload         string    `gorm:"not null;default:'{}'"`
+	CreatedAt          time.Time `gorm:"index;not null"`
+	UpdatedAt          time.Time `gorm:"not null"`
+}
+
+type ActivationAPIKey struct {
+	ID                      uint       `gorm:"primaryKey"`
+	KeyID                   string     `gorm:"uniqueIndex;not null;size:64"`
+	KeyHash                 string     `gorm:"uniqueIndex;not null;size:96"`
+	KeyPrefix               string     `gorm:"index;not null;size:24"`
+	PaymentOrderID          string     `gorm:"uniqueIndex;not null;size:64"`
+	GuildID                 string     `gorm:"index;not null;size:32"`
+	Plan                    string     `gorm:"index;not null;size:32"`
+	Status                  string     `gorm:"index;not null;size:32"`
+	ExpiresAt               time.Time  `gorm:"index;not null"`
+	ConsumedAt              *time.Time `gorm:"index"`
+	ConsumedByDiscordUserID string     `gorm:"index;not null;default:'';size:32"`
+	RevokedAt               *time.Time `gorm:"index"`
+	CreatedAt               time.Time  `gorm:"index;not null"`
+	UpdatedAt               time.Time  `gorm:"not null"`
 }
 
 type UsagePeriod struct {

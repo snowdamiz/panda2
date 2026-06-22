@@ -41,6 +41,7 @@ export const heroMeta = ['14-day trial', 'Usage limits', 'Admin controls', 'Serv
 
 export const planOptions = [
   {
+    slug: 'starter',
     label: 'Starter',
     price: '$19',
     cadence: '/server/mo',
@@ -49,10 +50,10 @@ export const planOptions = [
     storage: '100 MB knowledge',
     retention: '30 day retention',
     badge: 'Small servers',
-    command: '/billing action:upgrade plan:starter',
     featured: false,
   },
   {
+    slug: 'plus',
     label: 'Plus',
     price: '$49',
     cadence: '/server/mo',
@@ -61,10 +62,10 @@ export const planOptions = [
     storage: '500 MB knowledge',
     retention: '90 day retention',
     badge: 'Active communities',
-    command: '/billing action:upgrade plan:plus',
     featured: true,
   },
   {
+    slug: 'pro',
     label: 'Pro',
     price: '$99',
     cadence: '/server/mo',
@@ -73,10 +74,10 @@ export const planOptions = [
     storage: '2 GB knowledge',
     retention: '180 day retention',
     badge: 'Large servers',
-    command: '/billing action:upgrade plan:pro',
     featured: false,
   },
   {
+    slug: 'business',
     label: 'Business',
     price: '$249',
     cadence: '/server/mo',
@@ -85,14 +86,13 @@ export const planOptions = [
     storage: '10 GB knowledge',
     retention: '365 day retention',
     badge: 'High-volume teams',
-    command: '/billing action:upgrade plan:business',
     featured: false,
   },
 ] as const;
 
 export const marqueeItems = [
   'START A SERVER TRIAL',
-  'UPGRADE FROM /BILLING',
+  'PAY WITH CONNECTED WALLET',
   'ASK NATURALLY',
   'CONTROL EVERY TOOL',
   'SEE USAGE BEFORE CUTOFF',
@@ -167,7 +167,7 @@ export const commandRows = [
     key: 'billing',
     symbol: '$',
     command: '/billing',
-    description: 'Status, checkout, and portal',
+    description: 'Status and SOL activation',
     order: '02',
   },
   {
@@ -203,7 +203,7 @@ export const commandViews = [
       ['AI REMAINING', '1,842'],
       ['RENEWAL', 'Monthly'],
     ],
-    status: '/billing action:upgrade creates checkout',
+    status: 'SOL activation key is ready for Discord',
   },
   {
     key: 'tool',

@@ -36,12 +36,32 @@ The installer becomes the billing owner for that server. The Discord server owne
 
 ## Buy A Plan
 
-The billing owner purchases from Discord:
+The billing owner purchases from the Panda landing page:
 
-- `/billing action:upgrade plan:starter|plus|pro|business` creates a Stripe Checkout session for the selected monthly plan.
-- `/billing action:portal` opens Stripe Customer Portal after the first completed Stripe checkout records the server's customer ID.
+- Connect a Solana wallet from a browser extension, or open the Solana Pay link in a mobile wallet.
+- Panda creates a server-side payment order with the exact plan, treasury wallet, native SOL amount, memo, reference, and expiration.
+- After the transaction is verified, the landing page reveals a one-time activation key.
+- Run `/billing action:activate api_key:<key>` in the Discord server to apply the plan.
 
-Panda grants plans only from verified Stripe webhooks or Discord Premium App entitlement events. Client-side success redirects never grant access.
+Panda grants plans only after the backend verifies the native SOL transaction against Solana RPC. Wallet connection, client-side UI state, redirects, and copied signatures never grant access by themselves.
+
+## End-To-End Flow
+
+The production path has three separate identities: the wallet payer, the Discord billing actor, and the Discord end user.
+
+1. A server admin installs Panda from the landing page or Discord app directory.
+2. Panda creates a trial for the Discord server. Members can use Panda within trial limits after admins finish setup.
+3. When the server needs a paid plan, the billing owner opens the landing page and chooses a plan.
+4. The landing page calls the Panda API to create a SOL payment order. The API returns the exact plan, lamports, treasury wallet, memo/reference, cluster, and expiration.
+5. The payer connects a Solana wallet through Wallet Standard-compatible extension discovery, or opens the Solana Pay/mobile wallet link.
+6. The wallet signs and sends the exact native SOL transfer. The landing page submits the resulting transaction signature to Panda.
+7. Panda verifies the transaction server-side against Solana RPC. It must match the treasury wallet, native SOL amount, memo/reference, order, guild, plan, expiration, and confirmation threshold.
+8. After verification, the landing page reveals a one-time activation key. The key is displayed once, stored only as a hash, scoped to the payment order, and can be revoked before use.
+9. The billing owner, a guild admin claiming an unclaimed server, or a Panda operator runs `/billing action:activate api_key:<key>` in Discord.
+10. Panda consumes the key atomically, records the SOL payment event, upserts the server subscription, writes a fresh entitlement snapshot, and marks the order activated.
+11. End users keep using Panda in Discord. Every paid AI, web search, schedule, composed tool, storage, and music path checks the active entitlement and quota before provider spend.
+
+The wallet proves payment only. Discord permissions decide who can activate the payment for a server, and entitlement checks decide what end users can do after activation.
 
 ## Admin Setup
 
@@ -52,7 +72,7 @@ Common setup commands:
 - `/admin role action:list|set|remove profile:admin|moderator role:@Role` maps Panda admin and moderator profiles.
 - `/admin tool action:list|add|remove tool_name:<tool> role:@Role` narrows tool access.
 - `/admin prompt` sets server instructions.
-- `/admin billing` or `/billing` shows plan, renewal, usage, quota, checkout, and portal actions.
+- `/admin billing` or `/billing` shows plan, renewal, usage, quota, purchase, and activation guidance.
 - `/admin audit` shows recent privileged changes.
 - `/support` creates a safe support bundle without raw prompts or raw Discord messages.
 - `/data export` shows a safe data export summary.
@@ -81,6 +101,6 @@ Panda does not expose model names, provider names, fallback routing, token price
 
 ## Operator Notes
 
-This repository also contains the operator runtime for Panda. Deployment, backups, billing webhooks, spend alerts, restore drills, and internal provider configuration are documented in `OPERATIONS.md`.
+This repository also contains the operator runtime for Panda. Deployment, backups, SOL payment verification, spend alerts, restore drills, and internal provider configuration are documented in `OPERATIONS.md`.
 
 Do not send operator runbooks, provider configuration, model routing, cost math, or hidden diagnostics to customers unless an approved enterprise contract explicitly requires it.

@@ -46,7 +46,12 @@ func TestDefaultSQLitePathUsesFlyDataDirInProduction(t *testing.T) {
 	t.Setenv("DISCORD_APPLICATION_ID", "123")
 	t.Setenv("OPENROUTER_API_KEY", "key")
 	t.Setenv("PUBLIC_APP_URL", "https://panda.example")
-	t.Setenv("DISCORD_STARTER_SKU_ID", "sku_starter")
+	t.Setenv("SOLANA_RPC_URL", "https://api.devnet.solana.com")
+	t.Setenv("SOLANA_TREASURY_WALLET", "treasury-wallet")
+	t.Setenv("SOLANA_STARTER_LAMPORTS", "19000000")
+	t.Setenv("SOLANA_PLUS_LAMPORTS", "49000000")
+	t.Setenv("SOLANA_PRO_LAMPORTS", "99000000")
+	t.Setenv("SOLANA_BUSINESS_LAMPORTS", "249000000")
 
 	cfg, _, err := Load()
 	if err != nil {
@@ -348,29 +353,32 @@ func TestLoadBillingPurchaseEnvOverrides(t *testing.T) {
 	t.Setenv("SQLITE_PATH", ":memory:")
 	t.Setenv("PORT", "8081")
 	t.Setenv("PUBLIC_APP_URL", "https://panda.example")
-	t.Setenv("BILLING_SUCCESS_URL", "https://panda.example/success")
-	t.Setenv("BILLING_CANCEL_URL", "https://panda.example/cancel")
-	t.Setenv("STRIPE_SECRET_KEY", "sk_test_123")
-	t.Setenv("STRIPE_API_BASE_URL", "https://stripe.test")
-	t.Setenv("STRIPE_WEBHOOK_SECRET", "whsec_123")
-	t.Setenv("STRIPE_PLUS_PRICE_ID", "price_plus")
-	t.Setenv("DISCORD_PLUS_SKU_ID", "sku_plus")
+	t.Setenv("SOLANA_RPC_URL", "https://api.devnet.solana.com")
+	t.Setenv("SOLANA_CLUSTER", "devnet")
+	t.Setenv("SOLANA_TREASURY_WALLET", "treasury-wallet")
+	t.Setenv("SOLANA_CONFIRMATION", "confirmed")
+	t.Setenv("SOLANA_ORDER_EXPIRATION", "45m")
+	t.Setenv("SOLANA_ACTIVATION_KEY_TTL", "24h")
+	t.Setenv("BILLING_ALLOWED_ORIGINS", "https://panda.example, https://panda2-landing.fly.dev, https://panda.example")
+	t.Setenv("SOLANA_PLAN_LAMPORTS", "starter:19000000,plus:49000000")
+	t.Setenv("SOLANA_PRO_LAMPORTS", "99000000")
+	t.Setenv("SOLANA_BUSINESS_LAMPORTS", "249000000")
 
 	cfg, _, err := Load()
 	if err != nil {
 		t.Fatalf("Load returned error: %v", err)
 	}
-	if cfg.BillingSuccessURL != "https://panda.example/success" || cfg.BillingCancelURL != "https://panda.example/cancel" {
-		t.Fatalf("unexpected billing redirects: success=%q cancel=%q", cfg.BillingSuccessURL, cfg.BillingCancelURL)
+	if cfg.SolanaRPCURL != "https://api.devnet.solana.com" || cfg.SolanaCluster != "devnet" || cfg.SolanaTreasuryWallet != "treasury-wallet" {
+		t.Fatalf("unexpected Solana config: rpc=%q cluster=%q treasury=%q", cfg.SolanaRPCURL, cfg.SolanaCluster, cfg.SolanaTreasuryWallet)
 	}
-	if cfg.StripeSecretKey != "sk_test_123" || cfg.StripeAPIBaseURL != "https://stripe.test" || cfg.StripeWebhookSecret != "whsec_123" {
-		t.Fatalf("unexpected Stripe config: key=%q base=%q webhook=%q", cfg.StripeSecretKey, cfg.StripeAPIBaseURL, cfg.StripeWebhookSecret)
+	if cfg.SolanaConfirmation != "confirmed" || cfg.SolanaOrderExpiration.String() != "45m0s" || cfg.SolanaActivationKeyTTL.String() != "24h0m0s" {
+		t.Fatalf("unexpected Solana timing config: confirmation=%q order=%s key=%s", cfg.SolanaConfirmation, cfg.SolanaOrderExpiration, cfg.SolanaActivationKeyTTL)
 	}
-	if cfg.StripePricePlans["price_plus"] != "plus" {
-		t.Fatalf("expected plus price mapping, got %#v", cfg.StripePricePlans)
+	if origins := cfg.PaymentAllowedOrigins(); len(origins) != 2 || origins[0] != "https://panda.example" || origins[1] != "https://panda2-landing.fly.dev" {
+		t.Fatalf("unexpected billing allowed origins: %#v", origins)
 	}
-	if cfg.DiscordSKUPlans["sku_plus"] != "plus" {
-		t.Fatalf("expected Discord plus SKU mapping, got %#v", cfg.DiscordSKUPlans)
+	if cfg.SolanaPlanLamports["starter"] != 19_000_000 || cfg.SolanaPlanLamports["plus"] != 49_000_000 || cfg.SolanaPlanLamports["pro"] != 99_000_000 || cfg.SolanaPlanLamports["business"] != 249_000_000 {
+		t.Fatalf("unexpected SOL lamport map: %#v", cfg.SolanaPlanLamports)
 	}
 }
 
@@ -416,23 +424,18 @@ func clearConfigEnv(t *testing.T) {
 		"BRAVE_SEARCH_API_KEY",
 		"BRAVE_SEARCH_BASE_URL",
 		"PUBLIC_APP_URL",
-		"BILLING_SUCCESS_URL",
-		"BILLING_CANCEL_URL",
-		"STRIPE_SECRET_KEY",
-		"STRIPE_API_BASE_URL",
-		"STRIPE_WEBHOOK_SECRET",
-		"DISCORD_SKU_PLAN_MAP",
-		"DISCORD_TRIAL_SKU_ID",
-		"DISCORD_STARTER_SKU_ID",
-		"DISCORD_PLUS_SKU_ID",
-		"DISCORD_PRO_SKU_ID",
-		"DISCORD_BUSINESS_SKU_ID",
-		"STRIPE_PRICE_PLAN_MAP",
-		"STRIPE_TRIAL_PRICE_ID",
-		"STRIPE_STARTER_PRICE_ID",
-		"STRIPE_PLUS_PRICE_ID",
-		"STRIPE_PRO_PRICE_ID",
-		"STRIPE_BUSINESS_PRICE_ID",
+		"BILLING_ALLOWED_ORIGINS",
+		"SOLANA_RPC_URL",
+		"SOLANA_CLUSTER",
+		"SOLANA_TREASURY_WALLET",
+		"SOLANA_CONFIRMATION",
+		"SOLANA_ORDER_EXPIRATION",
+		"SOLANA_ACTIVATION_KEY_TTL",
+		"SOLANA_PLAN_LAMPORTS",
+		"SOLANA_STARTER_LAMPORTS",
+		"SOLANA_PLUS_LAMPORTS",
+		"SOLANA_PRO_LAMPORTS",
+		"SOLANA_BUSINESS_LAMPORTS",
 		"YTDLP_PATH",
 		"FFMPEG_PATH",
 		"MUSIC_SIDECAR_DIR",

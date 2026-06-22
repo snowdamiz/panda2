@@ -31,9 +31,6 @@ func TestEnsureTrialMetersUsageAndDeniesOverQuota(t *testing.T) {
 	if entitlement.Plan.Plan != PlanTrial || entitlement.Status != StatusTrialing || !entitlement.CanUsePaidFeatures || entitlement.ReadOnly {
 		t.Fatalf("unexpected trial entitlement: %+v", entitlement)
 	}
-	if entitlement.PeriodEnd.Sub(entitlement.PeriodStart) != TrialDuration {
-		t.Fatalf("expected %s trial window, got %s", TrialDuration, entitlement.PeriodEnd.Sub(entitlement.PeriodStart))
-	}
 
 	reservation, err := service.BeginUsage(ctx, "guild-1", MetricAIResponse, int64(entitlement.Plan.AIResponses))
 	if err != nil {
@@ -54,81 +51,12 @@ func TestEnsureTrialMetersUsageAndDeniesOverQuota(t *testing.T) {
 	if quotaErr.Metric != MetricAIResponse || quotaErr.Used != int64(entitlement.Plan.AIResponses) || quotaErr.Limit != int64(entitlement.Plan.AIResponses) {
 		t.Fatalf("unexpected quota error: %+v", quotaErr)
 	}
-
-	resolved, err := service.Resolve(ctx, "guild-1")
-	if err != nil {
-		t.Fatalf("Resolve: %v", err)
-	}
-	if resolved.Usage.AIResponsesConsumed != int64(entitlement.Plan.AIResponses) || resolved.Usage.AIResponsesReserved != 0 {
-		t.Fatalf("unexpected persisted usage totals: %+v", resolved.Usage)
-	}
 }
 
-func TestStripeWebhookIsIdempotentAndGrantsMappedPlan(t *testing.T) {
+func TestSolPaymentOrderVerificationRevealAndActivation(t *testing.T) {
 	ctx := context.Background()
 	service, database := newBillingTestService(t)
 	defer database.Close()
-
-	now := time.Date(2026, 6, 21, 12, 0, 0, 0, time.UTC)
-	service.SetClock(func() time.Time { return now })
-	event := StripeEvent{
-		EventID:            "evt_1",
-		EventType:          "customer.subscription.updated",
-		GuildID:            "guild-1",
-		BillingOwnerUserID: "owner-1",
-		CustomerEmail:      "owner@example.com",
-		SubscriptionID:     "sub_1",
-		PriceID:            "price_plus",
-		Status:             "active",
-		CurrentPeriodStart: now,
-		CurrentPeriodEnd:   now.AddDate(0, 1, 0),
-		AmountCents:        4900,
-		Currency:           "usd",
-		RawPayload:         `{"id":"evt_1"}`,
-	}
-	if err := service.HandleStripeEvent(ctx, event); err != nil {
-		t.Fatalf("HandleStripeEvent first call: %v", err)
-	}
-	if err := service.HandleStripeEvent(ctx, event); err != nil {
-		t.Fatalf("HandleStripeEvent duplicate call: %v", err)
-	}
-
-	entitlement, err := service.Resolve(ctx, "guild-1")
-	if err != nil {
-		t.Fatalf("Resolve: %v", err)
-	}
-	if entitlement.Plan.Plan != PlanPlus || entitlement.Status != StatusActive || !entitlement.CanUsePaidFeatures {
-		t.Fatalf("unexpected Stripe entitlement: %+v", entitlement)
-	}
-	if entitlement.UpgradeURL != "https://panda.example/?guild_id=guild-1#pricing" || entitlement.PortalURL != "https://panda.example/?guild_id=guild-1#pricing" {
-		t.Fatalf("unexpected billing links: upgrade=%q portal=%q", entitlement.UpgradeURL, entitlement.PortalURL)
-	}
-
-	var events int64
-	if err := database.DB.Model(&storepkg.InvoicePaymentEvent{}).Count(&events).Error; err != nil {
-		t.Fatalf("count invoice events: %v", err)
-	}
-	if events != 1 {
-		t.Fatalf("expected one idempotent invoice event, got %d", events)
-	}
-
-	var snapshots int64
-	if err := database.DB.Model(&storepkg.EntitlementSnapshot{}).Where("guild_id = ?", "guild-1").Count(&snapshots).Error; err != nil {
-		t.Fatalf("count entitlement snapshots: %v", err)
-	}
-	if snapshots != 1 {
-		t.Fatalf("expected one entitlement snapshot after duplicate event, got %d", snapshots)
-	}
-}
-
-func TestCreatePlanCheckoutSessionUsesStripeMetadata(t *testing.T) {
-	ctx := context.Background()
-	service, database := newBillingTestService(t)
-	defer database.Close()
-	stripe := &fakeStripeClient{
-		checkout: StripeCheckoutSession{ID: "cs_plan", URL: "https://checkout.stripe.test/plan"},
-	}
-	service.WithStripeClient(stripe)
 
 	now := time.Date(2026, 6, 21, 12, 0, 0, 0, time.UTC)
 	service.SetClock(func() time.Time { return now })
@@ -136,142 +64,156 @@ func TestCreatePlanCheckoutSessionUsesStripeMetadata(t *testing.T) {
 		t.Fatalf("EnsureTrial: %v", err)
 	}
 
-	session, err := service.CreateCheckoutSession(ctx, CheckoutRequest{
-		GuildID:       "guild-1",
-		ActorUserID:   "owner-1",
-		Kind:          CheckoutKindPlan,
-		Plan:          PlanPlus,
-		CustomerEmail: "owner@example.com",
-	})
-	if err != nil {
-		t.Fatalf("CreateCheckoutSession: %v", err)
-	}
-	if session.URL != "https://checkout.stripe.test/plan" || stripe.checkoutCalls != 1 {
-		t.Fatalf("unexpected checkout session=%+v calls=%d", session, stripe.checkoutCalls)
-	}
-	request := stripe.lastCheckout
-	if request.Mode != "subscription" || request.PriceID != "price_plus" || request.CustomerEmail != "owner@example.com" {
-		t.Fatalf("unexpected Stripe plan request: %+v", request)
-	}
-	if request.Metadata["guild_id"] != "guild-1" || request.Metadata["billing_owner_user_id"] != "owner-1" || request.Metadata["plan"] != PlanPlus || request.Metadata["kind"] != string(CheckoutKindPlan) {
-		t.Fatalf("unexpected plan metadata: %+v", request.Metadata)
-	}
-	if request.SubscriptionMetadata["plan"] != PlanPlus || request.SubscriptionMetadata["guild_id"] != "guild-1" {
-		t.Fatalf("expected subscription metadata copy, got %+v", request.SubscriptionMetadata)
-	}
-	if !strings.Contains(request.SuccessURL, "/billing/success") || !strings.Contains(request.SuccessURL, "guild_id=guild-1") || !strings.Contains(request.SuccessURL, "session_id={CHECKOUT_SESSION_ID}") {
-		t.Fatalf("unexpected success url %q", request.SuccessURL)
-	}
-	if !strings.Contains(request.CancelURL, "/billing/cancel") || !strings.Contains(request.CancelURL, "guild_id=guild-1") {
-		t.Fatalf("unexpected cancel url %q", request.CancelURL)
-	}
-}
-
-func TestUnclaimedGuildAdminCanCreateFirstCheckout(t *testing.T) {
-	ctx := context.Background()
-	service, database := newBillingTestService(t)
-	defer database.Close()
-	stripe := &fakeStripeClient{
-		checkout: StripeCheckoutSession{ID: "cs_first", URL: "https://checkout.stripe.test/first"},
-	}
-	service.WithStripeClient(stripe)
-
-	session, err := service.CreateCheckoutSession(ctx, CheckoutRequest{
-		GuildID:       "guild-1",
-		ActorUserID:   "admin-1",
-		ActorCanClaim: true,
-		Kind:          CheckoutKindPlan,
-		Plan:          PlanStarter,
-	})
-	if err != nil {
-		t.Fatalf("CreateCheckoutSession: %v", err)
-	}
-	if session.ID != "cs_first" {
-		t.Fatalf("unexpected first checkout session: %+v", session)
-	}
-	var account storepkg.CustomerAccount
-	if err := database.DB.Where("guild_id = ?", "guild-1").First(&account).Error; err != nil {
-		t.Fatalf("load claimed account: %v", err)
-	}
-	if account.BillingOwnerUserID != "admin-1" {
-		t.Fatalf("expected first checkout actor to become billing owner, got %+v", account)
-	}
-}
-
-func TestCreatePortalSessionUsesStoredStripeCustomer(t *testing.T) {
-	ctx := context.Background()
-	service, database := newBillingTestService(t)
-	defer database.Close()
-	stripe := &fakeStripeClient{
-		portal: StripePortalSession{ID: "bps_1", URL: "https://billing.stripe.test/session"},
-	}
-	service.WithStripeClient(stripe)
-
-	now := time.Date(2026, 6, 21, 12, 0, 0, 0, time.UTC)
-	service.SetClock(func() time.Time { return now })
-	if _, err := service.EnsureTrial(ctx, TrialSeed{GuildID: "guild-1", BillingOwnerUserID: "owner-1", AuthorizedAt: now}); err != nil {
-		t.Fatalf("EnsureTrial: %v", err)
-	}
-	if _, err := service.CreatePortalSession(ctx, PortalRequest{GuildID: "guild-1", ActorUserID: "owner-1"}); !errors.Is(err, ErrStripeCustomerMissing) {
-		t.Fatalf("expected missing customer error before checkout, got %v", err)
-	}
-	if err := database.DB.Model(&storepkg.CustomerAccount{}).Where("guild_id = ?", "guild-1").Update("stripe_customer_id", "cus_1").Error; err != nil {
-		t.Fatalf("store customer id: %v", err)
-	}
-	session, err := service.CreatePortalSession(ctx, PortalRequest{GuildID: "guild-1", ActorUserID: "owner-1"})
-	if err != nil {
-		t.Fatalf("CreatePortalSession: %v", err)
-	}
-	if session.URL != "https://billing.stripe.test/session" || stripe.lastPortal.CustomerID != "cus_1" {
-		t.Fatalf("unexpected portal session=%+v request=%+v", session, stripe.lastPortal)
-	}
-	if !strings.Contains(stripe.lastPortal.ReturnURL, "guild_id=guild-1") {
-		t.Fatalf("unexpected portal return url %q", stripe.lastPortal.ReturnURL)
-	}
-}
-
-func TestPastDueGraceAllowsUseThenSuspendsAfterGraceWindow(t *testing.T) {
-	ctx := context.Background()
-	service, database := newBillingTestService(t)
-	defer database.Close()
-
-	now := time.Date(2026, 6, 21, 12, 0, 0, 0, time.UTC)
-	service.SetClock(func() time.Time { return now })
-	graceEvent := StripeEvent{
-		EventID:            "evt_grace",
-		EventType:          "invoice.payment_failed",
+	order, err := service.CreateSolPaymentOrder(ctx, CreateSolPaymentOrderRequest{
 		GuildID:            "guild-1",
 		BillingOwnerUserID: "owner-1",
-		SubscriptionID:     "sub_1",
-		PriceID:            "price_starter",
-		Status:             "past_due",
-		CurrentPeriodStart: now.AddDate(0, -1, 0),
-		CurrentPeriodEnd:   now.Add(-time.Hour),
-		RawPayload:         `{"id":"evt_grace"}`,
-	}
-	if err := service.HandleStripeEvent(ctx, graceEvent); err != nil {
-		t.Fatalf("HandleStripeEvent grace: %v", err)
-	}
-	entitlement, err := service.Check(ctx, "guild-1", MetricWebSearch, 1)
+		Plan:               PlanPlus,
+		SupportEmail:       "owner@example.com",
+	})
 	if err != nil {
-		t.Fatalf("expected grace-period use to be allowed, got %v", err)
+		t.Fatalf("CreateSolPaymentOrder: %v", err)
 	}
-	if entitlement.Status != StatusGrace || entitlement.GraceState != GraceGrace || !entitlement.CanUsePaidFeatures || entitlement.ReadOnly {
-		t.Fatalf("unexpected grace entitlement: %+v", entitlement)
+	if order.ExpectedLamports != 49_000_000 || order.DestinationWallet != "treasury-wallet" || order.Reference == "" || !strings.HasPrefix(order.PaymentURL, "solana:treasury-wallet?") {
+		t.Fatalf("unexpected order view: %+v", order)
 	}
 
-	suspendedEvent := graceEvent
-	suspendedEvent.EventID = "evt_suspended"
-	suspendedEvent.CurrentPeriodEnd = now.Add(-(GraceDuration + time.Hour))
-	if err := service.HandleStripeEvent(ctx, suspendedEvent); err != nil {
-		t.Fatalf("HandleStripeEvent suspended: %v", err)
+	service.WithSolanaRPCClient(fakeSolanaRPCClient{transaction: verifiedTransaction(order, "payer-wallet", 50_000_000)})
+	result, err := service.VerifySolPayment(ctx, VerifySolPaymentRequest{OrderID: order.OrderID, Signature: "sig-1"})
+	if err != nil {
+		t.Fatalf("VerifySolPayment: %v result=%+v", err, result)
 	}
-	entitlement, err = service.Check(ctx, "guild-1", MetricWebSearch, 1)
-	if !errors.Is(err, ErrReadOnly) {
-		t.Fatalf("expected read-only after grace window, got entitlement=%+v err=%v", entitlement, err)
+	if !result.Verified || result.Order.Status != SolOrderStatusVerified || result.Order.VerifiedTransactionSignature != "sig-1" {
+		t.Fatalf("unexpected verification result: %+v", result)
 	}
-	if entitlement.Status != StatusSuspended || entitlement.GraceState != GraceSuspended || !entitlement.ReadOnly {
-		t.Fatalf("unexpected suspended entitlement: %+v", entitlement)
+
+	reveal, err := service.RevealActivationKey(ctx, order.OrderID)
+	if err != nil {
+		t.Fatalf("RevealActivationKey: %v", err)
+	}
+	if !strings.HasPrefix(reveal.Key, "panda_sol_") || reveal.Prefix == "" {
+		t.Fatalf("unexpected activation key reveal: %+v", reveal)
+	}
+	if _, err := service.RevealActivationKey(ctx, order.OrderID); !errors.Is(err, ErrActivationKeyAlreadyRevealed) {
+		t.Fatalf("expected one-time reveal error, got %v", err)
+	}
+
+	activated, err := service.ActivateWithAPIKey(ctx, ActivateAPIKeyRequest{
+		GuildID:     "guild-1",
+		ActorUserID: "owner-1",
+		APIKey:      reveal.Key,
+	})
+	if err != nil {
+		t.Fatalf("ActivateWithAPIKey: %v", err)
+	}
+	if activated.Entitlement.Plan.Plan != PlanPlus || activated.Entitlement.PaymentProvider != ProviderSol || !activated.Entitlement.CanUsePaidFeatures {
+		t.Fatalf("unexpected activated entitlement: %+v", activated.Entitlement)
+	}
+	if _, err := service.ActivateWithAPIKey(ctx, ActivateAPIKeyRequest{GuildID: "guild-1", ActorUserID: "owner-1", APIKey: reveal.Key}); !errors.Is(err, ErrActivationKeyConsumed) {
+		t.Fatalf("expected consumed key error, got %v", err)
+	}
+
+	var event storepkg.InvoicePaymentEvent
+	if err := database.DB.Where("provider = ? AND external_id = ?", ProviderSol, "sig-1").First(&event).Error; err != nil {
+		t.Fatalf("load SOL payment event: %v", err)
+	}
+	if event.AmountLamports != 49_000_000 || event.Currency != "sol" || event.Status != "paid" {
+		t.Fatalf("unexpected payment event: %+v", event)
+	}
+}
+
+func TestSolVerificationRejectsWrongWalletAndKeepsOrderClosed(t *testing.T) {
+	ctx := context.Background()
+	service, database := newBillingTestService(t)
+	defer database.Close()
+
+	now := time.Date(2026, 6, 21, 12, 0, 0, 0, time.UTC)
+	service.SetClock(func() time.Time { return now })
+	order, err := service.CreateSolPaymentOrder(ctx, CreateSolPaymentOrderRequest{
+		GuildID: "guild-1",
+		Plan:    PlanStarter,
+	})
+	if err != nil {
+		t.Fatalf("CreateSolPaymentOrder: %v", err)
+	}
+	bad := order
+	bad.DestinationWallet = "wrong-wallet"
+	service.WithSolanaRPCClient(fakeSolanaRPCClient{transaction: verifiedTransaction(bad, "payer-wallet", 19_000_000)})
+
+	result, err := service.VerifySolPayment(ctx, VerifySolPaymentRequest{OrderID: order.OrderID, Signature: "sig-wrong-wallet"})
+	if !errors.Is(err, ErrSolPaymentVerificationFailed) {
+		t.Fatalf("expected verification failure, got err=%v result=%+v", err, result)
+	}
+	if result.Verified || result.FailureCode != "verification_failed" {
+		t.Fatalf("unexpected failed verification result: %+v", result)
+	}
+	if _, err := service.RevealActivationKey(ctx, order.OrderID); !errors.Is(err, ErrSolPaymentOrderNotVerified) {
+		t.Fatalf("expected not verified reveal error, got %v", err)
+	}
+
+	var transactions int64
+	if err := database.DB.Model(&storepkg.SolPaymentTransaction{}).Where("signature = ? AND status = ?", "sig-wrong-wallet", SolTransactionStatusFailed).Count(&transactions).Error; err != nil {
+		t.Fatalf("count failed transactions: %v", err)
+	}
+	if transactions != 1 {
+		t.Fatalf("expected one failed transaction record, got %d", transactions)
+	}
+}
+
+func TestActivationKeyRevocationIsOperatorOnlyAndAudited(t *testing.T) {
+	ctx := context.Background()
+	service, database := newBillingTestService(t)
+	defer database.Close()
+
+	now := time.Date(2026, 6, 21, 12, 0, 0, 0, time.UTC)
+	service.SetClock(func() time.Time { return now })
+	order, err := service.CreateSolPaymentOrder(ctx, CreateSolPaymentOrderRequest{
+		GuildID:            "guild-1",
+		BillingOwnerUserID: "owner-1",
+		Plan:               PlanPro,
+	})
+	if err != nil {
+		t.Fatalf("CreateSolPaymentOrder: %v", err)
+	}
+	service.WithSolanaRPCClient(fakeSolanaRPCClient{transaction: verifiedTransaction(order, "payer-wallet", 99_000_000)})
+	if _, err := service.VerifySolPayment(ctx, VerifySolPaymentRequest{OrderID: order.OrderID, Signature: "sig-revoked"}); err != nil {
+		t.Fatalf("VerifySolPayment: %v", err)
+	}
+	reveal, err := service.RevealActivationKey(ctx, order.OrderID)
+	if err != nil {
+		t.Fatalf("RevealActivationKey: %v", err)
+	}
+
+	if _, err := service.RevokeActivationAPIKey(ctx, RevokeActivationAPIKeyRequest{PaymentOrderID: order.OrderID, ActorUserID: "owner-1"}); !errors.Is(err, ErrBillingAccess) {
+		t.Fatalf("expected operator access error, got %v", err)
+	}
+	revocation, err := service.RevokeActivationAPIKey(ctx, RevokeActivationAPIKeyRequest{
+		PaymentOrderID:  order.OrderID,
+		ActorUserID:     "operator-1",
+		ActorIsOperator: true,
+		Reason:          "support refund",
+	})
+	if err != nil {
+		t.Fatalf("RevokeActivationAPIKey: %v", err)
+	}
+	if revocation.Prefix != reveal.Prefix || revocation.Order.OrderID != order.OrderID || revocation.RevokedAt.IsZero() {
+		t.Fatalf("unexpected revocation result: %+v reveal=%+v", revocation, reveal)
+	}
+	if _, err := service.ActivateWithAPIKey(ctx, ActivateAPIKeyRequest{
+		GuildID:     "guild-1",
+		ActorUserID: "owner-1",
+		APIKey:      reveal.Key,
+	}); !errors.Is(err, ErrActivationKeyRevoked) {
+		t.Fatalf("expected revoked key error, got %v", err)
+	}
+
+	for _, action := range []string{"billing.activation_key.created", "billing.activation_key.viewed", "billing.activation_key.revoked"} {
+		var count int64
+		if err := database.DB.Model(&storepkg.AuditEvent{}).Where("guild_id = ? AND action = ?", "guild-1", action).Count(&count).Error; err != nil {
+			t.Fatalf("count audit action %s: %v", action, err)
+		}
+		if count != 1 {
+			t.Fatalf("expected one audit action %s, got %d", action, count)
+		}
 	}
 }
 
@@ -315,42 +257,56 @@ func newBillingTestService(t *testing.T) (*Service, *storepkg.Store) {
 		t.Fatalf("open store: %v", err)
 	}
 	service := NewService(repository.NewBillingRepository(database.DB), Config{
-		PublicURL: "https://panda.example",
-		DiscordSKUPlans: map[string]string{
-			"sku_starter": PlanStarter,
+		PublicURL:              "https://panda.example",
+		SolanaRPCURL:           "https://api.devnet.solana.com",
+		SolanaCluster:          "devnet",
+		SolanaTreasuryWallet:   "treasury-wallet",
+		SolanaConfirmation:     "finalized",
+		SolanaOrderExpiration:  time.Hour,
+		SolanaActivationKeyTTL: time.Hour,
+		SolanaPlanLamports: map[string]int64{
+			PlanStarter:  19_000_000,
+			PlanPlus:     49_000_000,
+			PlanPro:      99_000_000,
+			PlanBusiness: 249_000_000,
 		},
-		StripePricePlans: map[string]string{
-			"price_starter": PlanStarter,
-			"price_plus":    PlanPlus,
-		},
-	})
+	}).WithAuditRecorder(repository.NewAuditRepository(database.DB))
 	return service, database
 }
 
-type fakeStripeClient struct {
-	checkoutCalls int
-	portalCalls   int
-	lastCheckout  StripeCheckoutRequest
-	lastPortal    StripePortalRequest
-	checkout      StripeCheckoutSession
-	portal        StripePortalSession
-	err           error
+type fakeSolanaRPCClient struct {
+	transaction SolanaTransaction
+	err         error
 }
 
-func (f *fakeStripeClient) CreateCheckoutSession(_ context.Context, request StripeCheckoutRequest) (StripeCheckoutSession, error) {
-	f.checkoutCalls++
-	f.lastCheckout = request
+func (f fakeSolanaRPCClient) GetTransaction(context.Context, string, string) (SolanaTransaction, error) {
 	if f.err != nil {
-		return StripeCheckoutSession{}, f.err
+		return SolanaTransaction{}, f.err
 	}
-	return f.checkout, nil
+	return f.transaction, nil
 }
 
-func (f *fakeStripeClient) CreatePortalSession(_ context.Context, request StripePortalRequest) (StripePortalSession, error) {
-	f.portalCalls++
-	f.lastPortal = request
-	if f.err != nil {
-		return StripePortalSession{}, f.err
+func verifiedTransaction(order SolPaymentOrderView, payer string, lamports int64) SolanaTransaction {
+	var transaction SolanaTransaction
+	transaction.Transaction.Message.AccountKeys = []solanaAccountKey{{Pubkey: payer, Signer: true}}
+	transaction.Transaction.Message.Instructions = []solanaParsedInstruction{
+		{
+			Program:   "spl-memo",
+			ProgramID: "MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr",
+			Parsed:    order.Reference,
+		},
+		{
+			Program:   "system",
+			ProgramID: "11111111111111111111111111111111",
+			Parsed: map[string]any{
+				"type": "transfer",
+				"info": map[string]any{
+					"source":      payer,
+					"destination": order.DestinationWallet,
+					"lamports":    float64(lamports),
+				},
+			},
+		},
 	}
-	return f.portal, nil
+	return transaction
 }

@@ -75,14 +75,15 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 	})
 	memoryService := memory.NewServiceWithEmbeddings(knowledge, openRouter, cfg.OpenRouterEmbeddingModel)
 	billingService := billing.NewService(billingRepo, billing.Config{
-		PublicURL:        cfg.PublicAppURL,
-		SuccessURL:       cfg.BillingSuccessURL,
-		CancelURL:        cfg.BillingCancelURL,
-		StripeSecretKey:  cfg.StripeSecretKey,
-		StripeAPIBaseURL: cfg.StripeAPIBaseURL,
-		DiscordSKUPlans:  cfg.DiscordSKUPlans,
-		StripePricePlans: cfg.StripePricePlans,
-	})
+		PublicURL:              cfg.PublicAppURL,
+		SolanaRPCURL:           cfg.SolanaRPCURL,
+		SolanaCluster:          cfg.SolanaCluster,
+		SolanaTreasuryWallet:   cfg.SolanaTreasuryWallet,
+		SolanaConfirmation:     cfg.SolanaConfirmation,
+		SolanaPlanLamports:     cfg.SolanaPlanLamports,
+		SolanaOrderExpiration:  cfg.SolanaOrderExpiration,
+		SolanaActivationKeyTTL: cfg.SolanaActivationKeyTTL,
+	}).WithAuditRecorder(audit)
 	curator := curation.NewService(memoryService).
 		WithAuditRecorder(audit).
 		WithBilling(billingService)
@@ -145,7 +146,6 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 		WithDiscordEventRecorder(discordEvents).
 		WithJobQueue(jobs).
 		WithAlertHandler(alertService).
-		WithBillingHandler(billingService).
 		WithMusicRepository(musicRepo)
 	toolExecutor.WithMusicManager(discord.MusicManager())
 	schedulerService.WithDeliverySender(discord)
@@ -167,7 +167,7 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 		store:  dataStore,
 		httpServer: pandahttp.New(cfg, dataStore).
 			WithDiscordWebhookHandler(installService).
-			WithBillingWebhookHandler(billingService),
+			WithBillingService(billingService),
 		discord:   discord,
 		worker:    worker,
 		scheduler: schedulerService,

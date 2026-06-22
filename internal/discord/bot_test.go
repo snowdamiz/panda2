@@ -519,31 +519,34 @@ func TestAdminBehaviorCommandIncludesRuntimeOptions(t *testing.T) {
 	}
 }
 
-func TestBillingCommandIncludesPurchaseOptions(t *testing.T) {
+func TestBillingCommandIncludesActivationOptions(t *testing.T) {
 	billingCommand := slashCommand(t, "billing")
 	action := slashStringOption(t, billingCommand, "action")
 	if action.Required {
 		t.Fatal("billing action should be optional so /billing shows status")
 	}
-	for _, expected := range []string{"status", "upgrade", "portal"} {
+	for _, expected := range []string{"status", "activate", "revoke"} {
 		if !stringOptionHasChoice(action, expected) {
 			t.Fatalf("expected billing action choice %q", expected)
 		}
 	}
-	if stringOptionHasChoice(action, "pack") {
-		t.Fatal("did not expect billing pack action")
+	if len(action.Choices) != 3 {
+		t.Fatalf("expected billing action to expose exactly three choices, got %+v", action.Choices)
 	}
-	plan := slashStringOption(t, billingCommand, "plan")
-	for _, expected := range []string{"starter", "plus", "pro", "business"} {
-		if !stringOptionHasChoice(plan, expected) {
-			t.Fatalf("expected billing plan choice %q", expected)
-		}
+	if slashHasStringOption(billingCommand, "plan") {
+		t.Fatal("did not expect billing command to include legacy plan option")
 	}
 	if slashHasStringOption(billingCommand, "pack") {
 		t.Fatal("did not expect billing command to include pack option")
 	}
-	if !slashHasStringOption(billingCommand, "email") {
-		t.Fatal("expected billing command to include optional email")
+	if slashHasStringOption(billingCommand, "email") {
+		t.Fatal("did not expect billing command to include purchase email option")
+	}
+	if !slashHasStringOption(billingCommand, "api_key") {
+		t.Fatal("expected billing command to include activation api key option")
+	}
+	if !slashHasStringOption(billingCommand, "order_id") {
+		t.Fatal("expected billing command to include operator order id option")
 	}
 }
 

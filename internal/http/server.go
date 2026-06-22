@@ -3,9 +3,6 @@ package http
 import (
 	"context"
 	"crypto/ed25519"
-	"crypto/hmac"
-	"crypto/sha256"
-	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -17,9 +14,11 @@ import (
 	"time"
 
 	"github.com/gofiber/fiber/v2"
+	"github.com/gofiber/fiber/v2/middleware/cors"
 	"github.com/sn0w/panda2/internal/billing"
 	"github.com/sn0w/panda2/internal/config"
 	discordbot "github.com/sn0w/panda2/internal/discord"
+	"github.com/sn0w/panda2/internal/ratelimit"
 	"github.com/sn0w/panda2/internal/store"
 )
 
@@ -28,15 +27,12 @@ type Server struct {
 	cfg            config.Config
 	store          *store.Store
 	discordWebhook DiscordWebhookHandler
-	billingWebhook BillingWebhookHandler
+	billing        *billing.Service
+	paymentLimiter *ratelimit.Limiter
 }
 
 type DiscordWebhookHandler interface {
 	HandleWebhookEvent(ctx context.Context, event discordbot.WebhookEvent) error
-}
-
-type BillingWebhookHandler interface {
-	HandleStripeEvent(ctx context.Context, event billing.StripeEvent) error
 }
 
 type healthResponse struct {
@@ -56,8 +52,9 @@ func New(cfg config.Config, store *store.Store) *Server {
 			AppName:     "panda-assistant",
 			ReadTimeout: 5 * time.Second,
 		}),
-		cfg:   cfg,
-		store: store,
+		cfg:            cfg,
+		store:          store,
+		paymentLimiter: ratelimit.New(cfg.UserRateLimit, cfg.UserRateLimitWindow),
 	}
 	server.routes()
 	return server
@@ -68,8 +65,8 @@ func (s *Server) WithDiscordWebhookHandler(handler DiscordWebhookHandler) *Serve
 	return s
 }
 
-func (s *Server) WithBillingWebhookHandler(handler BillingWebhookHandler) *Server {
-	s.billingWebhook = handler
+func (s *Server) WithBillingService(service *billing.Service) *Server {
+	s.billing = service
 	return s
 }
 
@@ -86,6 +83,19 @@ func (s *Server) Test(req *stdhttp.Request, timeout ...int) (*stdhttp.Response, 
 }
 
 func (s *Server) routes() {
+	if origins := s.cfg.PaymentAllowedOrigins(); len(origins) > 0 {
+		s.app.Use("/billing/sol", cors.New(cors.Config{
+			AllowOrigins: strings.Join(origins, ","),
+			AllowMethods: strings.Join([]string{
+				fiber.MethodGet,
+				fiber.MethodPost,
+				fiber.MethodOptions,
+			}, ","),
+			AllowHeaders: fiber.HeaderContentType,
+			MaxAge:       300,
+		}))
+	}
+
 	s.app.Get("/healthz", s.health)
 	s.app.Get("/readyz", s.ready)
 	s.app.Get("/livez", func(c *fiber.Ctx) error {
@@ -96,9 +106,11 @@ func (s *Server) routes() {
 		return c.SendString(s.metrics(c.Context()))
 	})
 	s.app.Post("/discord/webhook-events", s.discordWebhookEvents)
-	s.app.Post("/billing/stripe/webhook", s.stripeWebhook)
-	s.app.Get("/billing/success", s.billingSuccess)
-	s.app.Get("/billing/cancel", s.billingCancel)
+	s.app.Post("/billing/sol/orders", s.createSolPaymentOrder)
+	s.app.Get("/billing/sol/orders/:order_id", s.getSolPaymentOrder)
+	s.app.Get("/billing/sol/orders/:order_id/payment-request", s.getSolPaymentOrder)
+	s.app.Post("/billing/sol/orders/:order_id/verify", s.verifySolPaymentOrder)
+	s.app.Post("/billing/sol/orders/:order_id/activation-key", s.revealSolActivationKey)
 }
 
 func (s *Server) health(c *fiber.Ctx) error {
@@ -115,16 +127,6 @@ func (s *Server) ready(c *fiber.Ctx) error {
 	return c.Status(statusCode).JSON(response)
 }
 
-func (s *Server) billingSuccess(c *fiber.Ctx) error {
-	c.Set(fiber.HeaderContentType, fiber.MIMETextHTMLCharsetUTF8)
-	return c.SendString(`<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Panda billing updated</title></head><body><main style="font-family:system-ui,sans-serif;max-width:42rem;margin:12vh auto;padding:0 1rem;line-height:1.5"><h1>Panda billing is processing</h1><p>Stripe confirmed the checkout. Panda grants plans from the verified webhook, which usually lands within a moment.</p><p>Return to Discord and run <strong>/billing</strong> to see the updated plan.</p></main></body></html>`)
-}
-
-func (s *Server) billingCancel(c *fiber.Ctx) error {
-	c.Set(fiber.HeaderContentType, fiber.MIMETextHTMLCharsetUTF8)
-	return c.SendString(`<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Panda checkout canceled</title></head><body><main style="font-family:system-ui,sans-serif;max-width:42rem;margin:12vh auto;padding:0 1rem;line-height:1.5"><h1>Checkout canceled</h1><p>No Panda plan changes were made. Return to Discord and run <strong>/billing</strong> when you are ready to choose a plan.</p></main></body></html>`)
-}
-
 func (s *Server) healthPayload(ctx context.Context) (healthResponse, int) {
 	checks := map[string]componentStatus{
 		"config":  {Status: "ok"},
@@ -134,6 +136,7 @@ func (s *Server) healthPayload(ctx context.Context) (healthResponse, int) {
 			"public key missing; owner-only install webhooks disabled"),
 		"ai_service":    configuredStatus(s.cfg.OpenRouterConfigured(), "AI service key missing; natural-language assistant disabled"),
 		"brave_search":  configuredStatus(s.cfg.BraveSearchConfigured(), "api key missing; web search disabled"),
+		"sol_payments":  configuredStatus(s.cfg.SolanaPaymentsConfigured(), "SOL payment settings incomplete; paid purchases disabled"),
 		"local_storage": localStorageStatus(s.cfg.DataDir),
 	}
 
@@ -275,273 +278,128 @@ func (s *Server) discordWebhookEvents(c *fiber.Ctx) error {
 	}
 }
 
-type stripeWebhookPayload struct {
-	ID   string `json:"id"`
-	Type string `json:"type"`
-	Data struct {
-		Object json.RawMessage `json:"object"`
-	} `json:"data"`
+type createSolPaymentOrderRequest struct {
+	GuildID            string `json:"guild_id"`
+	BillingOwnerUserID string `json:"billing_owner_user_id"`
+	Plan               string `json:"plan"`
+	SupportEmail       string `json:"support_email"`
 }
 
-type stripeSubscriptionObject struct {
-	ID                 string            `json:"id"`
-	Customer           string            `json:"customer"`
-	Status             string            `json:"status"`
-	Metadata           map[string]string `json:"metadata"`
-	CustomerEmail      string            `json:"customer_email"`
-	CurrentPeriodStart int64             `json:"current_period_start"`
-	CurrentPeriodEnd   int64             `json:"current_period_end"`
-	CancelAtPeriodEnd  bool              `json:"cancel_at_period_end"`
-	Items              struct {
-		Data []struct {
-			Price struct {
-				ID string `json:"id"`
-			} `json:"price"`
-		} `json:"data"`
-	} `json:"items"`
+type verifySolPaymentRequest struct {
+	Signature string `json:"signature"`
 }
 
-type stripeCheckoutSessionObject struct {
-	ID              string            `json:"id"`
-	Customer        string            `json:"customer"`
-	Subscription    string            `json:"subscription"`
-	Mode            string            `json:"mode"`
-	Metadata        map[string]string `json:"metadata"`
-	AmountTotal     int64             `json:"amount_total"`
-	Currency        string            `json:"currency"`
-	CustomerDetails struct {
-		Email string `json:"email"`
-	} `json:"customer_details"`
-}
-
-type stripeInvoiceObject struct {
-	ID            string            `json:"id"`
-	Customer      string            `json:"customer"`
-	Subscription  string            `json:"subscription"`
-	Status        string            `json:"status"`
-	AmountPaid    int64             `json:"amount_paid"`
-	AmountDue     int64             `json:"amount_due"`
-	Currency      string            `json:"currency"`
-	CustomerEmail string            `json:"customer_email"`
-	Metadata      map[string]string `json:"metadata"`
-	Lines         struct {
-		Data []struct {
-			Price struct {
-				ID string `json:"id"`
-			} `json:"price"`
-			Period struct {
-				Start int64 `json:"start"`
-				End   int64 `json:"end"`
-			} `json:"period"`
-		} `json:"data"`
-	} `json:"lines"`
-	SubscriptionDetails struct {
-		Metadata map[string]string `json:"metadata"`
-	} `json:"subscription_details"`
-	Parent struct {
-		SubscriptionDetails struct {
-			Metadata map[string]string `json:"metadata"`
-		} `json:"subscription_details"`
-	} `json:"parent"`
-}
-
-func (s *Server) stripeWebhook(c *fiber.Ctx) error {
-	if s.billingWebhook == nil {
+func (s *Server) createSolPaymentOrder(c *fiber.Ctx) error {
+	if denied := s.allowPaymentWrite(c); denied != nil {
+		return denied
+	}
+	if s.billing == nil {
 		return c.SendStatus(fiber.StatusServiceUnavailable)
 	}
-	body := c.BodyRaw()
-	if err := verifyStripeSignature(s.cfg.StripeWebhookSecret, c.Get("Stripe-Signature"), body, time.Now); err != nil {
-		if errors.Is(err, errStripeWebhookNotConfigured) {
-			return c.SendStatus(fiber.StatusServiceUnavailable)
-		}
-		return c.SendStatus(fiber.StatusUnauthorized)
-	}
-	var payload stripeWebhookPayload
-	if err := json.Unmarshal(body, &payload); err != nil {
+	var request createSolPaymentOrderRequest
+	if err := c.BodyParser(&request); err != nil {
 		return c.SendStatus(fiber.StatusBadRequest)
 	}
-	event, ok, err := stripeEventFromPayload(payload, body)
+	order, err := s.billing.CreateSolPaymentOrder(c.Context(), billing.CreateSolPaymentOrderRequest{
+		GuildID:            request.GuildID,
+		BillingOwnerUserID: request.BillingOwnerUserID,
+		Plan:               request.Plan,
+		SupportEmail:       request.SupportEmail,
+	})
 	if err != nil {
-		return c.SendStatus(fiber.StatusBadRequest)
+		return writeSolBillingError(c, err)
 	}
-	if !ok {
-		return c.SendStatus(fiber.StatusNoContent)
-	}
-	if err := s.billingWebhook.HandleStripeEvent(c.Context(), event); err != nil {
-		return c.SendStatus(fiber.StatusInternalServerError)
-	}
-	return c.SendStatus(fiber.StatusNoContent)
+	return c.Status(fiber.StatusCreated).JSON(order)
 }
 
-func stripeEventFromPayload(payload stripeWebhookPayload, raw []byte) (billing.StripeEvent, bool, error) {
-	switch payload.Type {
-	case "customer.subscription.created", "customer.subscription.updated", "customer.subscription.deleted":
-		var object stripeSubscriptionObject
-		if err := json.Unmarshal(payload.Data.Object, &object); err != nil {
-			return billing.StripeEvent{}, false, err
+func (s *Server) getSolPaymentOrder(c *fiber.Ctx) error {
+	if s.billing == nil {
+		return c.SendStatus(fiber.StatusServiceUnavailable)
+	}
+	order, err := s.billing.GetSolPaymentOrder(c.Context(), c.Params("order_id"))
+	if err != nil {
+		return writeSolBillingError(c, err)
+	}
+	return c.JSON(order)
+}
+
+func (s *Server) verifySolPaymentOrder(c *fiber.Ctx) error {
+	if denied := s.allowPaymentWrite(c); denied != nil {
+		return denied
+	}
+	if s.billing == nil {
+		return c.SendStatus(fiber.StatusServiceUnavailable)
+	}
+	var request verifySolPaymentRequest
+	if err := c.BodyParser(&request); err != nil {
+		return c.SendStatus(fiber.StatusBadRequest)
+	}
+	result, err := s.billing.VerifySolPayment(c.Context(), billing.VerifySolPaymentRequest{
+		OrderID:   c.Params("order_id"),
+		Signature: request.Signature,
+	})
+	if err != nil {
+		switch result.FailureCode {
+		case "pending_confirmation":
+			return c.Status(fiber.StatusAccepted).JSON(result)
+		case "rpc_unavailable":
+			return c.Status(fiber.StatusServiceUnavailable).JSON(result)
+		case "verification_failed", "duplicate_or_stale":
+			return c.Status(fiber.StatusUnprocessableEntity).JSON(result)
+		default:
+			return writeSolBillingError(c, err)
 		}
-		priceID := ""
-		if len(object.Items.Data) > 0 {
-			priceID = object.Items.Data[0].Price.ID
-		}
-		return billing.StripeEvent{
-			EventID:            payload.ID,
-			EventType:          payload.Type,
-			GuildID:            firstMetadata(object.Metadata, "guild_id"),
-			Plan:               firstMetadata(object.Metadata, "plan"),
-			CustomerEmail:      object.CustomerEmail,
-			BillingOwnerUserID: firstMetadata(object.Metadata, "billing_owner_user_id"),
-			CustomerID:         object.Customer,
-			SubscriptionID:     object.ID,
-			PriceID:            priceID,
-			Status:             object.Status,
-			CurrentPeriodStart: unixTime(object.CurrentPeriodStart),
-			CurrentPeriodEnd:   unixTime(object.CurrentPeriodEnd),
-			CancelAtPeriodEnd:  object.CancelAtPeriodEnd,
-			RawPayload:         string(raw),
-		}, true, nil
-	case "checkout.session.completed":
-		var object stripeCheckoutSessionObject
-		if err := json.Unmarshal(payload.Data.Object, &object); err != nil {
-			return billing.StripeEvent{}, false, err
-		}
-		return billing.StripeEvent{
-			EventID:            payload.ID,
-			EventType:          payload.Type,
-			GuildID:            firstMetadata(object.Metadata, "guild_id"),
-			Plan:               firstMetadata(object.Metadata, "plan"),
-			CustomerEmail:      object.CustomerDetails.Email,
-			BillingOwnerUserID: firstMetadata(object.Metadata, "billing_owner_user_id"),
-			CustomerID:         object.Customer,
-			CheckoutSessionID:  object.ID,
-			SubscriptionID:     object.Subscription,
-			Status:             "active",
-			AmountCents:        object.AmountTotal,
-			Currency:           object.Currency,
-			RawPayload:         string(raw),
-		}, true, nil
-	case "invoice.payment_succeeded", "invoice.payment_failed":
-		var object stripeInvoiceObject
-		if err := json.Unmarshal(payload.Data.Object, &object); err != nil {
-			return billing.StripeEvent{}, false, err
-		}
-		priceID := ""
-		var periodStart, periodEnd time.Time
-		if len(object.Lines.Data) > 0 {
-			priceID = object.Lines.Data[0].Price.ID
-			periodStart = unixTime(object.Lines.Data[0].Period.Start)
-			periodEnd = unixTime(object.Lines.Data[0].Period.End)
-		}
-		metadata := mergedStripeMetadata(object.Metadata, object.SubscriptionDetails.Metadata, object.Parent.SubscriptionDetails.Metadata)
-		status := object.Status
-		if payload.Type == "invoice.payment_failed" {
-			status = "past_due"
-		}
-		amount := object.AmountPaid
-		if amount == 0 {
-			amount = object.AmountDue
-		}
-		return billing.StripeEvent{
-			EventID:            payload.ID,
-			EventType:          payload.Type,
-			GuildID:            firstMetadata(metadata, "guild_id"),
-			Plan:               firstMetadata(metadata, "plan"),
-			CustomerEmail:      object.CustomerEmail,
-			BillingOwnerUserID: firstMetadata(metadata, "billing_owner_user_id"),
-			CustomerID:         object.Customer,
-			SubscriptionID:     object.Subscription,
-			PriceID:            priceID,
-			Status:             status,
-			CurrentPeriodStart: periodStart,
-			CurrentPeriodEnd:   periodEnd,
-			AmountCents:        amount,
-			Currency:           object.Currency,
-			RawPayload:         string(raw),
-		}, true, nil
+	}
+	return c.JSON(result)
+}
+
+func (s *Server) revealSolActivationKey(c *fiber.Ctx) error {
+	if denied := s.allowPaymentWrite(c); denied != nil {
+		return denied
+	}
+	if s.billing == nil {
+		return c.SendStatus(fiber.StatusServiceUnavailable)
+	}
+	key, err := s.billing.RevealActivationKey(c.Context(), c.Params("order_id"))
+	if err != nil {
+		return writeSolBillingError(c, err)
+	}
+	return c.JSON(key)
+}
+
+func (s *Server) allowPaymentWrite(c *fiber.Ctx) error {
+	if s.paymentLimiter == nil {
+		return nil
+	}
+	key := c.IP() + ":" + c.Method() + ":" + c.Route().Path
+	ok, retryAfter := s.paymentLimiter.Allow(key)
+	if ok {
+		return nil
+	}
+	c.Set(fiber.HeaderRetryAfter, strconv.Itoa(int(retryAfter.Round(time.Second).Seconds())))
+	return c.Status(fiber.StatusTooManyRequests).JSON(map[string]string{
+		"error":       "rate_limited",
+		"retry_after": retryAfter.Round(time.Second).String(),
+	})
+}
+
+func writeSolBillingError(c *fiber.Ctx, err error) error {
+	switch {
+	case errors.Is(err, billing.ErrSolPaymentsNotConfigured):
+		return c.Status(fiber.StatusServiceUnavailable).JSON(map[string]string{"error": "sol_payments_not_configured"})
+	case errors.Is(err, billing.ErrUnknownPlan):
+		return c.Status(fiber.StatusBadRequest).JSON(map[string]string{"error": "unknown_plan"})
+	case errors.Is(err, billing.ErrSolPaymentOrderNotFound):
+		return c.Status(fiber.StatusNotFound).JSON(map[string]string{"error": "order_not_found"})
+	case errors.Is(err, billing.ErrSolPaymentOrderExpired), errors.Is(err, billing.ErrActivationKeyExpired):
+		return c.Status(fiber.StatusGone).JSON(map[string]string{"error": "expired"})
+	case errors.Is(err, billing.ErrSolPaymentOrderNotVerified):
+		return c.Status(fiber.StatusConflict).JSON(map[string]string{"error": "order_not_verified"})
+	case errors.Is(err, billing.ErrActivationKeyAlreadyRevealed):
+		return c.Status(fiber.StatusConflict).JSON(map[string]string{"error": "activation_key_already_revealed"})
 	default:
-		return billing.StripeEvent{}, false, nil
+		return c.Status(fiber.StatusBadRequest).JSON(map[string]string{"error": "bad_request"})
 	}
-}
-
-var errStripeWebhookNotConfigured = errors.New("stripe webhook secret is not configured")
-
-func verifyStripeSignature(secret, header string, body []byte, now func() time.Time) error {
-	secret = strings.TrimSpace(secret)
-	if secret == "" {
-		return errStripeWebhookNotConfigured
-	}
-	timestamp, signatures, err := stripeSignatureParts(header)
-	if err != nil {
-		return err
-	}
-	signedAt, err := strconv.ParseInt(timestamp, 10, 64)
-	if err != nil {
-		return errors.New("invalid stripe signature timestamp")
-	}
-	eventTime := time.Unix(signedAt, 0)
-	if diff := now().Sub(eventTime); diff > 5*time.Minute || diff < -5*time.Minute {
-		return errors.New("stale stripe signature timestamp")
-	}
-	mac := hmac.New(sha256.New, []byte(secret))
-	_, _ = mac.Write([]byte(timestamp))
-	_, _ = mac.Write([]byte("."))
-	_, _ = mac.Write(body)
-	expected := hex.EncodeToString(mac.Sum(nil))
-	for _, signature := range signatures {
-		if subtle.ConstantTimeCompare([]byte(signature), []byte(expected)) == 1 {
-			return nil
-		}
-	}
-	return errors.New("invalid stripe signature")
-}
-
-func stripeSignatureParts(header string) (string, []string, error) {
-	var timestamp string
-	var signatures []string
-	for _, part := range strings.Split(header, ",") {
-		key, value, ok := strings.Cut(strings.TrimSpace(part), "=")
-		if !ok {
-			continue
-		}
-		switch strings.TrimSpace(key) {
-		case "t":
-			timestamp = strings.TrimSpace(value)
-		case "v1":
-			if value = strings.TrimSpace(value); value != "" {
-				signatures = append(signatures, value)
-			}
-		}
-	}
-	if timestamp == "" || len(signatures) == 0 {
-		return "", nil, errors.New("missing stripe signature")
-	}
-	return timestamp, signatures, nil
-}
-
-func firstMetadata(metadata map[string]string, key string) string {
-	if metadata == nil {
-		return ""
-	}
-	return strings.TrimSpace(metadata[key])
-}
-
-func mergedStripeMetadata(values ...map[string]string) map[string]string {
-	merged := map[string]string{}
-	for _, metadata := range values {
-		for key, value := range metadata {
-			if strings.TrimSpace(value) != "" {
-				merged[key] = value
-			}
-		}
-	}
-	return merged
-}
-
-func unixTime(value int64) time.Time {
-	if value <= 0 {
-		return time.Time{}
-	}
-	return time.Unix(value, 0).UTC()
 }
 
 var errDiscordWebhookNotConfigured = errors.New("discord webhook public key is not configured")

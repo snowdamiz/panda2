@@ -40,7 +40,6 @@ func (r *BillingRepository) EnsureCustomerAccount(ctx context.Context, account s
 	account.Email = strings.TrimSpace(account.Email)
 	account.TaxCountry = strings.ToUpper(strings.TrimSpace(account.TaxCountry))
 	account.SupportContact = strings.TrimSpace(account.SupportContact)
-	account.StripeCustomerID = strings.TrimSpace(account.StripeCustomerID)
 	account.CreatedAt = now
 	account.UpdatedAt = now
 	if account.GuildID == "" {
@@ -74,9 +73,6 @@ func (r *BillingRepository) EnsureCustomerAccount(ctx context.Context, account s
 		if account.SupportContact != "" {
 			updates["support_contact"] = account.SupportContact
 		}
-		if account.StripeCustomerID != "" {
-			updates["stripe_customer_id"] = account.StripeCustomerID
-		}
 		if err := tx.Model(&existing).Updates(updates).Error; err != nil {
 			return err
 		}
@@ -95,20 +91,6 @@ func (r *BillingRepository) GetCustomerAccountByGuild(ctx context.Context, guild
 		return store.CustomerAccount{}, false, nil
 	}
 	return store.CustomerAccount{}, false, err
-}
-
-func (r *BillingRepository) SetStripeCustomerID(ctx context.Context, guildID, stripeCustomerID string) error {
-	guildID = strings.TrimSpace(guildID)
-	stripeCustomerID = strings.TrimSpace(stripeCustomerID)
-	if guildID == "" || stripeCustomerID == "" {
-		return fmt.Errorf("guild_id and stripe_customer_id are required")
-	}
-	return r.db.WithContext(ctx).Model(&store.CustomerAccount{}).
-		Where("guild_id = ?", guildID).
-		Updates(map[string]any{
-			"stripe_customer_id": stripeCustomerID,
-			"updated_at":         time.Now().UTC(),
-		}).Error
 }
 
 func (r *BillingRepository) GetSubscriptionByGuild(ctx context.Context, guildID string) (store.GuildSubscription, bool, error) {
@@ -251,6 +233,182 @@ func (r *BillingRepository) RecordInvoicePaymentEvent(ctx context.Context, event
 		return false, nil
 	}
 	return false, err
+}
+
+func (r *BillingRepository) CreateSolPaymentOrder(ctx context.Context, order store.SolPaymentOrder) (store.SolPaymentOrder, error) {
+	now := time.Now().UTC()
+	order.OrderID = strings.TrimSpace(order.OrderID)
+	order.GuildID = strings.TrimSpace(order.GuildID)
+	order.BillingOwnerUserID = strings.TrimSpace(order.BillingOwnerUserID)
+	order.SupportEmail = strings.TrimSpace(order.SupportEmail)
+	order.Plan = strings.TrimSpace(order.Plan)
+	order.DestinationWallet = strings.TrimSpace(order.DestinationWallet)
+	order.Reference = strings.TrimSpace(order.Reference)
+	order.Status = strings.TrimSpace(order.Status)
+	order.Cluster = strings.TrimSpace(order.Cluster)
+	order.ConfirmationThreshold = strings.TrimSpace(order.ConfirmationThreshold)
+	if order.OrderID == "" || order.GuildID == "" || order.Plan == "" || order.ExpectedLamports <= 0 || order.DestinationWallet == "" || order.Reference == "" || order.Status == "" || order.Cluster == "" || order.ConfirmationThreshold == "" {
+		return store.SolPaymentOrder{}, fmt.Errorf("sol payment order is missing required fields")
+	}
+	if order.ExpiresAt.IsZero() {
+		return store.SolPaymentOrder{}, fmt.Errorf("sol payment order expiration is required")
+	}
+	if order.CreatedAt.IsZero() {
+		order.CreatedAt = now
+	}
+	order.UpdatedAt = now
+	if err := r.db.WithContext(ctx).Create(&order).Error; err != nil {
+		return store.SolPaymentOrder{}, err
+	}
+	return order, nil
+}
+
+func (r *BillingRepository) GetSolPaymentOrder(ctx context.Context, orderID string) (store.SolPaymentOrder, bool, error) {
+	var order store.SolPaymentOrder
+	err := r.db.WithContext(ctx).Where("order_id = ?", strings.TrimSpace(orderID)).First(&order).Error
+	if err == nil {
+		return order, true, nil
+	}
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return store.SolPaymentOrder{}, false, nil
+	}
+	return store.SolPaymentOrder{}, false, err
+}
+
+func (r *BillingRepository) GetSolPaymentOrderForUpdate(ctx context.Context, orderID string) (store.SolPaymentOrder, bool, error) {
+	var order store.SolPaymentOrder
+	err := r.db.WithContext(ctx).
+		Clauses(clause.Locking{Strength: "UPDATE"}).
+		Where("order_id = ?", strings.TrimSpace(orderID)).
+		First(&order).Error
+	if err == nil {
+		return order, true, nil
+	}
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return store.SolPaymentOrder{}, false, nil
+	}
+	return store.SolPaymentOrder{}, false, err
+}
+
+func (r *BillingRepository) UpdateSolPaymentOrder(ctx context.Context, orderID string, updates map[string]any) error {
+	if strings.TrimSpace(orderID) == "" {
+		return fmt.Errorf("order_id is required")
+	}
+	if updates == nil {
+		updates = map[string]any{}
+	}
+	updates["updated_at"] = time.Now().UTC()
+	return r.db.WithContext(ctx).Model(&store.SolPaymentOrder{}).
+		Where("order_id = ?", strings.TrimSpace(orderID)).
+		Updates(updates).Error
+}
+
+func (r *BillingRepository) RecordSolPaymentTransaction(ctx context.Context, transaction store.SolPaymentTransaction) (bool, error) {
+	now := time.Now().UTC()
+	transaction.Signature = strings.TrimSpace(transaction.Signature)
+	transaction.OrderID = strings.TrimSpace(transaction.OrderID)
+	transaction.GuildID = strings.TrimSpace(transaction.GuildID)
+	transaction.PayerWallet = strings.TrimSpace(transaction.PayerWallet)
+	transaction.DestinationWallet = strings.TrimSpace(transaction.DestinationWallet)
+	transaction.Reference = strings.TrimSpace(transaction.Reference)
+	transaction.ConfirmationStatus = strings.TrimSpace(transaction.ConfirmationStatus)
+	transaction.Status = strings.TrimSpace(transaction.Status)
+	transaction.ErrorMessage = strings.TrimSpace(transaction.ErrorMessage)
+	if transaction.Signature == "" || transaction.OrderID == "" || transaction.GuildID == "" || transaction.Status == "" {
+		return false, fmt.Errorf("sol payment transaction is missing required fields")
+	}
+	if transaction.CreatedAt.IsZero() {
+		transaction.CreatedAt = now
+	}
+	transaction.UpdatedAt = now
+	if strings.TrimSpace(transaction.RawPayload) == "" {
+		transaction.RawPayload = "{}"
+	}
+	err := r.db.WithContext(ctx).Create(&transaction).Error
+	if err == nil {
+		return true, nil
+	}
+	if isBillingUniqueConstraintError(err) {
+		return false, nil
+	}
+	return false, err
+}
+
+func (r *BillingRepository) CreateActivationAPIKey(ctx context.Context, key store.ActivationAPIKey) (store.ActivationAPIKey, error) {
+	now := time.Now().UTC()
+	key.KeyID = strings.TrimSpace(key.KeyID)
+	key.KeyHash = strings.TrimSpace(key.KeyHash)
+	key.KeyPrefix = strings.TrimSpace(key.KeyPrefix)
+	key.PaymentOrderID = strings.TrimSpace(key.PaymentOrderID)
+	key.GuildID = strings.TrimSpace(key.GuildID)
+	key.Plan = strings.TrimSpace(key.Plan)
+	key.Status = strings.TrimSpace(key.Status)
+	if key.KeyID == "" || key.KeyHash == "" || key.KeyPrefix == "" || key.PaymentOrderID == "" || key.GuildID == "" || key.Plan == "" || key.Status == "" || key.ExpiresAt.IsZero() {
+		return store.ActivationAPIKey{}, fmt.Errorf("activation api key is missing required fields")
+	}
+	if key.CreatedAt.IsZero() {
+		key.CreatedAt = now
+	}
+	key.UpdatedAt = now
+	if err := r.db.WithContext(ctx).Create(&key).Error; err != nil {
+		return store.ActivationAPIKey{}, err
+	}
+	return key, nil
+}
+
+func (r *BillingRepository) GetActivationAPIKeyByPaymentOrder(ctx context.Context, orderID string) (store.ActivationAPIKey, bool, error) {
+	var key store.ActivationAPIKey
+	err := r.db.WithContext(ctx).Where("payment_order_id = ?", strings.TrimSpace(orderID)).First(&key).Error
+	if err == nil {
+		return key, true, nil
+	}
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return store.ActivationAPIKey{}, false, nil
+	}
+	return store.ActivationAPIKey{}, false, err
+}
+
+func (r *BillingRepository) GetActivationAPIKeyByPaymentOrderForUpdate(ctx context.Context, orderID string) (store.ActivationAPIKey, bool, error) {
+	var key store.ActivationAPIKey
+	err := r.db.WithContext(ctx).
+		Clauses(clause.Locking{Strength: "UPDATE"}).
+		Where("payment_order_id = ?", strings.TrimSpace(orderID)).
+		First(&key).Error
+	if err == nil {
+		return key, true, nil
+	}
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return store.ActivationAPIKey{}, false, nil
+	}
+	return store.ActivationAPIKey{}, false, err
+}
+
+func (r *BillingRepository) GetActivationAPIKeyByHashForUpdate(ctx context.Context, keyHash string) (store.ActivationAPIKey, bool, error) {
+	var key store.ActivationAPIKey
+	err := r.db.WithContext(ctx).
+		Clauses(clause.Locking{Strength: "UPDATE"}).
+		Where("key_hash = ?", strings.TrimSpace(keyHash)).
+		First(&key).Error
+	if err == nil {
+		return key, true, nil
+	}
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return store.ActivationAPIKey{}, false, nil
+	}
+	return store.ActivationAPIKey{}, false, err
+}
+
+func (r *BillingRepository) UpdateActivationAPIKey(ctx context.Context, keyID string, updates map[string]any) error {
+	if strings.TrimSpace(keyID) == "" {
+		return fmt.Errorf("key_id is required")
+	}
+	if updates == nil {
+		updates = map[string]any{}
+	}
+	updates["updated_at"] = time.Now().UTC()
+	return r.db.WithContext(ctx).Model(&store.ActivationAPIKey{}).
+		Where("key_id = ?", strings.TrimSpace(keyID)).
+		Updates(updates).Error
 }
 
 func (r *BillingRepository) UsageTotals(ctx context.Context, guildID string, periodStart, periodEnd time.Time) (BillingUsageTotals, error) {

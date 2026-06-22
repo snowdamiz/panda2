@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
-	"sort"
 	"strings"
 	"time"
 
@@ -15,29 +14,30 @@ import (
 )
 
 var (
-	ErrNoSubscription        = errors.New("billing subscription is not configured")
-	ErrReadOnly              = errors.New("billing account is read-only")
-	ErrQuotaExceeded         = errors.New("billing quota exceeded")
-	ErrUnknownPlan           = errors.New("unknown billing plan")
-	ErrBillingAccess         = errors.New("billing can only be managed by the billing owner")
-	ErrStripeNotConfigured   = errors.New("stripe billing is not configured")
-	ErrStripeCustomerMissing = errors.New("stripe customer is not recorded for this guild")
+	ErrNoSubscription           = errors.New("billing subscription is not configured")
+	ErrReadOnly                 = errors.New("billing account is read-only")
+	ErrQuotaExceeded            = errors.New("billing quota exceeded")
+	ErrUnknownPlan              = errors.New("unknown billing plan")
+	ErrBillingAccess            = errors.New("billing can only be managed by the billing owner")
+	ErrSolPaymentsNotConfigured = errors.New("sol payments are not configured")
 )
 
 type Config struct {
-	PublicURL        string
-	SuccessURL       string
-	CancelURL        string
-	StripeSecretKey  string
-	StripeAPIBaseURL string
-	DiscordSKUPlans  map[string]string
-	StripePricePlans map[string]string
+	PublicURL              string
+	SolanaRPCURL           string
+	SolanaCluster          string
+	SolanaTreasuryWallet   string
+	SolanaConfirmation     string
+	SolanaPlanLamports     map[string]int64
+	SolanaOrderExpiration  time.Duration
+	SolanaActivationKeyTTL time.Duration
 }
 
 type Service struct {
 	repo   *repository.BillingRepository
+	audit  *repository.AuditRepository
 	cfg    Config
-	stripe StripeClient
+	solana SolanaRPCClient
 	now    func() time.Time
 }
 
@@ -65,7 +65,6 @@ type Entitlement struct {
 	ReadOnly           bool
 	Usage              repository.BillingUsageTotals
 	UpgradeURL         string
-	PortalURL          string
 }
 
 type Reservation struct {
@@ -89,72 +88,6 @@ func (e QuotaError) Error() string {
 	return fmt.Sprintf("%s quota exhausted", MetricLabel(e.Metric))
 }
 
-type DiscordEntitlementEvent struct {
-	EventID        string
-	EventType      string
-	GuildID        string
-	UserID         string
-	SKUID          string
-	EntitlementID  string
-	SubscriptionID string
-	Deleted        bool
-	StartsAt       *time.Time
-	EndsAt         *time.Time
-	RawPayload     string
-}
-
-type StripeEvent struct {
-	EventID            string
-	EventType          string
-	GuildID            string
-	Plan               string
-	CustomerEmail      string
-	BillingOwnerUserID string
-	CustomerID         string
-	CheckoutSessionID  string
-	SubscriptionID     string
-	PriceID            string
-	Status             string
-	CurrentPeriodStart time.Time
-	CurrentPeriodEnd   time.Time
-	CancelAtPeriodEnd  bool
-	AmountCents        int64
-	Currency           string
-	RawPayload         string
-}
-
-type CheckoutKind string
-
-const (
-	CheckoutKindPlan CheckoutKind = "plan"
-)
-
-type CheckoutRequest struct {
-	GuildID         string
-	ActorUserID     string
-	ActorIsOperator bool
-	ActorCanClaim   bool
-	Kind            CheckoutKind
-	Plan            string
-	CustomerEmail   string
-}
-
-type CheckoutSession struct {
-	ID  string
-	URL string
-}
-
-type PortalRequest struct {
-	GuildID         string
-	ActorUserID     string
-	ActorIsOperator bool
-}
-
-type PortalSession struct {
-	ID  string
-	URL string
-}
-
 type CostEvent struct {
 	GuildID             string
 	RequestID           string
@@ -175,22 +108,37 @@ type CostEvent struct {
 
 func NewService(repo *repository.BillingRepository, cfg Config) *Service {
 	cfg.PublicURL = strings.TrimRight(strings.TrimSpace(cfg.PublicURL), "/")
-	cfg.SuccessURL = strings.TrimSpace(cfg.SuccessURL)
-	cfg.CancelURL = strings.TrimSpace(cfg.CancelURL)
-	cfg.StripeSecretKey = strings.TrimSpace(cfg.StripeSecretKey)
-	cfg.StripeAPIBaseURL = strings.TrimRight(strings.TrimSpace(cfg.StripeAPIBaseURL), "/")
-	if cfg.StripeAPIBaseURL == "" {
-		cfg.StripeAPIBaseURL = defaultStripeAPIBaseURL
+	cfg.SolanaRPCURL = strings.TrimSpace(cfg.SolanaRPCURL)
+	cfg.SolanaCluster = strings.TrimSpace(cfg.SolanaCluster)
+	if cfg.SolanaCluster == "" {
+		cfg.SolanaCluster = "devnet"
 	}
+	cfg.SolanaTreasuryWallet = strings.TrimSpace(cfg.SolanaTreasuryWallet)
+	cfg.SolanaConfirmation = strings.ToLower(strings.TrimSpace(cfg.SolanaConfirmation))
+	if cfg.SolanaConfirmation == "" {
+		cfg.SolanaConfirmation = "finalized"
+	}
+	if cfg.SolanaOrderExpiration <= 0 {
+		cfg.SolanaOrderExpiration = 30 * time.Minute
+	}
+	if cfg.SolanaActivationKeyTTL <= 0 {
+		cfg.SolanaActivationKeyTTL = 48 * time.Hour
+	}
+	cfg.SolanaPlanLamports = normalizePlanLamports(cfg.SolanaPlanLamports)
 	service := &Service{repo: repo, cfg: cfg, now: time.Now}
-	if cfg.StripeSecretKey != "" {
-		service.stripe = NewHTTPStripeClient(cfg.StripeSecretKey, cfg.StripeAPIBaseURL)
+	if cfg.SolanaRPCURL != "" {
+		service.solana = NewHTTPSolanaRPCClient(cfg.SolanaRPCURL)
 	}
 	return service
 }
 
-func (s *Service) WithStripeClient(client StripeClient) *Service {
-	s.stripe = client
+func (s *Service) WithSolanaRPCClient(client SolanaRPCClient) *Service {
+	s.solana = client
+	return s
+}
+
+func (s *Service) WithAuditRecorder(audit *repository.AuditRepository) *Service {
+	s.audit = audit
 	return s
 }
 
@@ -282,93 +230,6 @@ func (s *Service) CanManageBilling(ctx context.Context, guildID, userID string, 
 	return ok && strings.TrimSpace(subscription.BillingOwnerUserID) == userID, nil
 }
 
-func (s *Service) CreateCheckoutSession(ctx context.Context, request CheckoutRequest) (CheckoutSession, error) {
-	if s == nil || s.repo == nil || s.stripe == nil {
-		return CheckoutSession{}, ErrStripeNotConfigured
-	}
-	request.GuildID = strings.TrimSpace(request.GuildID)
-	request.ActorUserID = strings.TrimSpace(request.ActorUserID)
-	request.CustomerEmail = strings.TrimSpace(request.CustomerEmail)
-	if request.GuildID == "" {
-		return CheckoutSession{}, fmt.Errorf("guild_id is required")
-	}
-	allowed, err := s.CanManageBilling(ctx, request.GuildID, request.ActorUserID, request.ActorIsOperator)
-	if err != nil {
-		return CheckoutSession{}, err
-	}
-	if !allowed && request.ActorCanClaim {
-		claimable, err := s.billingOwnerUnclaimed(ctx, request.GuildID)
-		if err != nil {
-			return CheckoutSession{}, err
-		}
-		allowed = claimable
-	}
-	if !allowed {
-		return CheckoutSession{}, ErrBillingAccess
-	}
-
-	account, ok, err := s.repo.GetCustomerAccountByGuild(ctx, request.GuildID)
-	if err != nil {
-		return CheckoutSession{}, err
-	}
-	if !ok {
-		account, err = s.repo.EnsureCustomerAccount(ctx, store.CustomerAccount{
-			GuildID:            request.GuildID,
-			BillingOwnerUserID: request.ActorUserID,
-			Email:              request.CustomerEmail,
-			SupportContact:     request.CustomerEmail,
-		})
-		if err != nil {
-			return CheckoutSession{}, err
-		}
-	}
-	customerEmail := firstNonEmpty(request.CustomerEmail, account.Email)
-	if request.ActorUserID == "" {
-		request.ActorUserID = account.BillingOwnerUserID
-	}
-
-	metadata := map[string]string{
-		"guild_id":              request.GuildID,
-		"billing_owner_user_id": request.ActorUserID,
-	}
-	stripeMode := "subscription"
-	var priceID string
-	switch request.Kind {
-	case CheckoutKindPlan, "":
-		plan, ok := NormalizePlan(request.Plan)
-		if !ok || plan == PlanTrial {
-			return CheckoutSession{}, ErrUnknownPlan
-		}
-		priceID, err = s.stripePriceForPlan(plan)
-		if err != nil {
-			return CheckoutSession{}, err
-		}
-		metadata["kind"] = string(CheckoutKindPlan)
-		metadata["plan"] = plan
-	default:
-		return CheckoutSession{}, fmt.Errorf("unsupported checkout kind")
-	}
-
-	session, err := s.stripe.CreateCheckoutSession(ctx, StripeCheckoutRequest{
-		Mode:                 stripeMode,
-		PriceID:              priceID,
-		CustomerID:           account.StripeCustomerID,
-		CustomerEmail:        customerEmail,
-		ClientReferenceID:    request.GuildID,
-		SuccessURL:           s.successURL(request.GuildID),
-		CancelURL:            s.cancelURL(request.GuildID),
-		Metadata:             metadata,
-		SubscriptionMetadata: subscriptionMetadata(stripeMode, metadata),
-	})
-	if err != nil {
-		return CheckoutSession{}, err
-	}
-	if session.CustomerID != "" && session.CustomerID != account.StripeCustomerID {
-		_ = s.repo.SetStripeCustomerID(ctx, request.GuildID, session.CustomerID)
-	}
-	return CheckoutSession{ID: session.ID, URL: session.URL}, nil
-}
-
 func (s *Service) billingOwnerUnclaimed(ctx context.Context, guildID string) (bool, error) {
 	account, accountOK, err := s.repo.GetCustomerAccountByGuild(ctx, guildID)
 	if err != nil {
@@ -382,34 +243,6 @@ func (s *Service) billingOwnerUnclaimed(ctx context.Context, guildID string) (bo
 		return false, err
 	}
 	return !subscriptionOK || strings.TrimSpace(subscription.BillingOwnerUserID) == "", nil
-}
-
-func (s *Service) CreatePortalSession(ctx context.Context, request PortalRequest) (PortalSession, error) {
-	if s == nil || s.repo == nil || s.stripe == nil {
-		return PortalSession{}, ErrStripeNotConfigured
-	}
-	allowed, err := s.CanManageBilling(ctx, request.GuildID, request.ActorUserID, request.ActorIsOperator)
-	if err != nil {
-		return PortalSession{}, err
-	}
-	if !allowed {
-		return PortalSession{}, ErrBillingAccess
-	}
-	account, ok, err := s.repo.GetCustomerAccountByGuild(ctx, request.GuildID)
-	if err != nil {
-		return PortalSession{}, err
-	}
-	if !ok || strings.TrimSpace(account.StripeCustomerID) == "" {
-		return PortalSession{}, ErrStripeCustomerMissing
-	}
-	session, err := s.stripe.CreatePortalSession(ctx, StripePortalRequest{
-		CustomerID: account.StripeCustomerID,
-		ReturnURL:  s.returnURL(request.GuildID),
-	})
-	if err != nil {
-		return PortalSession{}, err
-	}
-	return PortalSession{ID: session.ID, URL: session.URL}, nil
 }
 
 func (s *Service) Check(ctx context.Context, guildID, metric string, units int64) (Entitlement, error) {
@@ -557,175 +390,6 @@ func (s *Service) ReleaseUsage(ctx context.Context, reservation Reservation) err
 	return s.repo.ReleaseUsageReservation(ctx, reservation.ID)
 }
 
-func (s *Service) HandleDiscordEntitlement(ctx context.Context, event DiscordEntitlementEvent) error {
-	if s == nil || s.repo == nil {
-		return ErrNoSubscription
-	}
-	event.EventID = strings.TrimSpace(event.EventID)
-	event.GuildID = strings.TrimSpace(event.GuildID)
-	event.SKUID = strings.TrimSpace(event.SKUID)
-	event.EntitlementID = strings.TrimSpace(event.EntitlementID)
-	if event.EventID == "" {
-		event.EventID = strings.Join([]string{ProviderDiscord, event.EventType, event.EntitlementID}, ":")
-	}
-	raw := firstNonEmpty(event.RawPayload, "{}")
-	return s.repo.WithTransaction(ctx, func(repo *repository.BillingRepository) error {
-		inserted, err := repo.RecordInvoicePaymentEvent(ctx, store.InvoicePaymentEvent{
-			Provider:       ProviderDiscord,
-			ExternalID:     event.EntitlementID,
-			GuildID:        event.GuildID,
-			Status:         strings.ToLower(strings.TrimSpace(event.EventType)),
-			IdempotencyKey: event.EventID,
-			RawPayload:     raw,
-		})
-		if err != nil || !inserted {
-			return err
-		}
-		plan, planOK := s.cfg.DiscordSKUPlans[event.SKUID]
-		if !planOK {
-			return nil
-		}
-		if event.GuildID == "" {
-			return nil
-		}
-		now := s.currentTime()
-		plan, planOK = NormalizePlan(plan)
-		if !planOK {
-			return ErrUnknownPlan
-		}
-		if event.Deleted || strings.EqualFold(event.EventType, "delete") {
-			return s.setGuildReadOnlyWithRepo(ctx, repo, event.GuildID, ProviderDiscord, event.EntitlementID, now)
-		}
-		periodStart := now
-		if event.StartsAt != nil && !event.StartsAt.IsZero() {
-			periodStart = event.StartsAt.UTC()
-		}
-		periodEnd := now.AddDate(0, 1, 0)
-		if event.EndsAt != nil && !event.EndsAt.IsZero() {
-			periodEnd = event.EndsAt.UTC()
-		}
-		status := StatusActive
-		grace := GraceActive
-		if event.EndsAt != nil && event.EndsAt.Before(now) {
-			status = StatusReadOnly
-			grace = GraceReadOnly
-		}
-		limits, _ := LimitsForPlan(plan)
-		account, err := repo.EnsureCustomerAccount(ctx, store.CustomerAccount{
-			GuildID:            event.GuildID,
-			BillingOwnerUserID: event.UserID,
-		})
-		if err != nil {
-			return err
-		}
-		_, err = repo.UpsertSubscriptionWithSnapshot(ctx, store.GuildSubscription{
-			GuildID:                event.GuildID,
-			CustomerAccountID:      account.ID,
-			Plan:                   plan,
-			Status:                 status,
-			GraceState:             grace,
-			PaymentProvider:        ProviderDiscord,
-			ExternalSubscriptionID: event.SubscriptionID,
-			ExternalEntitlementID:  event.EntitlementID,
-			BillingOwnerUserID:     event.UserID,
-			CurrentPeriodStart:     periodStart,
-			CurrentPeriodEnd:       periodEnd,
-		}, snapshotForLimits(event.GuildID, 0, limits, status, grace, now))
-		return err
-	})
-}
-
-func (s *Service) HandleStripeEvent(ctx context.Context, event StripeEvent) error {
-	if s == nil || s.repo == nil {
-		return ErrNoSubscription
-	}
-	event.EventID = strings.TrimSpace(event.EventID)
-	event.GuildID = strings.TrimSpace(event.GuildID)
-	event.Plan = strings.TrimSpace(event.Plan)
-	event.PriceID = strings.TrimSpace(event.PriceID)
-	event.SubscriptionID = strings.TrimSpace(event.SubscriptionID)
-	event.CustomerID = strings.TrimSpace(event.CustomerID)
-	event.CheckoutSessionID = strings.TrimSpace(event.CheckoutSessionID)
-	if event.GuildID == "" && event.SubscriptionID != "" {
-		if subscription, ok, err := s.repo.GetSubscriptionByExternalSubscriptionID(ctx, event.SubscriptionID); err != nil {
-			return err
-		} else if ok {
-			event.GuildID = subscription.GuildID
-			if event.BillingOwnerUserID == "" {
-				event.BillingOwnerUserID = subscription.BillingOwnerUserID
-			}
-		}
-	}
-	raw := firstNonEmpty(event.RawPayload, "{}")
-	externalID := firstNonEmpty(event.SubscriptionID, event.CheckoutSessionID)
-	idempotencyKey := firstNonEmpty(event.EventID, ProviderStripe+":"+event.EventType+":"+externalID)
-	return s.repo.WithTransaction(ctx, func(repo *repository.BillingRepository) error {
-		inserted, err := repo.RecordInvoicePaymentEvent(ctx, store.InvoicePaymentEvent{
-			Provider:       ProviderStripe,
-			ExternalID:     externalID,
-			GuildID:        event.GuildID,
-			AmountCents:    event.AmountCents,
-			Currency:       firstNonEmpty(event.Currency, "usd"),
-			Status:         firstNonEmpty(event.Status, event.EventType),
-			IdempotencyKey: idempotencyKey,
-			RawPayload:     raw,
-		})
-		if err != nil || !inserted {
-			return err
-		}
-		if event.GuildID != "" && event.CustomerID != "" {
-			if _, err := repo.EnsureCustomerAccount(ctx, store.CustomerAccount{
-				GuildID:            event.GuildID,
-				BillingOwnerUserID: event.BillingOwnerUserID,
-				Email:              event.CustomerEmail,
-				SupportContact:     event.CustomerEmail,
-				StripeCustomerID:   event.CustomerID,
-			}); err != nil {
-				return err
-			}
-		}
-		plan, ok := s.stripeEventPlan(event)
-		if !ok || event.GuildID == "" {
-			return nil
-		}
-		now := s.currentTime()
-		periodStart := event.CurrentPeriodStart
-		if periodStart.IsZero() {
-			periodStart = now
-		}
-		periodEnd := event.CurrentPeriodEnd
-		if periodEnd.IsZero() || !periodEnd.After(periodStart) {
-			periodEnd = periodStart.AddDate(0, 1, 0)
-		}
-		status, grace := statusFromStripe(event.Status, event.CancelAtPeriodEnd, periodEnd, now)
-		limits, _ := LimitsForPlan(plan)
-		account, err := repo.EnsureCustomerAccount(ctx, store.CustomerAccount{
-			GuildID:            event.GuildID,
-			BillingOwnerUserID: event.BillingOwnerUserID,
-			Email:              event.CustomerEmail,
-			SupportContact:     event.CustomerEmail,
-			StripeCustomerID:   event.CustomerID,
-		})
-		if err != nil {
-			return err
-		}
-		_, err = repo.UpsertSubscriptionWithSnapshot(ctx, store.GuildSubscription{
-			GuildID:                event.GuildID,
-			CustomerAccountID:      account.ID,
-			Plan:                   plan,
-			Status:                 status,
-			GraceState:             grace,
-			PaymentProvider:        ProviderStripe,
-			ExternalSubscriptionID: event.SubscriptionID,
-			BillingOwnerUserID:     event.BillingOwnerUserID,
-			CurrentPeriodStart:     periodStart.UTC(),
-			CurrentPeriodEnd:       periodEnd.UTC(),
-			CancelAtPeriodEnd:      event.CancelAtPeriodEnd,
-		}, snapshotForLimits(event.GuildID, 0, limits, status, grace, now))
-		return err
-	})
-}
-
 func (s *Service) RecordCost(ctx context.Context, event CostEvent) error {
 	if s == nil || s.repo == nil {
 		return nil
@@ -775,7 +439,6 @@ func (s *Service) entitlementFromSubscription(ctx context.Context, subscription 
 		ReadOnly:           readOnly,
 		Usage:              totals,
 		UpgradeURL:         s.upgradeURL(subscription.GuildID),
-		PortalURL:          s.portalURL(subscription.GuildID),
 	}, nil
 }
 
@@ -860,25 +523,6 @@ func effectiveState(subscription store.GuildSubscription, now time.Time) (status
 	}
 }
 
-func statusFromStripe(status string, cancelAtPeriodEnd bool, periodEnd, now time.Time) (string, string) {
-	switch strings.ToLower(strings.TrimSpace(status)) {
-	case "active", "trialing":
-		if cancelAtPeriodEnd {
-			return StatusActive, GraceActive
-		}
-		return StatusActive, GraceActive
-	case "past_due", "unpaid":
-		if now.Before(periodEnd.Add(GraceDuration)) {
-			return StatusPastDue, GracePastDue
-		}
-		return StatusSuspended, GraceSuspended
-	case "canceled", "cancelled", "incomplete_expired":
-		return StatusCanceled, GraceCanceled
-	default:
-		return StatusReadOnly, GraceReadOnly
-	}
-}
-
 func firstFuture(value time.Time, now time.Time) time.Time {
 	if value.After(now) {
 		return value
@@ -908,20 +552,6 @@ func (s *Service) upgradeURL(guildID string) string {
 	}
 	parsed.RawQuery = query.Encode()
 	return parsed.String()
-}
-
-func (s *Service) portalURL(guildID string) string {
-	return s.returnURL(guildID)
-}
-
-func (s *Service) successURL(guildID string) string {
-	base := firstNonEmpty(s.cfg.SuccessURL, s.publicPath("/billing/success"))
-	return withBillingQuery(base, guildID, true)
-}
-
-func (s *Service) cancelURL(guildID string) string {
-	base := firstNonEmpty(s.cfg.CancelURL, s.publicPath("/billing/cancel"))
-	return withBillingQuery(base, guildID, false)
 }
 
 func (s *Service) returnURL(guildID string) string {
@@ -960,54 +590,6 @@ func withBillingQuery(base, guildID string, includeSessionPlaceholder bool) stri
 	}
 	parsed.RawQuery = rawQuery
 	return parsed.String()
-}
-
-func (s *Service) stripePriceForPlan(plan string) (string, error) {
-	plan, ok := NormalizePlan(plan)
-	if !ok || plan == PlanTrial {
-		return "", ErrUnknownPlan
-	}
-	return uniqueMappedID(s.cfg.StripePricePlans, plan, "Stripe plan price")
-}
-
-func uniqueMappedID(values map[string]string, target string, label string) (string, error) {
-	var matches []string
-	for id, value := range values {
-		if strings.EqualFold(strings.TrimSpace(value), target) {
-			matches = append(matches, strings.TrimSpace(id))
-		}
-	}
-	sort.Strings(matches)
-	switch len(matches) {
-	case 0:
-		return "", fmt.Errorf("%s for %s is not configured", label, target)
-	case 1:
-		return matches[0], nil
-	default:
-		return "", fmt.Errorf("%s for %s is ambiguous", label, target)
-	}
-}
-
-func subscriptionMetadata(mode string, metadata map[string]string) map[string]string {
-	if mode != "subscription" {
-		return nil
-	}
-	result := map[string]string{}
-	for key, value := range metadata {
-		result[key] = value
-	}
-	return result
-}
-
-func (s *Service) stripeEventPlan(event StripeEvent) (string, bool) {
-	if plan, ok := NormalizePlan(event.Plan); ok {
-		return plan, true
-	}
-	plan, ok := s.cfg.StripePricePlans[event.PriceID]
-	if !ok {
-		return "", false
-	}
-	return NormalizePlan(plan)
 }
 
 func (e Entitlement) metricConsumed(metric string) int64 {
@@ -1053,6 +635,7 @@ func (e Entitlement) UsageLine(metric string) string {
 func (e Entitlement) SummaryText() string {
 	return strings.Join([]string{
 		fmt.Sprintf("Plan: %s (%s)", e.Plan.DisplayName, e.Status),
+		fmt.Sprintf("Provider: %s", firstNonEmpty(e.PaymentProvider, "unknown")),
 		fmt.Sprintf("Renewal/reset: %s", e.PeriodEnd.Format("2006-01-02")),
 		fmt.Sprintf("AI responses: %s", e.UsageLine(MetricAIResponse)),
 		fmt.Sprintf("Web searches: %s", e.UsageLine(MetricWebSearch)),

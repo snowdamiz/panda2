@@ -76,7 +76,7 @@ export const legalDocuments: LegalDocument[] = [
         heading: 'Subscriptions and billing',
         body: [
           'Paid plans are billed per server and include defined limits for AI responses, web searches, knowledge storage, schedules, retention, music, and premium tools.',
-          'Payment success, failure, cancellation, upgrades, downgrades, and entitlement changes are applied only from verified billing events or Discord entitlement events.',
+          'Paid access is applied only after Panda verifies a native SOL transaction for a server-created payment order and the billing owner activates the one-time key in Discord.',
         ],
       },
       {
@@ -193,7 +193,7 @@ export const legalDocuments: LegalDocument[] = [
       {
         heading: 'Where to start',
         body: [
-          'Use /billing in Discord for plan, renewal, quota, checkout, and portal actions. Use /admin status for server setup, permissions, usage, web search, memory, and degraded-state checks.',
+          'Use /billing in Discord for plan, renewal, quota, and activation status. Use /admin status for server setup, permissions, usage, web search, memory, and degraded-state checks.',
           'Paid customers can contact support for billing, permissions, export, deletion, security, and outage questions.',
         ],
       },
@@ -223,7 +223,7 @@ export const legalDocuments: LegalDocument[] = [
         heading: 'Current status',
         body: [
           'All production components are expected to be operational unless an incident is posted here or announced through support.',
-          'Panda monitors Discord gateway health, HTTP readiness, SQLite readiness, queue depth, billing webhooks, quota checks, managed AI availability, web search availability, and music sidecars.',
+          'Panda monitors Discord gateway health, HTTP readiness, SQLite readiness, queue depth, SOL payment verification, quota checks, managed AI availability, web search availability, and music sidecars.',
         ],
       },
       {
@@ -252,8 +252,8 @@ export const legalDocuments: LegalDocument[] = [
       {
         heading: 'Controls',
         body: [
-          'Panda keeps Discord tokens, managed AI keys, search keys, webhook secrets, and billing secrets in the deployment secret manager.',
-          'Repository queries are tenant-scoped by guild, privileged changes are audited, webhooks are verified and idempotent, and paid provider-spend paths check entitlements before work begins.',
+          'Panda keeps Discord tokens, managed AI keys, search keys, Solana RPC credentials, and billing secrets in the deployment secret manager.',
+          'Repository queries are tenant-scoped by guild, privileged changes are audited, Discord webhooks are verified and idempotent, SOL payment signatures are verified server-side, and paid provider-spend paths check entitlements before work begins.',
         ],
       },
       {

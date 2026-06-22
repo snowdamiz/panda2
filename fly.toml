@@ -4,6 +4,10 @@ primary_region = "sjc"
 [build]
   dockerfile = "Dockerfile"
 
+[env]
+  PUBLIC_APP_URL = "https://panda2-landing.fly.dev"
+  BILLING_ALLOWED_ORIGINS = "https://panda2-landing.fly.dev"
+
 [[mounts]]
   source = "data"
   destination = "/data"

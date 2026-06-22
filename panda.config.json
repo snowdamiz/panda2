@@ -7,11 +7,19 @@
   },
   "billing": {
     "public_url": "",
-    "success_url": "",
-    "cancel_url": "",
-    "stripe_api_base_url": "",
-    "discord_sku_plans": {},
-    "stripe_price_plans": {}
+    "allowed_origins": [],
+    "solana_rpc_url": "",
+    "solana_cluster": "devnet",
+    "solana_treasury_wallet": "2gRg3JMJkJkWb85fh3RqNCQgbmGYRpa1Gk5o84Y84ve1",
+    "solana_confirmation": "finalized",
+    "solana_order_expiration": "30m",
+    "solana_activation_key_ttl": "48h",
+    "solana_plan_lamports": {
+      "starter": 250000000,
+      "plus": 650000000,
+      "pro": 1350000000,
+      "business": 3350000000
+    }
   },
   "runtime": {
     "port": "8080",

@@ -642,13 +642,11 @@ var migrations = []Migration{
 				email TEXT NOT NULL DEFAULT '',
 				tax_country TEXT NOT NULL DEFAULT '',
 				support_contact TEXT NOT NULL DEFAULT '',
-				stripe_customer_id TEXT NOT NULL DEFAULT '',
 				created_at DATETIME NOT NULL,
 				updated_at DATETIME NOT NULL,
 				UNIQUE(guild_id)
 			)`,
 			`CREATE INDEX IF NOT EXISTS idx_customer_accounts_billing_owner_user_id ON customer_accounts(billing_owner_user_id)`,
-			`CREATE UNIQUE INDEX IF NOT EXISTS idx_customer_accounts_stripe_customer_present ON customer_accounts(stripe_customer_id) WHERE stripe_customer_id <> ''`,
 			`CREATE TABLE IF NOT EXISTS guild_subscriptions (
 				id INTEGER PRIMARY KEY AUTOINCREMENT,
 				guild_id TEXT NOT NULL,
@@ -713,6 +711,7 @@ var migrations = []Migration{
 				guild_id TEXT NOT NULL DEFAULT '',
 				subscription_id INTEGER NOT NULL DEFAULT 0,
 				amount_cents INTEGER NOT NULL DEFAULT 0,
+				amount_lamports INTEGER NOT NULL DEFAULT 0,
 				currency TEXT NOT NULL DEFAULT 'usd',
 				status TEXT NOT NULL,
 				idempotency_key TEXT NOT NULL,
@@ -811,10 +810,9 @@ var migrations = []Migration{
 	},
 	{
 		Version: 18,
-		Name:    "stripe_checkout_customer_identity",
+		Name:    "billing_customer_identity_cleanup",
 		SQL: []string{
-			`ALTER TABLE customer_accounts ADD COLUMN stripe_customer_id TEXT NOT NULL DEFAULT ''`,
-			`CREATE UNIQUE INDEX IF NOT EXISTS idx_customer_accounts_stripe_customer_present ON customer_accounts(stripe_customer_id) WHERE stripe_customer_id <> ''`,
+			`SELECT 1`,
 		},
 	},
 	{
@@ -822,6 +820,103 @@ var migrations = []Migration{
 		Name:    "remove_quota_packs",
 		SQL: []string{
 			`DROP TABLE IF EXISTS quota_packs`,
+		},
+	},
+	{
+		Version: 20,
+		Name:    "sol_only_payments_and_activation_keys",
+		SQL: []string{
+			`DROP INDEX IF EXISTS idx_customer_accounts_stripe_customer_present`,
+			`ALTER TABLE customer_accounts DROP COLUMN stripe_customer_id`,
+			`ALTER TABLE invoice_payment_events ADD COLUMN amount_lamports INTEGER NOT NULL DEFAULT 0`,
+			`CREATE TABLE IF NOT EXISTS sol_payment_orders (
+				id INTEGER PRIMARY KEY AUTOINCREMENT,
+				order_id TEXT NOT NULL,
+				guild_id TEXT NOT NULL,
+				billing_owner_user_id TEXT NOT NULL DEFAULT '',
+				support_email TEXT NOT NULL DEFAULT '',
+				plan TEXT NOT NULL,
+				expected_lamports INTEGER NOT NULL,
+				destination_wallet TEXT NOT NULL,
+				reference TEXT NOT NULL,
+				status TEXT NOT NULL,
+				cluster TEXT NOT NULL,
+				confirmation_threshold TEXT NOT NULL,
+				verified_transaction_signature TEXT NOT NULL DEFAULT '',
+				verified_at DATETIME,
+				activation_key_revealed_at DATETIME,
+				activated_at DATETIME,
+				expires_at DATETIME NOT NULL,
+				created_at DATETIME NOT NULL,
+				updated_at DATETIME NOT NULL,
+				UNIQUE(order_id),
+				UNIQUE(reference)
+			)`,
+			`CREATE INDEX IF NOT EXISTS idx_sol_payment_orders_guild_id ON sol_payment_orders(guild_id)`,
+			`CREATE INDEX IF NOT EXISTS idx_sol_payment_orders_billing_owner_user_id ON sol_payment_orders(billing_owner_user_id)`,
+			`CREATE INDEX IF NOT EXISTS idx_sol_payment_orders_plan ON sol_payment_orders(plan)`,
+			`CREATE INDEX IF NOT EXISTS idx_sol_payment_orders_destination_wallet ON sol_payment_orders(destination_wallet)`,
+			`CREATE INDEX IF NOT EXISTS idx_sol_payment_orders_status ON sol_payment_orders(status)`,
+			`CREATE INDEX IF NOT EXISTS idx_sol_payment_orders_cluster ON sol_payment_orders(cluster)`,
+			`CREATE UNIQUE INDEX IF NOT EXISTS idx_sol_payment_orders_verified_signature ON sol_payment_orders(verified_transaction_signature) WHERE verified_transaction_signature <> ''`,
+			`CREATE INDEX IF NOT EXISTS idx_sol_payment_orders_verified_at ON sol_payment_orders(verified_at)`,
+			`CREATE INDEX IF NOT EXISTS idx_sol_payment_orders_activation_key_revealed_at ON sol_payment_orders(activation_key_revealed_at)`,
+			`CREATE INDEX IF NOT EXISTS idx_sol_payment_orders_activated_at ON sol_payment_orders(activated_at)`,
+			`CREATE INDEX IF NOT EXISTS idx_sol_payment_orders_expires_at ON sol_payment_orders(expires_at)`,
+			`CREATE INDEX IF NOT EXISTS idx_sol_payment_orders_created_at ON sol_payment_orders(created_at)`,
+			`CREATE TABLE IF NOT EXISTS sol_payment_transactions (
+				id INTEGER PRIMARY KEY AUTOINCREMENT,
+				signature TEXT NOT NULL,
+				order_id TEXT NOT NULL,
+				guild_id TEXT NOT NULL,
+				payer_wallet TEXT NOT NULL DEFAULT '',
+				destination_wallet TEXT NOT NULL DEFAULT '',
+				reference TEXT NOT NULL DEFAULT '',
+				amount_lamports INTEGER NOT NULL DEFAULT 0,
+				confirmation_status TEXT NOT NULL DEFAULT '',
+				status TEXT NOT NULL,
+				error_message TEXT NOT NULL DEFAULT '',
+				raw_payload TEXT NOT NULL DEFAULT '{}',
+				created_at DATETIME NOT NULL,
+				updated_at DATETIME NOT NULL,
+				UNIQUE(signature)
+			)`,
+			`CREATE INDEX IF NOT EXISTS idx_sol_payment_transactions_order_id ON sol_payment_transactions(order_id)`,
+			`CREATE INDEX IF NOT EXISTS idx_sol_payment_transactions_guild_id ON sol_payment_transactions(guild_id)`,
+			`CREATE INDEX IF NOT EXISTS idx_sol_payment_transactions_payer_wallet ON sol_payment_transactions(payer_wallet)`,
+			`CREATE INDEX IF NOT EXISTS idx_sol_payment_transactions_destination_wallet ON sol_payment_transactions(destination_wallet)`,
+			`CREATE INDEX IF NOT EXISTS idx_sol_payment_transactions_reference ON sol_payment_transactions(reference)`,
+			`CREATE INDEX IF NOT EXISTS idx_sol_payment_transactions_confirmation_status ON sol_payment_transactions(confirmation_status)`,
+			`CREATE INDEX IF NOT EXISTS idx_sol_payment_transactions_status ON sol_payment_transactions(status)`,
+			`CREATE INDEX IF NOT EXISTS idx_sol_payment_transactions_created_at ON sol_payment_transactions(created_at)`,
+			`CREATE TABLE IF NOT EXISTS activation_api_keys (
+				id INTEGER PRIMARY KEY AUTOINCREMENT,
+				key_id TEXT NOT NULL,
+				key_hash TEXT NOT NULL,
+				key_prefix TEXT NOT NULL,
+				payment_order_id TEXT NOT NULL,
+				guild_id TEXT NOT NULL,
+				plan TEXT NOT NULL,
+				status TEXT NOT NULL,
+				expires_at DATETIME NOT NULL,
+				consumed_at DATETIME,
+				consumed_by_discord_user_id TEXT NOT NULL DEFAULT '',
+				revoked_at DATETIME,
+				created_at DATETIME NOT NULL,
+				updated_at DATETIME NOT NULL,
+				UNIQUE(key_id),
+				UNIQUE(key_hash),
+				UNIQUE(payment_order_id)
+			)`,
+			`CREATE INDEX IF NOT EXISTS idx_activation_api_keys_key_prefix ON activation_api_keys(key_prefix)`,
+			`CREATE INDEX IF NOT EXISTS idx_activation_api_keys_guild_id ON activation_api_keys(guild_id)`,
+			`CREATE INDEX IF NOT EXISTS idx_activation_api_keys_plan ON activation_api_keys(plan)`,
+			`CREATE INDEX IF NOT EXISTS idx_activation_api_keys_status ON activation_api_keys(status)`,
+			`CREATE INDEX IF NOT EXISTS idx_activation_api_keys_expires_at ON activation_api_keys(expires_at)`,
+			`CREATE INDEX IF NOT EXISTS idx_activation_api_keys_consumed_at ON activation_api_keys(consumed_at)`,
+			`CREATE INDEX IF NOT EXISTS idx_activation_api_keys_consumed_by_discord_user_id ON activation_api_keys(consumed_by_discord_user_id)`,
+			`CREATE INDEX IF NOT EXISTS idx_activation_api_keys_revoked_at ON activation_api_keys(revoked_at)`,
+			`CREATE INDEX IF NOT EXISTS idx_activation_api_keys_created_at ON activation_api_keys(created_at)`,
 		},
 	},
 }
@@ -873,6 +968,9 @@ func execMigrationStatement(tx *gorm.DB, statement string) error {
 	if isAddColumnStatement(statement) && isDuplicateColumnError(err) {
 		return nil
 	}
+	if isDropColumnStatement(statement) && isMissingColumnError(err) {
+		return nil
+	}
 	if isKnowledgeFTS5Statement(statement) && strings.Contains(strings.ToLower(err.Error()), "no such module: fts5") {
 		return createFallbackKnowledgeSearchTable(tx)
 	}
@@ -884,8 +982,21 @@ func isAddColumnStatement(statement string) bool {
 	return strings.HasPrefix(normalized, "alter table ") && strings.Contains(normalized, " add column ")
 }
 
+func isDropColumnStatement(statement string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(statement))
+	return strings.HasPrefix(normalized, "alter table ") && strings.Contains(normalized, " drop column ")
+}
+
 func isDuplicateColumnError(err error) bool {
 	return err != nil && strings.Contains(strings.ToLower(err.Error()), "duplicate column name")
+}
+
+func isMissingColumnError(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "no such column") || strings.Contains(message, "has no column named")
 }
 
 func isKnowledgeFTS5Statement(statement string) bool {

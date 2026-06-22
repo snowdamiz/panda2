@@ -16,47 +16,52 @@ The default test run covers the SQLite fallback search path. The tagged run cove
 
 1. Run one primary writable database for v1. Keep SQLite attached to one primary Machine unless the storage plan moves to LiteFS, Postgres, or another explicitly owned single-writer design.
 2. Create one Fly volume mounted at `/data`.
-3. Configure Discord application ID, public key, owner user IDs, public app URL, billing redirects, SKU or price mappings, and runtime settings in `panda.config.json` or environment overrides.
+3. Configure Discord application ID, public key, owner user IDs, public landing URL, SOL payment settings, and runtime settings in `panda.config.json` or environment overrides.
 4. Store secrets with the deployment secret manager:
    - `DISCORD_BOT_TOKEN`
    - `OPENROUTER_API_KEY`
    - `BRAVE_SEARCH_API_KEY`
-   - `STRIPE_SECRET_KEY`
-   - `STRIPE_WEBHOOK_SECRET`
-   - billing SKU and price IDs when not committed as non-secret config
+   - `SOLANA_RPC_URL`
+   - `SOLANA_TREASURY_WALLET`
+   - `SOLANA_STARTER_LAMPORTS`, `SOLANA_PLUS_LAMPORTS`, `SOLANA_PRO_LAMPORTS`, and `SOLANA_BUSINESS_LAMPORTS`
 5. Deploy with `fly deploy`.
-6. In the Discord Developer Portal Webhooks page, set the endpoint to `https://<app-host>/discord/webhook-events`, enable events, and subscribe to `APPLICATION_AUTHORIZED` plus entitlement events used by Premium Apps.
-7. In Stripe, set the webhook endpoint to `https://<app-host>/billing/stripe/webhook` and subscribe to `checkout.session.completed`, `customer.subscription.created`, `customer.subscription.updated`, `customer.subscription.deleted`, `invoice.payment_succeeded`, and `invoice.payment_failed`.
+6. In the Discord Developer Portal Webhooks page, set the endpoint to `https://<app-host>/discord/webhook-events`, enable events, and subscribe to `APPLICATION_AUTHORIZED`.
+7. Confirm the landing build args point at the API origin with `PUBLIC_PANDA_API_BASE_URL` and at the public RPC endpoint with `PUBLIC_SOLANA_RPC_URL` when a custom RPC is required.
 8. Check rollout with `fly status`, `fly releases`, `fly logs`, `/readyz`, `/metrics`, and `/ops health`.
 
-Production validation fails when Discord credentials, the managed AI service key, public app URL, or billing SKU/price mappings are missing. If any Stripe price mapping is configured, production also requires `STRIPE_SECRET_KEY` and `STRIPE_WEBHOOK_SECRET`.
+Production validation fails when Discord credentials, the managed AI service key, public app URL, SOL RPC URL, treasury wallet, or paid-plan lamport mappings are missing.
 
 ## Billing Environment
 
-Required for Stripe self-serve billing:
+Required for SOL self-serve billing:
 
-- `PUBLIC_APP_URL`: the hosted app origin used for Stripe return URLs.
-- `STRIPE_SECRET_KEY`: server-side Stripe key used to create Checkout and Customer Portal sessions.
-- `STRIPE_WEBHOOK_SECRET`: Stripe endpoint signing secret for `/billing/stripe/webhook`.
-- `STRIPE_STARTER_PRICE_ID`, `STRIPE_PLUS_PRICE_ID`, `STRIPE_PRO_PRICE_ID`, `STRIPE_BUSINESS_PRICE_ID`: recurring monthly Price IDs mapped to Panda plans.
+- `PUBLIC_APP_URL`: the hosted landing origin used in Discord billing links and payment CORS.
+- `BILLING_ALLOWED_ORIGINS`: comma-separated origins allowed to call `/billing/sol/*`; defaults effectively include `PUBLIC_APP_URL`.
+- `SOLANA_RPC_URL`: backend RPC endpoint used to verify transactions with `getTransaction`.
+- `SOLANA_CLUSTER`: `devnet`, `testnet`, `mainnet`, or `mainnet-beta`; defaults to `devnet`.
+- `SOLANA_TREASURY_WALLET`: treasury wallet receiving native SOL transfers.
+- `SOLANA_CONFIRMATION`: `confirmed` or `finalized`; defaults to `finalized`.
+- `SOLANA_ORDER_EXPIRATION`: order lifetime; defaults to `30m`.
+- `SOLANA_ACTIVATION_KEY_TTL`: one-time key lifetime after reveal; defaults to `48h`.
+- `SOLANA_STARTER_LAMPORTS`, `SOLANA_PLUS_LAMPORTS`, `SOLANA_PRO_LAMPORTS`, `SOLANA_BUSINESS_LAMPORTS`: exact native SOL prices by plan.
 
 Optional billing overrides:
 
-- `BILLING_SUCCESS_URL`: defaults to `PUBLIC_APP_URL/billing/success`.
-- `BILLING_CANCEL_URL`: defaults to `PUBLIC_APP_URL/billing/cancel`.
-- `STRIPE_API_BASE_URL`: defaults to `https://api.stripe.com`; use only for local tests against a fake Stripe server.
-- `STRIPE_PRICE_PLAN_MAP`: comma-separated `price_id:plan` entries when using custom plan price names.
+- `SOLANA_PLAN_LAMPORTS`: comma-separated `plan:lamports` entries, useful when setting all plan amounts in one value.
 
-Required for Discord Premium Apps billing, when that channel is enabled:
+Landing build-time values:
 
-- `DISCORD_STARTER_SKU_ID`, `DISCORD_PLUS_SKU_ID`, `DISCORD_PRO_SKU_ID`, `DISCORD_BUSINESS_SKU_ID`: Discord SKU IDs mapped to Panda plans.
-- `DISCORD_SKU_PLAN_MAP` is available as a comma-separated map alternative.
+- `PUBLIC_PANDA_API_BASE_URL`: API origin used by the static landing payment module.
+- `PUBLIC_SOLANA_RPC_URL`: public RPC endpoint used by the browser when it signs and submits a transaction itself.
 
-Stripe Price setup:
+SOL payment setup:
 
-- Plan prices must be recurring monthly prices matching public plan prices.
-- Stripe Customer Portal must be configured in Stripe Dashboard before `/billing action:portal` can open successfully.
-- Checkout sessions are created from `/billing action:upgrade ...`; do not expose unauthenticated public checkout endpoints.
+- Plan prices must map to integer lamports and match the public plan table.
+- The treasury wallet should be controlled outside the app runtime. Do not store private keys on the Panda host.
+- The landing page creates orders through `POST /billing/sol/orders`; the backend returns the exact amount, treasury wallet, memo/reference, Solana Pay URL, and expiration.
+- The backend verifies submitted signatures with structured Solana RPC responses, rejects token transfers, requires one matching native SOL transfer to the treasury wallet, requires the order memo/reference, and only accepts transactions at or above the configured confirmation threshold.
+- Verified orders reveal one activation key once. The key is stored hashed, consumed by `/billing action:activate api_key:<key>`, and cannot be re-revealed.
+- Operators can revoke an unused activation key by payment order with `/billing action:revoke order_id:<order>`. Revocation, creation, one-time viewing, consumption, and expiration are recorded in audit events.
 
 ## Health Checks
 
@@ -69,23 +74,25 @@ Stripe Price setup:
 - `/ops incident action:enable` records incident mode in runtime state.
 - `/ops reload` rechecks runtime dependencies.
 
-Long Discord summaries are queued as `discord.interaction` jobs. If queue depth grows, inspect logs, AI-service health, entitlement checks, worker drain state, and incident state before scaling.
+Long Discord summaries are queued as `discord.interaction` jobs. If queue depth grows, inspect logs, AI-service health, entitlement checks, SOL verifier health, worker drain state, and incident state before scaling.
 
 ## Billing Operations
 
-Panda grants entitlements only from verified Discord entitlement events or verified Stripe webhooks. Do not grant paid access from client-side redirects.
+Panda grants entitlements only from verified SOL payment orders activated with one-time keys. Do not grant paid access from wallet connection state, landing UI state, pasted signatures that have not passed backend verification, or support screenshots.
 
 Required billing checks:
 
-- Webhook handlers are idempotent and record every payment event.
+- Payment order creation is rate limited and records exact plan, amount, treasury wallet, memo/reference, expiration, and support contact.
+- SOL transaction verification is idempotent by signature and records successful and failed verification attempts.
+- Activation keys are revealed once, hashed at rest, scoped to the order guild, and consumed atomically.
 - Every paid assistant, web search, schedule, composed-tool, storage, and music path checks entitlement before provider spend.
 - Past-due accounts enter grace, then read-only or suspended states according to billing policy.
 - Suspended and canceled guilds retain help, billing, export, delete, and support access.
-- Discord Premium Apps and Stripe prices must stay in parity where Discord requires it.
 
 Weekly reconciliation:
 
-- Compare internal AI response counts, web search counts, storage bytes, and cost ledger records against provider dashboards and payment reports.
+- Compare internal SOL payment events against treasury wallet transactions and RPC history.
+- Compare internal AI response counts, web search counts, storage bytes, and cost ledger records against provider dashboards.
 - Alert when gross margin drops below 45% for any plan cohort.
 - Alert when a guild consumes more than 50% of its included quota in the first 20% of a billing period.
 
@@ -129,7 +136,7 @@ Copy backups off the Fly volume after creation. Keep the main database, WAL, and
 1. Inspect `fly releases`.
 2. Roll back with `fly releases rollback <version>`.
 3. Watch `fly logs`.
-4. Confirm `/readyz`, `/metrics`, `/ops health`, and billing webhook delivery.
+4. Confirm `/readyz`, `/metrics`, `/ops health`, and SOL payment verification on the configured cluster.
 
 Schema migrations are forward-only. Restore from a SQLite backup if a bad migration corrupts data.
 
@@ -137,7 +144,7 @@ Schema migrations are forward-only. Restore from a SQLite backup if a bad migrat
 
 For managed AI trouble, enable incident mode, drain background work if needed, and disable assistant responses in affected guilds with `/admin disable`. Removing the AI service key and redeploying is a last-resort global stop; health checks will report the AI service as missing and assistant responses will stop before provider calls.
 
-For billing webhook trouble, pause upgrades that depend on the affected channel, keep existing entitlement snapshots intact, replay webhooks after the fix, and verify idempotency before resuming self-serve upgrades.
+For SOL payment verification trouble, pause new purchases from the landing page if needed, keep existing entitlement snapshots intact, preserve submitted signatures and order IDs, retry verification after RPC recovery, and verify idempotency before resuming self-serve purchases.
 
 For quota spikes or abuse, suspend the guild, revoke trial credits when warranted, preserve audit logs, and keep export/delete/support paths available.
 

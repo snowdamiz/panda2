@@ -21,7 +21,13 @@ const (
 	defaultProdDataDir               = "/data"
 	defaultOpenRouterModel           = "inception/mercury-2"
 	defaultOpenRouterClassifierModel = "inclusionai/ling-2.6-flash"
+	defaultSolanaCluster             = "devnet"
+	defaultSolanaConfirmation        = "finalized"
+	defaultSolanaOrderExpiration     = 30 * time.Minute
+	defaultSolanaActivationKeyTTL    = 48 * time.Hour
 )
+
+var paidPlanNames = []string{"starter", "plus", "pro", "business"}
 
 type Config struct {
 	DiscordBotToken                          string
@@ -41,13 +47,14 @@ type Config struct {
 	BraveSearchAPIKey                        string
 	BraveSearchBaseURL                       string
 	PublicAppURL                             string
-	BillingSuccessURL                        string
-	BillingCancelURL                         string
-	StripeSecretKey                          string
-	StripeAPIBaseURL                         string
-	StripeWebhookSecret                      string
-	DiscordSKUPlans                          map[string]string
-	StripePricePlans                         map[string]string
+	BillingAllowedOrigins                    []string
+	SolanaRPCURL                             string
+	SolanaCluster                            string
+	SolanaTreasuryWallet                     string
+	SolanaConfirmation                       string
+	SolanaOrderExpiration                    time.Duration
+	SolanaActivationKeyTTL                   time.Duration
+	SolanaPlanLamports                       map[string]int64
 	MusicYTDLPPath                           string
 	MusicFFmpegPath                          string
 	MusicSidecarDir                          string
@@ -99,12 +106,15 @@ type fileBraveSearchConfig struct {
 }
 
 type fileBillingConfig struct {
-	PublicURL        string            `json:"public_url"`
-	SuccessURL       string            `json:"success_url"`
-	CancelURL        string            `json:"cancel_url"`
-	StripeAPIBaseURL string            `json:"stripe_api_base_url"`
-	DiscordSKUPlans  map[string]string `json:"discord_sku_plans"`
-	StripePricePlans map[string]string `json:"stripe_price_plans"`
+	PublicURL             string           `json:"public_url"`
+	AllowedOrigins        []string         `json:"allowed_origins"`
+	SolanaRPCURL          string           `json:"solana_rpc_url"`
+	SolanaCluster         string           `json:"solana_cluster"`
+	SolanaTreasuryWallet  string           `json:"solana_treasury_wallet"`
+	SolanaConfirmation    string           `json:"solana_confirmation"`
+	SolanaOrderExpiration string           `json:"solana_order_expiration"`
+	SolanaActivationTTL   string           `json:"solana_activation_key_ttl"`
+	SolanaPlanLamports    map[string]int64 `json:"solana_plan_lamports"`
 }
 
 type fileMusicConfig struct {
@@ -161,11 +171,8 @@ func (c Config) Validate() ([]string, error) {
 	if c.BraveSearchBaseURL == "" {
 		return nil, errors.New("brave_search.base_url (BRAVE_SEARCH_BASE_URL) must not be empty")
 	}
-	if c.DiscordSKUPlans == nil {
-		c.DiscordSKUPlans = map[string]string{}
-	}
-	if c.StripePricePlans == nil {
-		c.StripePricePlans = map[string]string{}
+	if c.SolanaPlanLamports == nil {
+		c.SolanaPlanLamports = map[string]int64{}
 	}
 	if c.MusicSidecarDir == "" {
 		return nil, errors.New("music.sidecar_dir (MUSIC_SIDECAR_DIR) must not be empty")
@@ -188,6 +195,23 @@ func (c Config) Validate() ([]string, error) {
 	if c.UserRateLimitWindow <= 0 {
 		return nil, errors.New("runtime.user_rate_limit_window (USER_RATE_LIMIT_WINDOW) must be greater than zero")
 	}
+	if strings.TrimSpace(c.SolanaCluster) == "" {
+		return nil, errors.New("billing.solana_cluster (SOLANA_CLUSTER) must not be empty")
+	}
+	switch strings.ToLower(strings.TrimSpace(c.SolanaConfirmation)) {
+	case "confirmed", "finalized":
+	default:
+		return nil, errors.New("billing.solana_confirmation (SOLANA_CONFIRMATION) must be confirmed or finalized")
+	}
+	if c.SolanaOrderExpiration <= 0 {
+		return nil, errors.New("billing.solana_order_expiration (SOLANA_ORDER_EXPIRATION) must be greater than zero")
+	}
+	if c.SolanaActivationKeyTTL <= 0 {
+		return nil, errors.New("billing.solana_activation_key_ttl (SOLANA_ACTIVATION_KEY_TTL) must be greater than zero")
+	}
+	if err := validateSolanaPlanLamports(c.SolanaPlanLamports); err != nil {
+		return nil, err
+	}
 
 	if !c.DiscordConfigured() {
 		warnings = append(warnings, "Discord credentials are not fully configured; gateway and command registration will be skipped")
@@ -204,14 +228,11 @@ func (c Config) Validate() ([]string, error) {
 	if c.PublicAppURL == "" {
 		warnings = append(warnings, "PUBLIC_APP_URL is not configured; billing and support links will be limited")
 	}
-	if len(c.DiscordSKUPlans) == 0 && len(c.StripePricePlans) == 0 {
-		warnings = append(warnings, "No billing plan SKU or price mappings are configured; paid plan entitlements cannot be granted automatically")
+	if len(c.PaymentAllowedOrigins()) == 0 {
+		warnings = append(warnings, "BILLING_ALLOWED_ORIGINS is not configured; cross-origin landing payments will be disabled")
 	}
-	if len(c.StripePricePlans) > 0 && c.StripeSecretKey == "" {
-		warnings = append(warnings, "Stripe price mappings are configured without STRIPE_SECRET_KEY; Stripe Checkout and portal sessions cannot be created")
-	}
-	if len(c.StripePricePlans) > 0 && c.StripeWebhookSecret == "" {
-		warnings = append(warnings, "Stripe price mappings are configured without STRIPE_WEBHOOK_SECRET; Stripe payment events cannot grant entitlements")
+	if !c.SolanaPaymentsConfigured() {
+		warnings = append(warnings, "SOL payment settings are incomplete; paid self-serve purchases cannot be verified")
 	}
 
 	if strings.EqualFold(c.Environment, "production") {
@@ -224,14 +245,14 @@ func (c Config) Validate() ([]string, error) {
 		if c.PublicAppURL == "" {
 			return warnings, errors.New("production requires PUBLIC_APP_URL")
 		}
-		if len(c.DiscordSKUPlans) == 0 && len(c.StripePricePlans) == 0 {
-			return warnings, errors.New("production requires Discord SKU or Stripe price mappings")
+		if c.SolanaRPCURL == "" {
+			return warnings, errors.New("production SOL billing requires SOLANA_RPC_URL")
 		}
-		if len(c.StripePricePlans) > 0 && c.StripeSecretKey == "" {
-			return warnings, errors.New("production Stripe billing requires STRIPE_SECRET_KEY")
+		if c.SolanaTreasuryWallet == "" {
+			return warnings, errors.New("production SOL billing requires SOLANA_TREASURY_WALLET")
 		}
-		if len(c.StripePricePlans) > 0 && c.StripeWebhookSecret == "" {
-			return warnings, errors.New("production Stripe billing requires STRIPE_WEBHOOK_SECRET")
+		if missing := missingSolanaPaidPlans(c.SolanaPlanLamports); len(missing) > 0 {
+			return warnings, fmt.Errorf("production SOL billing requires lamports for paid plans: %s", strings.Join(missing, ", "))
 		}
 	}
 
@@ -254,6 +275,20 @@ func (c Config) BraveSearchConfigured() bool {
 	return c.BraveSearchAPIKey != ""
 }
 
+func (c Config) SolanaPaymentsConfigured() bool {
+	return strings.TrimSpace(c.SolanaRPCURL) != "" &&
+		strings.TrimSpace(c.SolanaTreasuryWallet) != "" &&
+		len(missingSolanaPaidPlans(c.SolanaPlanLamports)) == 0
+}
+
+func (c Config) PaymentAllowedOrigins() []string {
+	origins := append([]string(nil), c.BillingAllowedOrigins...)
+	if strings.TrimSpace(c.PublicAppURL) != "" {
+		origins = append(origins, c.PublicAppURL)
+	}
+	return normalizeList(origins)
+}
+
 func (c Config) IsOwner(userID string) bool {
 	_, ok := c.OwnerUserIDs[userID]
 	return ok
@@ -268,9 +303,11 @@ func defaultConfig() Config {
 		OpenRouterCircuitBreakerFailureThreshold: 5,
 		OpenRouterCircuitBreakerCooldown:         30 * time.Second,
 		BraveSearchBaseURL:                       "https://api.search.brave.com/res/v1",
-		DiscordSKUPlans:                          map[string]string{},
-		StripePricePlans:                         map[string]string{},
-		StripeAPIBaseURL:                         "https://api.stripe.com",
+		SolanaCluster:                            defaultSolanaCluster,
+		SolanaConfirmation:                       defaultSolanaConfirmation,
+		SolanaOrderExpiration:                    defaultSolanaOrderExpiration,
+		SolanaActivationKeyTTL:                   defaultSolanaActivationKeyTTL,
+		SolanaPlanLamports:                       map[string]int64{},
 		Port:                                     "8080",
 		Environment:                              defaultEnvironment(),
 		LogLevel:                                 "info",
@@ -551,20 +588,37 @@ func applyFileConfig(cfg *Config, file fileConfig) error {
 	if value := strings.TrimSpace(file.Billing.PublicURL); value != "" {
 		cfg.PublicAppURL = value
 	}
-	if value := strings.TrimSpace(file.Billing.SuccessURL); value != "" {
-		cfg.BillingSuccessURL = value
+	if file.Billing.AllowedOrigins != nil {
+		cfg.BillingAllowedOrigins = normalizeList(file.Billing.AllowedOrigins)
 	}
-	if value := strings.TrimSpace(file.Billing.CancelURL); value != "" {
-		cfg.BillingCancelURL = value
+	if value := strings.TrimSpace(file.Billing.SolanaRPCURL); value != "" {
+		cfg.SolanaRPCURL = value
 	}
-	if value := strings.TrimSpace(file.Billing.StripeAPIBaseURL); value != "" {
-		cfg.StripeAPIBaseURL = value
+	if value := strings.TrimSpace(file.Billing.SolanaCluster); value != "" {
+		cfg.SolanaCluster = value
 	}
-	if file.Billing.DiscordSKUPlans != nil {
-		cfg.DiscordSKUPlans = normalizePlanMap(file.Billing.DiscordSKUPlans)
+	if value := strings.TrimSpace(file.Billing.SolanaTreasuryWallet); value != "" {
+		cfg.SolanaTreasuryWallet = value
 	}
-	if file.Billing.StripePricePlans != nil {
-		cfg.StripePricePlans = normalizePlanMap(file.Billing.StripePricePlans)
+	if value := strings.TrimSpace(file.Billing.SolanaConfirmation); value != "" {
+		cfg.SolanaConfirmation = strings.ToLower(value)
+	}
+	if value := strings.TrimSpace(file.Billing.SolanaOrderExpiration); value != "" {
+		parsed, err := parseDuration("billing.solana_order_expiration", value)
+		if err != nil {
+			return err
+		}
+		cfg.SolanaOrderExpiration = parsed
+	}
+	if value := strings.TrimSpace(file.Billing.SolanaActivationTTL); value != "" {
+		parsed, err := parseDuration("billing.solana_activation_key_ttl", value)
+		if err != nil {
+			return err
+		}
+		cfg.SolanaActivationKeyTTL = parsed
+	}
+	if file.Billing.SolanaPlanLamports != nil {
+		cfg.SolanaPlanLamports = normalizeLamportsMap(file.Billing.SolanaPlanLamports)
 	}
 
 	if value := strings.TrimSpace(file.Music.YTDLPPath); value != "" {
@@ -630,27 +684,22 @@ func applyEnvValues(cfg *Config, lookup func(string) (string, bool)) {
 	cfg.BraveSearchAPIKey = stringFromLookup(lookup, "BRAVE_SEARCH_API_KEY", cfg.BraveSearchAPIKey)
 	cfg.BraveSearchBaseURL = nonEmptyStringFromLookup(lookup, "BRAVE_SEARCH_BASE_URL", cfg.BraveSearchBaseURL)
 	cfg.PublicAppURL = nonEmptyStringFromLookup(lookup, "PUBLIC_APP_URL", cfg.PublicAppURL)
-	cfg.BillingSuccessURL = nonEmptyStringFromLookup(lookup, "BILLING_SUCCESS_URL", cfg.BillingSuccessURL)
-	cfg.BillingCancelURL = nonEmptyStringFromLookup(lookup, "BILLING_CANCEL_URL", cfg.BillingCancelURL)
-	cfg.StripeSecretKey = stringFromLookup(lookup, "STRIPE_SECRET_KEY", cfg.StripeSecretKey)
-	cfg.StripeAPIBaseURL = nonEmptyStringFromLookup(lookup, "STRIPE_API_BASE_URL", cfg.StripeAPIBaseURL)
-	cfg.StripeWebhookSecret = stringFromLookup(lookup, "STRIPE_WEBHOOK_SECRET", cfg.StripeWebhookSecret)
-	if value, ok := planMapFromLookup(lookup, "DISCORD_SKU_PLAN_MAP"); ok {
-		cfg.DiscordSKUPlans = value
+	if value, ok := csvListFromLookup(lookup, "BILLING_ALLOWED_ORIGINS"); ok {
+		cfg.BillingAllowedOrigins = value
 	}
-	if value, ok := planMapFromLookup(lookup, "STRIPE_PRICE_PLAN_MAP"); ok {
-		cfg.StripePricePlans = value
+	cfg.SolanaRPCURL = nonEmptyStringFromLookup(lookup, "SOLANA_RPC_URL", cfg.SolanaRPCURL)
+	cfg.SolanaCluster = nonEmptyStringFromLookup(lookup, "SOLANA_CLUSTER", cfg.SolanaCluster)
+	cfg.SolanaTreasuryWallet = nonEmptyStringFromLookup(lookup, "SOLANA_TREASURY_WALLET", cfg.SolanaTreasuryWallet)
+	cfg.SolanaConfirmation = strings.ToLower(nonEmptyStringFromLookup(lookup, "SOLANA_CONFIRMATION", cfg.SolanaConfirmation))
+	cfg.SolanaOrderExpiration = durationFromLookup(lookup, "SOLANA_ORDER_EXPIRATION", cfg.SolanaOrderExpiration)
+	cfg.SolanaActivationKeyTTL = durationFromLookup(lookup, "SOLANA_ACTIVATION_KEY_TTL", cfg.SolanaActivationKeyTTL)
+	if value, ok := lamportsMapFromLookup(lookup, "SOLANA_PLAN_LAMPORTS"); ok {
+		cfg.SolanaPlanLamports = value
 	}
-	applyPlanIDEnv(cfg.DiscordSKUPlans, lookup, "DISCORD_TRIAL_SKU_ID", "trial")
-	applyPlanIDEnv(cfg.DiscordSKUPlans, lookup, "DISCORD_STARTER_SKU_ID", "starter")
-	applyPlanIDEnv(cfg.DiscordSKUPlans, lookup, "DISCORD_PLUS_SKU_ID", "plus")
-	applyPlanIDEnv(cfg.DiscordSKUPlans, lookup, "DISCORD_PRO_SKU_ID", "pro")
-	applyPlanIDEnv(cfg.DiscordSKUPlans, lookup, "DISCORD_BUSINESS_SKU_ID", "business")
-	applyPlanIDEnv(cfg.StripePricePlans, lookup, "STRIPE_TRIAL_PRICE_ID", "trial")
-	applyPlanIDEnv(cfg.StripePricePlans, lookup, "STRIPE_STARTER_PRICE_ID", "starter")
-	applyPlanIDEnv(cfg.StripePricePlans, lookup, "STRIPE_PLUS_PRICE_ID", "plus")
-	applyPlanIDEnv(cfg.StripePricePlans, lookup, "STRIPE_PRO_PRICE_ID", "pro")
-	applyPlanIDEnv(cfg.StripePricePlans, lookup, "STRIPE_BUSINESS_PRICE_ID", "business")
+	applyPlanLamportsEnv(cfg.SolanaPlanLamports, lookup, "SOLANA_STARTER_LAMPORTS", "starter")
+	applyPlanLamportsEnv(cfg.SolanaPlanLamports, lookup, "SOLANA_PLUS_LAMPORTS", "plus")
+	applyPlanLamportsEnv(cfg.SolanaPlanLamports, lookup, "SOLANA_PRO_LAMPORTS", "pro")
+	applyPlanLamportsEnv(cfg.SolanaPlanLamports, lookup, "SOLANA_BUSINESS_LAMPORTS", "business")
 	cfg.MusicYTDLPPath = nonEmptyStringFromLookup(lookup, "YTDLP_PATH", cfg.MusicYTDLPPath)
 	cfg.MusicFFmpegPath = nonEmptyStringFromLookup(lookup, "FFMPEG_PATH", cfg.MusicFFmpegPath)
 	cfg.MusicSidecarDir = nonEmptyStringFromLookup(lookup, "MUSIC_SIDECAR_DIR", cfg.MusicSidecarDir)
@@ -724,15 +773,15 @@ func csvListFromLookup(lookup func(string) (string, bool), name string) ([]strin
 	return parseCSVList(value), true
 }
 
-func planMapFromLookup(lookup func(string) (string, bool), name string) (map[string]string, bool) {
+func lamportsMapFromLookup(lookup func(string) (string, bool), name string) (map[string]int64, bool) {
 	value, ok := lookup(name)
 	if !ok {
 		return nil, false
 	}
-	return parsePlanMap(value), true
+	return parseLamportsMap(value), true
 }
 
-func applyPlanIDEnv(target map[string]string, lookup func(string) (string, bool), name string, plan string) {
+func applyPlanLamportsEnv(target map[string]int64, lookup func(string) (string, bool), name string, plan string) {
 	if target == nil {
 		return
 	}
@@ -744,7 +793,11 @@ func applyPlanIDEnv(target map[string]string, lookup func(string) (string, bool)
 	if value == "" {
 		return
 	}
-	target[value] = strings.ToLower(strings.TrimSpace(plan))
+	parsed, err := strconv.ParseInt(value, 10, 64)
+	if err != nil {
+		return
+	}
+	target[strings.ToLower(strings.TrimSpace(plan))] = parsed
 }
 
 func intFromLookup(lookup func(string) (string, bool), name string, fallback int) int {
@@ -812,39 +865,38 @@ func normalizeList(values []string) []string {
 	return result
 }
 
-func normalizePlanMap(values map[string]string) map[string]string {
-	result := map[string]string{}
+func normalizeLamportsMap(values map[string]int64) map[string]int64 {
+	result := map[string]int64{}
 	for key, value := range values {
 		key = strings.TrimSpace(key)
-		value = strings.ToLower(strings.TrimSpace(value))
-		if key == "" || value == "" {
+		if key == "" {
 			continue
 		}
-		result[key] = value
+		result[strings.ToLower(key)] = value
 	}
 	return result
 }
 
-func parsePlanMap(value string) map[string]string {
-	result := map[string]string{}
+func parseLamportsMap(value string) map[string]int64 {
+	result := map[string]int64{}
 	for _, part := range strings.Split(value, ",") {
 		part = strings.TrimSpace(part)
 		if part == "" {
 			continue
 		}
-		key, plan, ok := strings.Cut(part, ":")
+		plan, lamports, ok := strings.Cut(part, ":")
 		if !ok {
-			key, plan, ok = strings.Cut(part, "=")
+			plan, lamports, ok = strings.Cut(part, "=")
 		}
 		if !ok {
 			continue
 		}
-		key = strings.TrimSpace(key)
 		plan = strings.ToLower(strings.TrimSpace(plan))
-		if key == "" || plan == "" {
+		parsed, err := strconv.ParseInt(strings.TrimSpace(lamports), 10, 64)
+		if plan == "" || err != nil {
 			continue
 		}
-		result[key] = plan
+		result[plan] = parsed
 	}
 	return result
 }
@@ -855,4 +907,36 @@ func parseDuration(name, value string) (time.Duration, error) {
 		return 0, fmt.Errorf("%s must be a valid duration: %w", name, err)
 	}
 	return parsed, nil
+}
+
+func validateSolanaPlanLamports(values map[string]int64) error {
+	for plan, lamports := range values {
+		if !isPaidPlanName(plan) {
+			return fmt.Errorf("billing.solana_plan_lamports includes unknown paid plan %q", plan)
+		}
+		if lamports <= 0 {
+			return fmt.Errorf("billing.solana_plan_lamports.%s must be greater than zero", plan)
+		}
+	}
+	return nil
+}
+
+func missingSolanaPaidPlans(values map[string]int64) []string {
+	var missing []string
+	for _, plan := range paidPlanNames {
+		if values == nil || values[plan] <= 0 {
+			missing = append(missing, plan)
+		}
+	}
+	return missing
+}
+
+func isPaidPlanName(plan string) bool {
+	plan = strings.ToLower(strings.TrimSpace(plan))
+	for _, paidPlan := range paidPlanNames {
+		if plan == paidPlan {
+			return true
+		}
+	}
+	return false
 }

@@ -6,6 +6,8 @@ primary_region = "sjc"
 
   [build.args]
     PUBLIC_SITE_URL = "https://panda2-landing.fly.dev"
+    PUBLIC_PANDA_API_BASE_URL = "https://panda-assistant.fly.dev"
+    PUBLIC_SOLANA_RPC_URL = ""
 
 [http_service]
   internal_port = 8080

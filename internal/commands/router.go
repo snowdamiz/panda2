@@ -578,10 +578,13 @@ func (r *Router) handleBilling(ctx context.Context, request Request) Response {
 	}
 	action := strings.ToLower(strings.TrimSpace(firstNonEmpty(request.Subcommand, request.Options["action"])))
 	switch action {
-	case "upgrade", "plan", "checkout":
-		return r.handleBillingCheckout(ctx, request, billing.CheckoutKindPlan)
-	case "portal", "manage", "cancel":
-		return r.handleBillingPortal(ctx, request)
+	case "", "status":
+	case "activate":
+		return r.handleBillingActivate(ctx, request)
+	case "revoke":
+		return r.handleBillingRevoke(ctx, request)
+	default:
+		return Response{Content: "Billing action must be `status`, `activate`, or `revoke`.", Ephemeral: true, Presentation: Presentation{Title: "Unknown billing action", Accent: AccentWarning}}
 	}
 
 	entitlement, err := r.billing.Resolve(ctx, request.GuildID)
@@ -590,95 +593,102 @@ func (r *Router) handleBilling(ctx context.Context, request Request) Response {
 	}
 	if errors.Is(err, billing.ErrNoSubscription) {
 		content := "No Panda subscription is active for this server."
-		content += "\nUse `/billing action:upgrade plan:starter` to create a checkout session."
+		content += "\nStart a SOL purchase from the Panda landing page, then run `/billing action:activate api_key:<key>`."
 		return Response{Content: content, Ephemeral: true, Presentation: Presentation{Title: "No active subscription", Accent: AccentWarning}}
 	}
 	content := entitlement.SummaryText()
-	content += "\n\nUse `/billing action:upgrade plan:plus` to change plans."
-	content += "\nUse `/billing action:portal` to manage payment details or cancellation."
+	if entitlement.UpgradeURL != "" {
+		content += "\n\nPurchase or renew on the Panda landing page, then activate with `/billing action:activate api_key:<key>`."
+		return Response{
+			Content:      content,
+			Ephemeral:    true,
+			Presentation: Presentation{Title: "Panda Billing", Accent: AccentInfo},
+			Actions:      []Action{{Label: "Open Panda pricing", URL: entitlement.UpgradeURL}},
+		}
+	}
+	content += "\n\nPurchase or renew on the Panda landing page, then activate with `/billing action:activate api_key:<key>`."
 	return Response{Content: content, Ephemeral: true, Presentation: Presentation{Title: "Panda Billing", Accent: AccentInfo}}
 }
 
-func (r *Router) handleBillingCheckout(ctx context.Context, request Request, kind billing.CheckoutKind) Response {
-	checkout := billing.CheckoutRequest{
+func (r *Router) handleBillingActivate(ctx context.Context, request Request) Response {
+	apiKey := strings.TrimSpace(request.Options["api_key"])
+	if apiKey == "" {
+		return Response{Content: "Paste the one-time activation key from the Panda landing page: `/billing action:activate api_key:<key>`.", Ephemeral: true, Presentation: Presentation{Title: "Activation key required", Accent: AccentWarning}}
+	}
+	result, err := r.billing.ActivateWithAPIKey(ctx, billing.ActivateAPIKeyRequest{
 		GuildID:         request.GuildID,
 		ActorUserID:     request.UserID,
 		ActorIsOperator: request.IsOwner,
 		ActorCanClaim:   request.IsGuildAdmin,
-		Kind:            kind,
-		CustomerEmail:   request.Options["email"],
-	}
-	var label string
-	switch kind {
-	case billing.CheckoutKindPlan:
-		plan, ok := billing.NormalizePlan(request.Options["plan"])
-		if !ok || plan == billing.PlanTrial {
-			return Response{Content: "Choose a paid plan: `starter`, `plus`, `pro`, or `business`.", Ephemeral: true, Presentation: Presentation{Title: "Choose a plan", Accent: AccentWarning}}
-		}
-		limits, _ := billing.LimitsForPlan(plan)
-		checkout.Plan = plan
-		label = limits.DisplayName
-	default:
-		return Response{Content: "Unsupported billing checkout action.", Ephemeral: true}
-	}
-	session, err := r.billing.CreateCheckoutSession(ctx, checkout)
-	if err != nil {
-		return billingCheckoutErrorResponse(err)
-	}
-	return Response{
-		Content:   fmt.Sprintf("Stripe checkout is ready for `%s`. Panda will apply the plan only after the verified Stripe webhook arrives.", label),
-		Ephemeral: true,
-		Presentation: Presentation{
-			Title:  "Checkout ready",
-			Accent: AccentSuccess,
-		},
-		Actions: []Action{{Label: "Open checkout", URL: session.URL}},
-	}
-}
-
-func (r *Router) handleBillingPortal(ctx context.Context, request Request) Response {
-	if denied := r.ensureBillingManager(ctx, request); denied.Content != "" {
-		return denied
-	}
-	session, err := r.billing.CreatePortalSession(ctx, billing.PortalRequest{
-		GuildID:         request.GuildID,
-		ActorUserID:     request.UserID,
-		ActorIsOperator: request.IsOwner,
+		APIKey:          apiKey,
 	})
 	if err != nil {
-		return billingCheckoutErrorResponse(err)
+		return billingActivationErrorResponse(err)
 	}
 	return Response{
-		Content:      "Stripe billing portal is ready. Use it to update payment details, change the active subscription, or cancel renewal.",
+		Content:      fmt.Sprintf("Panda %s is active for this server through %s.", result.Entitlement.Plan.DisplayName, result.Entitlement.PeriodEnd.Format("2006-01-02")),
 		Ephemeral:    true,
-		Presentation: Presentation{Title: "Billing portal ready", Accent: AccentInfo},
-		Actions:      []Action{{Label: "Open billing portal", URL: session.URL}},
+		Presentation: Presentation{Title: "Plan activated", Accent: AccentSuccess},
 	}
 }
 
-func (r *Router) ensureBillingManager(ctx context.Context, request Request) Response {
-	allowed, err := r.billing.CanManageBilling(ctx, request.GuildID, request.UserID, request.IsOwner)
+func (r *Router) handleBillingRevoke(ctx context.Context, request Request) Response {
+	if !request.IsOwner {
+		return Response{Content: "Only Panda operators can revoke activation keys.", Ephemeral: true, Presentation: Presentation{Title: "Operator required", Accent: AccentWarning}}
+	}
+	orderID := strings.TrimSpace(request.Options["order_id"])
+	if orderID == "" {
+		return Response{Content: "Provide the SOL payment order ID to revoke its unused activation key.", Ephemeral: true, Presentation: Presentation{Title: "Order ID required", Accent: AccentWarning}}
+	}
+	revocation, err := r.billing.RevokeActivationAPIKey(ctx, billing.RevokeActivationAPIKeyRequest{
+		PaymentOrderID:  orderID,
+		ActorUserID:     request.UserID,
+		ActorIsOperator: true,
+		Reason:          "operator command",
+	})
 	if err != nil {
-		return Response{Content: "Billing ownership could not be verified.", Ephemeral: true, Presentation: Presentation{Title: "Billing lookup failed", Accent: AccentWarning}}
+		return billingRevocationErrorResponse(err)
 	}
-	if !allowed {
-		return Response{Content: "Only the current billing owner can change plans or open the billing portal.", Ephemeral: true, Presentation: Presentation{Title: "Billing owner required", Accent: AccentWarning}}
+	return Response{
+		Content:      fmt.Sprintf("Activation key `%s...` for Panda %s order `%s` was revoked.", revocation.Prefix, revocation.Order.DisplayName, revocation.Order.OrderID),
+		Ephemeral:    true,
+		Presentation: Presentation{Title: "Activation key revoked", Accent: AccentSuccess},
 	}
-	return Response{}
 }
 
-func billingCheckoutErrorResponse(err error) Response {
+func billingActivationErrorResponse(err error) Response {
 	switch {
-	case errors.Is(err, billing.ErrStripeNotConfigured):
-		return Response{Content: "Stripe billing is not configured for this runtime.", Ephemeral: true, Presentation: Presentation{Title: "Checkout unavailable", Accent: AccentWarning}}
-	case errors.Is(err, billing.ErrStripeCustomerMissing):
-		return Response{Content: "Stripe does not have a customer record for this server yet. Complete checkout first, then run `/billing action:portal` after the webhook updates Panda.", Ephemeral: true, Presentation: Presentation{Title: "Portal unavailable", Accent: AccentWarning}}
 	case errors.Is(err, billing.ErrBillingAccess):
-		return Response{Content: "Only the current billing owner can manage Panda billing for this server.", Ephemeral: true, Presentation: Presentation{Title: "Billing owner required", Accent: AccentWarning}}
-	case errors.Is(err, billing.ErrUnknownPlan):
-		return Response{Content: "Choose a paid plan: `starter`, `plus`, `pro`, or `business`.", Ephemeral: true, Presentation: Presentation{Title: "Choose a plan", Accent: AccentWarning}}
+		return Response{Content: "Only the current billing owner, a guild admin claiming an unclaimed server, or a Panda operator can activate billing for this server.", Ephemeral: true, Presentation: Presentation{Title: "Billing owner required", Accent: AccentWarning}}
+	case errors.Is(err, billing.ErrActivationKeyExpired):
+		return Response{Content: "That activation key has expired. Create a fresh SOL payment order from the Panda landing page or contact support.", Ephemeral: true, Presentation: Presentation{Title: "Activation key expired", Accent: AccentWarning}}
+	case errors.Is(err, billing.ErrActivationKeyConsumed):
+		return Response{Content: "That activation key has already been used.", Ephemeral: true, Presentation: Presentation{Title: "Activation key used", Accent: AccentWarning}}
+	case errors.Is(err, billing.ErrActivationKeyRevoked):
+		return Response{Content: "That activation key is no longer available. Contact Panda support with your order ID.", Ephemeral: true, Presentation: Presentation{Title: "Activation key revoked", Accent: AccentWarning}}
+	case errors.Is(err, billing.ErrActivationKeyInvalid):
+		return Response{Content: "That activation key could not be validated for this server.", Ephemeral: true, Presentation: Presentation{Title: "Activation failed", Accent: AccentWarning}}
+	case errors.Is(err, billing.ErrSolPaymentOrderNotVerified):
+		return Response{Content: "The SOL payment for that activation key is not verified yet.", Ephemeral: true, Presentation: Presentation{Title: "Payment not verified", Accent: AccentWarning}}
 	default:
-		return Response{Content: "Billing checkout could not be created. Please try again later or contact Panda support.", Ephemeral: true, Presentation: Presentation{Title: "Checkout failed", Accent: AccentWarning}}
+		return Response{Content: "Billing activation could not be completed. Please try again later or contact Panda support.", Ephemeral: true, Presentation: Presentation{Title: "Activation failed", Accent: AccentWarning}}
+	}
+}
+
+func billingRevocationErrorResponse(err error) Response {
+	switch {
+	case errors.Is(err, billing.ErrBillingAccess):
+		return Response{Content: "Only Panda operators can revoke activation keys.", Ephemeral: true, Presentation: Presentation{Title: "Operator required", Accent: AccentWarning}}
+	case errors.Is(err, billing.ErrActivationKeyConsumed):
+		return Response{Content: "That activation key has already been consumed and cannot be revoked.", Ephemeral: true, Presentation: Presentation{Title: "Key already consumed", Accent: AccentWarning}}
+	case errors.Is(err, billing.ErrActivationKeyRevoked):
+		return Response{Content: "That activation key is already revoked.", Ephemeral: true, Presentation: Presentation{Title: "Key already revoked", Accent: AccentWarning}}
+	case errors.Is(err, billing.ErrActivationKeyExpired):
+		return Response{Content: "That activation key is already expired.", Ephemeral: true, Presentation: Presentation{Title: "Key expired", Accent: AccentWarning}}
+	case errors.Is(err, billing.ErrActivationKeyInvalid), errors.Is(err, billing.ErrSolPaymentOrderNotFound):
+		return Response{Content: "No unused activation key was found for that payment order.", Ephemeral: true, Presentation: Presentation{Title: "Key not found", Accent: AccentWarning}}
+	default:
+		return Response{Content: "Activation key revocation could not be completed.", Ephemeral: true, Presentation: Presentation{Title: "Revocation failed", Accent: AccentWarning}}
 	}
 }
 
@@ -2064,11 +2074,11 @@ func billingErrorResponse(err error) Response {
 	var quotaErr billing.QuotaError
 	if errors.As(err, &quotaErr) {
 		content := fmt.Sprintf("This server has used its included %s for the current billing period.", billing.MetricLabel(quotaErr.Metric))
-		content += "\nThe billing owner can run `/billing action:upgrade plan:plus` to move to a higher tier."
+		content += "\nThe billing owner can run `/billing` for the Panda pricing link, then activate a verified SOL purchase with `/billing action:activate api_key:<key>`."
 		return Response{Content: content, Ephemeral: true, Presentation: Presentation{Title: "Usage limit reached", Accent: AccentWarning}}
 	}
 	if errors.Is(err, billing.ErrNoSubscription) {
-		return Response{Content: "This server does not have an active Panda subscription. Use `/billing` to start a trial or choose a plan.", Ephemeral: true, Presentation: Presentation{Title: "Subscription required", Accent: AccentWarning}}
+		return Response{Content: "This server does not have an active Panda subscription. Use `/billing` for status and the SOL purchase link.", Ephemeral: true, Presentation: Presentation{Title: "Subscription required", Accent: AccentWarning}}
 	}
 	if errors.Is(err, billing.ErrReadOnly) {
 		return Response{Content: "This server's Panda subscription is read-only. Billing, help, export/delete, and support access remain available.", Ephemeral: true, Presentation: Presentation{Title: "Subscription read-only", Accent: AccentWarning}}

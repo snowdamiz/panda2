@@ -35,10 +35,9 @@ const (
 	MetricScheduledRun         = "scheduled_run"
 	MetricMusicMinute          = "music_minute"
 
-	ProviderTrial   = "trial"
-	ProviderDiscord = "discord"
-	ProviderStripe  = "stripe"
-	ProviderManual  = "manual"
+	ProviderTrial  = "trial"
+	ProviderSol    = "sol"
+	ProviderManual = "manual"
 
 	UsageReservationPending  = "pending"
 	UsageReservationConsumed = "consumed"

@@ -1,4 +1,5 @@
 import { commandViews } from '../data/landing';
+import { initSolPayments } from './sol-payments';
 
 (() => {
   'use strict';
@@ -101,4 +102,6 @@ import { commandViews } from '../data/landing';
   document.querySelectorAll('[data-year]').forEach((node) => {
     node.textContent = String(new Date().getFullYear());
   });
+
+  initSolPayments();
 })();

@@ -1454,14 +1454,275 @@ svg {
   overflow-wrap: anywhere;
 }
 
-.checkout-row th,
-.checkout-row td {
+.payment-row th,
+.payment-row td {
   vertical-align: top;
 }
 
-.checkout-row td {
+.payment-row td {
   font-size: .55rem;
   text-align: left;
+}
+
+.sol-pay-console {
+  border-top: 1px solid color-mix(in oklab, var(--color-white) 10%, transparent);
+  background: color-mix(in oklab, var(--color-white) 2.5%, transparent);
+}
+
+.sol-pay-heading {
+  min-height: 86px;
+  padding: 22px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  border-bottom: 1px solid color-mix(in oklab, var(--color-white) 8%, transparent);
+}
+
+.sol-pay-heading span,
+.sol-pay-form legend,
+.sol-pay-form label > span,
+.sol-order-detail dt,
+.activation-key > span {
+  color: color-mix(in oklab, var(--color-white) 40%, transparent);
+  font-family: var(--font-mono);
+  font-size: .55rem;
+  font-weight: 760;
+  letter-spacing: .13em;
+  text-transform: uppercase;
+}
+
+.sol-pay-heading strong {
+  display: block;
+  margin-top: 8px;
+  color: var(--color-paper-bright);
+  font-size: 1.18rem;
+  font-weight: 560;
+  line-height: 1.15;
+}
+
+.sol-pay-heading p {
+  max-width: 520px;
+  margin: 0;
+  color: color-mix(in oklab, var(--color-paper-bright) 50%, transparent);
+  font-size: .82rem;
+  line-height: 1.65;
+}
+
+.sol-pay-grid {
+  display: grid;
+  grid-template-columns: minmax(300px, .86fr) minmax(0, 1.14fr);
+}
+
+.sol-pay-form,
+.sol-pay-panel {
+  padding: 22px;
+}
+
+.sol-pay-form {
+  border-right: 1px solid color-mix(in oklab, var(--color-white) 8%, transparent);
+}
+
+.sol-pay-form fieldset {
+  min-width: 0;
+  margin: 0 0 18px;
+  padding: 0;
+  border: 0;
+}
+
+.plan-picker {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.plan-choice,
+.sol-primary,
+.wallet-strip button,
+.sol-actions button,
+.sol-actions a,
+.activation-key button {
+  min-height: 42px;
+  padding: 0 13px;
+  border: 1px solid color-mix(in oklab, var(--color-white) 12%, transparent);
+  border-radius: var(--radius-xs);
+  background: color-mix(in oklab, var(--color-white) 4%, transparent);
+  color: color-mix(in oklab, var(--color-paper-bright) 78%, transparent);
+  font-family: var(--font-mono);
+  font-size: .64rem;
+  font-weight: 760;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+  cursor: pointer;
+  transition: border-color .2s ease, background .2s ease, color .2s ease, transform .2s ease;
+}
+
+.plan-choice {
+  min-height: 68px;
+  display: grid;
+  align-content: center;
+  gap: 6px;
+  text-align: left;
+}
+
+.plan-choice b {
+  color: var(--color-paper-bright);
+  font-size: 1rem;
+  font-weight: 560;
+  letter-spacing: 0;
+}
+
+.plan-choice.active,
+.plan-choice:hover,
+.plan-choice:focus-visible,
+.wallet-strip button:hover,
+.wallet-strip button:focus-visible,
+.sol-actions button:hover,
+.sol-actions button:focus-visible,
+.sol-actions a:hover,
+.sol-actions a:focus-visible,
+.activation-key button:hover,
+.activation-key button:focus-visible {
+  color: var(--color-paper-bright);
+  border-color: color-mix(in oklab, var(--color-white) 34%, transparent);
+  background: color-mix(in oklab, var(--color-white) 9%, transparent);
+}
+
+.sol-primary {
+  width: 100%;
+  margin-top: 6px;
+  color: var(--color-ink);
+  background: var(--color-paper-bright);
+  border-color: var(--color-paper-bright);
+}
+
+.sol-pay-form label,
+.signature-field {
+  display: grid;
+  gap: 8px;
+  margin-bottom: 14px;
+}
+
+.sol-pay-form input,
+.signature-field input,
+.wallet-strip select {
+  width: 100%;
+  min-height: 44px;
+  border: 1px solid color-mix(in oklab, var(--color-white) 12%, transparent);
+  border-radius: var(--radius-xs);
+  background: color-mix(in oklab, var(--color-ink) 48%, transparent);
+  color: var(--color-paper-bright);
+  font-family: var(--font-mono);
+  font-size: .78rem;
+  outline: 0;
+}
+
+.sol-pay-form input,
+.signature-field input {
+  padding: 0 12px;
+}
+
+.wallet-strip {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+}
+
+.wallet-strip select {
+  padding: 0 10px;
+}
+
+.sol-order-detail {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  margin: 18px 0;
+  border-top: 1px solid color-mix(in oklab, var(--color-white) 8%, transparent);
+  border-left: 1px solid color-mix(in oklab, var(--color-white) 8%, transparent);
+}
+
+.sol-order-detail div {
+  min-width: 0;
+  padding: 14px;
+  border-right: 1px solid color-mix(in oklab, var(--color-white) 8%, transparent);
+  border-bottom: 1px solid color-mix(in oklab, var(--color-white) 8%, transparent);
+}
+
+.sol-order-detail dd {
+  margin: 8px 0 0;
+  color: var(--color-paper-bright);
+  font-family: var(--font-mono);
+  font-size: .76rem;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.sol-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 16px;
+}
+
+.sol-actions.secondary {
+  margin-bottom: 14px;
+}
+
+.sol-actions button,
+.sol-actions a {
+  flex: 1 1 0;
+  justify-content: center;
+  text-align: center;
+}
+
+.sol-actions a {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.activation-key {
+  margin: 4px 0 14px;
+  padding: 14px;
+  display: grid;
+  gap: 10px;
+  border: 1px solid color-mix(in oklab, var(--color-white) 14%, transparent);
+  border-radius: var(--radius-xs);
+  background: color-mix(in oklab, var(--color-white) 5%, transparent);
+}
+
+.activation-key code {
+  color: var(--color-paper-bright);
+  font-family: var(--font-mono);
+  font-size: .76rem;
+  overflow-wrap: anywhere;
+}
+
+.sol-status {
+  min-height: 40px;
+  margin: 0;
+  padding: 11px 12px;
+  border-left: 2px solid color-mix(in oklab, var(--color-white) 22%, transparent);
+  color: color-mix(in oklab, var(--color-paper-bright) 58%, transparent);
+  background: color-mix(in oklab, var(--color-white) 3%, transparent);
+  font-size: .78rem;
+  line-height: 1.45;
+}
+
+.sol-status[data-tone="error"] {
+  border-left-color: var(--color-status-error);
+  color: color-mix(in oklab, var(--color-status-error) 78%, var(--color-paper-bright));
+}
+
+.sol-pay-console.busy {
+  cursor: progress;
+}
+
+.sol-pay-console button:disabled,
+.sol-pay-console input:disabled,
+.sol-pay-console select:disabled {
+  cursor: not-allowed;
+  opacity: .48;
 }
 
 .pricing-footer {
@@ -2338,6 +2599,20 @@ svg {
     justify-self: stretch;
   }
 
+  .sol-pay-heading {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .sol-pay-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .sol-pay-form {
+    border-right: 0;
+    border-bottom: 1px solid color-mix(in oklab, var(--color-white) 8%, transparent);
+  }
+
   .control-panel {
     order: 2;
     max-width: 800px;
@@ -2530,6 +2805,26 @@ svg {
     width: 100%;
   }
 
+  .sol-pay-heading,
+  .sol-pay-form,
+  .sol-pay-panel {
+    padding: 18px;
+  }
+
+  .plan-picker,
+  .sol-order-detail {
+    grid-template-columns: 1fr;
+  }
+
+  .wallet-strip {
+    grid-template-columns: 1fr;
+  }
+
+  .sol-actions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
   .workflow-grid {
     grid-template-columns: 1fr;
   }
@@ -2653,6 +2948,14 @@ svg {
 
   .policy-row b {
     display: none;
+  }
+
+  .plan-choice {
+    min-height: 58px;
+  }
+
+  .sol-pay-heading strong {
+    font-size: 1rem;
   }
 
   .panel-head > span {
