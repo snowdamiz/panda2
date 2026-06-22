@@ -34,6 +34,8 @@ Trials do not auto-convert without payment approval. Servers use the included li
 
 The installer becomes the billing owner for that server. The Discord server owner retains management access.
 
+Implementation planning for feature-based pre-install customization lives in [Feature-Based Discord Install Customization Plan](FEATURE_INSTALL_CUSTOMIZATION_PLAN.md).
+
 ## Buy A Plan
 
 The billing owner purchases from the Panda landing page:

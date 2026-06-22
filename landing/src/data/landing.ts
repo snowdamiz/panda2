@@ -167,7 +167,7 @@ export const commandRows = [
     key: 'billing',
     symbol: '$',
     command: '/billing',
-    description: 'Status and SOL activation',
+    description: 'Status and activation',
     order: '02',
   },
   {
@@ -203,7 +203,7 @@ export const commandViews = [
       ['AI REMAINING', '1,842'],
       ['RENEWAL', 'Monthly'],
     ],
-    status: 'SOL activation key is ready for Discord',
+    status: 'Activation key is ready for Discord',
   },
   {
     key: 'tool',

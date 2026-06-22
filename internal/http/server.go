@@ -108,7 +108,8 @@ func (s *Server) routes() {
 	s.app.Post("/discord/webhook-events", s.discordWebhookEvents)
 	s.app.Post("/billing/sol/orders", s.createSolPaymentOrder)
 	s.app.Get("/billing/sol/orders/:order_id", s.getSolPaymentOrder)
-	s.app.Get("/billing/sol/orders/:order_id/payment-request", s.getSolPaymentOrder)
+	s.app.Post("/billing/sol/orders/:order_id/transaction", s.prepareSolPaymentTransaction)
+	s.app.Post("/billing/sol/orders/:order_id/submit", s.submitSolPaymentTransaction)
 	s.app.Post("/billing/sol/orders/:order_id/verify", s.verifySolPaymentOrder)
 	s.app.Post("/billing/sol/orders/:order_id/activation-key", s.revealSolActivationKey)
 }
@@ -283,10 +284,19 @@ type createSolPaymentOrderRequest struct {
 	BillingOwnerUserID string `json:"billing_owner_user_id"`
 	Plan               string `json:"plan"`
 	SupportEmail       string `json:"support_email"`
+	CouponCode         string `json:"coupon_code"`
 }
 
 type verifySolPaymentRequest struct {
 	Signature string `json:"signature"`
+}
+
+type prepareSolPaymentTransactionRequest struct {
+	PayerWallet string `json:"payer_wallet"`
+}
+
+type submitSolPaymentTransactionRequest struct {
+	SignedTransaction string `json:"signed_transaction"`
 }
 
 func (s *Server) createSolPaymentOrder(c *fiber.Ctx) error {
@@ -305,6 +315,7 @@ func (s *Server) createSolPaymentOrder(c *fiber.Ctx) error {
 		BillingOwnerUserID: request.BillingOwnerUserID,
 		Plan:               request.Plan,
 		SupportEmail:       request.SupportEmail,
+		CouponCode:         request.CouponCode,
 	})
 	if err != nil {
 		return writeSolBillingError(c, err)
@@ -321,6 +332,57 @@ func (s *Server) getSolPaymentOrder(c *fiber.Ctx) error {
 		return writeSolBillingError(c, err)
 	}
 	return c.JSON(order)
+}
+
+func (s *Server) prepareSolPaymentTransaction(c *fiber.Ctx) error {
+	if denied := s.allowPaymentWrite(c); denied != nil {
+		return denied
+	}
+	if s.billing == nil {
+		return c.SendStatus(fiber.StatusServiceUnavailable)
+	}
+	var request prepareSolPaymentTransactionRequest
+	if err := c.BodyParser(&request); err != nil {
+		return c.SendStatus(fiber.StatusBadRequest)
+	}
+	prepared, err := s.billing.PrepareSolPaymentTransaction(c.Context(), billing.PrepareSolPaymentTransactionRequest{
+		OrderID:     c.Params("order_id"),
+		PayerWallet: request.PayerWallet,
+	})
+	if err != nil {
+		return writeSolBillingError(c, err)
+	}
+	return c.JSON(prepared)
+}
+
+func (s *Server) submitSolPaymentTransaction(c *fiber.Ctx) error {
+	if denied := s.allowPaymentWrite(c); denied != nil {
+		return denied
+	}
+	if s.billing == nil {
+		return c.SendStatus(fiber.StatusServiceUnavailable)
+	}
+	var request submitSolPaymentTransactionRequest
+	if err := c.BodyParser(&request); err != nil {
+		return c.SendStatus(fiber.StatusBadRequest)
+	}
+	result, err := s.billing.SubmitSolPaymentTransaction(c.Context(), billing.SubmitSolPaymentTransactionRequest{
+		OrderID:           c.Params("order_id"),
+		SignedTransaction: request.SignedTransaction,
+	})
+	if err != nil {
+		switch result.FailureCode {
+		case "pending_confirmation":
+			return c.Status(fiber.StatusAccepted).JSON(result)
+		case "rpc_unavailable":
+			return c.Status(fiber.StatusServiceUnavailable).JSON(result)
+		case "verification_failed", "duplicate_or_stale":
+			return c.Status(fiber.StatusUnprocessableEntity).JSON(result)
+		default:
+			return writeSolBillingError(c, err)
+		}
+	}
+	return c.JSON(result)
 }
 
 func (s *Server) verifySolPaymentOrder(c *fiber.Ctx) error {
@@ -389,12 +451,26 @@ func writeSolBillingError(c *fiber.Ctx, err error) error {
 		return c.Status(fiber.StatusServiceUnavailable).JSON(map[string]string{"error": "sol_payments_not_configured"})
 	case errors.Is(err, billing.ErrUnknownPlan):
 		return c.Status(fiber.StatusBadRequest).JSON(map[string]string{"error": "unknown_plan"})
+	case errors.Is(err, billing.ErrCouponInvalid):
+		return c.Status(fiber.StatusBadRequest).JSON(map[string]string{"error": "coupon_invalid"})
+	case errors.Is(err, billing.ErrCouponPlanMismatch):
+		return c.Status(fiber.StatusBadRequest).JSON(map[string]string{"error": "coupon_wrong_plan"})
+	case errors.Is(err, billing.ErrCouponRevoked):
+		return c.Status(fiber.StatusGone).JSON(map[string]string{"error": "coupon_revoked"})
+	case errors.Is(err, billing.ErrCouponExpired):
+		return c.Status(fiber.StatusGone).JSON(map[string]string{"error": "coupon_expired"})
+	case errors.Is(err, billing.ErrCouponExhausted):
+		return c.Status(fiber.StatusConflict).JSON(map[string]string{"error": "coupon_exhausted"})
 	case errors.Is(err, billing.ErrSolPaymentOrderNotFound):
 		return c.Status(fiber.StatusNotFound).JSON(map[string]string{"error": "order_not_found"})
 	case errors.Is(err, billing.ErrSolPaymentOrderExpired), errors.Is(err, billing.ErrActivationKeyExpired):
 		return c.Status(fiber.StatusGone).JSON(map[string]string{"error": "expired"})
 	case errors.Is(err, billing.ErrSolPaymentOrderNotVerified):
 		return c.Status(fiber.StatusConflict).JSON(map[string]string{"error": "order_not_verified"})
+	case errors.Is(err, billing.ErrSolPaymentNotRequired):
+		return c.Status(fiber.StatusBadRequest).JSON(map[string]string{"error": "sol_payment_not_required"})
+	case errors.Is(err, billing.ErrSolPaymentOrderAlreadyActive):
+		return c.Status(fiber.StatusConflict).JSON(map[string]string{"error": "order_already_ready"})
 	case errors.Is(err, billing.ErrActivationKeyAlreadyRevealed):
 		return c.Status(fiber.StatusConflict).JSON(map[string]string{"error": "activation_key_already_revealed"})
 	default:

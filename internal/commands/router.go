@@ -583,8 +583,14 @@ func (r *Router) handleBilling(ctx context.Context, request Request) Response {
 		return r.handleBillingActivate(ctx, request)
 	case "revoke":
 		return r.handleBillingRevoke(ctx, request)
+	case "coupon_create":
+		return r.handleBillingCouponCreate(ctx, request)
+	case "coupon_list":
+		return r.handleBillingCouponList(ctx, request)
+	case "coupon_revoke":
+		return r.handleBillingCouponRevoke(ctx, request)
 	default:
-		return Response{Content: "Billing action must be `status`, `activate`, or `revoke`.", Ephemeral: true, Presentation: Presentation{Title: "Unknown billing action", Accent: AccentWarning}}
+		return Response{Content: "Billing action must be `status`, `activate`, `revoke`, `coupon_create`, `coupon_list`, or `coupon_revoke`.", Ephemeral: true, Presentation: Presentation{Title: "Unknown billing action", Accent: AccentWarning}}
 	}
 
 	entitlement, err := r.billing.Resolve(ctx, request.GuildID)
@@ -656,6 +662,109 @@ func (r *Router) handleBillingRevoke(ctx context.Context, request Request) Respo
 	}
 }
 
+func (r *Router) handleBillingCouponCreate(ctx context.Context, request Request) Response {
+	if !request.IsOwner {
+		return Response{Content: "Only Panda owners can create coupon codes.", Ephemeral: true, Presentation: Presentation{Title: "Owner required", Accent: AccentWarning}}
+	}
+	discountLamports, err := strconv.ParseInt(strings.TrimSpace(request.Options["discount_lamports"]), 10, 64)
+	if err != nil || discountLamports <= 0 {
+		return Response{Content: "Provide `discount_lamports` as a positive integer.", Ephemeral: true, Presentation: Presentation{Title: "Discount required", Accent: AccentWarning}}
+	}
+	maxRedemptions := 0
+	if value := strings.TrimSpace(request.Options["max_redemptions"]); value != "" {
+		parsed, err := strconv.Atoi(value)
+		if err != nil || parsed < 0 {
+			return Response{Content: "`max_redemptions` must be zero or a positive integer.", Ephemeral: true, Presentation: Presentation{Title: "Invalid limit", Accent: AccentWarning}}
+		}
+		maxRedemptions = parsed
+	}
+	expiresAt, err := parseCouponExpiry(request.Options["expires_at"])
+	if err != nil {
+		return Response{Content: "Use `expires_at` as RFC3339 time or YYYY-MM-DD.", Ephemeral: true, Presentation: Presentation{Title: "Invalid expiration", Accent: AccentWarning}}
+	}
+	result, err := r.billing.CreateCoupon(ctx, billing.CreateCouponRequest{
+		ActorUserID:      request.UserID,
+		ActorIsOwner:     request.IsOwner,
+		Plan:             request.Options["plan"],
+		DiscountLamports: discountLamports,
+		Code:             request.Options["coupon_code"],
+		MaxRedemptions:   maxRedemptions,
+		ExpiresAt:        expiresAt,
+		Note:             request.Options["note"],
+	})
+	if err != nil {
+		return billingCouponErrorResponse(err)
+	}
+	content := fmt.Sprintf("Coupon `%s` for Panda %s created.\nRaw code, shown once: `%s`\nDiscount: `%d` lamports. Limit: `%s`.",
+		result.Coupon.CouponID,
+		result.Coupon.DisplayName,
+		result.Code,
+		result.Coupon.DiscountLamports,
+		formatCouponLimit(result.Coupon.MaxRedemptions),
+	)
+	if result.Coupon.ExpiresAt != nil {
+		content += "\nExpires: `" + result.Coupon.ExpiresAt.Format(time.RFC3339) + "`."
+	}
+	return Response{Content: content, Ephemeral: true, Presentation: Presentation{Title: "Coupon created", Accent: AccentSuccess}}
+}
+
+func (r *Router) handleBillingCouponList(ctx context.Context, request Request) Response {
+	if !request.IsOwner {
+		return Response{Content: "Only Panda owners can list coupon codes.", Ephemeral: true, Presentation: Presentation{Title: "Owner required", Accent: AccentWarning}}
+	}
+	coupons, err := r.billing.ListCoupons(ctx, billing.ListCouponsRequest{ActorUserID: request.UserID, ActorIsOwner: request.IsOwner})
+	if err != nil {
+		return billingCouponErrorResponse(err)
+	}
+	if len(coupons) == 0 {
+		return Response{Content: "No coupon codes have been created.", Ephemeral: true, Presentation: Presentation{Title: "Coupons", Accent: AccentInfo}}
+	}
+	lines := make([]string, 0, len(coupons))
+	for _, coupon := range coupons {
+		expires := "never"
+		if coupon.ExpiresAt != nil {
+			expires = coupon.ExpiresAt.Format("2006-01-02")
+		}
+		lines = append(lines, fmt.Sprintf("`%s` `%s...` %s %d lamports %s expires %s pending=%d consumed=%d released=%d",
+			coupon.CouponID,
+			coupon.CodePrefix,
+			coupon.DisplayName,
+			coupon.DiscountLamports,
+			coupon.Status,
+			expires,
+			coupon.Pending,
+			coupon.Consumed,
+			coupon.Released,
+		))
+	}
+	return Response{Content: strings.Join(lines, "\n"), Ephemeral: true, Presentation: Presentation{Title: "Coupons", Accent: AccentInfo}}
+}
+
+func (r *Router) handleBillingCouponRevoke(ctx context.Context, request Request) Response {
+	if !request.IsOwner {
+		return Response{Content: "Only Panda owners can revoke coupon codes.", Ephemeral: true, Presentation: Presentation{Title: "Owner required", Accent: AccentWarning}}
+	}
+	identifier := strings.TrimSpace(firstNonEmpty(request.Options["coupon"], request.Options["coupon_id"]))
+	if identifier == "" {
+		return Response{Content: "Provide a coupon id or code prefix.", Ephemeral: true, Presentation: Presentation{Title: "Coupon required", Accent: AccentWarning}}
+	}
+	revoke := billing.RevokeCouponRequest{ActorUserID: request.UserID, ActorIsOwner: request.IsOwner}
+	if strings.HasPrefix(identifier, "cpn_") {
+		revoke.CouponID = identifier
+	} else {
+		revoke.Prefix = identifier
+	}
+	coupon, err := r.billing.RevokeCoupon(ctx, revoke)
+	if err != nil {
+		return billingCouponErrorResponse(err)
+	}
+	return Response{
+		Content:      fmt.Sprintf("Coupon `%s` (`%s...`) for Panda %s was revoked.", coupon.CouponID, coupon.CodePrefix, coupon.DisplayName),
+		Ephemeral:    true,
+		Presentation: Presentation{Title: "Coupon revoked", Accent: AccentSuccess},
+	}
+}
+
 func billingActivationErrorResponse(err error) Response {
 	switch {
 	case errors.Is(err, billing.ErrBillingAccess):
@@ -690,6 +799,51 @@ func billingRevocationErrorResponse(err error) Response {
 	default:
 		return Response{Content: "Activation key revocation could not be completed.", Ephemeral: true, Presentation: Presentation{Title: "Revocation failed", Accent: AccentWarning}}
 	}
+}
+
+func billingCouponErrorResponse(err error) Response {
+	switch {
+	case errors.Is(err, billing.ErrBillingAccess):
+		return Response{Content: "Only Panda owners can manage coupon codes.", Ephemeral: true, Presentation: Presentation{Title: "Owner required", Accent: AccentWarning}}
+	case errors.Is(err, billing.ErrUnknownPlan):
+		return Response{Content: "Choose a paid Panda plan for this coupon.", Ephemeral: true, Presentation: Presentation{Title: "Unknown plan", Accent: AccentWarning}}
+	case errors.Is(err, billing.ErrCouponDuplicate):
+		return Response{Content: "That coupon code already exists. Choose a different custom code.", Ephemeral: true, Presentation: Presentation{Title: "Duplicate coupon", Accent: AccentWarning}}
+	case errors.Is(err, billing.ErrCouponExpired):
+		return Response{Content: "That coupon is expired or the expiration time is not in the future.", Ephemeral: true, Presentation: Presentation{Title: "Coupon expired", Accent: AccentWarning}}
+	case errors.Is(err, billing.ErrCouponRevoked):
+		return Response{Content: "That coupon has already been revoked.", Ephemeral: true, Presentation: Presentation{Title: "Coupon revoked", Accent: AccentWarning}}
+	case errors.Is(err, billing.ErrCouponNotFound):
+		return Response{Content: "No coupon matched that id or prefix.", Ephemeral: true, Presentation: Presentation{Title: "Coupon not found", Accent: AccentWarning}}
+	case errors.Is(err, billing.ErrCouponAmbiguous):
+		return Response{Content: "That prefix matches more than one coupon. Use the coupon id instead.", Ephemeral: true, Presentation: Presentation{Title: "Coupon ambiguous", Accent: AccentWarning}}
+	default:
+		return Response{Content: "Coupon management could not be completed.", Ephemeral: true, Presentation: Presentation{Title: "Coupon failed", Accent: AccentWarning}}
+	}
+}
+
+func parseCouponExpiry(value string) (*time.Time, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil, nil
+	}
+	if parsed, err := time.Parse(time.RFC3339, value); err == nil {
+		parsed = parsed.UTC()
+		return &parsed, nil
+	}
+	parsed, err := time.Parse("2006-01-02", value)
+	if err != nil {
+		return nil, err
+	}
+	parsed = parsed.UTC()
+	return &parsed, nil
+}
+
+func formatCouponLimit(limit int) string {
+	if limit == 0 {
+		return "unlimited"
+	}
+	return strconv.Itoa(limit)
 }
 
 func renderDataSummary(summary repository.GuildDataSummary) string {

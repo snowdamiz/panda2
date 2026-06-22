@@ -26,7 +26,7 @@ The default test run covers the SQLite fallback search path. The tagged run cove
    - `SOLANA_STARTER_LAMPORTS`, `SOLANA_PLUS_LAMPORTS`, `SOLANA_PRO_LAMPORTS`, and `SOLANA_BUSINESS_LAMPORTS`
 5. Deploy with `fly deploy`.
 6. In the Discord Developer Portal Webhooks page, set the endpoint to `https://<app-host>/discord/webhook-events`, enable events, and subscribe to `APPLICATION_AUTHORIZED`.
-7. Confirm the landing build args point at the API origin with `PUBLIC_PANDA_API_BASE_URL` and at the public RPC endpoint with `PUBLIC_SOLANA_RPC_URL` when a custom RPC is required.
+7. Confirm the landing build args point at the API origin with `PUBLIC_PANDA_API_BASE_URL`. Do not expose Solana RPC endpoints to the static landing app.
 8. Check rollout with `fly status`, `fly releases`, `fly logs`, `/readyz`, `/metrics`, and `/ops health`.
 
 Production validation fails when Discord credentials, the managed AI service key, public app URL, SOL RPC URL, treasury wallet, or paid-plan lamport mappings are missing.
@@ -37,7 +37,7 @@ Required for SOL self-serve billing:
 
 - `PUBLIC_APP_URL`: the hosted landing origin used in Discord billing links and payment CORS.
 - `BILLING_ALLOWED_ORIGINS`: comma-separated origins allowed to call `/billing/sol/*`; defaults effectively include `PUBLIC_APP_URL`.
-- `SOLANA_RPC_URL`: backend RPC endpoint used to verify transactions with `getTransaction`.
+- `SOLANA_RPC_URL`: backend-only RPC endpoint used to prepare, submit, and verify Solana transactions. Do not publish this value to browser builds.
 - `SOLANA_CLUSTER`: `devnet`, `testnet`, `mainnet`, or `mainnet-beta`; defaults to `devnet`.
 - `SOLANA_TREASURY_WALLET`: treasury wallet receiving native SOL transfers.
 - `SOLANA_CONFIRMATION`: `confirmed` or `finalized`; defaults to `finalized`.
@@ -52,14 +52,13 @@ Optional billing overrides:
 Landing build-time values:
 
 - `PUBLIC_PANDA_API_BASE_URL`: API origin used by the static landing payment module.
-- `PUBLIC_SOLANA_RPC_URL`: public RPC endpoint used by the browser when it signs and submits a transaction itself.
 
 SOL payment setup:
 
 - Plan prices must map to integer lamports and match the public plan table.
 - The treasury wallet should be controlled outside the app runtime. Do not store private keys on the Panda host.
-- The landing page creates orders through `POST /billing/sol/orders`; the backend returns the exact amount, treasury wallet, memo/reference, Solana Pay URL, and expiration.
-- The backend verifies submitted signatures with structured Solana RPC responses, rejects token transfers, requires one matching native SOL transfer to the treasury wallet, requires the order memo/reference, and only accepts transactions at or above the configured confirmation threshold.
+- The landing page creates orders through `POST /billing/sol/orders`, asks the backend to prepare an unsigned transaction through `POST /billing/sol/orders/:order_id/transaction`, asks the user's wallet to sign the server-built transaction bytes, then submits the signed transaction to `POST /billing/sol/orders/:order_id/submit`.
+- The backend fetches the latest blockhash, serializes the native SOL transfer plus memo/reference, submits signed transaction bytes through Solana RPC, verifies structured Solana RPC responses, rejects token transfers, requires one matching native SOL transfer to the treasury wallet, requires the order memo/reference, and only accepts transactions at or above the configured confirmation threshold.
 - Verified orders reveal one activation key once. The key is stored hashed, consumed by `/billing action:activate api_key:<key>`, and cannot be re-revealed.
 - Operators can revoke an unused activation key by payment order with `/billing action:revoke order_id:<order>`. Revocation, creation, one-time viewing, consumption, and expiration are recorded in audit events.
 

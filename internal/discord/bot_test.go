@@ -525,16 +525,25 @@ func TestBillingCommandIncludesActivationOptions(t *testing.T) {
 	if action.Required {
 		t.Fatal("billing action should be optional so /billing shows status")
 	}
-	for _, expected := range []string{"status", "activate", "revoke"} {
+	for _, expected := range []string{"status", "activate", "revoke", "coupon_create", "coupon_list", "coupon_revoke"} {
 		if !stringOptionHasChoice(action, expected) {
 			t.Fatalf("expected billing action choice %q", expected)
 		}
 	}
-	if len(action.Choices) != 3 {
-		t.Fatalf("expected billing action to expose exactly three choices, got %+v", action.Choices)
+	if len(action.Choices) != 6 {
+		t.Fatalf("expected billing action to expose exactly six choices, got %+v", action.Choices)
 	}
-	if slashHasStringOption(billingCommand, "plan") {
-		t.Fatal("did not expect billing command to include legacy plan option")
+	if !slashHasStringOption(billingCommand, "plan") {
+		t.Fatal("expected billing command to include coupon plan option")
+	}
+	if !slashHasStringOption(billingCommand, "discount_lamports") {
+		t.Fatal("expected billing command to include coupon discount option")
+	}
+	if !slashHasStringOption(billingCommand, "coupon_code") {
+		t.Fatal("expected billing command to include custom coupon code option")
+	}
+	if !slashHasStringOption(billingCommand, "coupon") {
+		t.Fatal("expected billing command to include coupon revocation option")
 	}
 	if slashHasStringOption(billingCommand, "pack") {
 		t.Fatal("did not expect billing command to include pack option")

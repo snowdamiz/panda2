@@ -644,11 +644,13 @@ func (e Entitlement) SummaryText() string {
 	}, "\n")
 }
 
-func firstNonEmpty(value, fallback string) string {
-	if strings.TrimSpace(value) == "" {
-		return fallback
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
 	}
-	return strings.TrimSpace(value)
+	return ""
 }
 
 func MarshalRaw(value any) string {

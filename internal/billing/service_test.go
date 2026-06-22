@@ -2,6 +2,7 @@ package billing
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"path/filepath"
 	"strings"
@@ -73,7 +74,7 @@ func TestSolPaymentOrderVerificationRevealAndActivation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateSolPaymentOrder: %v", err)
 	}
-	if order.ExpectedLamports != 49_000_000 || order.DestinationWallet != "treasury-wallet" || order.Reference == "" || !strings.HasPrefix(order.PaymentURL, "solana:treasury-wallet?") {
+	if order.ExpectedLamports != 49_000_000 || order.DestinationWallet != "treasury-wallet" || order.Reference == "" || order.PaymentURL != "" {
 		t.Fatalf("unexpected order view: %+v", order)
 	}
 
@@ -90,7 +91,7 @@ func TestSolPaymentOrderVerificationRevealAndActivation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RevealActivationKey: %v", err)
 	}
-	if !strings.HasPrefix(reveal.Key, "panda_sol_") || reveal.Prefix == "" {
+	if !strings.HasPrefix(reveal.Key, "panda_act_") || reveal.Prefix == "" {
 		t.Fatalf("unexpected activation key reveal: %+v", reveal)
 	}
 	if _, err := service.RevealActivationKey(ctx, order.OrderID); !errors.Is(err, ErrActivationKeyAlreadyRevealed) {
@@ -217,6 +218,293 @@ func TestActivationKeyRevocationIsOperatorOnlyAndAudited(t *testing.T) {
 	}
 }
 
+func TestCouponCreateDuplicateAndInvalidOrderCreation(t *testing.T) {
+	ctx := context.Background()
+	service, database := newBillingTestService(t)
+	defer database.Close()
+
+	now := time.Date(2026, 6, 21, 12, 0, 0, 0, time.UTC)
+	service.SetClock(func() time.Time { return now })
+	expires := now.Add(time.Hour)
+	created, err := service.CreateCoupon(ctx, CreateCouponRequest{
+		ActorUserID:      "owner-1",
+		ActorIsOwner:     true,
+		Plan:             PlanPlus,
+		DiscountLamports: 10_000_000,
+		Code:             "PLUS10",
+		MaxRedemptions:   1,
+		ExpiresAt:        &expires,
+		Note:             "launch",
+	})
+	if err != nil {
+		t.Fatalf("CreateCoupon: %v", err)
+	}
+	if created.Code != "PLUS10" || created.Coupon.CodePrefix != "PLUS10" || created.Coupon.DiscountLamports != 10_000_000 {
+		t.Fatalf("unexpected created coupon: %+v", created)
+	}
+
+	var stored storepkg.BillingCoupon
+	if err := database.DB.Where("coupon_id = ?", created.Coupon.CouponID).First(&stored).Error; err != nil {
+		t.Fatalf("load coupon: %v", err)
+	}
+	if stored.CodeHash == "PLUS10" || stored.CodeHash == "" {
+		t.Fatalf("coupon code should be hashed at rest: %+v", stored)
+	}
+	if _, err := service.CreateCoupon(ctx, CreateCouponRequest{
+		ActorUserID:      "owner-1",
+		ActorIsOwner:     true,
+		Plan:             PlanPlus,
+		DiscountLamports: 5_000_000,
+		Code:             "PLUS10",
+	}); !errors.Is(err, ErrCouponDuplicate) {
+		t.Fatalf("expected duplicate coupon error, got %v", err)
+	}
+	if _, err := service.CreateCoupon(ctx, CreateCouponRequest{
+		ActorUserID:      "user-1",
+		Plan:             PlanPlus,
+		DiscountLamports: 5_000_000,
+	}); !errors.Is(err, ErrBillingAccess) {
+		t.Fatalf("expected owner-only create error, got %v", err)
+	}
+	if _, err := service.CreateSolPaymentOrder(ctx, CreateSolPaymentOrderRequest{
+		GuildID:    "guild-1",
+		Plan:       PlanPro,
+		CouponCode: created.Code,
+	}); !errors.Is(err, ErrCouponPlanMismatch) {
+		t.Fatalf("expected wrong-plan coupon error, got %v", err)
+	}
+
+	revoked, err := service.RevokeCoupon(ctx, RevokeCouponRequest{ActorUserID: "owner-1", ActorIsOwner: true, CouponID: created.Coupon.CouponID})
+	if err != nil {
+		t.Fatalf("RevokeCoupon: %v", err)
+	}
+	if revoked.Status != CouponStatusRevoked {
+		t.Fatalf("expected revoked coupon, got %+v", revoked)
+	}
+	if _, err := service.CreateSolPaymentOrder(ctx, CreateSolPaymentOrderRequest{
+		GuildID:    "guild-1",
+		Plan:       PlanPlus,
+		CouponCode: created.Code,
+	}); !errors.Is(err, ErrCouponRevoked) {
+		t.Fatalf("expected revoked coupon error, got %v", err)
+	}
+}
+
+func TestLimitedCouponReservationAndExpirationRelease(t *testing.T) {
+	ctx := context.Background()
+	service, database := newBillingTestService(t)
+	defer database.Close()
+
+	now := time.Date(2026, 6, 21, 12, 0, 0, 0, time.UTC)
+	service.SetClock(func() time.Time { return now })
+	coupon, err := service.CreateCoupon(ctx, CreateCouponRequest{
+		ActorUserID:      "owner-1",
+		ActorIsOwner:     true,
+		Plan:             PlanStarter,
+		DiscountLamports: 1_000_000,
+		Code:             "ONEUSE",
+		MaxRedemptions:   1,
+	})
+	if err != nil {
+		t.Fatalf("CreateCoupon: %v", err)
+	}
+	order, err := service.CreateSolPaymentOrder(ctx, CreateSolPaymentOrderRequest{
+		GuildID:    "guild-1",
+		Plan:       PlanStarter,
+		CouponCode: coupon.Code,
+	})
+	if err != nil {
+		t.Fatalf("CreateSolPaymentOrder with coupon: %v", err)
+	}
+	if order.ListLamports != 19_000_000 || order.DiscountLamports != 1_000_000 || order.DueLamports != 18_000_000 || order.CouponPrefix != "ONEUSE" {
+		t.Fatalf("unexpected discounted order: %+v", order)
+	}
+	if _, err := service.CreateSolPaymentOrder(ctx, CreateSolPaymentOrderRequest{
+		GuildID:    "guild-2",
+		Plan:       PlanStarter,
+		CouponCode: coupon.Code,
+	}); !errors.Is(err, ErrCouponExhausted) {
+		t.Fatalf("expected exhausted coupon error, got %v", err)
+	}
+
+	now = now.Add(2 * time.Hour)
+	service.SetClock(func() time.Time { return now })
+	if _, err := service.GetSolPaymentOrder(ctx, order.OrderID); err != nil {
+		t.Fatalf("GetSolPaymentOrder after expiration: %v", err)
+	}
+	redemptions, err := service.ListCoupons(ctx, ListCouponsRequest{ActorUserID: "owner-1", ActorIsOwner: true})
+	if err != nil {
+		t.Fatalf("ListCoupons: %v", err)
+	}
+	if len(redemptions) != 1 || redemptions[0].Released != 1 || redemptions[0].Pending != 0 {
+		t.Fatalf("expected released pending redemption, got %+v", redemptions)
+	}
+}
+
+func TestPaidCouponOrderVerifiesDueLamports(t *testing.T) {
+	ctx := context.Background()
+	service, database := newBillingTestService(t)
+	defer database.Close()
+
+	now := time.Date(2026, 6, 21, 12, 0, 0, 0, time.UTC)
+	service.SetClock(func() time.Time { return now })
+	coupon, err := service.CreateCoupon(ctx, CreateCouponRequest{
+		ActorUserID:      "owner-1",
+		ActorIsOwner:     true,
+		Plan:             PlanPlus,
+		DiscountLamports: 10_000_000,
+		Code:             "PLUS-DUE",
+	})
+	if err != nil {
+		t.Fatalf("CreateCoupon: %v", err)
+	}
+	order, err := service.CreateSolPaymentOrder(ctx, CreateSolPaymentOrderRequest{
+		GuildID:    "guild-1",
+		Plan:       PlanPlus,
+		CouponCode: coupon.Code,
+	})
+	if err != nil {
+		t.Fatalf("CreateSolPaymentOrder: %v", err)
+	}
+	if order.DueLamports != 39_000_000 {
+		t.Fatalf("expected discounted due lamports, got %+v", order)
+	}
+	service.WithSolanaRPCClient(fakeSolanaRPCClient{transaction: verifiedTransaction(order, "payer-wallet", 38_999_999)})
+	if _, err := service.VerifySolPayment(ctx, VerifySolPaymentRequest{OrderID: order.OrderID, Signature: "sig-underpay"}); !errors.Is(err, ErrSolPaymentVerificationFailed) {
+		t.Fatalf("expected underpay failure against due amount, got %v", err)
+	}
+
+	service.WithSolanaRPCClient(fakeSolanaRPCClient{transaction: verifiedTransaction(order, "payer-wallet", 39_000_000)})
+	result, err := service.VerifySolPayment(ctx, VerifySolPaymentRequest{OrderID: order.OrderID, Signature: "sig-discounted"})
+	if err != nil {
+		t.Fatalf("VerifySolPayment discounted due: %v result=%+v", err, result)
+	}
+	if !result.Verified || result.Order.DueLamports != 39_000_000 {
+		t.Fatalf("unexpected discounted verification: %+v", result)
+	}
+}
+
+func TestServerPreparedSolTransactionAndSubmission(t *testing.T) {
+	ctx := context.Background()
+	service, database := newBillingTestService(t)
+	defer database.Close()
+
+	service.cfg.SolanaTreasuryWallet = "2gRg3JMJkJkWb85fh3RqNCQgbmGYRpa1Gk5o84Y84ve1"
+	now := time.Date(2026, 6, 21, 12, 0, 0, 0, time.UTC)
+	service.SetClock(func() time.Time { return now })
+	order, err := service.CreateSolPaymentOrder(ctx, CreateSolPaymentOrderRequest{
+		GuildID: "guild-1",
+		Plan:    PlanStarter,
+	})
+	if err != nil {
+		t.Fatalf("CreateSolPaymentOrder: %v", err)
+	}
+	rpc := fakeSolanaRPCClient{
+		latestBlockhash: SolanaLatestBlockhash{
+			Blockhash:            "11111111111111111111111111111111",
+			LastValidBlockHeight: 12345,
+		},
+		sentSignature: "sig-server-submitted",
+		transaction:   verifiedTransaction(order, "2gRg3JMJkJkWb85fh3RqNCQgbmGYRpa1Gk5o84Y84ve1", 19_000_000),
+	}
+	service.WithSolanaRPCClient(rpc)
+
+	prepared, err := service.PrepareSolPaymentTransaction(ctx, PrepareSolPaymentTransactionRequest{
+		OrderID:     order.OrderID,
+		PayerWallet: "2gRg3JMJkJkWb85fh3RqNCQgbmGYRpa1Gk5o84Y84ve1",
+	})
+	if err != nil {
+		t.Fatalf("PrepareSolPaymentTransaction: %v", err)
+	}
+	if prepared.Transaction == "" || prepared.LastValidBlockHeight != 12345 || prepared.Order.PaymentURL != "" {
+		t.Fatalf("unexpected prepared transaction: %+v", prepared)
+	}
+	if _, err := base64.StdEncoding.DecodeString(prepared.Transaction); err != nil {
+		t.Fatalf("prepared transaction should be base64: %v", err)
+	}
+
+	result, err := service.SubmitSolPaymentTransaction(ctx, SubmitSolPaymentTransactionRequest{
+		OrderID:           order.OrderID,
+		SignedTransaction: prepared.Transaction,
+	})
+	if err != nil {
+		t.Fatalf("SubmitSolPaymentTransaction: %v result=%+v", err, result)
+	}
+	if !result.Verified || result.SubmittedSignature != "sig-server-submitted" {
+		t.Fatalf("unexpected submit result: %+v", result)
+	}
+}
+
+func TestFreeCouponOrderRevealsAndActivatesWithoutSolana(t *testing.T) {
+	ctx := context.Background()
+	service, database := newBillingTestService(t)
+	defer database.Close()
+
+	now := time.Date(2026, 6, 21, 12, 0, 0, 0, time.UTC)
+	service.SetClock(func() time.Time { return now })
+	service.cfg.SolanaRPCURL = ""
+	service.cfg.SolanaTreasuryWallet = ""
+	service.solana = nil
+
+	coupon, err := service.CreateCoupon(ctx, CreateCouponRequest{
+		ActorUserID:      "owner-1",
+		ActorIsOwner:     true,
+		Plan:             PlanBusiness,
+		DiscountLamports: 999_000_000,
+		Code:             "COMP-BIZ",
+	})
+	if err != nil {
+		t.Fatalf("CreateCoupon: %v", err)
+	}
+	order, err := service.CreateSolPaymentOrder(ctx, CreateSolPaymentOrderRequest{
+		GuildID:            "guild-1",
+		BillingOwnerUserID: "owner-1",
+		Plan:               PlanBusiness,
+		CouponCode:         coupon.Code,
+	})
+	if err != nil {
+		t.Fatalf("CreateSolPaymentOrder free coupon: %v", err)
+	}
+	if order.DueLamports != 0 || order.Status != SolOrderStatusVerified || order.DestinationWallet != "" || order.PaymentURL != "" {
+		t.Fatalf("unexpected free coupon order: %+v", order)
+	}
+	reveal, err := service.RevealActivationKey(ctx, order.OrderID)
+	if err != nil {
+		t.Fatalf("RevealActivationKey free coupon: %v", err)
+	}
+	if reveal.Key == "" {
+		t.Fatal("expected activation key for free coupon")
+	}
+	activated, err := service.ActivateWithAPIKey(ctx, ActivateAPIKeyRequest{
+		GuildID:       "guild-1",
+		ActorUserID:   "owner-1",
+		ActorCanClaim: true,
+		APIKey:        reveal.Key,
+	})
+	if err != nil {
+		t.Fatalf("ActivateWithAPIKey free coupon: %v", err)
+	}
+	if activated.Entitlement.Plan.Plan != PlanBusiness || activated.Entitlement.PaymentProvider != ProviderCoupon || !activated.Entitlement.CanUsePaidFeatures {
+		t.Fatalf("unexpected free coupon entitlement: %+v", activated.Entitlement)
+	}
+	var event storepkg.InvoicePaymentEvent
+	if err := database.DB.Where("provider = ? AND external_id = ?", ProviderCoupon, order.OrderID).First(&event).Error; err != nil {
+		t.Fatalf("load coupon payment event: %v", err)
+	}
+	if event.AmountLamports != 0 || event.Currency != "coupon" || event.Status != "comped" || !strings.Contains(event.RawPayload, `"coupon_prefix":"COMP-BIZ"`) {
+		t.Fatalf("unexpected coupon payment event: %+v", event)
+	}
+	for _, action := range []string{"billing.coupon.redemption.reserved", "billing.coupon.redemption.consumed", "billing.coupon.free_activation_key_revealed"} {
+		var count int64
+		if err := database.DB.Model(&storepkg.AuditEvent{}).Where("action = ?", action).Count(&count).Error; err != nil {
+			t.Fatalf("count audit action %s: %v", action, err)
+		}
+		if count != 1 {
+			t.Fatalf("expected one audit action %s, got %d", action, count)
+		}
+	}
+}
+
 func TestRecordCostPersistsInternalProviderDetailsOnlyInLedger(t *testing.T) {
 	ctx := context.Background()
 	service, database := newBillingTestService(t)
@@ -275,8 +563,11 @@ func newBillingTestService(t *testing.T) (*Service, *storepkg.Store) {
 }
 
 type fakeSolanaRPCClient struct {
-	transaction SolanaTransaction
-	err         error
+	transaction     SolanaTransaction
+	latestBlockhash SolanaLatestBlockhash
+	sentSignature   string
+	err             error
+	sendErr         error
 }
 
 func (f fakeSolanaRPCClient) GetTransaction(context.Context, string, string) (SolanaTransaction, error) {
@@ -284,6 +575,26 @@ func (f fakeSolanaRPCClient) GetTransaction(context.Context, string, string) (So
 		return SolanaTransaction{}, f.err
 	}
 	return f.transaction, nil
+}
+
+func (f fakeSolanaRPCClient) GetLatestBlockhash(context.Context, string) (SolanaLatestBlockhash, error) {
+	if f.err != nil {
+		return SolanaLatestBlockhash{}, f.err
+	}
+	if f.latestBlockhash.Blockhash == "" {
+		return SolanaLatestBlockhash{Blockhash: "11111111111111111111111111111111", LastValidBlockHeight: 1}, nil
+	}
+	return f.latestBlockhash, nil
+}
+
+func (f fakeSolanaRPCClient) SendTransaction(context.Context, string, string) (string, error) {
+	if f.sendErr != nil {
+		return "", f.sendErr
+	}
+	if f.sentSignature == "" {
+		return "sig-submitted", nil
+	}
+	return f.sentSignature, nil
 }
 
 func verifiedTransaction(order SolPaymentOrderView, payer string, lamports int64) SolanaTransaction {

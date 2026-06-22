@@ -6,13 +6,14 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"math/big"
 	"net/http"
-	"net/url"
 	"strings"
 	"time"
 
@@ -34,6 +35,14 @@ const (
 	ActivationKeyStatusConsumed = "consumed"
 	ActivationKeyStatusExpired  = "expired"
 	ActivationKeyStatusRevoked  = "revoked"
+
+	CouponStatusActive  = "active"
+	CouponStatusRevoked = "revoked"
+	CouponStatusExpired = "expired"
+
+	CouponRedemptionStatusPending  = "pending"
+	CouponRedemptionStatusConsumed = "consumed"
+	CouponRedemptionStatusReleased = "released"
 )
 
 var (
@@ -41,6 +50,7 @@ var (
 	ErrSolPaymentOrderExpired       = errors.New("sol payment order expired")
 	ErrSolPaymentOrderNotVerified   = errors.New("sol payment order is not verified")
 	ErrSolPaymentOrderAlreadyActive = errors.New("sol payment order is already activated")
+	ErrSolPaymentNotRequired        = errors.New("sol payment is not required for this order")
 	ErrSolPaymentVerificationFailed = errors.New("sol payment verification failed")
 	ErrActivationKeyAlreadyRevealed = errors.New("activation api key was already revealed")
 	ErrActivationKeyInvalid         = errors.New("activation api key is invalid")
@@ -48,6 +58,14 @@ var (
 	ErrActivationKeyConsumed        = errors.New("activation api key was already consumed")
 	ErrActivationKeyRevoked         = errors.New("activation api key was revoked")
 	ErrSolanaTransactionUnavailable = errors.New("solana transaction is not available at the required commitment")
+	ErrCouponInvalid                = errors.New("coupon code is invalid")
+	ErrCouponExpired                = errors.New("coupon expired")
+	ErrCouponRevoked                = errors.New("coupon revoked")
+	ErrCouponPlanMismatch           = errors.New("coupon does not apply to the selected plan")
+	ErrCouponExhausted              = errors.New("coupon redemptions are exhausted")
+	ErrCouponDuplicate              = errors.New("coupon code already exists")
+	ErrCouponNotFound               = errors.New("coupon was not found")
+	ErrCouponAmbiguous              = errors.New("coupon prefix matches multiple coupons")
 )
 
 type CreateSolPaymentOrderRequest struct {
@@ -55,6 +73,7 @@ type CreateSolPaymentOrderRequest struct {
 	BillingOwnerUserID string
 	Plan               string
 	SupportEmail       string
+	CouponCode         string
 }
 
 type SolPaymentOrderView struct {
@@ -63,8 +82,12 @@ type SolPaymentOrderView struct {
 	BillingOwnerUserID           string    `json:"billing_owner_user_id,omitempty"`
 	Plan                         string    `json:"plan"`
 	DisplayName                  string    `json:"display_name"`
+	ListLamports                 int64     `json:"list_lamports"`
+	DiscountLamports             int64     `json:"discount_lamports"`
+	DueLamports                  int64     `json:"due_lamports"`
 	ExpectedLamports             int64     `json:"expected_lamports"`
 	AmountSOL                    string    `json:"amount_sol"`
+	CouponPrefix                 string    `json:"coupon_prefix,omitempty"`
 	DestinationWallet            string    `json:"destination_wallet"`
 	Reference                    string    `json:"reference"`
 	Memo                         string    `json:"memo"`
@@ -84,10 +107,28 @@ type VerifySolPaymentRequest struct {
 }
 
 type SolPaymentVerificationResult struct {
-	Order        SolPaymentOrderView `json:"order"`
-	Verified     bool                `json:"verified"`
-	FailureCode  string              `json:"failure_code,omitempty"`
-	FailureError string              `json:"failure_error,omitempty"`
+	Order              SolPaymentOrderView `json:"order"`
+	Verified           bool                `json:"verified"`
+	SubmittedSignature string              `json:"submitted_signature,omitempty"`
+	FailureCode        string              `json:"failure_code,omitempty"`
+	FailureError       string              `json:"failure_error,omitempty"`
+}
+
+type PrepareSolPaymentTransactionRequest struct {
+	OrderID     string
+	PayerWallet string
+}
+
+type SolPaymentTransactionPreparation struct {
+	Order                SolPaymentOrderView `json:"order"`
+	Transaction          string              `json:"transaction"`
+	PayerWallet          string              `json:"payer_wallet"`
+	LastValidBlockHeight uint64              `json:"last_valid_block_height"`
+}
+
+type SubmitSolPaymentTransactionRequest struct {
+	OrderID           string
+	SignedTransaction string
 }
 
 type ActivationKeyReveal struct {
@@ -122,13 +163,82 @@ type ActivationKeyRevocation struct {
 	RevokedAt time.Time
 }
 
+type BillingQuoteRequest struct {
+	Plan       string
+	CouponCode string
+}
+
+type BillingQuote struct {
+	Plan             string
+	DisplayName      string
+	ListLamports     int64
+	DiscountLamports int64
+	DueLamports      int64
+	CouponID         string
+	CouponPrefix     string
+}
+
+type CreateCouponRequest struct {
+	ActorUserID      string
+	ActorIsOwner     bool
+	Plan             string
+	DiscountLamports int64
+	Code             string
+	MaxRedemptions   int
+	ExpiresAt        *time.Time
+	Note             string
+}
+
+type CouponCreateResult struct {
+	Coupon CouponView
+	Code   string
+}
+
+type ListCouponsRequest struct {
+	ActorUserID  string
+	ActorIsOwner bool
+}
+
+type RevokeCouponRequest struct {
+	ActorUserID  string
+	ActorIsOwner bool
+	CouponID     string
+	Prefix       string
+}
+
+type CouponView struct {
+	CouponID         string     `json:"coupon_id"`
+	CodePrefix       string     `json:"code_prefix"`
+	Plan             string     `json:"plan"`
+	DisplayName      string     `json:"display_name"`
+	DiscountLamports int64      `json:"discount_lamports"`
+	MaxRedemptions   int        `json:"max_redemptions"`
+	Status           string     `json:"status"`
+	OwnerNote        string     `json:"owner_note,omitempty"`
+	CreatedByUserID  string     `json:"created_by_user_id"`
+	ExpiresAt        *time.Time `json:"expires_at,omitempty"`
+	RevokedAt        *time.Time `json:"revoked_at,omitempty"`
+	Pending          int        `json:"pending"`
+	Consumed         int        `json:"consumed"`
+	Released         int        `json:"released"`
+	CreatedAt        time.Time  `json:"created_at"`
+	UpdatedAt        time.Time  `json:"updated_at"`
+}
+
 type SolanaRPCClient interface {
 	GetTransaction(ctx context.Context, signature string, commitment string) (SolanaTransaction, error)
+	GetLatestBlockhash(ctx context.Context, commitment string) (SolanaLatestBlockhash, error)
+	SendTransaction(ctx context.Context, signedTransaction string, commitment string) (string, error)
 }
 
 type HTTPSolanaRPCClient struct {
 	endpoint string
 	client   *http.Client
+}
+
+type SolanaLatestBlockhash struct {
+	Blockhash            string
+	LastValidBlockHeight uint64
 }
 
 func NewHTTPSolanaRPCClient(endpoint string) *HTTPSolanaRPCClient {
@@ -199,6 +309,106 @@ func (c *HTTPSolanaRPCClient) GetTransaction(ctx context.Context, signature stri
 	return *response.Result, nil
 }
 
+func (c *HTTPSolanaRPCClient) GetLatestBlockhash(ctx context.Context, commitment string) (SolanaLatestBlockhash, error) {
+	if c == nil || strings.TrimSpace(c.endpoint) == "" {
+		return SolanaLatestBlockhash{}, ErrSolPaymentsNotConfigured
+	}
+	var response struct {
+		Result *struct {
+			Value struct {
+				Blockhash            string `json:"blockhash"`
+				LastValidBlockHeight uint64 `json:"lastValidBlockHeight"`
+			} `json:"value"`
+		} `json:"result"`
+		Error *struct {
+			Code    int    `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := c.rpc(ctx, "getLatestBlockhash", []any{map[string]any{"commitment": strings.TrimSpace(commitment)}}, &response); err != nil {
+		return SolanaLatestBlockhash{}, err
+	}
+	if response.Error != nil {
+		return SolanaLatestBlockhash{}, fmt.Errorf("solana rpc error (%d): %s", response.Error.Code, response.Error.Message)
+	}
+	if response.Result == nil || strings.TrimSpace(response.Result.Value.Blockhash) == "" {
+		return SolanaLatestBlockhash{}, ErrSolanaTransactionUnavailable
+	}
+	return SolanaLatestBlockhash{
+		Blockhash:            strings.TrimSpace(response.Result.Value.Blockhash),
+		LastValidBlockHeight: response.Result.Value.LastValidBlockHeight,
+	}, nil
+}
+
+func (c *HTTPSolanaRPCClient) SendTransaction(ctx context.Context, signedTransaction string, commitment string) (string, error) {
+	if c == nil || strings.TrimSpace(c.endpoint) == "" {
+		return "", ErrSolPaymentsNotConfigured
+	}
+	var response struct {
+		Result string `json:"result"`
+		Error  *struct {
+			Code    int    `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := c.rpc(ctx, "sendTransaction", []any{
+		strings.TrimSpace(signedTransaction),
+		map[string]any{
+			"encoding":            "base64",
+			"skipPreflight":       false,
+			"preflightCommitment": strings.TrimSpace(commitment),
+			"maxRetries":          3,
+		},
+	}, &response); err != nil {
+		return "", err
+	}
+	if response.Error != nil {
+		return "", fmt.Errorf("solana rpc error (%d): %s", response.Error.Code, response.Error.Message)
+	}
+	if strings.TrimSpace(response.Result) == "" {
+		return "", ErrSolanaTransactionUnavailable
+	}
+	return strings.TrimSpace(response.Result), nil
+}
+
+func (c *HTTPSolanaRPCClient) rpc(ctx context.Context, method string, params []any, response any) error {
+	payload := map[string]any{
+		"jsonrpc": "2.0",
+		"id":      1,
+		"method":  method,
+		"params":  params,
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.endpoint, bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	client := c.client
+	if client == nil {
+		client = http.DefaultClient
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	responseBody, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+	if err != nil {
+		return err
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("solana rpc error (%d): %s", resp.StatusCode, strings.TrimSpace(string(responseBody)))
+	}
+	if err := json.Unmarshal(responseBody, response); err != nil {
+		return fmt.Errorf("decode solana rpc response: %w", err)
+	}
+	return nil
+}
+
 type SolanaTransaction struct {
 	Slot      uint64 `json:"slot"`
 	BlockTime *int64 `json:"blockTime"`
@@ -242,12 +452,27 @@ type solanaParsedInstruction struct {
 	Parsed    any    `json:"parsed"`
 }
 
+func (s *Service) QuoteBillingOrder(ctx context.Context, request BillingQuoteRequest) (BillingQuote, error) {
+	if s == nil || s.repo == nil {
+		return BillingQuote{}, ErrNoSubscription
+	}
+	plan, ok := NormalizePlan(request.Plan)
+	if !ok || plan == PlanTrial {
+		return BillingQuote{}, ErrUnknownPlan
+	}
+	now := s.currentTime()
+	var quote BillingQuote
+	err := s.repo.WithTransaction(ctx, func(repo *repository.BillingRepository) error {
+		var err error
+		quote, err = s.quoteBillingOrderWithRepo(ctx, repo, plan, request.CouponCode, now)
+		return err
+	})
+	return quote, err
+}
+
 func (s *Service) CreateSolPaymentOrder(ctx context.Context, request CreateSolPaymentOrderRequest) (SolPaymentOrderView, error) {
 	if s == nil || s.repo == nil {
 		return SolPaymentOrderView{}, ErrNoSubscription
-	}
-	if !s.solPaymentsConfigured() {
-		return SolPaymentOrderView{}, ErrSolPaymentsNotConfigured
 	}
 	guildID := strings.TrimSpace(request.GuildID)
 	if guildID == "" {
@@ -256,10 +481,6 @@ func (s *Service) CreateSolPaymentOrder(ctx context.Context, request CreateSolPa
 	plan, ok := NormalizePlan(request.Plan)
 	if !ok || plan == PlanTrial {
 		return SolPaymentOrderView{}, ErrUnknownPlan
-	}
-	lamports := s.cfg.SolanaPlanLamports[plan]
-	if lamports <= 0 {
-		return SolPaymentOrderView{}, ErrSolPaymentsNotConfigured
 	}
 	now := s.currentTime()
 	orderID, err := randomBase58(18)
@@ -270,33 +491,320 @@ func (s *Service) CreateSolPaymentOrder(ctx context.Context, request CreateSolPa
 	if err != nil {
 		return SolPaymentOrderView{}, err
 	}
-	order, err := s.repo.CreateSolPaymentOrder(ctx, store.SolPaymentOrder{
-		OrderID:               "sol_" + orderID,
-		GuildID:               guildID,
-		BillingOwnerUserID:    strings.TrimSpace(request.BillingOwnerUserID),
-		SupportEmail:          strings.TrimSpace(request.SupportEmail),
-		Plan:                  plan,
-		ExpectedLamports:      lamports,
-		DestinationWallet:     s.cfg.SolanaTreasuryWallet,
-		Reference:             reference,
-		Status:                SolOrderStatusPending,
-		Cluster:               s.cfg.SolanaCluster,
-		ConfirmationThreshold: s.cfg.SolanaConfirmation,
-		ExpiresAt:             now.Add(s.cfg.SolanaOrderExpiration),
-		CreatedAt:             now,
-		UpdatedAt:             now,
+	var order store.BillingOrder
+	var redemption store.BillingCouponRedemption
+	err = s.repo.WithTransaction(ctx, func(repo *repository.BillingRepository) error {
+		quote, err := s.quoteBillingOrderWithRepo(ctx, repo, plan, request.CouponCode, now)
+		if err != nil {
+			return err
+		}
+		if quote.DueLamports > 0 && !s.solPaymentsConfigured() {
+			return ErrSolPaymentsNotConfigured
+		}
+		provider := ProviderSol
+		status := SolOrderStatusPending
+		var verifiedAt *time.Time
+		if quote.DueLamports == 0 {
+			provider = ProviderCoupon
+			status = SolOrderStatusVerified
+			verifiedAt = &now
+		}
+		destinationWallet := ""
+		cluster := ""
+		confirmation := ""
+		if quote.DueLamports > 0 {
+			destinationWallet = s.cfg.SolanaTreasuryWallet
+			cluster = s.cfg.SolanaCluster
+			confirmation = s.cfg.SolanaConfirmation
+		}
+		order, err = repo.CreateBillingOrder(ctx, store.BillingOrder{
+			OrderID:               "ord_" + orderID,
+			GuildID:               guildID,
+			BillingOwnerUserID:    strings.TrimSpace(request.BillingOwnerUserID),
+			SupportEmail:          strings.TrimSpace(request.SupportEmail),
+			Plan:                  quote.Plan,
+			Provider:              provider,
+			ListLamports:          quote.ListLamports,
+			DiscountLamports:      quote.DiscountLamports,
+			DueLamports:           quote.DueLamports,
+			CouponID:              quote.CouponID,
+			CouponPrefix:          quote.CouponPrefix,
+			DestinationWallet:     destinationWallet,
+			Reference:             reference,
+			Status:                status,
+			Cluster:               cluster,
+			ConfirmationThreshold: confirmation,
+			VerifiedAt:            verifiedAt,
+			ExpiresAt:             now.Add(s.cfg.SolanaOrderExpiration),
+			CreatedAt:             now,
+			UpdatedAt:             now,
+		})
+		if err != nil {
+			return err
+		}
+		if quote.CouponID == "" {
+			return nil
+		}
+		redemptionID, err := randomBase58(18)
+		if err != nil {
+			return err
+		}
+		redemption, err = repo.CreateCouponRedemption(ctx, store.BillingCouponRedemption{
+			RedemptionID:       "red_" + redemptionID,
+			CouponID:           quote.CouponID,
+			OrderID:            order.OrderID,
+			GuildID:            guildID,
+			BillingOwnerUserID: strings.TrimSpace(request.BillingOwnerUserID),
+			Plan:               quote.Plan,
+			ListLamports:       quote.ListLamports,
+			DiscountLamports:   quote.DiscountLamports,
+			DueLamports:        quote.DueLamports,
+			Status:             CouponRedemptionStatusPending,
+			ExpiresAt:          order.ExpiresAt,
+			CreatedAt:          now,
+			UpdatedAt:          now,
+		})
+		return err
 	})
 	if err != nil {
 		return SolPaymentOrderView{}, err
 	}
+	if redemption.RedemptionID != "" {
+		s.recordCouponAudit(ctx, "billing.coupon.redemption.reserved", firstNonEmpty(order.BillingOwnerUserID, order.GuildID), store.BillingCoupon{CouponID: order.CouponID, CodePrefix: order.CouponPrefix, Plan: order.Plan}, map[string]any{
+			"redemption_id":     redemption.RedemptionID,
+			"order_id":          order.OrderID,
+			"guild_id":          order.GuildID,
+			"list_lamports":     order.ListLamports,
+			"discount_lamports": order.DiscountLamports,
+			"due_lamports":      order.DueLamports,
+		})
+	}
 	return s.solPaymentOrderView(order), nil
+}
+
+func (s *Service) CreateCoupon(ctx context.Context, request CreateCouponRequest) (CouponCreateResult, error) {
+	if s == nil || s.repo == nil {
+		return CouponCreateResult{}, ErrNoSubscription
+	}
+	if !request.ActorIsOwner {
+		return CouponCreateResult{}, ErrBillingAccess
+	}
+	plan, ok := NormalizePlan(request.Plan)
+	if !ok || plan == PlanTrial {
+		return CouponCreateResult{}, ErrUnknownPlan
+	}
+	if request.DiscountLamports <= 0 {
+		return CouponCreateResult{}, fmt.Errorf("discount_lamports must be greater than zero")
+	}
+	if request.MaxRedemptions < 0 {
+		return CouponCreateResult{}, fmt.Errorf("max_redemptions cannot be negative")
+	}
+	now := s.currentTime()
+	if request.ExpiresAt != nil && !request.ExpiresAt.After(now) {
+		return CouponCreateResult{}, ErrCouponExpired
+	}
+	rawCode := strings.TrimSpace(request.Code)
+	if rawCode == "" {
+		generated, err := newCouponCode()
+		if err != nil {
+			return CouponCreateResult{}, err
+		}
+		rawCode = generated
+	}
+	couponID, err := randomBase58(18)
+	if err != nil {
+		return CouponCreateResult{}, err
+	}
+	coupon, err := s.repo.CreateBillingCoupon(ctx, store.BillingCoupon{
+		CouponID:         "cpn_" + couponID,
+		CodeHash:         couponCodeHash(rawCode),
+		CodePrefix:       couponCodePrefix(rawCode),
+		Plan:             plan,
+		DiscountLamports: request.DiscountLamports,
+		MaxRedemptions:   request.MaxRedemptions,
+		Status:           CouponStatusActive,
+		OwnerNote:        request.Note,
+		CreatedByUserID:  request.ActorUserID,
+		ExpiresAt:        request.ExpiresAt,
+		CreatedAt:        now,
+		UpdatedAt:        now,
+	})
+	if repository.IsUniqueConstraintError(err) {
+		return CouponCreateResult{}, ErrCouponDuplicate
+	}
+	if err != nil {
+		return CouponCreateResult{}, err
+	}
+	view := s.couponView(coupon, repository.CouponRedemptionCounts{})
+	s.recordCouponAudit(ctx, "billing.coupon.created", request.ActorUserID, coupon, map[string]any{
+		"discount_lamports": coupon.DiscountLamports,
+		"max_redemptions":   coupon.MaxRedemptions,
+	})
+	return CouponCreateResult{Coupon: view, Code: rawCode}, nil
+}
+
+func (s *Service) ListCoupons(ctx context.Context, request ListCouponsRequest) ([]CouponView, error) {
+	if s == nil || s.repo == nil {
+		return nil, ErrNoSubscription
+	}
+	if !request.ActorIsOwner {
+		return nil, ErrBillingAccess
+	}
+	coupons, err := s.repo.ListBillingCoupons(ctx)
+	if err != nil {
+		return nil, err
+	}
+	couponIDs := make([]string, 0, len(coupons))
+	for _, coupon := range coupons {
+		couponIDs = append(couponIDs, coupon.CouponID)
+	}
+	counts, err := s.repo.CouponRedemptionCountsForCoupons(ctx, couponIDs)
+	if err != nil {
+		return nil, err
+	}
+	views := make([]CouponView, 0, len(coupons))
+	now := s.currentTime()
+	for _, coupon := range coupons {
+		effective := s.effectiveCouponStatus(coupon, now)
+		if effective.Status != coupon.Status {
+			if err := s.repo.UpdateBillingCoupon(ctx, effective.CouponID, map[string]any{"status": effective.Status}); err != nil {
+				return nil, err
+			}
+		}
+		views = append(views, s.couponView(effective, counts[coupon.CouponID]))
+	}
+	return views, nil
+}
+
+func (s *Service) RevokeCoupon(ctx context.Context, request RevokeCouponRequest) (CouponView, error) {
+	if s == nil || s.repo == nil {
+		return CouponView{}, ErrNoSubscription
+	}
+	if !request.ActorIsOwner {
+		return CouponView{}, ErrBillingAccess
+	}
+	couponID := strings.TrimSpace(request.CouponID)
+	prefix := strings.TrimSpace(request.Prefix)
+	if couponID == "" && prefix == "" {
+		return CouponView{}, ErrCouponNotFound
+	}
+	now := s.currentTime()
+	var coupon store.BillingCoupon
+	var counts repository.CouponRedemptionCounts
+	err := s.repo.WithTransaction(ctx, func(repo *repository.BillingRepository) error {
+		var ok bool
+		var err error
+		if couponID != "" {
+			coupon, ok, err = repo.GetBillingCouponByIDForUpdate(ctx, couponID)
+			if err != nil {
+				return err
+			}
+			if !ok {
+				return ErrCouponNotFound
+			}
+		} else {
+			matches, err := repo.FindBillingCouponsByPrefixForUpdate(ctx, prefix)
+			if err != nil {
+				return err
+			}
+			if len(matches) == 0 {
+				return ErrCouponNotFound
+			}
+			if len(matches) > 1 {
+				return ErrCouponAmbiguous
+			}
+			coupon = matches[0]
+		}
+		if coupon.Status == CouponStatusRevoked || coupon.RevokedAt != nil {
+			return ErrCouponRevoked
+		}
+		revokedAt := now
+		if err := repo.UpdateBillingCoupon(ctx, coupon.CouponID, map[string]any{
+			"status":     CouponStatusRevoked,
+			"revoked_at": &revokedAt,
+		}); err != nil {
+			return err
+		}
+		coupon.Status = CouponStatusRevoked
+		coupon.RevokedAt = &revokedAt
+		coupon.UpdatedAt = now
+		counts, err = repo.CouponRedemptionCounts(ctx, coupon.CouponID)
+		return err
+	})
+	if err != nil {
+		return CouponView{}, err
+	}
+	s.recordCouponAudit(ctx, "billing.coupon.revoked", request.ActorUserID, coupon, map[string]any{
+		"pending_redemptions":  counts.Pending,
+		"consumed_redemptions": counts.Consumed,
+	})
+	return s.couponView(coupon, counts), nil
+}
+
+func (s *Service) quoteBillingOrderWithRepo(ctx context.Context, repo *repository.BillingRepository, plan string, couponCode string, now time.Time) (BillingQuote, error) {
+	limits, ok := LimitsForPlan(plan)
+	if !ok || plan == PlanTrial {
+		return BillingQuote{}, ErrUnknownPlan
+	}
+	listLamports := s.cfg.SolanaPlanLamports[plan]
+	if listLamports <= 0 {
+		return BillingQuote{}, ErrSolPaymentsNotConfigured
+	}
+	quote := BillingQuote{
+		Plan:         plan,
+		DisplayName:  limits.DisplayName,
+		ListLamports: listLamports,
+		DueLamports:  listLamports,
+	}
+	couponCode = strings.TrimSpace(couponCode)
+	if couponCode == "" {
+		return quote, nil
+	}
+	coupon, ok, err := repo.GetBillingCouponByCodeHashForUpdate(ctx, couponCodeHash(couponCode))
+	if err != nil {
+		return BillingQuote{}, err
+	}
+	if !ok {
+		return BillingQuote{}, ErrCouponInvalid
+	}
+	if coupon.Status == CouponStatusRevoked || coupon.RevokedAt != nil {
+		return BillingQuote{}, ErrCouponRevoked
+	}
+	if coupon.Status == CouponStatusExpired || (coupon.ExpiresAt != nil && !now.Before(*coupon.ExpiresAt)) {
+		if coupon.Status != CouponStatusExpired {
+			_ = repo.UpdateBillingCoupon(ctx, coupon.CouponID, map[string]any{"status": CouponStatusExpired})
+		}
+		return BillingQuote{}, ErrCouponExpired
+	}
+	if coupon.Status != CouponStatusActive {
+		return BillingQuote{}, ErrCouponInvalid
+	}
+	if coupon.Plan != plan {
+		return BillingQuote{}, ErrCouponPlanMismatch
+	}
+	counts, err := repo.CouponRedemptionCounts(ctx, coupon.CouponID)
+	if err != nil {
+		return BillingQuote{}, err
+	}
+	if coupon.MaxRedemptions > 0 && counts.Pending+counts.Consumed >= coupon.MaxRedemptions {
+		return BillingQuote{}, ErrCouponExhausted
+	}
+	discount := coupon.DiscountLamports
+	if discount > listLamports {
+		discount = listLamports
+	}
+	quote.DiscountLamports = discount
+	quote.DueLamports = listLamports - discount
+	quote.CouponID = coupon.CouponID
+	quote.CouponPrefix = coupon.CodePrefix
+	return quote, nil
 }
 
 func (s *Service) GetSolPaymentOrder(ctx context.Context, orderID string) (SolPaymentOrderView, error) {
 	if s == nil || s.repo == nil {
 		return SolPaymentOrderView{}, ErrNoSubscription
 	}
-	order, ok, err := s.repo.GetSolPaymentOrder(ctx, orderID)
+	order, ok, err := s.repo.GetBillingOrder(ctx, orderID)
 	if err != nil {
 		return SolPaymentOrderView{}, err
 	}
@@ -310,6 +818,99 @@ func (s *Service) GetSolPaymentOrder(ctx context.Context, orderID string) (SolPa
 	return s.solPaymentOrderView(order), nil
 }
 
+func (s *Service) PrepareSolPaymentTransaction(ctx context.Context, request PrepareSolPaymentTransactionRequest) (SolPaymentTransactionPreparation, error) {
+	if s == nil || s.repo == nil {
+		return SolPaymentTransactionPreparation{}, ErrNoSubscription
+	}
+	if !s.solPaymentsConfigured() || s.solana == nil {
+		return SolPaymentTransactionPreparation{}, ErrSolPaymentsNotConfigured
+	}
+	payerWallet := strings.TrimSpace(request.PayerWallet)
+	if payerWallet == "" {
+		return SolPaymentTransactionPreparation{}, fmt.Errorf("payer_wallet is required")
+	}
+	order, ok, err := s.repo.GetBillingOrder(ctx, request.OrderID)
+	if err != nil {
+		return SolPaymentTransactionPreparation{}, err
+	}
+	if !ok {
+		return SolPaymentTransactionPreparation{}, ErrSolPaymentOrderNotFound
+	}
+	order, err = s.expireOrderIfNeeded(ctx, order)
+	if err != nil {
+		return SolPaymentTransactionPreparation{}, err
+	}
+	if order.Status == SolOrderStatusExpired {
+		return SolPaymentTransactionPreparation{}, ErrSolPaymentOrderExpired
+	}
+	if order.DueLamports <= 0 {
+		return SolPaymentTransactionPreparation{}, ErrSolPaymentNotRequired
+	}
+	if order.Status == SolOrderStatusActivated {
+		return SolPaymentTransactionPreparation{}, ErrSolPaymentOrderAlreadyActive
+	}
+	if order.Status == SolOrderStatusVerified {
+		return SolPaymentTransactionPreparation{}, ErrSolPaymentOrderAlreadyActive
+	}
+	latest, err := s.solana.GetLatestBlockhash(ctx, order.ConfirmationThreshold)
+	if err != nil {
+		return SolPaymentTransactionPreparation{}, err
+	}
+	transaction, err := buildSolPaymentTransactionBase64(order, payerWallet, latest.Blockhash)
+	if err != nil {
+		return SolPaymentTransactionPreparation{}, err
+	}
+	return SolPaymentTransactionPreparation{
+		Order:                s.solPaymentOrderView(order),
+		Transaction:          transaction,
+		PayerWallet:          payerWallet,
+		LastValidBlockHeight: latest.LastValidBlockHeight,
+	}, nil
+}
+
+func (s *Service) SubmitSolPaymentTransaction(ctx context.Context, request SubmitSolPaymentTransactionRequest) (SolPaymentVerificationResult, error) {
+	if s == nil || s.repo == nil {
+		return SolPaymentVerificationResult{}, ErrNoSubscription
+	}
+	if !s.solPaymentsConfigured() || s.solana == nil {
+		return SolPaymentVerificationResult{}, ErrSolPaymentsNotConfigured
+	}
+	signedTransaction := strings.TrimSpace(request.SignedTransaction)
+	if signedTransaction == "" {
+		return SolPaymentVerificationResult{}, fmt.Errorf("signed_transaction is required")
+	}
+	if _, err := base64.StdEncoding.DecodeString(signedTransaction); err != nil {
+		return SolPaymentVerificationResult{}, fmt.Errorf("signed_transaction must be base64")
+	}
+	order, ok, err := s.repo.GetBillingOrder(ctx, request.OrderID)
+	if err != nil {
+		return SolPaymentVerificationResult{}, err
+	}
+	if !ok {
+		return SolPaymentVerificationResult{}, ErrSolPaymentOrderNotFound
+	}
+	order, err = s.expireOrderIfNeeded(ctx, order)
+	if err != nil {
+		return SolPaymentVerificationResult{}, err
+	}
+	if order.Status == SolOrderStatusExpired {
+		return SolPaymentVerificationResult{Order: s.solPaymentOrderView(order), FailureCode: "expired"}, ErrSolPaymentOrderExpired
+	}
+	if order.DueLamports <= 0 {
+		return SolPaymentVerificationResult{Order: s.solPaymentOrderView(order)}, ErrSolPaymentNotRequired
+	}
+	signature, err := s.solana.SendTransaction(ctx, signedTransaction, order.ConfirmationThreshold)
+	if err != nil {
+		return SolPaymentVerificationResult{Order: s.solPaymentOrderView(order), FailureCode: "rpc_unavailable", FailureError: err.Error()}, ErrSolPaymentVerificationFailed
+	}
+	result, err := s.VerifySolPayment(ctx, VerifySolPaymentRequest{OrderID: order.OrderID, Signature: signature})
+	result.SubmittedSignature = signature
+	if err != nil {
+		return result, err
+	}
+	return result, nil
+}
+
 func (s *Service) VerifySolPayment(ctx context.Context, request VerifySolPaymentRequest) (SolPaymentVerificationResult, error) {
 	if s == nil || s.repo == nil {
 		return SolPaymentVerificationResult{}, ErrNoSubscription
@@ -321,7 +922,7 @@ func (s *Service) VerifySolPayment(ctx context.Context, request VerifySolPayment
 	if signature == "" {
 		return SolPaymentVerificationResult{}, fmt.Errorf("transaction signature is required")
 	}
-	order, ok, err := s.repo.GetSolPaymentOrder(ctx, request.OrderID)
+	order, ok, err := s.repo.GetBillingOrder(ctx, request.OrderID)
 	if err != nil {
 		return SolPaymentVerificationResult{}, err
 	}
@@ -363,7 +964,7 @@ func (s *Service) VerifySolPayment(ctx context.Context, request VerifySolPayment
 	verified.RawPayload = MarshalRaw(transaction)
 
 	err = s.repo.WithTransaction(ctx, func(repo *repository.BillingRepository) error {
-		locked, ok, err := repo.GetSolPaymentOrderForUpdate(ctx, order.OrderID)
+		locked, ok, err := repo.GetBillingOrderForUpdate(ctx, order.OrderID)
 		if err != nil {
 			return err
 		}
@@ -387,7 +988,7 @@ func (s *Service) VerifySolPayment(ctx context.Context, request VerifySolPayment
 			return fmt.Errorf("transaction signature has already been recorded")
 		}
 		now := s.currentTime()
-		return repo.UpdateSolPaymentOrder(ctx, locked.OrderID, map[string]any{
+		return repo.UpdateBillingOrder(ctx, locked.OrderID, map[string]any{
 			"status":                         SolOrderStatusVerified,
 			"verified_transaction_signature": signature,
 			"verified_at":                    &now,
@@ -397,7 +998,7 @@ func (s *Service) VerifySolPayment(ctx context.Context, request VerifySolPayment
 		_ = s.recordFailedSolVerification(ctx, order, signature, "duplicate_or_stale", err)
 		return SolPaymentVerificationResult{Order: s.solPaymentOrderView(order), FailureCode: "duplicate_or_stale", FailureError: err.Error()}, ErrSolPaymentVerificationFailed
 	}
-	updated, _, err := s.repo.GetSolPaymentOrder(ctx, order.OrderID)
+	updated, _, err := s.repo.GetBillingOrder(ctx, order.OrderID)
 	if err != nil {
 		return SolPaymentVerificationResult{}, err
 	}
@@ -410,9 +1011,10 @@ func (s *Service) RevealActivationKey(ctx context.Context, orderID string) (Acti
 	}
 	var rawKey string
 	var savedKey store.ActivationAPIKey
-	var updatedOrder store.SolPaymentOrder
+	var updatedOrder store.BillingOrder
+	var consumedRedemption store.BillingCouponRedemption
 	err := s.repo.WithTransaction(ctx, func(repo *repository.BillingRepository) error {
-		order, ok, err := repo.GetSolPaymentOrderForUpdate(ctx, orderID)
+		order, ok, err := repo.GetBillingOrderForUpdate(ctx, orderID)
 		if err != nil {
 			return err
 		}
@@ -443,7 +1045,7 @@ func (s *Service) RevealActivationKey(ctx context.Context, orderID string) (Acti
 			KeyID:          "act_" + keyID,
 			KeyHash:        activationKeyHash(rawKey),
 			KeyPrefix:      activationKeyPrefix(rawKey),
-			PaymentOrderID: order.OrderID,
+			BillingOrderID: order.OrderID,
 			GuildID:        order.GuildID,
 			Plan:           order.Plan,
 			Status:         ActivationKeyStatusUnused,
@@ -455,7 +1057,26 @@ func (s *Service) RevealActivationKey(ctx context.Context, orderID string) (Acti
 		if err != nil {
 			return err
 		}
-		if err := repo.UpdateSolPaymentOrder(ctx, order.OrderID, map[string]any{
+		if order.CouponID != "" {
+			redemption, ok, err := repo.GetCouponRedemptionByOrderForUpdate(ctx, order.OrderID)
+			if err != nil {
+				return err
+			}
+			if !ok || redemption.Status != CouponRedemptionStatusPending {
+				return ErrCouponInvalid
+			}
+			if err := repo.UpdateCouponRedemption(ctx, redemption.RedemptionID, map[string]any{
+				"status":      CouponRedemptionStatusConsumed,
+				"consumed_at": &now,
+			}); err != nil {
+				return err
+			}
+			consumedRedemption = redemption
+			consumedRedemption.Status = CouponRedemptionStatusConsumed
+			consumedRedemption.ConsumedAt = &now
+			consumedRedemption.UpdatedAt = now
+		}
+		if err := repo.UpdateBillingOrder(ctx, order.OrderID, map[string]any{
 			"activation_key_revealed_at": &now,
 		}); err != nil {
 			return err
@@ -474,6 +1095,22 @@ func (s *Service) RevealActivationKey(ctx context.Context, orderID string) (Acti
 	s.recordActivationKeyAudit(ctx, "billing.activation_key.viewed", firstNonEmpty(updatedOrder.BillingOwnerUserID, updatedOrder.GuildID), savedKey, updatedOrder, map[string]string{
 		"event": "viewed",
 	})
+	if consumedRedemption.RedemptionID != "" {
+		s.recordCouponAudit(ctx, "billing.coupon.redemption.consumed", firstNonEmpty(updatedOrder.BillingOwnerUserID, updatedOrder.GuildID), store.BillingCoupon{CouponID: updatedOrder.CouponID, CodePrefix: updatedOrder.CouponPrefix, Plan: updatedOrder.Plan}, map[string]any{
+			"redemption_id":     consumedRedemption.RedemptionID,
+			"order_id":          updatedOrder.OrderID,
+			"guild_id":          updatedOrder.GuildID,
+			"list_lamports":     updatedOrder.ListLamports,
+			"discount_lamports": updatedOrder.DiscountLamports,
+			"due_lamports":      updatedOrder.DueLamports,
+		})
+	}
+	if updatedOrder.DueLamports == 0 && updatedOrder.CouponID != "" {
+		s.recordActivationKeyAudit(ctx, "billing.coupon.free_activation_key_revealed", firstNonEmpty(updatedOrder.BillingOwnerUserID, updatedOrder.GuildID), savedKey, updatedOrder, map[string]string{
+			"event":         "free_coupon_reveal",
+			"coupon_prefix": updatedOrder.CouponPrefix,
+		})
+	}
 	return ActivationKeyReveal{
 		Order:     s.solPaymentOrderView(updatedOrder),
 		Key:       rawKey,
@@ -493,7 +1130,7 @@ func (s *Service) ActivateWithAPIKey(ctx context.Context, request ActivateAPIKey
 	}
 	var subscription store.GuildSubscription
 	var consumedKey store.ActivationAPIKey
-	var consumedOrder store.SolPaymentOrder
+	var consumedOrder store.BillingOrder
 	var expiredKey store.ActivationAPIKey
 	err := s.repo.WithTransaction(ctx, func(repo *repository.BillingRepository) error {
 		key, ok, err := repo.GetActivationAPIKeyByHashForUpdate(ctx, activationKeyHash(request.APIKey))
@@ -534,7 +1171,7 @@ func (s *Service) ActivateWithAPIKey(ctx context.Context, request ActivateAPIKey
 		if !allowed {
 			return ErrBillingAccess
 		}
-		order, ok, err := repo.GetSolPaymentOrderForUpdate(ctx, key.PaymentOrderID)
+		order, ok, err := repo.GetBillingOrderForUpdate(ctx, key.BillingOrderID)
 		if err != nil {
 			return err
 		}
@@ -558,15 +1195,27 @@ func (s *Service) ActivateWithAPIKey(ctx context.Context, request ActivateAPIKey
 		}
 		periodStart := now
 		periodEnd := periodStart.AddDate(0, 1, 0)
+		paymentProvider := ProviderSol
+		paymentStatus := "paid"
+		paymentCurrency := "sol"
+		paymentExternalID := firstNonEmpty(order.VerifiedTransactionSignature, order.OrderID)
+		paymentIDPrefix := "sol"
+		if order.DueLamports == 0 {
+			paymentProvider = ProviderCoupon
+			paymentStatus = "comped"
+			paymentCurrency = "coupon"
+			paymentExternalID = order.OrderID
+			paymentIDPrefix = "coupon"
+		}
 		saved, err := repo.UpsertSubscriptionWithSnapshot(ctx, store.GuildSubscription{
 			GuildID:                request.GuildID,
 			CustomerAccountID:      account.ID,
 			Plan:                   order.Plan,
 			Status:                 StatusActive,
 			GraceState:             GraceActive,
-			PaymentProvider:        ProviderSol,
+			PaymentProvider:        paymentProvider,
 			ExternalSubscriptionID: order.OrderID,
-			ExternalEntitlementID:  order.VerifiedTransactionSignature,
+			ExternalEntitlementID:  firstNonEmpty(order.VerifiedTransactionSignature, order.CouponPrefix, order.OrderID),
 			BillingOwnerUserID:     request.ActorUserID,
 			CurrentPeriodStart:     periodStart,
 			CurrentPeriodEnd:       periodEnd,
@@ -576,20 +1225,27 @@ func (s *Service) ActivateWithAPIKey(ctx context.Context, request ActivateAPIKey
 		}
 		subscription = saved
 		_, err = repo.RecordInvoicePaymentEvent(ctx, store.InvoicePaymentEvent{
-			Provider:       ProviderSol,
-			ExternalID:     firstNonEmpty(order.VerifiedTransactionSignature, order.OrderID),
+			Provider:       paymentProvider,
+			ExternalID:     paymentExternalID,
 			GuildID:        request.GuildID,
 			SubscriptionID: saved.ID,
-			AmountLamports: order.ExpectedLamports,
-			Currency:       "sol",
-			Status:         "paid",
-			IdempotencyKey: "sol:activation:" + key.KeyID,
+			AmountLamports: order.DueLamports,
+			Currency:       paymentCurrency,
+			Status:         paymentStatus,
+			IdempotencyKey: paymentIDPrefix + ":activation:" + key.KeyID,
 			RawPayload: MarshalRaw(map[string]any{
-				"order_id":   order.OrderID,
-				"signature":  order.VerifiedTransactionSignature,
-				"plan":       order.Plan,
-				"lamports":   order.ExpectedLamports,
-				"key_prefix": key.KeyPrefix,
+				"order_id":           order.OrderID,
+				"signature":          order.VerifiedTransactionSignature,
+				"plan":               order.Plan,
+				"list_lamports":      order.ListLamports,
+				"discount_lamports":  order.DiscountLamports,
+				"due_lamports":       order.DueLamports,
+				"coupon_id":          order.CouponID,
+				"coupon_prefix":      order.CouponPrefix,
+				"activation_key_id":  key.KeyID,
+				"activation_prefix":  key.KeyPrefix,
+				"payment_provider":   paymentProvider,
+				"payment_event_type": paymentStatus,
 			}),
 			CreatedAt: now,
 		})
@@ -609,7 +1265,7 @@ func (s *Service) ActivateWithAPIKey(ctx context.Context, request ActivateAPIKey
 		consumedKey.ConsumedAt = &consumedAt
 		consumedKey.ConsumedByDiscordUserID = request.ActorUserID
 		consumedOrder = order
-		if err := repo.UpdateSolPaymentOrder(ctx, order.OrderID, map[string]any{
+		if err := repo.UpdateBillingOrder(ctx, order.OrderID, map[string]any{
 			"status":       SolOrderStatusActivated,
 			"activated_at": &consumedAt,
 		}); err != nil {
@@ -621,7 +1277,7 @@ func (s *Service) ActivateWithAPIKey(ctx context.Context, request ActivateAPIKey
 	})
 	if err != nil {
 		if errors.Is(err, ErrActivationKeyExpired) && expiredKey.KeyID != "" {
-			s.recordActivationKeyAudit(ctx, "billing.activation_key.expired", request.ActorUserID, expiredKey, store.SolPaymentOrder{OrderID: expiredKey.PaymentOrderID, GuildID: expiredKey.GuildID, Plan: expiredKey.Plan}, map[string]string{
+			s.recordActivationKeyAudit(ctx, "billing.activation_key.expired", request.ActorUserID, expiredKey, store.BillingOrder{OrderID: expiredKey.BillingOrderID, GuildID: expiredKey.GuildID, Plan: expiredKey.Plan}, map[string]string{
 				"event": "expired",
 			})
 		}
@@ -650,7 +1306,7 @@ func (s *Service) RevokeActivationAPIKey(ctx context.Context, request RevokeActi
 	}
 	request.ActorUserID = strings.TrimSpace(request.ActorUserID)
 	var revokedKey store.ActivationAPIKey
-	var order store.SolPaymentOrder
+	var order store.BillingOrder
 	var revokedAt time.Time
 	err := s.repo.WithTransaction(ctx, func(repo *repository.BillingRepository) error {
 		key, ok, err := repo.GetActivationAPIKeyByPaymentOrderForUpdate(ctx, orderID)
@@ -682,7 +1338,7 @@ func (s *Service) RevokeActivationAPIKey(ctx context.Context, request RevokeActi
 			_ = repo.UpdateActivationAPIKey(ctx, key.KeyID, map[string]any{"status": ActivationKeyStatusExpired})
 			return ErrActivationKeyExpired
 		}
-		loadedOrder, ok, err := repo.GetSolPaymentOrderForUpdate(ctx, key.PaymentOrderID)
+		loadedOrder, ok, err := repo.GetBillingOrderForUpdate(ctx, key.BillingOrderID)
 		if err != nil {
 			return err
 		}
@@ -724,22 +1380,59 @@ func (s *Service) solPaymentsConfigured() bool {
 		strings.TrimSpace(s.cfg.SolanaConfirmation) != ""
 }
 
-func (s *Service) expireOrderIfNeeded(ctx context.Context, order store.SolPaymentOrder) (store.SolPaymentOrder, error) {
+func (s *Service) expireOrderIfNeeded(ctx context.Context, order store.BillingOrder) (store.BillingOrder, error) {
 	if order.Status != SolOrderStatusPending && order.Status != SolOrderStatusFailed {
 		return order, nil
 	}
 	if s.currentTime().Before(order.ExpiresAt) {
 		return order, nil
 	}
-	if err := s.repo.UpdateSolPaymentOrder(ctx, order.OrderID, map[string]any{"status": SolOrderStatusExpired}); err != nil {
-		return store.SolPaymentOrder{}, err
+	now := s.currentTime()
+	err := s.repo.WithTransaction(ctx, func(repo *repository.BillingRepository) error {
+		locked, ok, err := repo.GetBillingOrderForUpdate(ctx, order.OrderID)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return ErrSolPaymentOrderNotFound
+		}
+		if locked.Status != SolOrderStatusPending && locked.Status != SolOrderStatusFailed {
+			order = locked
+			return nil
+		}
+		if now.Before(locked.ExpiresAt) {
+			order = locked
+			return nil
+		}
+		if locked.CouponID != "" {
+			redemption, ok, err := repo.GetCouponRedemptionByOrderForUpdate(ctx, locked.OrderID)
+			if err != nil {
+				return err
+			}
+			if ok && redemption.Status == CouponRedemptionStatusPending {
+				if err := repo.UpdateCouponRedemption(ctx, redemption.RedemptionID, map[string]any{
+					"status":      CouponRedemptionStatusReleased,
+					"released_at": &now,
+				}); err != nil {
+					return err
+				}
+			}
+		}
+		if err := repo.UpdateBillingOrder(ctx, locked.OrderID, map[string]any{"status": SolOrderStatusExpired}); err != nil {
+			return err
+		}
+		locked.Status = SolOrderStatusExpired
+		locked.UpdatedAt = now
+		order = locked
+		return nil
+	})
+	if err != nil {
+		return store.BillingOrder{}, err
 	}
-	order.Status = SolOrderStatusExpired
-	order.UpdatedAt = s.currentTime()
 	return order, nil
 }
 
-func (s *Service) recordFailedSolVerification(ctx context.Context, order store.SolPaymentOrder, signature string, code string, cause error) error {
+func (s *Service) recordFailedSolVerification(ctx context.Context, order store.BillingOrder, signature string, code string, cause error) error {
 	if strings.TrimSpace(signature) == "" {
 		return nil
 	}
@@ -761,17 +1454,17 @@ func (s *Service) recordFailedSolVerification(ctx context.Context, order store.S
 	if err != nil {
 		return err
 	}
-	return s.repo.UpdateSolPaymentOrder(ctx, order.OrderID, map[string]any{"status": SolOrderStatusFailed})
+	return s.repo.UpdateBillingOrder(ctx, order.OrderID, map[string]any{"status": SolOrderStatusFailed})
 }
 
-func (s *Service) recordActivationKeyAudit(ctx context.Context, action string, actorID string, key store.ActivationAPIKey, order store.SolPaymentOrder, extra map[string]string) {
+func (s *Service) recordActivationKeyAudit(ctx context.Context, action string, actorID string, key store.ActivationAPIKey, order store.BillingOrder, extra map[string]string) {
 	if s == nil || s.audit == nil || key.KeyID == "" {
 		return
 	}
 	metadata := map[string]string{
 		"key_id":         key.KeyID,
 		"key_prefix":     key.KeyPrefix,
-		"order_id":       firstNonEmpty(order.OrderID, key.PaymentOrderID),
+		"order_id":       firstNonEmpty(order.OrderID, key.BillingOrderID),
 		"plan":           firstNonEmpty(order.Plan, key.Plan),
 		"key_status":     key.Status,
 		"payment_status": order.Status,
@@ -794,6 +1487,65 @@ func (s *Service) recordActivationKeyAudit(ctx context.Context, action string, a
 		Metadata:   string(data),
 		CreatedAt:  s.currentTime(),
 	})
+}
+
+func (s *Service) recordCouponAudit(ctx context.Context, action string, actorID string, coupon store.BillingCoupon, extra map[string]any) {
+	if s == nil || s.audit == nil || coupon.CouponID == "" {
+		return
+	}
+	metadata := map[string]any{
+		"coupon_id":     coupon.CouponID,
+		"coupon_prefix": coupon.CodePrefix,
+		"plan":          coupon.Plan,
+		"status":        coupon.Status,
+	}
+	for name, value := range extra {
+		if strings.TrimSpace(name) != "" {
+			metadata[name] = value
+		}
+	}
+	data, err := json.Marshal(metadata)
+	if err != nil {
+		data = []byte("{}")
+	}
+	_ = s.audit.Record(ctx, store.AuditEvent{
+		GuildID:    "",
+		ActorID:    strings.TrimSpace(actorID),
+		Action:     action,
+		TargetType: "billing_coupon",
+		TargetID:   coupon.CouponID,
+		Metadata:   string(data),
+		CreatedAt:  s.currentTime(),
+	})
+}
+
+func (s *Service) couponView(coupon store.BillingCoupon, counts repository.CouponRedemptionCounts) CouponView {
+	limits, _ := LimitsForPlan(coupon.Plan)
+	return CouponView{
+		CouponID:         coupon.CouponID,
+		CodePrefix:       coupon.CodePrefix,
+		Plan:             coupon.Plan,
+		DisplayName:      firstNonEmpty(limits.DisplayName, coupon.Plan),
+		DiscountLamports: coupon.DiscountLamports,
+		MaxRedemptions:   coupon.MaxRedemptions,
+		Status:           coupon.Status,
+		OwnerNote:        coupon.OwnerNote,
+		CreatedByUserID:  coupon.CreatedByUserID,
+		ExpiresAt:        coupon.ExpiresAt,
+		RevokedAt:        coupon.RevokedAt,
+		Pending:          counts.Pending,
+		Consumed:         counts.Consumed,
+		Released:         counts.Released,
+		CreatedAt:        coupon.CreatedAt.UTC(),
+		UpdatedAt:        coupon.UpdatedAt.UTC(),
+	}
+}
+
+func (s *Service) effectiveCouponStatus(coupon store.BillingCoupon, now time.Time) store.BillingCoupon {
+	if coupon.Status == CouponStatusActive && coupon.ExpiresAt != nil && !now.Before(*coupon.ExpiresAt) {
+		coupon.Status = CouponStatusExpired
+	}
+	return coupon
 }
 
 func (s *Service) canManageBillingWithRepo(ctx context.Context, repo *repository.BillingRepository, guildID, userID string, operator bool, canClaim bool) (bool, error) {
@@ -828,7 +1580,7 @@ func (s *Service) canManageBillingWithRepo(ctx context.Context, repo *repository
 	return !subscriptionOK || strings.TrimSpace(subscription.BillingOwnerUserID) == "", nil
 }
 
-func (s *Service) solPaymentOrderView(order store.SolPaymentOrder) SolPaymentOrderView {
+func (s *Service) solPaymentOrderView(order store.BillingOrder) SolPaymentOrderView {
 	limits, _ := LimitsForPlan(order.Plan)
 	return SolPaymentOrderView{
 		OrderID:                      order.OrderID,
@@ -836,8 +1588,12 @@ func (s *Service) solPaymentOrderView(order store.SolPaymentOrder) SolPaymentOrd
 		BillingOwnerUserID:           order.BillingOwnerUserID,
 		Plan:                         order.Plan,
 		DisplayName:                  firstNonEmpty(limits.DisplayName, order.Plan),
-		ExpectedLamports:             order.ExpectedLamports,
-		AmountSOL:                    formatLamports(order.ExpectedLamports),
+		ListLamports:                 order.ListLamports,
+		DiscountLamports:             order.DiscountLamports,
+		DueLamports:                  order.DueLamports,
+		ExpectedLamports:             order.DueLamports,
+		AmountSOL:                    formatLamports(order.DueLamports),
+		CouponPrefix:                 order.CouponPrefix,
 		DestinationWallet:            order.DestinationWallet,
 		Reference:                    order.Reference,
 		Memo:                         order.Reference,
@@ -852,7 +1608,7 @@ func (s *Service) solPaymentOrderView(order store.SolPaymentOrder) SolPaymentOrd
 	}
 }
 
-func verifyTransactionForOrder(transaction SolanaTransaction, order store.SolPaymentOrder) (store.SolPaymentTransaction, error) {
+func verifyTransactionForOrder(transaction SolanaTransaction, order store.BillingOrder) (store.SolPaymentTransaction, error) {
 	if transaction.Meta.Err != nil {
 		return store.SolPaymentTransaction{}, fmt.Errorf("transaction meta contains an execution error")
 	}
@@ -888,8 +1644,8 @@ func verifyTransactionForOrder(transaction SolanaTransaction, order store.SolPay
 		return store.SolPaymentTransaction{}, fmt.Errorf("expected exactly one native SOL transfer to the treasury wallet, got %d", len(matchingTransfers))
 	}
 	transfer := matchingTransfers[0]
-	if transfer.AmountLamports < order.ExpectedLamports {
-		return store.SolPaymentTransaction{}, fmt.Errorf("native SOL transfer underpaid order: got %d lamports, expected %d", transfer.AmountLamports, order.ExpectedLamports)
+	if transfer.AmountLamports < order.DueLamports {
+		return store.SolPaymentTransaction{}, fmt.Errorf("native SOL transfer underpaid order: got %d lamports, expected %d", transfer.AmountLamports, order.DueLamports)
 	}
 	if transfer.PayerWallet == "" {
 		transfer.PayerWallet = firstSigner(transaction)
@@ -968,17 +1724,115 @@ func firstSigner(transaction SolanaTransaction) string {
 	return ""
 }
 
-func solanaPayURL(order store.SolPaymentOrder) string {
-	if strings.TrimSpace(order.DestinationWallet) == "" {
-		return ""
+func solanaPayURL(order store.BillingOrder) string {
+	return ""
+}
+
+func buildSolPaymentTransactionBase64(order store.BillingOrder, payerWallet string, blockhash string) (string, error) {
+	payer, err := decodeBase58Fixed(payerWallet, 32)
+	if err != nil {
+		return "", fmt.Errorf("invalid payer wallet: %w", err)
 	}
-	values := url.Values{}
-	values.Set("amount", formatLamports(order.ExpectedLamports))
-	values.Set("reference", order.Reference)
-	values.Set("memo", order.Reference)
-	values.Set("label", "Panda")
-	values.Set("message", fmt.Sprintf("Panda %s plan for Discord server %s", order.Plan, order.GuildID))
-	return "solana:" + order.DestinationWallet + "?" + values.Encode()
+	destination, err := decodeBase58Fixed(order.DestinationWallet, 32)
+	if err != nil {
+		return "", fmt.Errorf("invalid destination wallet: %w", err)
+	}
+	recentBlockhash, err := decodeBase58Fixed(blockhash, 32)
+	if err != nil {
+		return "", fmt.Errorf("invalid recent blockhash: %w", err)
+	}
+	systemProgram, _ := decodeBase58Fixed("11111111111111111111111111111111", 32)
+	memoProgram, _ := decodeBase58Fixed("MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr", 32)
+
+	var message bytes.Buffer
+	message.Write([]byte{1, 0, 2})
+	message.Write(compactLength(4))
+	message.Write(payer)
+	message.Write(destination)
+	message.Write(systemProgram)
+	message.Write(memoProgram)
+	message.Write(recentBlockhash)
+	message.Write(compactLength(2))
+
+	transferData := make([]byte, 12)
+	binary.LittleEndian.PutUint32(transferData[:4], 2)
+	binary.LittleEndian.PutUint64(transferData[4:], uint64(order.DueLamports))
+	writeCompiledInstruction(&message, 2, []byte{0, 1}, transferData)
+	writeCompiledInstruction(&message, 3, nil, []byte(firstNonEmpty(order.Reference, order.OrderID)))
+
+	var transaction bytes.Buffer
+	transaction.Write(compactLength(1))
+	transaction.Write(make([]byte, 64))
+	transaction.Write(message.Bytes())
+	return base64.StdEncoding.EncodeToString(transaction.Bytes()), nil
+}
+
+func writeCompiledInstruction(buffer *bytes.Buffer, programIndex byte, accounts []byte, data []byte) {
+	buffer.WriteByte(programIndex)
+	buffer.Write(compactLength(len(accounts)))
+	buffer.Write(accounts)
+	buffer.Write(compactLength(len(data)))
+	buffer.Write(data)
+}
+
+func compactLength(length int) []byte {
+	if length < 0 {
+		length = 0
+	}
+	var out []byte
+	value := uint(length)
+	for {
+		elem := byte(value & 0x7f)
+		value >>= 7
+		if value == 0 {
+			out = append(out, elem)
+			break
+		}
+		out = append(out, elem|0x80)
+	}
+	return out
+}
+
+func decodeBase58Fixed(value string, size int) ([]byte, error) {
+	decoded, err := decodeBase58(value)
+	if err != nil {
+		return nil, err
+	}
+	if len(decoded) != size {
+		return nil, fmt.Errorf("expected %d decoded bytes, got %d", size, len(decoded))
+	}
+	return decoded, nil
+}
+
+func decodeBase58(value string) ([]byte, error) {
+	const alphabet = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil, fmt.Errorf("empty base58 value")
+	}
+	indices := make(map[rune]int64, len(alphabet))
+	for i, char := range alphabet {
+		indices[char] = int64(i)
+	}
+	decoded := big.NewInt(0)
+	base := big.NewInt(58)
+	for _, char := range value {
+		index, ok := indices[char]
+		if !ok {
+			return nil, fmt.Errorf("invalid base58 character %q", char)
+		}
+		decoded.Mul(decoded, base)
+		decoded.Add(decoded, big.NewInt(index))
+	}
+	leadingZeroes := 0
+	for _, char := range value {
+		if char != '1' {
+			break
+		}
+		leadingZeroes++
+	}
+	result := append(make([]byte, leadingZeroes), decoded.Bytes()...)
+	return result, nil
 }
 
 func formatLamports(lamports int64) string {
@@ -1019,13 +1873,38 @@ func activationKeyPrefix(value string) string {
 	return value[:18]
 }
 
+func couponCodeHash(value string) string {
+	sum := sha256.Sum256([]byte(strings.TrimSpace(value)))
+	return hex.EncodeToString(sum[:])
+}
+
+func couponCodePrefix(value string) string {
+	value = strings.TrimSpace(value)
+	if len(value) <= 12 {
+		return value
+	}
+	return value[:12]
+}
+
 func newActivationAPIKey() (string, error) {
 	bytes := make([]byte, 32)
 	if _, err := rand.Read(bytes); err != nil {
 		return "", err
 	}
 	secret := base64.RawURLEncoding.EncodeToString(bytes)
-	return "panda_sol_" + secret, nil
+	return "panda_act_" + secret, nil
+}
+
+func newCouponCode() (string, error) {
+	first, err := randomBase58(6)
+	if err != nil {
+		return "", err
+	}
+	second, err := randomBase58(6)
+	if err != nil {
+		return "", err
+	}
+	return "PANDA-" + strings.ToUpper(first) + "-" + strings.ToUpper(second), nil
 }
 
 func randomBase58(size int) (string, error) {

@@ -235,48 +235,60 @@ func (r *BillingRepository) RecordInvoicePaymentEvent(ctx context.Context, event
 	return false, err
 }
 
-func (r *BillingRepository) CreateSolPaymentOrder(ctx context.Context, order store.SolPaymentOrder) (store.SolPaymentOrder, error) {
+type CouponRedemptionCounts struct {
+	Pending  int
+	Consumed int
+	Released int
+}
+
+func (r *BillingRepository) CreateBillingOrder(ctx context.Context, order store.BillingOrder) (store.BillingOrder, error) {
 	now := time.Now().UTC()
 	order.OrderID = strings.TrimSpace(order.OrderID)
 	order.GuildID = strings.TrimSpace(order.GuildID)
 	order.BillingOwnerUserID = strings.TrimSpace(order.BillingOwnerUserID)
 	order.SupportEmail = strings.TrimSpace(order.SupportEmail)
 	order.Plan = strings.TrimSpace(order.Plan)
+	order.Provider = strings.TrimSpace(order.Provider)
+	order.CouponID = strings.TrimSpace(order.CouponID)
+	order.CouponPrefix = strings.TrimSpace(order.CouponPrefix)
 	order.DestinationWallet = strings.TrimSpace(order.DestinationWallet)
 	order.Reference = strings.TrimSpace(order.Reference)
 	order.Status = strings.TrimSpace(order.Status)
 	order.Cluster = strings.TrimSpace(order.Cluster)
 	order.ConfirmationThreshold = strings.TrimSpace(order.ConfirmationThreshold)
-	if order.OrderID == "" || order.GuildID == "" || order.Plan == "" || order.ExpectedLamports <= 0 || order.DestinationWallet == "" || order.Reference == "" || order.Status == "" || order.Cluster == "" || order.ConfirmationThreshold == "" {
-		return store.SolPaymentOrder{}, fmt.Errorf("sol payment order is missing required fields")
+	if order.OrderID == "" || order.GuildID == "" || order.Plan == "" || order.Provider == "" || order.ListLamports <= 0 || order.DueLamports < 0 || order.Reference == "" || order.Status == "" {
+		return store.BillingOrder{}, fmt.Errorf("billing order is missing required fields")
+	}
+	if order.DueLamports > 0 && (order.DestinationWallet == "" || order.Cluster == "" || order.ConfirmationThreshold == "") {
+		return store.BillingOrder{}, fmt.Errorf("paid billing order is missing sol payment fields")
 	}
 	if order.ExpiresAt.IsZero() {
-		return store.SolPaymentOrder{}, fmt.Errorf("sol payment order expiration is required")
+		return store.BillingOrder{}, fmt.Errorf("billing order expiration is required")
 	}
 	if order.CreatedAt.IsZero() {
 		order.CreatedAt = now
 	}
 	order.UpdatedAt = now
 	if err := r.db.WithContext(ctx).Create(&order).Error; err != nil {
-		return store.SolPaymentOrder{}, err
+		return store.BillingOrder{}, err
 	}
 	return order, nil
 }
 
-func (r *BillingRepository) GetSolPaymentOrder(ctx context.Context, orderID string) (store.SolPaymentOrder, bool, error) {
-	var order store.SolPaymentOrder
+func (r *BillingRepository) GetBillingOrder(ctx context.Context, orderID string) (store.BillingOrder, bool, error) {
+	var order store.BillingOrder
 	err := r.db.WithContext(ctx).Where("order_id = ?", strings.TrimSpace(orderID)).First(&order).Error
 	if err == nil {
 		return order, true, nil
 	}
 	if errors.Is(err, gorm.ErrRecordNotFound) {
-		return store.SolPaymentOrder{}, false, nil
+		return store.BillingOrder{}, false, nil
 	}
-	return store.SolPaymentOrder{}, false, err
+	return store.BillingOrder{}, false, err
 }
 
-func (r *BillingRepository) GetSolPaymentOrderForUpdate(ctx context.Context, orderID string) (store.SolPaymentOrder, bool, error) {
-	var order store.SolPaymentOrder
+func (r *BillingRepository) GetBillingOrderForUpdate(ctx context.Context, orderID string) (store.BillingOrder, bool, error) {
+	var order store.BillingOrder
 	err := r.db.WithContext(ctx).
 		Clauses(clause.Locking{Strength: "UPDATE"}).
 		Where("order_id = ?", strings.TrimSpace(orderID)).
@@ -285,12 +297,12 @@ func (r *BillingRepository) GetSolPaymentOrderForUpdate(ctx context.Context, ord
 		return order, true, nil
 	}
 	if errors.Is(err, gorm.ErrRecordNotFound) {
-		return store.SolPaymentOrder{}, false, nil
+		return store.BillingOrder{}, false, nil
 	}
-	return store.SolPaymentOrder{}, false, err
+	return store.BillingOrder{}, false, err
 }
 
-func (r *BillingRepository) UpdateSolPaymentOrder(ctx context.Context, orderID string, updates map[string]any) error {
+func (r *BillingRepository) UpdateBillingOrder(ctx context.Context, orderID string, updates map[string]any) error {
 	if strings.TrimSpace(orderID) == "" {
 		return fmt.Errorf("order_id is required")
 	}
@@ -298,9 +310,213 @@ func (r *BillingRepository) UpdateSolPaymentOrder(ctx context.Context, orderID s
 		updates = map[string]any{}
 	}
 	updates["updated_at"] = time.Now().UTC()
-	return r.db.WithContext(ctx).Model(&store.SolPaymentOrder{}).
+	return r.db.WithContext(ctx).Model(&store.BillingOrder{}).
 		Where("order_id = ?", strings.TrimSpace(orderID)).
 		Updates(updates).Error
+}
+
+func (r *BillingRepository) CreateBillingCoupon(ctx context.Context, coupon store.BillingCoupon) (store.BillingCoupon, error) {
+	now := time.Now().UTC()
+	coupon.CouponID = strings.TrimSpace(coupon.CouponID)
+	coupon.CodeHash = strings.TrimSpace(coupon.CodeHash)
+	coupon.CodePrefix = strings.TrimSpace(coupon.CodePrefix)
+	coupon.Plan = strings.TrimSpace(coupon.Plan)
+	coupon.Status = strings.TrimSpace(coupon.Status)
+	coupon.OwnerNote = strings.TrimSpace(coupon.OwnerNote)
+	coupon.CreatedByUserID = strings.TrimSpace(coupon.CreatedByUserID)
+	if coupon.CouponID == "" || coupon.CodeHash == "" || coupon.CodePrefix == "" || coupon.Plan == "" || coupon.DiscountLamports <= 0 || coupon.Status == "" {
+		return store.BillingCoupon{}, fmt.Errorf("billing coupon is missing required fields")
+	}
+	if coupon.MaxRedemptions < 0 {
+		return store.BillingCoupon{}, fmt.Errorf("max redemptions cannot be negative")
+	}
+	if coupon.CreatedAt.IsZero() {
+		coupon.CreatedAt = now
+	}
+	coupon.UpdatedAt = now
+	if err := r.db.WithContext(ctx).Create(&coupon).Error; err != nil {
+		return store.BillingCoupon{}, err
+	}
+	return coupon, nil
+}
+
+func (r *BillingRepository) ListBillingCoupons(ctx context.Context) ([]store.BillingCoupon, error) {
+	var coupons []store.BillingCoupon
+	err := r.db.WithContext(ctx).
+		Order("created_at DESC, id DESC").
+		Find(&coupons).Error
+	return coupons, err
+}
+
+func (r *BillingRepository) GetBillingCouponByCodeHashForUpdate(ctx context.Context, codeHash string) (store.BillingCoupon, bool, error) {
+	var coupon store.BillingCoupon
+	err := r.db.WithContext(ctx).
+		Clauses(clause.Locking{Strength: "UPDATE"}).
+		Where("code_hash = ?", strings.TrimSpace(codeHash)).
+		First(&coupon).Error
+	if err == nil {
+		return coupon, true, nil
+	}
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return store.BillingCoupon{}, false, nil
+	}
+	return store.BillingCoupon{}, false, err
+}
+
+func (r *BillingRepository) GetBillingCouponByIDForUpdate(ctx context.Context, couponID string) (store.BillingCoupon, bool, error) {
+	var coupon store.BillingCoupon
+	err := r.db.WithContext(ctx).
+		Clauses(clause.Locking{Strength: "UPDATE"}).
+		Where("coupon_id = ?", strings.TrimSpace(couponID)).
+		First(&coupon).Error
+	if err == nil {
+		return coupon, true, nil
+	}
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return store.BillingCoupon{}, false, nil
+	}
+	return store.BillingCoupon{}, false, err
+}
+
+func (r *BillingRepository) FindBillingCouponsByPrefixForUpdate(ctx context.Context, prefix string) ([]store.BillingCoupon, error) {
+	var coupons []store.BillingCoupon
+	err := r.db.WithContext(ctx).
+		Clauses(clause.Locking{Strength: "UPDATE"}).
+		Where("code_prefix = ? OR coupon_id = ?", strings.TrimSpace(prefix), strings.TrimSpace(prefix)).
+		Order("created_at DESC, id DESC").
+		Find(&coupons).Error
+	return coupons, err
+}
+
+func (r *BillingRepository) UpdateBillingCoupon(ctx context.Context, couponID string, updates map[string]any) error {
+	if strings.TrimSpace(couponID) == "" {
+		return fmt.Errorf("coupon_id is required")
+	}
+	if updates == nil {
+		updates = map[string]any{}
+	}
+	updates["updated_at"] = time.Now().UTC()
+	return r.db.WithContext(ctx).Model(&store.BillingCoupon{}).
+		Where("coupon_id = ?", strings.TrimSpace(couponID)).
+		Updates(updates).Error
+}
+
+func (r *BillingRepository) CreateCouponRedemption(ctx context.Context, redemption store.BillingCouponRedemption) (store.BillingCouponRedemption, error) {
+	now := time.Now().UTC()
+	redemption.RedemptionID = strings.TrimSpace(redemption.RedemptionID)
+	redemption.CouponID = strings.TrimSpace(redemption.CouponID)
+	redemption.OrderID = strings.TrimSpace(redemption.OrderID)
+	redemption.GuildID = strings.TrimSpace(redemption.GuildID)
+	redemption.BillingOwnerUserID = strings.TrimSpace(redemption.BillingOwnerUserID)
+	redemption.Plan = strings.TrimSpace(redemption.Plan)
+	redemption.Status = strings.TrimSpace(redemption.Status)
+	if redemption.RedemptionID == "" || redemption.CouponID == "" || redemption.OrderID == "" || redemption.GuildID == "" || redemption.Plan == "" || redemption.ListLamports <= 0 || redemption.DiscountLamports <= 0 || redemption.DueLamports < 0 || redemption.Status == "" || redemption.ExpiresAt.IsZero() {
+		return store.BillingCouponRedemption{}, fmt.Errorf("billing coupon redemption is missing required fields")
+	}
+	if redemption.CreatedAt.IsZero() {
+		redemption.CreatedAt = now
+	}
+	redemption.UpdatedAt = now
+	if err := r.db.WithContext(ctx).Create(&redemption).Error; err != nil {
+		return store.BillingCouponRedemption{}, err
+	}
+	return redemption, nil
+}
+
+func (r *BillingRepository) GetCouponRedemptionByOrderForUpdate(ctx context.Context, orderID string) (store.BillingCouponRedemption, bool, error) {
+	var redemption store.BillingCouponRedemption
+	err := r.db.WithContext(ctx).
+		Clauses(clause.Locking{Strength: "UPDATE"}).
+		Where("order_id = ?", strings.TrimSpace(orderID)).
+		First(&redemption).Error
+	if err == nil {
+		return redemption, true, nil
+	}
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return store.BillingCouponRedemption{}, false, nil
+	}
+	return store.BillingCouponRedemption{}, false, err
+}
+
+func (r *BillingRepository) UpdateCouponRedemption(ctx context.Context, redemptionID string, updates map[string]any) error {
+	if strings.TrimSpace(redemptionID) == "" {
+		return fmt.Errorf("redemption_id is required")
+	}
+	if updates == nil {
+		updates = map[string]any{}
+	}
+	updates["updated_at"] = time.Now().UTC()
+	return r.db.WithContext(ctx).Model(&store.BillingCouponRedemption{}).
+		Where("redemption_id = ?", strings.TrimSpace(redemptionID)).
+		Updates(updates).Error
+}
+
+func (r *BillingRepository) CouponRedemptionCounts(ctx context.Context, couponID string) (CouponRedemptionCounts, error) {
+	var rows []struct {
+		Status string
+		Count  int
+	}
+	err := r.db.WithContext(ctx).
+		Model(&store.BillingCouponRedemption{}).
+		Select("status, COUNT(*) as count").
+		Where("coupon_id = ?", strings.TrimSpace(couponID)).
+		Group("status").
+		Scan(&rows).Error
+	if err != nil {
+		return CouponRedemptionCounts{}, err
+	}
+	var counts CouponRedemptionCounts
+	for _, row := range rows {
+		switch row.Status {
+		case "pending":
+			counts.Pending = row.Count
+		case "consumed":
+			counts.Consumed = row.Count
+		case "released":
+			counts.Released = row.Count
+		}
+	}
+	return counts, nil
+}
+
+func (r *BillingRepository) CouponRedemptionCountsForCoupons(ctx context.Context, couponIDs []string) (map[string]CouponRedemptionCounts, error) {
+	normalized := make([]string, 0, len(couponIDs))
+	for _, couponID := range couponIDs {
+		if couponID = strings.TrimSpace(couponID); couponID != "" {
+			normalized = append(normalized, couponID)
+		}
+	}
+	if len(normalized) == 0 {
+		return map[string]CouponRedemptionCounts{}, nil
+	}
+	var rows []struct {
+		CouponID string
+		Status   string
+		Count    int
+	}
+	err := r.db.WithContext(ctx).
+		Model(&store.BillingCouponRedemption{}).
+		Select("coupon_id, status, COUNT(*) as count").
+		Where("coupon_id IN ?", normalized).
+		Group("coupon_id, status").
+		Scan(&rows).Error
+	if err != nil {
+		return nil, err
+	}
+	result := make(map[string]CouponRedemptionCounts, len(normalized))
+	for _, row := range rows {
+		counts := result[row.CouponID]
+		switch row.Status {
+		case "pending":
+			counts.Pending = row.Count
+		case "consumed":
+			counts.Consumed = row.Count
+		case "released":
+			counts.Released = row.Count
+		}
+		result[row.CouponID] = counts
+	}
+	return result, nil
 }
 
 func (r *BillingRepository) RecordSolPaymentTransaction(ctx context.Context, transaction store.SolPaymentTransaction) (bool, error) {
@@ -339,11 +555,11 @@ func (r *BillingRepository) CreateActivationAPIKey(ctx context.Context, key stor
 	key.KeyID = strings.TrimSpace(key.KeyID)
 	key.KeyHash = strings.TrimSpace(key.KeyHash)
 	key.KeyPrefix = strings.TrimSpace(key.KeyPrefix)
-	key.PaymentOrderID = strings.TrimSpace(key.PaymentOrderID)
+	key.BillingOrderID = strings.TrimSpace(key.BillingOrderID)
 	key.GuildID = strings.TrimSpace(key.GuildID)
 	key.Plan = strings.TrimSpace(key.Plan)
 	key.Status = strings.TrimSpace(key.Status)
-	if key.KeyID == "" || key.KeyHash == "" || key.KeyPrefix == "" || key.PaymentOrderID == "" || key.GuildID == "" || key.Plan == "" || key.Status == "" || key.ExpiresAt.IsZero() {
+	if key.KeyID == "" || key.KeyHash == "" || key.KeyPrefix == "" || key.BillingOrderID == "" || key.GuildID == "" || key.Plan == "" || key.Status == "" || key.ExpiresAt.IsZero() {
 		return store.ActivationAPIKey{}, fmt.Errorf("activation api key is missing required fields")
 	}
 	if key.CreatedAt.IsZero() {
@@ -358,7 +574,7 @@ func (r *BillingRepository) CreateActivationAPIKey(ctx context.Context, key stor
 
 func (r *BillingRepository) GetActivationAPIKeyByPaymentOrder(ctx context.Context, orderID string) (store.ActivationAPIKey, bool, error) {
 	var key store.ActivationAPIKey
-	err := r.db.WithContext(ctx).Where("payment_order_id = ?", strings.TrimSpace(orderID)).First(&key).Error
+	err := r.db.WithContext(ctx).Where("billing_order_id = ?", strings.TrimSpace(orderID)).First(&key).Error
 	if err == nil {
 		return key, true, nil
 	}
@@ -372,7 +588,7 @@ func (r *BillingRepository) GetActivationAPIKeyByPaymentOrderForUpdate(ctx conte
 	var key store.ActivationAPIKey
 	err := r.db.WithContext(ctx).
 		Clauses(clause.Locking{Strength: "UPDATE"}).
-		Where("payment_order_id = ?", strings.TrimSpace(orderID)).
+		Where("billing_order_id = ?", strings.TrimSpace(orderID)).
 		First(&key).Error
 	if err == nil {
 		return key, true, nil
@@ -725,4 +941,8 @@ func isBillingUniqueConstraintError(err error) bool {
 	}
 	message := strings.ToLower(err.Error())
 	return strings.Contains(message, "unique constraint") || strings.Contains(message, "duplicate key")
+}
+
+func IsUniqueConstraintError(err error) bool {
+	return isBillingUniqueConstraintError(err)
 }

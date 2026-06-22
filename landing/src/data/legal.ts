@@ -76,7 +76,7 @@ export const legalDocuments: LegalDocument[] = [
         heading: 'Subscriptions and billing',
         body: [
           'Paid plans are billed per server and include defined limits for AI responses, web searches, knowledge storage, schedules, retention, music, and premium tools.',
-          'Paid access is applied only after Panda verifies a native SOL transaction for a server-created payment order and the billing owner activates the one-time key in Discord.',
+          'Paid access is applied only after Panda verifies a server-created billing order, including a native SOL payment or a coupon-covered zero-due order, and the billing owner activates the one-time key in Discord.',
         ],
       },
       {

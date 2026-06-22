@@ -22,7 +22,6 @@ const planRows = [
 ];
 
 const paymentApiBase = import.meta.env.PUBLIC_PANDA_API_BASE_URL || 'https://panda-assistant.fly.dev';
-const paymentRpcURL = import.meta.env.PUBLIC_SOLANA_RPC_URL || '';
 const defaultPlan = planOptions.find((plan) => plan.featured) ?? planOptions[0];
 ---
 
@@ -36,7 +35,7 @@ const defaultPlan = planOptions.find((plan) => plan.featured) ?? planOptions[0];
       <div class="pricing-summary">
         <p>
           Monthly per-server pricing, readable before anyone buys. Install starts a
-          14-day trial, then paid access activates from a verified native SOL payment.
+          14-day trial, then paid access activates from a verified billing order.
         </p>
         <a class="pricing-start" href={siteMeta.installUrl} target="_blank" rel="noreferrer">Start trial <span>↗</span></a>
       </div>
@@ -92,14 +91,13 @@ const defaultPlan = planOptions.find((plan) => plan.featured) ?? planOptions[0];
         class="sol-pay-console"
         data-sol-pay
         data-api-base={paymentApiBase}
-        data-rpc-url={paymentRpcURL}
       >
         <div class="sol-pay-heading">
           <div>
-            <span>Wallet payment</span>
-            <strong>Server-created SOL transfer</strong>
+            <span>Plan payment</span>
+            <strong>Server-created billing order</strong>
           </div>
-          <p>Connect a wallet, send the exact order transfer, then reveal one activation key for Discord.</p>
+          <p>Apply an optional coupon, pay any remaining SOL due, then reveal one activation key for Discord.</p>
         </div>
 
         <div class="sol-pay-grid">
@@ -122,6 +120,11 @@ const defaultPlan = planOptions.find((plan) => plan.featured) ?? planOptions[0];
                 }
               </div>
             </fieldset>
+
+            <label>
+              <span>Coupon code</span>
+              <input data-sol-coupon name="coupon_code" autocomplete="off" spellcheck="false" />
+            </label>
 
             <label>
               <span>Discord server ID</span>
@@ -155,7 +158,15 @@ const defaultPlan = planOptions.find((plan) => plan.featured) ?? planOptions[0];
                 <dd data-sol-order-plan>--</dd>
               </div>
               <div>
-                <dt>Amount</dt>
+                <dt>List price</dt>
+                <dd data-sol-order-list>--</dd>
+              </div>
+              <div>
+                <dt>Discount</dt>
+                <dd data-sol-order-discount>--</dd>
+              </div>
+              <div>
+                <dt>Amount due</dt>
                 <dd data-sol-order-amount>--</dd>
               </div>
               <div>
@@ -172,18 +183,22 @@ const defaultPlan = planOptions.find((plan) => plan.featured) ?? planOptions[0];
               </div>
             </dl>
 
-            <div class="sol-actions">
-              <button type="button" data-sol-send disabled>Sign and send</button>
-              <a data-sol-deeplink href="#" hidden>Open wallet app <span>↗</span></a>
+            <div data-sol-paid-controls>
+              <div class="sol-actions">
+                <button type="button" data-sol-send disabled>Sign and submit</button>
+              </div>
+
+              <label class="signature-field">
+                <span>Transaction signature</span>
+                <input data-sol-signature autocomplete="off" spellcheck="false" readonly />
+              </label>
+
+              <div class="sol-actions secondary">
+                <button type="button" data-sol-verify disabled>Verify signature</button>
+              </div>
             </div>
 
-            <label class="signature-field">
-              <span>Transaction signature</span>
-              <input data-sol-signature autocomplete="off" spellcheck="false" />
-            </label>
-
             <div class="sol-actions secondary">
-              <button type="button" data-sol-verify disabled>Verify signature</button>
               <button type="button" data-sol-reveal disabled>Reveal activation key</button>
             </div>
 
@@ -199,7 +214,7 @@ const defaultPlan = planOptions.find((plan) => plan.featured) ?? planOptions[0];
       </div>
 
       <div class="pricing-footer">
-        <p>SOL payments are verified against the configured Solana RPC before any server entitlement changes.</p>
+        <p>Paid SOL orders are verified against the configured Solana RPC before any server entitlement changes.</p>
         <a class="text-link" href={siteMeta.termsUrl}>
           Review terms <span>↗</span>
         </a>

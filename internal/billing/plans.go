@@ -37,6 +37,7 @@ const (
 
 	ProviderTrial  = "trial"
 	ProviderSol    = "sol"
+	ProviderCoupon = "coupon"
 	ProviderManual = "manual"
 
 	UsageReservationPending  = "pending"

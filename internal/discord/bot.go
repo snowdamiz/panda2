@@ -436,6 +436,8 @@ func applicationCommands() []disgoDiscord.ApplicationCommandCreate {
 	}
 	maxActivationKeyLength := 128
 	maxPaymentOrderIDLength := 80
+	maxCouponCodeLength := 64
+	maxCouponNoteLength := 160
 
 	commands := []disgoDiscord.ApplicationCommandCreate{
 		disgoDiscord.SlashCommandCreate{
@@ -458,6 +460,9 @@ func applicationCommands() []disgoDiscord.ApplicationCommandCreate {
 						{Name: "Status", Value: "status"},
 						{Name: "Activate", Value: "activate"},
 						{Name: "Revoke activation key", Value: "revoke"},
+						{Name: "Create coupon", Value: "coupon_create"},
+						{Name: "List coupons", Value: "coupon_list"},
+						{Name: "Revoke coupon", Value: "coupon_revoke"},
 					},
 				},
 				disgoDiscord.ApplicationCommandOptionString{
@@ -469,6 +474,52 @@ func applicationCommands() []disgoDiscord.ApplicationCommandCreate {
 				disgoDiscord.ApplicationCommandOptionString{
 					Name:        "order_id",
 					Description: "SOL payment order ID for operator revocation",
+					Required:    false,
+					MaxLength:   &maxPaymentOrderIDLength,
+				},
+				disgoDiscord.ApplicationCommandOptionString{
+					Name:        "plan",
+					Description: "Paid plan for coupon creation",
+					Required:    false,
+					Choices: []disgoDiscord.ApplicationCommandOptionChoiceString{
+						{Name: "Starter", Value: "starter"},
+						{Name: "Plus", Value: "plus"},
+						{Name: "Pro", Value: "pro"},
+						{Name: "Business", Value: "business"},
+					},
+				},
+				disgoDiscord.ApplicationCommandOptionString{
+					Name:        "discount_lamports",
+					Description: "Fixed coupon discount in lamports",
+					Required:    false,
+					MaxLength:   &maxPaymentOrderIDLength,
+				},
+				disgoDiscord.ApplicationCommandOptionString{
+					Name:        "coupon_code",
+					Description: "Optional custom coupon code, returned only once",
+					Required:    false,
+					MaxLength:   &maxCouponCodeLength,
+				},
+				disgoDiscord.ApplicationCommandOptionInt{
+					Name:        "max_redemptions",
+					Description: "Maximum uses; zero or omitted means unlimited",
+					Required:    false,
+				},
+				disgoDiscord.ApplicationCommandOptionString{
+					Name:        "expires_at",
+					Description: "Optional expiration as RFC3339 or YYYY-MM-DD",
+					Required:    false,
+					MaxLength:   &maxPaymentOrderIDLength,
+				},
+				disgoDiscord.ApplicationCommandOptionString{
+					Name:        "note",
+					Description: "Optional owner note for coupon list context",
+					Required:    false,
+					MaxLength:   &maxCouponNoteLength,
+				},
+				disgoDiscord.ApplicationCommandOptionString{
+					Name:        "coupon",
+					Description: "Coupon id or code prefix for revocation",
 					Required:    false,
 					MaxLength:   &maxPaymentOrderIDLength,
 				},
@@ -948,10 +999,13 @@ func (b *Bot) handleSlashCommand(event *events.ApplicationCommandInteractionCrea
 	if allowMultiselect, ok := data.OptBool("allow_multiselect"); ok && allowMultiselect {
 		request.Options["allow_multiselect"] = "true"
 	}
-	for _, name := range []string{"answer_length", "tool_policy", "prompt", "soul", "action", "confirm", "scope", "tool_name", "profile", "text", "when", "every", "target", "id", "pack", "input_json", "loop_mode", "default_volume", "vote_skip_threshold"} {
+	for _, name := range []string{"answer_length", "tool_policy", "prompt", "soul", "action", "confirm", "scope", "tool_name", "profile", "text", "when", "every", "target", "id", "pack", "input_json", "loop_mode", "default_volume", "vote_skip_threshold", "plan", "discount_lamports", "coupon_code", "expires_at", "note", "coupon", "coupon_id"} {
 		if value, ok := data.OptString(name); ok {
 			request.Options[name] = value
 		}
+	}
+	if maxRedemptions, ok := data.OptInt("max_redemptions"); ok {
+		request.Options["max_redemptions"] = strconv.Itoa(maxRedemptions)
 	}
 	if role, ok := data.OptRole("role"); ok {
 		request.Options["role_id"] = role.ID.String()

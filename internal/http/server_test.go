@@ -259,8 +259,8 @@ func TestSolPaymentOrderEndpointsCreateAndFetchOrders(t *testing.T) {
 	if order.ExpectedLamports != 49_000_000 || order.DestinationWallet != "treasury-wallet" || order.Cluster != "devnet" {
 		t.Fatalf("unexpected created order payment fields: %+v", order)
 	}
-	if !strings.Contains(order.PaymentURL, "solana:treasury-wallet?") || !strings.Contains(order.PaymentURL, order.Reference) {
-		t.Fatalf("expected payment URL to include treasury wallet and reference, got %q", order.PaymentURL)
+	if order.PaymentURL != "" {
+		t.Fatalf("expected no client-side payment URL, got %q", order.PaymentURL)
 	}
 
 	req, _ = stdhttp.NewRequest(stdhttp.MethodGet, "/billing/sol/orders/"+order.OrderID, nil)
