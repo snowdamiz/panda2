@@ -11,6 +11,12 @@ import (
 	"github.com/sn0w/panda2/internal/store"
 )
 
+func TestInstallResultURLBuildsLandingRoute(t *testing.T) {
+	if got := installResultURL("https://pandaclanker.xyz/", "install/success"); got != "https://pandaclanker.xyz/install/success" {
+		t.Fatalf("unexpected install result URL: %q", got)
+	}
+}
+
 func TestWorkerHandlesQueuedComposedEventJobs(t *testing.T) {
 	ctx := context.Background()
 	service, err := New(ctx, config.Config{

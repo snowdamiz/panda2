@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
@@ -170,8 +171,8 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 			ApplicationID:   cfg.DiscordApplicationID,
 			ClientSecret:    cfg.DiscordClientSecret,
 			RedirectURI:     cfg.DiscordInstallRedirectURI,
-			SuccessRedirect: "/install/success",
-			FailureRedirect: "/install/failed",
+			SuccessRedirect: installResultURL(cfg.PublicAppURL, "/install/success"),
+			FailureRedirect: installResultURL(cfg.PublicAppURL, "/install/failed"),
 		})
 	router := commands.NewRouter(adminService, assistantService, opsService, ratelimit.New(cfg.UserRateLimit, cfg.UserRateLimitWindow)).
 		WithComposedService(composedService).
@@ -222,6 +223,17 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 		worker:    worker,
 		scheduler: schedulerService,
 	}, nil
+}
+
+func installResultURL(publicURL, path string) string {
+	publicURL = strings.TrimRight(strings.TrimSpace(publicURL), "/")
+	if publicURL == "" {
+		return ""
+	}
+	if !strings.HasPrefix(path, "/") {
+		path = "/" + path
+	}
+	return publicURL + path
 }
 
 func (a *App) Run(ctx context.Context) error {
