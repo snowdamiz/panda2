@@ -7,18 +7,18 @@ import BaseLayout from '../../layouts/BaseLayout.astro';
 const setupSteps = [
   {
     number: '01',
-    title: 'Open the server',
-    body: 'Confirm Panda is visible in the member list, then choose the channel where you want the first setup check to happen.',
+    title: 'Talk to Panda',
+    body: 'Open your server and ask Panda to help set itself up. It can inspect current settings, then ask what roles, channels, and tools you want configured.',
   },
   {
     number: '02',
-    title: 'Run `/admin setup`',
-    body: 'Set the admin role, moderator role, and setup channel in one pass. Panda will report any missing Discord permissions there.',
+    title: 'Confirm the setup',
+    body: 'Choose Panda admin and moderator roles, allowed operating channels, per-tool role access, and the prompt or personality you want Panda to use.',
   },
   {
     number: '03',
-    title: 'Check `/billing`',
-    body: 'Review the trial, quotas, and activation status for this server before inviting members to rely on Panda.',
+    title: 'Use slash commands only when needed',
+    body: 'Most setup can happen in chat. Use `/billing` when you need to paste an activation key or review plan, quota, and trial status.',
   },
 ] as const;
 ---
@@ -30,7 +30,7 @@ const setupSteps = [
       <div class="install-result-copy">
         <span>INSTALL DETECTED</span>
         <h1>Panda is installed.</h1>
-        <p>Open Discord to finish setup with roles, channels, permissions, billing, and the first admin check.</p>
+        <p>Open Discord and configure Panda by chatting with it. Roles, channels, tool access, prompt, and personality can all be handled conversationally.</p>
         <div class="install-result-actions">
           <a href="https://discord.com/channels/@me" data-discord-server-link>Open Discord</a>
           <a href={siteMeta.accountUrl}>Account</a>
@@ -47,9 +47,9 @@ const setupSteps = [
             </div>
           </article>
         ))}
-        <div class="install-command-strip" aria-label="Suggested command order">
-          <span>/admin setup</span>
-          <span>/admin status</span>
+        <div class="install-command-strip" aria-label="Suggested setup prompts">
+          <span>Panda help me set you up</span>
+          <span>allow #panda</span>
           <span>/billing</span>
         </div>
       </div>

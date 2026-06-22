@@ -242,7 +242,9 @@ func newTestRouter(t *testing.T, client *fakeLLM, limit int, configureExecutor .
 	if err != nil {
 		t.Fatalf("tool registry: %v", err)
 	}
-	toolExecutor := tools.NewExecutor(registry, memoryService, configs).WithAdminOperations(adminService)
+	toolExecutor := tools.NewExecutor(registry, memoryService, configs).
+		WithAdminOperations(adminService).
+		WithOpsManager(opsService)
 	composedService := composed.NewService(repository.NewComposedToolRepository(db.DB), registry, toolExecutor, client, "openrouter/auto")
 	toolExecutor.WithDynamicToolProvider(composedService)
 	toolExecutor.WithComposedToolManager(composedService)
@@ -415,9 +417,14 @@ func TestRouterHelpShowsAdminGuidanceToGuildAdmins(t *testing.T) {
 	if !response.Ephemeral {
 		t.Fatalf("expected help response to be ephemeral: %+v", response)
 	}
-	for _, want := range []string{"**Admin commands**", "**Moderator tools**", "**Composed tools**", "`/admin", "tool_policy", "Role/channel access"} {
+	for _, want := range []string{"**Admin setup through chat**", "confirmation", "**Moderator tools**", "**Composed tools**", "Role/channel access"} {
 		if !strings.Contains(response.Content, want) {
 			t.Fatalf("admin help should include %q:\n%s", want, response.Content)
+		}
+	}
+	for _, hidden := range []string{"**Admin slash fallback**", "`/admin", "tool_policy"} {
+		if strings.Contains(response.Content, hidden) {
+			t.Fatalf("admin help should not include slash fallback %q:\n%s", hidden, response.Content)
 		}
 	}
 	if len(response.Content) > discordMessageContentLimit {
@@ -640,10 +647,13 @@ func TestAdminRoleProfileConfiguresDelegatedAdminRole(t *testing.T) {
 	}
 
 	help := router.Handle(ctx, Request{Command: "help", GuildID: "guild-1", UserID: "mod", RoleIDs: []string{"role-mod"}})
-	for _, want := range []string{"**Admin commands**", "**Moderator tools**", "Role/channel access"} {
+	for _, want := range []string{"**Admin setup through chat**", "**Moderator tools**", "Role/channel access"} {
 		if !strings.Contains(help.Content, want) {
 			t.Fatalf("expected admin role profile help to include %q:\n%s", want, help.Content)
 		}
+	}
+	if strings.Contains(help.Content, "**Admin slash fallback**") || strings.Contains(help.Content, "`/admin") {
+		t.Fatalf("admin role profile help should not include slash fallback:\n%s", help.Content)
 	}
 
 	behavior := router.Handle(ctx, Request{
@@ -1759,6 +1769,91 @@ func TestLLMToolConfirmationRendersButton(t *testing.T) {
 	}
 }
 
+func TestLLMToolConfirmationsRenderMultipleButtons(t *testing.T) {
+	const (
+		channelID = "100000000000000123"
+		roleID    = "100000000000000456"
+	)
+	client := &fakeLLM{responses: []llm.ChatResponse{
+		{
+			Model:   "fixture/model",
+			Content: "",
+			ToolCalls: []llm.ToolCall{
+				{
+					ID:   "call-allow-channel",
+					Type: "function",
+					Function: llm.ToolCallFunction{
+						Name:      "panda_manage_channel_rule",
+						Arguments: `{"action":"allow","channel_id":"` + channelID + `"}`,
+					},
+				},
+				{
+					ID:   "call-set-mod-role",
+					Type: "function",
+					Function: llm.ToolCallFunction{
+						Name:      "panda_manage_role_permission",
+						Arguments: `{"action":"add","role_id":"` + roleID + `","profile":"moderator"}`,
+					},
+				},
+			},
+		},
+		{Model: "fixture/model", Content: "I prepared the channel rule and moderator role changes."},
+	}}
+	router := newTestRouter(t, client, 20)
+	behavior := router.Handle(context.Background(), Request{
+		Command:      "admin",
+		Subcommand:   "behavior",
+		GuildID:      "guild-1",
+		UserID:       "admin",
+		IsGuildAdmin: true,
+		Options:      map[string]string{"tool_policy": "write_confirmed"},
+	})
+	if !strings.Contains(behavior.Content, "write_confirmed") {
+		t.Fatalf("expected tool policy update, got %+v", behavior)
+	}
+
+	response := router.Handle(context.Background(), Request{
+		Command:      "chat",
+		GuildID:      "guild-1",
+		ChannelID:    "channel-1",
+		UserID:       "admin",
+		IsGuildAdmin: true,
+		Options:      map[string]string{"question": "Panda allow " + channelID + " and make " + roleID + " a moderator role"},
+	})
+	if response.Confirmation == nil || len(response.Confirmations) != 2 {
+		t.Fatalf("expected two LLM-triggered confirmations, got %+v", response)
+	}
+	if !strings.Contains(response.Content, "Press each confirmation button") ||
+		!strings.Contains(response.Content, "channel access rule") ||
+		!strings.Contains(response.Content, "moderator") {
+		t.Fatalf("expected plural confirmation copy, got %q", response.Content)
+	}
+
+	confirmed := map[string]ToolConfirmationRequest{}
+	for _, confirmation := range response.Confirmations {
+		request, ok := RequestFromToolConfirmationID(confirmation.ID, Request{UserID: "admin"})
+		if !ok {
+			t.Fatalf("confirmation id did not parse: %+v", confirmation)
+		}
+		confirmed[request.Action] = request
+	}
+	channelRequest, ok := confirmed[toolActionChannelRuleSet]
+	if !ok || channelRequest.Options["channel_id"] != channelID || channelRequest.Options["rule"] != "allow" {
+		t.Fatalf("unexpected channel-rule confirmation: %+v", confirmed)
+	}
+	roleRequest, ok := confirmed[toolActionRoleProfileAdd]
+	if !ok || roleRequest.Options["role_id"] != roleID || roleRequest.Options["profile"] != "moderator" {
+		t.Fatalf("unexpected role-profile confirmation: %+v", confirmed)
+	}
+	if len(client.requests) != 2 || len(client.requests[1].Messages) == 0 {
+		t.Fatalf("expected initial and final LLM requests, got %+v", client.requests)
+	}
+	finalMessages := joinRequestMessages(client.requests[1])
+	if !strings.Contains(finalMessages, `"action":"channel_rule.set"`) || !strings.Contains(finalMessages, `"action":"role_profile.add"`) {
+		t.Fatalf("final request should include both tool results, got %s", finalMessages)
+	}
+}
+
 func requireConfirmation(t *testing.T, response Response) string {
 	t.Helper()
 	if !response.Ephemeral || response.Confirmation == nil || response.Confirmation.ID == "" || !response.Confirmation.Danger {
@@ -1958,6 +2053,56 @@ func TestNaturalMessageSetsSoulThroughAgentTool(t *testing.T) {
 	}
 	if len(client.requests) != 4 || !strings.Contains(joinRequestMessages(client.requests[3]), "crystalline and kind") {
 		t.Fatalf("agent soul missing from ask request: %+v", client.requests)
+	}
+}
+
+func TestNaturalMessageSetsPromptThroughAgentTool(t *testing.T) {
+	client := &fakeLLM{responses: []llm.ChatResponse{
+		{Content: `{"respond":true,"prompt":"set your server instructions to Prefer moderator context before answering.","tool_name":"panda_manage_prompt"}`},
+		{ToolCalls: []llm.ToolCall{{
+			ID:   "call-prompt-set",
+			Type: "function",
+			Function: llm.ToolCallFunction{
+				Name:      "panda_manage_prompt",
+				Arguments: `{"action":"set","prompt":"Prefer moderator context before answering."}`,
+			},
+		}}},
+		{Content: "Server prompt updated."},
+		{Content: "ok"},
+	}}
+	router := newTestRouter(t, client, 20)
+
+	response := router.HandleNaturalMessage(context.Background(), Request{
+		UserID:       "admin",
+		GuildID:      "guild-1",
+		ChannelID:    "channel-1",
+		IsGuildAdmin: true,
+		Options: map[string]string{
+			"message": "Panda set your server instructions to Prefer moderator context before answering.",
+		},
+	})
+	if response.Content != "Server prompt updated." {
+		t.Fatalf("expected model-rendered prompt update, got %+v", response)
+	}
+	if len(client.requests) != 3 {
+		t.Fatalf("expected classifier, prompt tool call, and final response, got %d request(s)", len(client.requests))
+	}
+	if names := requestToolNames(client.requests[1]); len(names) != 1 || !names["panda_manage_prompt"] {
+		t.Fatalf("expected only prompt management tool for natural prompt update, got %+v", names)
+	}
+
+	ask := router.Handle(context.Background(), Request{
+		Command:   "ask",
+		UserID:    "user-1",
+		GuildID:   "guild-1",
+		ChannelID: "channel-1",
+		Options:   map[string]string{"question": "hi"},
+	})
+	if ask.Content != "ok" {
+		t.Fatalf("unexpected ask response: %+v", ask)
+	}
+	if len(client.requests) != 4 || !strings.Contains(joinRequestMessages(client.requests[3]), "Prefer moderator context before answering.") {
+		t.Fatalf("server instructions missing from ask request: %+v", client.requests)
 	}
 }
 
@@ -2401,7 +2546,7 @@ func TestNaturalMessageAdminGetsManagementToolsWhenPolicyOff(t *testing.T) {
 		t.Fatalf("expected trigger and chat LLM requests, got %d", len(client.requests))
 	}
 	names := requestToolNames(client.requests[1])
-	for _, want := range []string{"panda_list_tools", "read_config", "panda_manage_soul", "panda_manage_tool_access", "panda_manage_composed_tool", "panda_manage_channel_rule", "generate_workflow_json"} {
+	for _, want := range []string{"panda_list_tools", "read_config", "panda_manage_soul", "panda_manage_prompt", "panda_manage_tool_access", "panda_manage_composed_tool", "panda_manage_channel_rule", "generate_workflow_json"} {
 		if !names[want] {
 			t.Fatalf("expected %s in admin natural-message tools, got %+v", want, names)
 		}
@@ -2457,6 +2602,51 @@ func TestGuildControlDoesNotGrantOwnerOpsTools(t *testing.T) {
 	})
 	if _, ok := ownerPermissions[admin.PermissionOwnerOps]; !ok {
 		t.Fatalf("expected bot owner to receive owner ops permission: %+v", ownerPermissions)
+	}
+}
+
+func TestNaturalOwnerOpsUsesConfirmationButton(t *testing.T) {
+	client := &fakeLLM{responses: []llm.ChatResponse{
+		{Content: `{"respond":true,"prompt":"drain the queue worker","tool_name":"panda_manage_ops"}`},
+		{ToolCalls: []llm.ToolCall{{
+			ID:   "call-ops-drain",
+			Type: "function",
+			Function: llm.ToolCallFunction{
+				Name:      "panda_manage_ops",
+				Arguments: `{"action":"drain"}`,
+			},
+		}}},
+		{Content: "Prepared the worker drain."},
+	}}
+	router := newTestRouter(t, client, 5)
+
+	response := router.HandleNaturalMessage(context.Background(), Request{
+		UserID:       "owner",
+		GuildID:      "guild-1",
+		ChannelID:    "channel-1",
+		IsOwner:      true,
+		IsGuildAdmin: true,
+		Options:      map[string]string{"message": "Panda drain the queue worker.", "bot_mentioned": "true"},
+	})
+	if response.Confirmation == nil || !response.Confirmation.Danger || response.Confirmation.ConfirmLabel != "Drain worker" {
+		t.Fatalf("expected owner ops confirmation, got %+v", response)
+	}
+	if names := requestToolNames(client.requests[1]); len(names) != 1 || !names["panda_manage_ops"] {
+		t.Fatalf("expected only owner ops tool for natural owner ops, got %+v", names)
+	}
+	confirmationRequest, ok := RequestFromToolConfirmationID(response.Confirmation.ID, Request{
+		UserID:       "owner",
+		GuildID:      "guild-1",
+		ChannelID:    "channel-1",
+		IsOwner:      true,
+		IsGuildAdmin: true,
+	})
+	if !ok || confirmationRequest.Action != toolActionOwnerOpsDrain {
+		t.Fatalf("expected owner ops confirmation request, got ok=%t request=%+v", ok, confirmationRequest)
+	}
+	confirmed := router.HandleToolConfirmation(context.Background(), confirmationRequest)
+	if !confirmed.Ephemeral || !strings.Contains(confirmed.Content, "draining") {
+		t.Fatalf("expected confirmed worker drain, got %+v", confirmed)
 	}
 }
 

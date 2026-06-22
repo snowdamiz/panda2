@@ -9,7 +9,6 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -29,7 +28,6 @@ import (
 	"github.com/sn0w/panda2/internal/commands"
 	"github.com/sn0w/panda2/internal/config"
 	contextsvc "github.com/sn0w/panda2/internal/context"
-	"github.com/sn0w/panda2/internal/features"
 	"github.com/sn0w/panda2/internal/music"
 	"github.com/sn0w/panda2/internal/polls"
 	"github.com/sn0w/panda2/internal/scheduler"
@@ -98,6 +96,8 @@ const (
 	dangerEmbedColor  = 0xed4245
 	musicEmbedColor   = 0xff66a8
 )
+
+const billingSlashCommand = "billing"
 
 type interactionJobPayload struct {
 	ApplicationID string                  `json:"application_id"`
@@ -389,62 +389,13 @@ func isRecoverableCommandRegistrationError(err error) bool {
 	}
 }
 
-func featureChoices() []disgoDiscord.ApplicationCommandOptionChoiceString {
-	public := features.PublicCatalog()
-	choices := make([]disgoDiscord.ApplicationCommandOptionChoiceString, 0, len(public))
-	for _, feature := range public {
-		choices = append(choices, disgoDiscord.ApplicationCommandOptionChoiceString{
-			Name:  feature.Label,
-			Value: feature.ID,
-		})
-	}
-	return choices
-}
-
 func applicationCommands() []disgoDiscord.ApplicationCommandCreate {
-	minQuestionLength := 1
-	maxQuestionLength := 1800
-	maxPollQuestionLength := polls.MaxQuestionRunes
-	maxPollAnswersLength := polls.MaxAnswers * (polls.MaxAnswerRunes + 3)
-	minPollDurationHours := 1
-	maxPollDurationHours := polls.MaxDurationHours
-	maxConfirmLength := 100
-	maxTextLength := 4000
-	confirmOption := disgoDiscord.ApplicationCommandOptionString{
-		Name:        "confirm",
-		Description: "Confirmation token from a pending dangerous action",
-		Required:    false,
-		MaxLength:   &maxConfirmLength,
-	}
-	dryRunOption := disgoDiscord.ApplicationCommandOptionBool{
-		Name:        "dry_run",
-		Description: "Preview the change without saving it",
-		Required:    false,
-	}
-	roleProfileOption := disgoDiscord.ApplicationCommandOptionString{
-		Name:        "profile",
-		Description: "Panda role profile",
-		Required:    false,
-		Choices: []disgoDiscord.ApplicationCommandOptionChoiceString{
-			{Name: "Admin", Value: "admin"},
-			{Name: "Moderator", Value: "moderator"},
-		},
-	}
 	maxActivationKeyLength := 128
-	maxPaymentOrderIDLength := 80
 
 	commands := []disgoDiscord.ApplicationCommandCreate{
 		disgoDiscord.SlashCommandCreate{
-			Name:        "ping",
-			Description: "Check whether Panda is responding",
-		},
-		disgoDiscord.SlashCommandCreate{
-			Name:        "help",
-			Description: "Show Panda commands",
-		},
-		disgoDiscord.SlashCommandCreate{
-			Name:        "billing",
-			Description: "Show or manage Panda plan, renewal, quota, and billing",
+			Name:        billingSlashCommand,
+			Description: "Show billing status or activate Panda with a one-time key",
 			Options: []disgoDiscord.ApplicationCommandOption{
 				disgoDiscord.ApplicationCommandOptionString{
 					Name:        "action",
@@ -453,7 +404,6 @@ func applicationCommands() []disgoDiscord.ApplicationCommandCreate {
 					Choices: []disgoDiscord.ApplicationCommandOptionChoiceString{
 						{Name: "Status", Value: "status"},
 						{Name: "Activate", Value: "activate"},
-						{Name: "Revoke activation key", Value: "revoke"},
 					},
 				},
 				disgoDiscord.ApplicationCommandOptionString{
@@ -462,466 +412,10 @@ func applicationCommands() []disgoDiscord.ApplicationCommandCreate {
 					Required:    false,
 					MaxLength:   &maxActivationKeyLength,
 				},
-				disgoDiscord.ApplicationCommandOptionString{
-					Name:        "order_id",
-					Description: "SOL payment order ID for operator revocation",
-					Required:    false,
-					MaxLength:   &maxPaymentOrderIDLength,
-				},
-			},
-		},
-		disgoDiscord.SlashCommandCreate{
-			Name:        "support",
-			Description: "Create a safe Panda support bundle",
-		},
-		disgoDiscord.SlashCommandCreate{
-			Name:        "data",
-			Description: "Export Panda server data",
-			Options: []disgoDiscord.ApplicationCommandOption{
-				disgoDiscord.ApplicationCommandOptionSubCommand{
-					Name:        "export",
-					Description: "Show a safe data export summary",
-				},
-			},
-		},
-		disgoDiscord.SlashCommandCreate{
-			Name:        "poll",
-			Description: "Create a native Discord poll",
-			Options: []disgoDiscord.ApplicationCommandOption{
-				disgoDiscord.ApplicationCommandOptionString{
-					Name:        "question",
-					Description: "Poll question",
-					Required:    true,
-					MinLength:   &minQuestionLength,
-					MaxLength:   &maxPollQuestionLength,
-				},
-				disgoDiscord.ApplicationCommandOptionString{
-					Name:        "answers",
-					Description: "Answers separated by |, semicolons, or new lines",
-					Required:    true,
-					MinLength:   &minQuestionLength,
-					MaxLength:   &maxPollAnswersLength,
-				},
-				disgoDiscord.ApplicationCommandOptionInt{
-					Name:        "duration_hours",
-					Description: "How long voting stays open",
-					Required:    false,
-					MinValue:    &minPollDurationHours,
-					MaxValue:    &maxPollDurationHours,
-				},
-				disgoDiscord.ApplicationCommandOptionBool{
-					Name:        "allow_multiselect",
-					Description: "Allow people to vote for multiple answers",
-					Required:    false,
-				},
-			},
-		},
-		disgoDiscord.SlashCommandCreate{
-			Name:        "reminder",
-			Description: "Create and manage Panda reminders",
-			Options: []disgoDiscord.ApplicationCommandOption{
-				disgoDiscord.ApplicationCommandOptionString{
-					Name:        "action",
-					Description: "Reminder action",
-					Required:    true,
-					Choices: []disgoDiscord.ApplicationCommandOptionChoiceString{
-						{Name: "Create", Value: "create"},
-						{Name: "List", Value: "list"},
-						{Name: "Cancel", Value: "cancel"},
-						{Name: "Complete", Value: "complete"},
-						{Name: "Snooze", Value: "snooze"},
-					},
-				},
-				disgoDiscord.ApplicationCommandOptionString{Name: "text", Description: "Reminder text", Required: false, MaxLength: &maxTextLength},
-				disgoDiscord.ApplicationCommandOptionString{Name: "when", Description: "When to run, such as 2026-06-22T18:00:00Z, in 2 hours, tomorrow, every friday", Required: false, MaxLength: &maxQuestionLength},
-				disgoDiscord.ApplicationCommandOptionString{Name: "every", Description: "Repeat interval such as 24h, every day, or every week", Required: false, MaxLength: &maxQuestionLength},
-				disgoDiscord.ApplicationCommandOptionString{
-					Name:        "target",
-					Description: "Reminder target",
-					Required:    false,
-					Choices: []disgoDiscord.ApplicationCommandOptionChoiceString{
-						{Name: "Me", Value: "me"},
-						{Name: "Channel", Value: "channel"},
-						{Name: "Role", Value: "role"},
-					},
-				},
-				disgoDiscord.ApplicationCommandOptionRole{Name: "role", Description: "Role target when target is role", Required: false},
-				disgoDiscord.ApplicationCommandOptionString{Name: "id", Description: "Reminder id for cancel, complete, or snooze", Required: false, MaxLength: &maxConfirmLength},
-				disgoDiscord.ApplicationCommandOptionBool{Name: "confirm_public", Description: "Confirm public or role-targeted reminder creation", Required: false},
-				dryRunOption,
-			},
-		},
-		disgoDiscord.SlashCommandCreate{
-			Name:        "schedule",
-			Description: "Schedule approved composed tools",
-			Options: []disgoDiscord.ApplicationCommandOption{
-				disgoDiscord.ApplicationCommandOptionString{
-					Name:        "action",
-					Description: "Schedule action",
-					Required:    true,
-					Choices: []disgoDiscord.ApplicationCommandOptionChoiceString{
-						{Name: "List", Value: "list"},
-						{Name: "Create", Value: "create"},
-						{Name: "Cancel", Value: "cancel"},
-					},
-				},
-				disgoDiscord.ApplicationCommandOptionString{Name: "tool_name", Description: "Approved composed tool name", Required: false, MaxLength: &maxConfirmLength},
-				disgoDiscord.ApplicationCommandOptionString{Name: "when", Description: "When to run", Required: false, MaxLength: &maxQuestionLength},
-				disgoDiscord.ApplicationCommandOptionString{Name: "every", Description: "Repeat interval", Required: false, MaxLength: &maxQuestionLength},
-				disgoDiscord.ApplicationCommandOptionString{Name: "input_json", Description: "JSON object input for the composed tool", Required: false, MaxLength: &maxTextLength},
-				disgoDiscord.ApplicationCommandOptionString{Name: "id", Description: "Schedule id for cancel", Required: false, MaxLength: &maxConfirmLength},
-				dryRunOption,
-			},
-		},
-		disgoDiscord.SlashCommandCreate{
-			Name:        "ops",
-			Description: "Owner operations",
-			Options: []disgoDiscord.ApplicationCommandOption{
-				disgoDiscord.ApplicationCommandOptionSubCommand{
-					Name:        "health",
-					Description: "Check bot operational health",
-				},
-				disgoDiscord.ApplicationCommandOptionSubCommand{
-					Name:        "guilds",
-					Description: "Show configured guild count",
-				},
-				disgoDiscord.ApplicationCommandOptionSubCommand{
-					Name:        "reload",
-					Description: "Recheck runtime dependencies",
-				},
-				disgoDiscord.ApplicationCommandOptionSubCommand{
-					Name:        "drain",
-					Description: "Stop claiming new background jobs",
-				},
-				disgoDiscord.ApplicationCommandOptionSubCommand{
-					Name:        "resume",
-					Description: "Resume background job processing",
-				},
-				disgoDiscord.ApplicationCommandOptionSubCommand{
-					Name:        "incident",
-					Description: "Manage incident mode",
-					Options: []disgoDiscord.ApplicationCommandOption{
-						disgoDiscord.ApplicationCommandOptionString{
-							Name:        "action",
-							Description: "Incident action",
-							Required:    false,
-							Choices: []disgoDiscord.ApplicationCommandOptionChoiceString{
-								{Name: "Enable", Value: "enable"},
-								{Name: "Disable", Value: "disable"},
-								{Name: "Status", Value: "status"},
-							},
-						},
-					},
-				},
 			},
 		},
 		disgoDiscord.MessageCommandCreate{Name: "Explain with Panda"},
 		disgoDiscord.MessageCommandCreate{Name: "Summarize with Panda"},
-		disgoDiscord.SlashCommandCreate{
-			Name:        "admin",
-			Description: "Admin commands",
-			Options: []disgoDiscord.ApplicationCommandOption{
-				disgoDiscord.ApplicationCommandOptionSubCommand{
-					Name:        "role",
-					Description: "Set which Discord roles mean Panda admin or moderator",
-					Options: []disgoDiscord.ApplicationCommandOption{
-						disgoDiscord.ApplicationCommandOptionString{
-							Name:        "action",
-							Description: "Role profile action",
-							Required:    true,
-							Choices: []disgoDiscord.ApplicationCommandOptionChoiceString{
-								{Name: "List", Value: "list"},
-								{Name: "Set", Value: "set"},
-								{Name: "Remove", Value: "remove"},
-							},
-						},
-						roleProfileOption,
-						disgoDiscord.ApplicationCommandOptionRole{
-							Name:        "role",
-							Description: "Role to mark as admin/moderator",
-							Required:    false,
-						},
-					},
-				},
-				disgoDiscord.ApplicationCommandOptionSubCommand{
-					Name:        "member-role",
-					Description: "Assign or remove a Discord role for a user",
-					Options: []disgoDiscord.ApplicationCommandOption{
-						disgoDiscord.ApplicationCommandOptionString{
-							Name:        "action",
-							Description: "Member role action",
-							Required:    true,
-							Choices: []disgoDiscord.ApplicationCommandOptionChoiceString{
-								{Name: "Add", Value: "add"},
-								{Name: "Remove", Value: "remove"},
-							},
-						},
-						disgoDiscord.ApplicationCommandOptionUser{
-							Name:        "user",
-							Description: "User to update",
-							Required:    true,
-						},
-						disgoDiscord.ApplicationCommandOptionRole{
-							Name:        "role",
-							Description: "Role to assign or remove",
-							Required:    true,
-						},
-					},
-				},
-				disgoDiscord.ApplicationCommandOptionSubCommand{
-					Name:        "tool",
-					Description: "Allow a role to use a specific Panda tool",
-					Options: []disgoDiscord.ApplicationCommandOption{
-						disgoDiscord.ApplicationCommandOptionString{
-							Name:        "action",
-							Description: "Tool access action",
-							Required:    true,
-							Choices: []disgoDiscord.ApplicationCommandOptionChoiceString{
-								{Name: "List", Value: "list"},
-								{Name: "Add", Value: "add"},
-								{Name: "Remove", Value: "remove"},
-							},
-						},
-						disgoDiscord.ApplicationCommandOptionString{
-							Name:        "tool_name",
-							Description: "Native or composed tool name, such as web.search or welcome_builder",
-							Required:    false,
-							MaxLength:   &maxConfirmLength,
-						},
-						disgoDiscord.ApplicationCommandOptionRole{
-							Name:        "role",
-							Description: "Role to allow or remove",
-							Required:    false,
-						},
-					},
-				},
-				disgoDiscord.ApplicationCommandOptionSubCommand{
-					Name:        "channel",
-					Description: "Choose which channels can use Panda assistant features",
-					Options: []disgoDiscord.ApplicationCommandOption{
-						disgoDiscord.ApplicationCommandOptionString{
-							Name:        "action",
-							Description: "Channel access action",
-							Required:    true,
-							Choices: []disgoDiscord.ApplicationCommandOptionChoiceString{
-								{Name: "List", Value: "list"},
-								{Name: "Allow", Value: "allow"},
-								{Name: "Deny", Value: "deny"},
-								{Name: "Remove", Value: "remove"},
-							},
-						},
-						disgoDiscord.ApplicationCommandOptionChannel{
-							Name:        "channel",
-							Description: "Channel to allow, deny, or remove",
-							Required:    false,
-							ChannelTypes: []disgoDiscord.ChannelType{
-								disgoDiscord.ChannelTypeGuildText,
-								disgoDiscord.ChannelTypeGuildNews,
-								disgoDiscord.ChannelTypeGuildForum,
-								disgoDiscord.ChannelTypeGuildMedia,
-								disgoDiscord.ChannelTypeGuildPublicThread,
-								disgoDiscord.ChannelTypeGuildNewsThread,
-								disgoDiscord.ChannelTypeGuildPrivateThread,
-							},
-						},
-						dryRunOption,
-					},
-				},
-				disgoDiscord.ApplicationCommandOptionSubCommand{
-					Name:        "behavior",
-					Description: "Configure Panda response length and tool access",
-					Options: []disgoDiscord.ApplicationCommandOption{
-						disgoDiscord.ApplicationCommandOptionString{
-							Name:        "answer_length",
-							Description: "Preferred response length",
-							Required:    false,
-							Choices: []disgoDiscord.ApplicationCommandOptionChoiceString{
-								{Name: "Brief", Value: "brief"},
-								{Name: "Standard", Value: "standard"},
-								{Name: "Detailed", Value: "detailed"},
-							},
-						},
-						disgoDiscord.ApplicationCommandOptionString{
-							Name:        "tool_policy",
-							Description: "Tool policy",
-							Required:    false,
-							Choices: []disgoDiscord.ApplicationCommandOptionChoiceString{
-								{Name: "Off", Value: "off"},
-								{Name: "Read Only", Value: "read_only"},
-								{Name: "Assistive", Value: "assistive"},
-								{Name: "Admin Only", Value: "admin_only"},
-								{Name: "Moderator", Value: "moderator"},
-								{Name: "Write Confirmed", Value: "write_confirmed"},
-								{Name: "Owner Ops", Value: "owner_ops"},
-							},
-						},
-						dryRunOption,
-					},
-				},
-				disgoDiscord.ApplicationCommandOptionSubCommand{
-					Name:        "billing",
-					Description: "Show plan, renewal, and quota status",
-				},
-				disgoDiscord.ApplicationCommandOptionSubCommand{
-					Name:        "prompt",
-					Description: "Set server-level assistant instructions",
-					Options: []disgoDiscord.ApplicationCommandOption{
-						disgoDiscord.ApplicationCommandOptionString{
-							Name:        "prompt",
-							Description: "Instructions to layer onto the system prompt",
-							Required:    false,
-							MaxLength:   &maxTextLength,
-						},
-						dryRunOption,
-					},
-				},
-				disgoDiscord.ApplicationCommandOptionSubCommand{
-					Name:        "soul",
-					Description: "Set Panda's response style and personality",
-					Options: []disgoDiscord.ApplicationCommandOption{
-						disgoDiscord.ApplicationCommandOptionString{
-							Name:        "soul",
-							Description: "Personality, style, and response voice",
-							Required:    false,
-							MaxLength:   &maxTextLength,
-						},
-						dryRunOption,
-					},
-				},
-				disgoDiscord.ApplicationCommandOptionSubCommand{
-					Name:        "audit",
-					Description: "Show recent privileged actions",
-				},
-				disgoDiscord.ApplicationCommandOptionSubCommand{
-					Name:        "status",
-					Description: "Show Panda setup, queues, schedules, alerts, and warnings",
-				},
-				disgoDiscord.ApplicationCommandOptionSubCommand{
-					Name:        "feature",
-					Description: "View, update, or reauthorize enabled Panda features",
-					Options: []disgoDiscord.ApplicationCommandOption{
-						disgoDiscord.ApplicationCommandOptionString{
-							Name:        "action",
-							Description: "Feature action",
-							Required:    true,
-							Choices: []disgoDiscord.ApplicationCommandOptionChoiceString{
-								{Name: "List", Value: "list"},
-								{Name: "Enable", Value: "enable"},
-								{Name: "Disable", Value: "disable"},
-								{Name: "Reauthorize", Value: "reauthorize"},
-							},
-						},
-						disgoDiscord.ApplicationCommandOptionString{
-							Name:        "feature_id",
-							Description: "Feature to enable or disable",
-							Required:    false,
-							Choices:     featureChoices(),
-						},
-						dryRunOption,
-					},
-				},
-				disgoDiscord.ApplicationCommandOptionSubCommand{
-					Name:        "setup",
-					Description: "Run setup checklist and optionally save common defaults",
-					Options: []disgoDiscord.ApplicationCommandOption{
-						disgoDiscord.ApplicationCommandOptionRole{Name: "admin_role", Description: "Role to mark as Panda admin", Required: false},
-						disgoDiscord.ApplicationCommandOptionRole{Name: "moderator_role", Description: "Role to mark as Panda moderator", Required: false},
-						disgoDiscord.ApplicationCommandOptionChannel{
-							Name:        "channel",
-							Description: "Default channel to allow Panda assistant use",
-							Required:    false,
-							ChannelTypes: []disgoDiscord.ChannelType{
-								disgoDiscord.ChannelTypeGuildText,
-								disgoDiscord.ChannelTypeGuildNews,
-								disgoDiscord.ChannelTypeGuildForum,
-								disgoDiscord.ChannelTypeGuildPublicThread,
-								disgoDiscord.ChannelTypeGuildNewsThread,
-								disgoDiscord.ChannelTypeGuildPrivateThread,
-							},
-						},
-						dryRunOption,
-					},
-				},
-				disgoDiscord.ApplicationCommandOptionSubCommand{
-					Name:        "alerts",
-					Description: "Manage recommended moderation and server-log alert packs",
-					Options: []disgoDiscord.ApplicationCommandOption{
-						disgoDiscord.ApplicationCommandOptionString{
-							Name:        "action",
-							Description: "Alert action",
-							Required:    true,
-							Choices: []disgoDiscord.ApplicationCommandOptionChoiceString{
-								{Name: "Preview", Value: "preview"},
-								{Name: "List", Value: "list"},
-								{Name: "Enable", Value: "enable"},
-								{Name: "Disable", Value: "disable"},
-								{Name: "Test", Value: "test"},
-							},
-						},
-						disgoDiscord.ApplicationCommandOptionString{
-							Name:        "pack",
-							Description: "Alert pack",
-							Required:    false,
-							Choices: []disgoDiscord.ApplicationCommandOptionChoiceString{
-								{Name: "Security", Value: "security"},
-								{Name: "Moderation", Value: "moderation"},
-								{Name: "Community", Value: "community"},
-								{Name: "All", Value: "all"},
-							},
-						},
-						disgoDiscord.ApplicationCommandOptionChannel{
-							Name:        "channel",
-							Description: "Alert destination channel",
-							Required:    false,
-							ChannelTypes: []disgoDiscord.ChannelType{
-								disgoDiscord.ChannelTypeGuildText,
-								disgoDiscord.ChannelTypeGuildNews,
-							},
-						},
-						dryRunOption,
-					},
-				},
-				disgoDiscord.ApplicationCommandOptionSubCommand{
-					Name:        "feedback",
-					Description: "Show private aggregate assistant feedback trends",
-				},
-				disgoDiscord.ApplicationCommandOptionSubCommand{
-					Name:        "music",
-					Description: "Configure per-server music settings",
-					Options: []disgoDiscord.ApplicationCommandOption{
-						disgoDiscord.ApplicationCommandOptionString{
-							Name:        "loop_mode",
-							Description: "Default loop mode",
-							Required:    false,
-							Choices: []disgoDiscord.ApplicationCommandOptionChoiceString{
-								{Name: "Off", Value: "off"},
-								{Name: "Track", Value: "track"},
-								{Name: "Queue", Value: "queue"},
-							},
-						},
-						disgoDiscord.ApplicationCommandOptionString{Name: "default_volume", Description: "Default volume percentage 1-200", Required: false, MaxLength: &maxConfirmLength},
-						disgoDiscord.ApplicationCommandOptionRole{Name: "dj_role", Description: "Role allowed to use disruptive music controls", Required: false},
-						disgoDiscord.ApplicationCommandOptionString{Name: "vote_skip_threshold", Description: "Vote skip threshold from 0.1 to 1", Required: false, MaxLength: &maxConfirmLength},
-						dryRunOption,
-					},
-				},
-				disgoDiscord.ApplicationCommandOptionSubCommand{
-					Name:        "enable",
-					Description: "Enable assistant responses",
-					Options: []disgoDiscord.ApplicationCommandOption{
-						dryRunOption,
-					},
-				},
-				disgoDiscord.ApplicationCommandOptionSubCommand{
-					Name:        "disable",
-					Description: "Disable assistant responses",
-					Options: []disgoDiscord.ApplicationCommandOption{
-						confirmOption,
-						dryRunOption,
-					},
-				},
-			},
-		},
 	}
 	return commands
 }
@@ -949,61 +443,44 @@ func (b *Bot) handleSlashCommand(event *events.ApplicationCommandInteractionCrea
 	if member := event.Member(); member != nil {
 		request.RoleIDs = snowflakeStrings(member.RoleIDs)
 	}
-	if data.SubCommandName != nil {
-		request.Subcommand = *data.SubCommandName
+	if !registeredSlashCommandName(request.Command) {
+		response := removedSlashCommandResponse(request.Command)
+		if err := event.CreateMessage(messageCreateFromResponse(response)); err != nil {
+			b.logger.Warn("failed to reject removed slash command", slog.Any("err", err), slog.String("request_id", request.RequestID), slog.String("command", request.Command))
+		}
+		return
 	}
 	if guildID := event.GuildID(); guildID != nil {
 		request.GuildID = guildID.String()
 	}
 	request.ChannelID = event.Channel().ID().String()
-	if question, ok := data.OptString("question"); ok {
-		request.Options["question"] = question
-	}
-	if answers, ok := data.OptString("answers"); ok {
-		request.Options["answers"] = answers
-	}
-	if durationHours, ok := data.OptInt("duration_hours"); ok {
-		request.Options["duration_hours"] = strconv.Itoa(durationHours)
-	}
-	if allowMultiselect, ok := data.OptBool("allow_multiselect"); ok && allowMultiselect {
-		request.Options["allow_multiselect"] = "true"
-	}
-	for _, name := range []string{"answer_length", "tool_policy", "prompt", "soul", "action", "confirm", "scope", "tool_name", "profile", "feature_id", "text", "when", "every", "target", "id", "pack", "input_json", "loop_mode", "default_volume", "vote_skip_threshold"} {
+	for _, name := range []string{"action", "api_key"} {
 		if value, ok := data.OptString(name); ok {
 			request.Options[name] = value
 		}
 	}
-	if role, ok := data.OptRole("role"); ok {
-		request.Options["role_id"] = role.ID.String()
-		request.Options["role_name"] = role.Name
-	}
-	if role, ok := data.OptRole("admin_role"); ok {
-		request.Options["admin_role_id"] = role.ID.String()
-		request.Options["admin_role_name"] = role.Name
-	}
-	if role, ok := data.OptRole("moderator_role"); ok {
-		request.Options["moderator_role_id"] = role.ID.String()
-		request.Options["moderator_role_name"] = role.Name
-	}
-	if role, ok := data.OptRole("dj_role"); ok {
-		request.Options["dj_role_id"] = role.ID.String()
-		request.Options["dj_role_name"] = role.Name
-	}
-	if channel, ok := data.OptChannel("channel"); ok {
-		request.Options["channel_id"] = channel.ID.String()
-		request.Options["channel_name"] = channel.Name
-	}
-	if user, ok := data.OptUser("user"); ok {
-		request.Options["member_user_id"] = user.ID.String()
-		request.Options["member_user_name"] = user.Username
-	}
-	if dryRun, ok := data.OptBool("dry_run"); ok && dryRun {
-		request.Options["dry_run"] = "true"
-	}
-	if confirmPublic, ok := data.OptBool("confirm_public"); ok && confirmPublic {
-		request.Options["confirm_public"] = "true"
-	}
 	b.respondToInteraction(event, request)
+}
+
+func registeredSlashCommandName(name string) bool {
+	return strings.EqualFold(strings.TrimSpace(name), billingSlashCommand)
+}
+
+func removedSlashCommandResponse(command string) commands.Response {
+	command = strings.TrimSpace(command)
+	if command == "" {
+		command = "this command"
+	} else {
+		command = "/" + command
+	}
+	return commands.Response{
+		Content:   fmt.Sprintf("`%s` has moved to natural Panda chat. Use `/billing` only for billing status or one-time activation keys.", command),
+		Ephemeral: true,
+		Presentation: commands.Presentation{
+			Title:  "Slash command moved",
+			Accent: commands.AccentWarning,
+		},
+	}
 }
 
 func (b *Bot) handleMessageCommand(event *events.ApplicationCommandInteractionCreate, data disgoDiscord.MessageCommandInteractionData) {
@@ -1691,20 +1168,7 @@ func utf8RuneCount(value string) int {
 
 func componentsFromResponse(response commands.Response) []disgoDiscord.LayoutComponent {
 	var components []disgoDiscord.LayoutComponent
-	if response.Confirmation != nil && strings.TrimSpace(response.Confirmation.ID) != "" {
-		confirmation := response.Confirmation
-		confirmLabel := firstNonEmptyText(confirmation.ConfirmLabel, "Confirm")
-		cancelLabel := firstNonEmptyText(confirmation.CancelLabel, "Cancel")
-		cancelID := firstNonEmptyText(confirmation.CancelID, commands.ConfirmationCancelID)
-		confirmButton := disgoDiscord.NewSuccessButton(confirmLabel, confirmation.ID)
-		if confirmation.Danger {
-			confirmButton = disgoDiscord.NewDangerButton(confirmLabel, confirmation.ID)
-		}
-		components = append(components, disgoDiscord.NewActionRow(
-			confirmButton,
-			disgoDiscord.NewSecondaryButton(cancelLabel, cancelID),
-		))
-	}
+	components = append(components, confirmationComponentsFromResponse(response)...)
 	if response.Feedback != nil && response.Feedback.TargetID != 0 {
 		buttons := []disgoDiscord.InteractiveComponent{
 			disgoDiscord.NewSecondaryButton("Helpful", commands.FeedbackButtonID(response.Feedback.TargetID, "helpful")),
@@ -1719,6 +1183,82 @@ func componentsFromResponse(response commands.Response) []disgoDiscord.LayoutCom
 		components = append(components, disgoDiscord.NewActionRow(buttons...))
 	}
 	return components
+}
+
+func confirmationComponentsFromResponse(response commands.Response) []disgoDiscord.LayoutComponent {
+	confirmations := confirmationsFromResponse(response)
+	if len(confirmations) == 0 {
+		return nil
+	}
+	if len(confirmations) == 1 {
+		confirmation := confirmations[0]
+		return []disgoDiscord.LayoutComponent{disgoDiscord.NewActionRow(
+			confirmationButton(confirmation),
+			disgoDiscord.NewSecondaryButton(
+				firstNonEmptyText(confirmation.CancelLabel, "Cancel"),
+				firstNonEmptyText(confirmation.CancelID, commands.ConfirmationCancelID),
+			),
+		)}
+	}
+
+	var rows []disgoDiscord.LayoutComponent
+	var row []disgoDiscord.InteractiveComponent
+	for _, confirmation := range confirmations {
+		row = append(row, confirmationButton(confirmation))
+		if len(row) == 5 {
+			rows = append(rows, disgoDiscord.NewActionRow(row...))
+			row = nil
+			if len(rows) == 4 {
+				break
+			}
+		}
+	}
+	cancelSource := confirmations[0]
+	cancelButton := disgoDiscord.NewSecondaryButton(
+		firstNonEmptyText(cancelSource.CancelLabel, "Cancel"),
+		firstNonEmptyText(cancelSource.CancelID, commands.ConfirmationCancelID),
+	)
+	if len(row) == 0 {
+		if len(rows) < 5 {
+			rows = append(rows, disgoDiscord.NewActionRow(cancelButton))
+		}
+		return rows
+	}
+	row = append(row, cancelButton)
+	rows = append(rows, disgoDiscord.NewActionRow(row...))
+	return rows
+}
+
+func confirmationsFromResponse(response commands.Response) []commands.Confirmation {
+	var source []commands.Confirmation
+	if len(response.Confirmations) > 0 {
+		source = response.Confirmations
+	} else if response.Confirmation != nil {
+		source = []commands.Confirmation{*response.Confirmation}
+	}
+	confirmations := make([]commands.Confirmation, 0, len(source))
+	seen := map[string]struct{}{}
+	for _, confirmation := range source {
+		id := strings.TrimSpace(confirmation.ID)
+		if id == "" {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		confirmation.ID = id
+		confirmations = append(confirmations, confirmation)
+	}
+	return confirmations
+}
+
+func confirmationButton(confirmation commands.Confirmation) disgoDiscord.InteractiveComponent {
+	label := firstNonEmptyText(confirmation.ConfirmLabel, "Confirm")
+	if confirmation.Danger {
+		return disgoDiscord.NewDangerButton(label, confirmation.ID)
+	}
+	return disgoDiscord.NewSuccessButton(label, confirmation.ID)
 }
 
 func actionButtonsFromResponse(actions []commands.Action) []disgoDiscord.InteractiveComponent {

@@ -7,10 +7,10 @@ Customers do not need provider, search, hosting, or database accounts. Panda ope
 ## What Panda Does
 
 - Answers natural Discord messages when members mention Panda.
-- Summarizes, explains, rewrites, and translates messages through slash commands or context menu actions.
+- Summarizes, explains, rewrites, and translates messages through natural chat or context menu actions.
 - Uses server knowledge, memory consent, web search, schedules, reminders, composed tools, and music within the server's plan.
 - Lets admins control channels, roles, tool access, response length, memory, billing, and audit history.
-- Shows plan, renewal, AI response usage, web search usage, storage, and quota state through `/billing` and `/admin status`.
+- Shows plan, renewal, AI response usage, web search usage, storage, and quota state through `/billing` and natural admin chat.
 
 ## Plans
 
@@ -30,7 +30,7 @@ Trials do not auto-convert without payment approval. Servers use the included li
 2. Choose the Discord server.
 3. Grant the requested Discord permissions.
 4. Run `/billing` to confirm the trial and billing owner.
-5. Run `/admin status` to review setup, usage, memory, web search, and permission state.
+5. Ask Panda to review setup, usage, memory, web search, and permission state.
 
 The installer becomes the billing owner for that server. The Discord server owner retains management access.
 
@@ -67,18 +67,12 @@ The wallet proves payment only. Discord permissions decide who can activate the 
 
 ## Admin Setup
 
-Common setup commands:
+Setup and administration are handled through natural Discord messages. Ask Panda what you want changed, review the prepared action, then use the confirmation button for sensitive writes.
 
-- `/admin behavior answer_length:brief|standard|detailed tool_policy:<policy>` changes response length and tool access.
-- `/admin channel action:list|allow|deny|remove channel:#channel` limits where Panda can answer.
-- `/admin role action:list|set|remove profile:admin|moderator role:@Role` maps Panda admin and moderator profiles.
-- `/admin tool action:list|add|remove tool_name:<tool> role:@Role` narrows tool access.
-- `/admin prompt` sets server instructions.
-- `/admin billing` or `/billing` shows plan, renewal, usage, quota, purchase, and activation guidance.
-- `/admin audit` shows recent privileged changes.
-- `/support` creates a safe support bundle without raw prompts or raw Discord messages.
-- `/data export` shows a safe data export summary.
-- `/data delete scope:knowledge|memory|conversations|billing|all` deletes scoped Panda data after confirmation.
+- Ask Panda to set answer length, tool policy, channel rules, role profiles, tool access, server prompt, or personality.
+- Ask Panda for billing status, usage, quota, audit history, setup warnings, support context, or safe data summaries.
+- Use `/billing action:activate api_key:<key>` only for one-time activation keys, so secrets stay out of normal chat.
+- Destructive or privileged changes use confirmation buttons before Panda acts.
 
 Panda does not expose model names, provider names, fallback routing, token prices, or provider diagnostics to normal users or guild admins.
 

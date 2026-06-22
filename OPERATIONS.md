@@ -27,7 +27,7 @@ The default test run covers the SQLite fallback search path. The tagged run cove
 5. Deploy with `fly deploy`.
 6. In the Discord Developer Portal Webhooks page, set the endpoint to `https://<app-host>/discord/webhook-events`, enable events, and subscribe to `APPLICATION_AUTHORIZED`.
 7. Confirm the landing build args point at the API origin with `PUBLIC_PANDA_API_BASE_URL`. Do not expose Solana RPC endpoints to the static landing app.
-8. Check rollout with `fly status`, `fly releases`, `fly logs`, `/readyz`, `/metrics`, and `/ops health`.
+8. Check rollout with `fly status`, `fly releases`, `fly logs`, `/readyz`, `/metrics`, and owner-ops health through Panda chat.
 
 Production validation fails when Discord credentials, the managed AI service key, public app URL, SOL RPC URL, treasury wallet, or paid-plan lamport mappings are missing.
 
@@ -61,7 +61,7 @@ SOL payment setup:
 - The landing page creates orders through `POST /billing/sol/orders`, asks the backend to prepare an unsigned transaction through `POST /billing/sol/orders/:order_id/transaction`, asks the user's wallet to sign the server-built transaction bytes, then submits the signed transaction to `POST /billing/sol/orders/:order_id/submit`.
 - The backend fetches the latest blockhash, serializes the native SOL transfer plus memo/reference, submits signed transaction bytes through Solana RPC, verifies structured Solana RPC responses, rejects token transfers, requires one matching native SOL transfer to the treasury wallet, requires the order memo/reference, and only accepts transactions at or above the configured confirmation threshold.
 - Verified orders reveal one activation key once. The key is stored hashed, consumed by `/billing action:activate api_key:<key>`, and cannot be re-revealed.
-- Operators can revoke an unused activation key by payment order with `/billing action:revoke order_id:<order>`. Revocation, creation, one-time viewing, consumption, and expiration are recorded in audit events.
+- Operators can revoke an unused activation key by payment order through internal operator tooling backed by the billing revocation service. Revocation, creation, one-time viewing, consumption, and expiration are recorded in audit events.
 - Operators manage coupon creation, listing, and revocation from the landing admin page at `/admin`. Admin access requires signing a short login challenge with the configured `SOLANA_TREASURY_WALLET`; coupon management is intentionally not exposed through Discord bot commands.
 
 ## Health Checks
@@ -69,11 +69,11 @@ SOL payment setup:
 - `GET /healthz` reports configuration, Fiber, Discord gateway credentials, Discord webhook public key, the managed AI service key, SQLite, and local storage.
 - `GET /readyz` returns unavailable when SQLite is not ready.
 - `GET /metrics` emits Prometheus-style gauges for SQLite, configured integrations, schema version, queue depth, usage totals, and AI-service configuration.
-- `/ops health` gives bot owners a Discord-side operational summary, including shard status. V1 reports `single-gateway-v1` when Discord credentials are configured and `disabled` when the gateway is not running.
-- `/ops drain` stops the background worker from claiming new jobs.
-- `/ops resume` resumes background job processing.
-- `/ops incident action:enable` records incident mode in runtime state.
-- `/ops reload` rechecks runtime dependencies.
+- Bot owners can ask Panda for owner-ops health, including shard status. V1 reports `single-gateway-v1` when Discord credentials are configured and `disabled` when the gateway is not running.
+- Ask Panda to drain the worker, then confirm, to stop claiming new background jobs.
+- Ask Panda to resume the worker, then confirm, to resume background job processing.
+- Ask Panda to enable or disable incident mode, then confirm, to update runtime incident state.
+- Ask Panda to reload owner ops to recheck runtime dependencies.
 
 Long Discord summaries are queued as `discord.interaction` jobs. If queue depth grows, inspect logs, AI-service health, entitlement checks, SOL verifier health, worker drain state, and incident state before scaling.
 
@@ -107,7 +107,7 @@ Before enabling multiple gateway shards or multiple Machines:
 2. Split background workers from gateway workers so only the intended process claims long-running jobs.
 3. Add shard IDs and counts to structured logs and metrics.
 4. Add queue backpressure, dead-letter queues, and per-guild concurrency caps.
-5. Confirm `/ops health` reports shard count, connected shard IDs, worker drain state, and queue state before scaling.
+5. Confirm owner-ops health reports shard count, connected shard IDs, worker drain state, and queue state before scaling.
 
 ## SQLite Backup
 
@@ -123,27 +123,27 @@ Copy backups off the Fly volume after creation. Keep the main database, WAL, and
 
 ## SQLite Restore
 
-1. Drain work with `/ops drain`.
+1. Ask Panda to drain work and confirm the owner-ops action.
 2. Stop or scale down the app so SQLite has no active writer.
 3. Copy the selected backup back to the Fly volume.
 4. Move the existing database, WAL, and SHM files aside with timestamped names.
 5. Place the backup at the configured SQLite path.
-6. Start the app and check `/readyz`, `/ops health`, `/metrics`, and `fly logs`.
+6. Start the app and check `/readyz`, owner-ops health, `/metrics`, and `fly logs`.
 7. Reconcile subscription snapshots, quota reservations, and cost ledger rows created near the restore point.
-8. Resume workers with `/ops resume` after the restored database passes health checks.
+8. Ask Panda to resume workers and confirm after the restored database passes health checks.
 
 ## Rollback
 
 1. Inspect `fly releases`.
 2. Roll back with `fly releases rollback <version>`.
 3. Watch `fly logs`.
-4. Confirm `/readyz`, `/metrics`, `/ops health`, and SOL payment verification on the configured cluster.
+4. Confirm `/readyz`, `/metrics`, owner-ops health, and SOL payment verification on the configured cluster.
 
 Schema migrations are forward-only. Restore from a SQLite backup if a bad migration corrupts data.
 
 ## Incident Mode
 
-For managed AI trouble, enable incident mode, drain background work if needed, and disable assistant responses in affected guilds with `/admin disable`. Removing the AI service key and redeploying is a last-resort global stop; health checks will report the AI service as missing and assistant responses will stop before provider calls.
+For managed AI trouble, ask Panda to enable incident mode, drain background work if needed, and disable assistant responses in affected guilds; confirm each privileged change. Removing the AI service key and redeploying is a last-resort global stop; health checks will report the AI service as missing and assistant responses will stop before provider calls.
 
 For SOL payment verification trouble, pause new purchases from the landing page if needed, keep existing entitlement snapshots intact, preserve submitted signatures and order IDs, retry verification after RPC recovery, and verify idempotency before resuming self-serve purchases.
 

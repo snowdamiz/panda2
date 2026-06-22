@@ -363,12 +363,12 @@ export const legalDocuments: LegalDocument[] = [
     updated,
     description: 'How to get help with billing, setup, permissions, usage, export, deletion, and incidents.',
     summary: [
-      'Start with Discord commands for live server state: /billing for plan and activation details, and /admin status for setup and permission checks.',
+      'Start in Discord: use /billing for plan and activation details, and ask Panda for setup and permission checks.',
       'Support can help with billing, permissions, export, deletion, security, outage, and installation blockers.',
       'Support bundles should include operational identifiers and error states, not raw prompts, raw messages, secrets, or billing credentials.',
     ],
     facts: [
-      { label: 'Fastest path', value: '/billing and /admin status inside Discord' },
+      { label: 'Fastest path', value: '/billing plus Panda setup chat inside Discord' },
       { label: 'Paid support', value: 'Billing, setup, export, deletion, security, and outage help' },
       { label: 'Trial support', value: 'Installation, billing, and basic setup blockers' },
       { label: 'Sensitive data', value: 'Do not send raw secrets or private keys' },
@@ -380,7 +380,7 @@ export const legalDocuments: LegalDocument[] = [
       {
         heading: 'Where to start',
         body: [
-          'Use /billing in Discord for plan, renewal, quota, and activation status. Use /admin status for server setup, permissions, usage, web search, memory, and degraded-state checks.',
+          'Use /billing in Discord for plan, renewal, quota, and activation status. Ask Panda for server setup, permissions, usage, web search, memory, and degraded-state checks.',
           'Paid customers can contact support for billing, permissions, export, deletion, security, and outage questions.',
         ],
       },
@@ -446,7 +446,7 @@ export const legalDocuments: LegalDocument[] = [
       {
         heading: 'Monitored components',
         body: [
-          'Core availability depends on Discord gateway events, slash commands, the landing and billing pages, the assistant API, queue workers, billing verification, search providers, managed AI providers, and storage.',
+          'Core availability depends on Discord gateway events, Discord interactions, the landing and billing pages, the assistant API, queue workers, billing verification, search providers, managed AI providers, and storage.',
           'Music availability may also depend on sidecar health, stream extraction, network conditions, and Discord voice connection state.',
         ],
       },

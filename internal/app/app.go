@@ -135,7 +135,8 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 		WithAttachmentReader(attachments).
 		WithAuditRecorder(audit).
 		WithAdminOperations(adminService).
-		WithBilling(billingService)
+		WithBilling(billingService).
+		WithOpsManager(opsService)
 	composedService := composed.NewService(composedRepo, toolRegistry, toolExecutor, openRouter, cfg.OpenRouterModel).
 		WithAuditRecorder(audit).
 		WithBilling(billingService).

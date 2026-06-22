@@ -160,7 +160,7 @@ func (r *Router) createReminder(ctx context.Context, request Request, followUp b
 	}
 	targetType, targetID := reminderTarget(request)
 	if (targetType == scheduler.TargetChannel || targetType == scheduler.TargetRole) && !truthyOption(request.Options["confirm_public"]) {
-		return Response{Content: "Public or role-targeted reminders require confirmation. Set `confirm_public` to true after checking the target and reminder text.", Ephemeral: true, Presentation: Presentation{Title: "Confirmation required", Accent: AccentWarning}}
+		return Response{Content: "Public or role-targeted reminders require confirmation. Ask Panda in chat to prepare the reminder, then approve the confirmation button after checking the target and text.", Ephemeral: true, Presentation: Presentation{Title: "Confirmation required", Accent: AccentWarning}}
 	}
 	if dryRunRequested(request) {
 		return dryRunResponse("reminder would run at %s for `%s`.", next.Format(time.RFC3339), targetType)
@@ -689,7 +689,7 @@ func renderAdminFeatureStatus(states []repository.GuildFeatureState) string {
 	permissionNames, _ := features.PermissionNamesForFeatures(enabledIDs)
 	bitfield, _ := features.PermissionBitfield(permissionNames)
 	lines = append(lines, fmt.Sprintf("\nEnabled permission bitfield: `%d`.", bitfield))
-	lines = append(lines, "Use `/admin feature action:reauthorize` to generate a fresh Discord permission link for the enabled features.")
+	lines = append(lines, "Ask Panda to reauthorize enabled features to generate a fresh Discord permission link.")
 	return strings.Join(lines, "\n")
 }
 

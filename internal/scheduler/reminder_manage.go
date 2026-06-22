@@ -76,7 +76,7 @@ func (s *Service) manageReminderCreate(ctx context.Context, request toolsvc.Remi
 		return nil, err
 	}
 	if public {
-		return nil, fmt.Errorf("public, channel, or role reminders require explicit confirmation; use the /reminder command with confirm_public after checking the target and text")
+		return nil, fmt.Errorf("public, channel, or role reminders require explicit confirmation; ask Panda to prepare the reminder, then approve the confirmation button after checking the target and text")
 	}
 	next, interval, err := ParseTimeOptions(map[string]string{
 		"when":  request.When,

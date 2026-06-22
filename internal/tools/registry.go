@@ -480,14 +480,16 @@ func DefaultDefinitions() []Definition {
 		},
 		adminRead("read_config", "Read Panda configuration for the current guild.", []string{}, 2*time.Second, 1),
 		auditRead("panda.usage_report", "Read Panda usage totals and breakdowns for this server.", []string{}, 3*time.Second, 25),
-		soulWrite("panda.manage_soul", "Read or update Panda's server-specific response style and personality.", []string{"action"}),
+		ownerOpsTool(),
+		soulManagementTool(),
+		promptManagementTool(),
 		adminWrite("panda.manage_budget_limit", "Set, remove, or list Panda budget limits for a guild, channel, or user.", []string{"action"}),
 		knowledgeAdminWrite("panda.manage_knowledge", "List, add, search, or delete server knowledge documents.", []string{"action"}),
-		adminWrite("panda.manage_role_permission", "Grant or remove Panda permission names for a Discord role.", []string{"action"}),
+		rolePermissionManagementTool(),
 		adminDiscordWrite(features.DiscordRoleManagement, "panda.manage_member_role", "Prepare confirmed Discord member role assignment changes.", []string{"action"}, "MANAGE_ROLES"),
 		adminDiscordWrite(features.DiscordRoleManagement, "panda.manage_discord_role", "Prepare confirmed Discord role creation with safe defaults.", []string{"action"}, "MANAGE_ROLES"),
-		adminWrite("panda.manage_tool_access", "Allow or remove role access to native or composed Panda tools.", []string{"action"}),
-		adminWrite("panda.manage_channel_rule", "Set or remove Panda channel allow/deny rules.", []string{"action"}),
+		toolAccessManagementTool(),
+		channelRuleManagementTool(),
 		{
 			Name:                  "panda.manage_composed_tool",
 			Description:           "Preview, draft, list, show, approve, run, simulate, export, pause, resume, disable, archive, or roll back composed tools.",
@@ -596,12 +598,118 @@ func actionSchema(required []string, names ...string) json.RawMessage {
 	return schemaWithProperties(required, properties)
 }
 
+func soulManagementTool() Definition {
+	definition := soulWrite("panda.manage_soul", "Read or update Panda's server-specific response style and personality.", []string{"action"})
+	definition.InputSchema = soulManagementSchema()
+	return definition
+}
+
+func promptManagementTool() Definition {
+	definition := adminSetupWrite("panda.manage_prompt", "Read or update Panda's server-specific assistant instructions.", []string{"action"})
+	definition.InputSchema = promptManagementSchema()
+	return definition
+}
+
+func ownerOpsTool() Definition {
+	return Definition{
+		Name:                  "panda.manage_ops",
+		Description:           "Read owner-only operational status or prepare confirmed drain, resume, and incident-mode changes.",
+		RequiredPermission:    admin.PermissionOwnerOps,
+		FeatureID:             features.OwnerOps,
+		ToolClass:             ToolClassOwnerOps,
+		InputSchema:           ownerOpsManagementSchema(),
+		OutputSchema:          objectSchema("result"),
+		Timeout:               3 * time.Second,
+		Redaction:             RedactContent,
+		Audit:                 AuditSensitive,
+		IncludeInModelContext: true,
+		SupportsDryRun:        true,
+	}
+}
+
+func rolePermissionManagementTool() Definition {
+	definition := adminWrite("panda.manage_role_permission", "Grant, remove, or list Panda permission names and role profiles for Discord roles.", []string{"action"})
+	definition.InputSchema = rolePermissionManagementSchema()
+	return definition
+}
+
+func toolAccessManagementTool() Definition {
+	definition := adminWrite("panda.manage_tool_access", "Allow, remove, or list role access to native or composed Panda tools.", []string{"action"})
+	definition.InputSchema = toolAccessManagementSchema()
+	return definition
+}
+
+func channelRuleManagementTool() Definition {
+	definition := adminWrite("panda.manage_channel_rule", "Set, remove, or list Panda channel allow/deny rules.", []string{"action"})
+	definition.InputSchema = channelRuleManagementSchema()
+	return definition
+}
+
 func objectSchema(required ...string) json.RawMessage {
 	properties := map[string]any{}
 	for _, name := range required {
 		properties[name] = map[string]string{"type": "string"}
 	}
 	return schemaWithProperties(required, properties)
+}
+
+func soulManagementSchema() json.RawMessage {
+	return schemaWithProperties([]string{"action"}, map[string]any{
+		"action":  map[string]string{"type": "string", "description": "Action: status, set, or update."},
+		"soul":    map[string]string{"type": "string", "description": "Personality, style, and response voice to save when action is set or update."},
+		"dry_run": map[string]string{"type": "boolean"},
+	})
+}
+
+func promptManagementSchema() json.RawMessage {
+	return schemaWithProperties([]string{"action"}, map[string]any{
+		"action":       map[string]string{"type": "string", "description": "Action: status, set, or update."},
+		"prompt":       map[string]string{"type": "string", "description": "Server-level assistant instructions to save when action is set or update."},
+		"instructions": map[string]string{"type": "string", "description": "Alias for prompt."},
+		"dry_run":      map[string]string{"type": "boolean"},
+	})
+}
+
+func ownerOpsManagementSchema() json.RawMessage {
+	return schemaWithProperties([]string{"action"}, map[string]any{
+		"action":  map[string]string{"type": "string", "description": "Action: health, guilds, reload, drain, resume, or incident."},
+		"state":   map[string]string{"type": "string", "description": "Incident state for action=incident: status, enable, or disable."},
+		"dry_run": map[string]string{"type": "boolean"},
+	})
+}
+
+func rolePermissionManagementSchema() json.RawMessage {
+	return schemaWithProperties([]string{"action"}, map[string]any{
+		"action":     map[string]string{"type": "string", "description": "Action: list, add, or remove."},
+		"profile":    map[string]string{"type": "string", "description": "Panda role profile: admin or moderator."},
+		"permission": map[string]string{"type": "string", "description": "Specific Panda permission name when not using a profile."},
+		"role_id":    map[string]string{"type": "string", "description": "Discord role ID or role mention."},
+		"role":       map[string]string{"type": "string", "description": "Discord role ID, mention, or name."},
+		"role_name":  map[string]string{"type": "string", "description": "Discord role name to resolve."},
+		"dry_run":    map[string]string{"type": "boolean"},
+	})
+}
+
+func toolAccessManagementSchema() json.RawMessage {
+	return schemaWithProperties([]string{"action"}, map[string]any{
+		"action":    map[string]string{"type": "string", "description": "Action: list, add/allow, or remove/deny."},
+		"tool_name": map[string]string{"type": "string", "description": "Native or composed Panda tool name, such as web.search or welcome_builder."},
+		"tool":      map[string]string{"type": "string", "description": "Alias for tool_name."},
+		"role_id":   map[string]string{"type": "string", "description": "Discord role ID or role mention."},
+		"role":      map[string]string{"type": "string", "description": "Discord role ID, mention, or name."},
+		"role_name": map[string]string{"type": "string", "description": "Discord role name to resolve."},
+		"dry_run":   map[string]string{"type": "boolean"},
+	})
+}
+
+func channelRuleManagementSchema() json.RawMessage {
+	return schemaWithProperties([]string{"action"}, map[string]any{
+		"action":       map[string]string{"type": "string", "description": "Action: list, allow, deny, or remove."},
+		"channel_id":   map[string]string{"type": "string", "description": "Discord channel ID or channel mention."},
+		"channel":      map[string]string{"type": "string", "description": "Discord channel ID, mention, or name."},
+		"channel_name": map[string]string{"type": "string", "description": "Discord channel name to resolve."},
+		"dry_run":      map[string]string{"type": "boolean"},
+	})
 }
 
 func toolListSchema() json.RawMessage {

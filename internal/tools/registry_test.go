@@ -38,6 +38,8 @@ func TestDefaultRegistryDefinitionsAreValid(t *testing.T) {
 		"panda.manage_member_role":     true,
 		"panda.manage_discord_role":    true,
 		"panda.manage_tool_access":     true,
+		"panda.manage_prompt":          true,
+		"panda.manage_ops":             true,
 		"panda.manage_composed_tool":   true,
 		"panda.manage_schedule":        true,
 		"read_config":                  true,
@@ -60,6 +62,32 @@ func TestDefaultRegistryDefinitionsAreValid(t *testing.T) {
 	for name := range restored {
 		t.Fatalf("expected restored tool %s to be registered", name)
 	}
+}
+
+func TestAdminSetupToolSchemasExposeNaturalLanguageFields(t *testing.T) {
+	registry, err := NewDefaultRegistry()
+	if err != nil {
+		t.Fatalf("NewDefaultRegistry: %v", err)
+	}
+	assertToolSchemaContains := func(toolName string, fields ...string) {
+		t.Helper()
+		definition, ok := registry.Get(toolName)
+		if !ok {
+			t.Fatalf("tool %s not registered", toolName)
+		}
+		schema := string(definition.InputSchema)
+		for _, field := range fields {
+			if !strings.Contains(schema, `"`+field+`"`) {
+				t.Fatalf("tool %s schema missing %q: %s", toolName, field, schema)
+			}
+		}
+	}
+
+	assertToolSchemaContains("panda.manage_role_permission", "profile", "role_name", "role")
+	assertToolSchemaContains("panda.manage_channel_rule", "channel_name", "channel")
+	assertToolSchemaContains("panda.manage_tool_access", "tool_name", "role_name", "role")
+	assertToolSchemaContains("panda.manage_prompt", "prompt", "instructions")
+	assertToolSchemaContains("panda.manage_soul", "soul")
 }
 
 func assertSchemaRequiredIsArray(t *testing.T, toolName, schemaName string, schema json.RawMessage) {
@@ -1218,6 +1246,26 @@ func TestExecutorRunsAdminServiceTools(t *testing.T) {
 		t.Fatalf("unexpected soul result: %+v", soul)
 	}
 
+	prompt, err := executor.Execute(context.Background(), ExecutionRequest{
+		GuildID: "guild-1",
+		ActorID: "admin",
+		Access:  testAccess(ToolPolicyWriteConfirmed, admin.PermissionAdminConfigWrite),
+		Call: llm.ToolCall{
+			ID:   "call-prompt",
+			Type: "function",
+			Function: llm.ToolCallFunction{
+				Name:      "panda_manage_prompt",
+				Arguments: `{"action":"set","prompt":"Prefer release-check context before answering."}`,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Execute prompt update: %v", err)
+	}
+	if !strings.Contains(prompt.Message.Content, "release-check context") {
+		t.Fatalf("unexpected prompt result: %+v", prompt)
+	}
+
 	added, err := executor.Execute(context.Background(), ExecutionRequest{
 		GuildID: "guild-1",
 		ActorID: "admin",
@@ -1313,6 +1361,26 @@ func TestExecutorRoleProfileAndMemberRoleToolsRequireConfirmation(t *testing.T) 
 	}
 	if profile.Confirmation == nil || profile.Confirmation.Action != "role_profile.add" || profile.Confirmation.Arguments["profile"] != "moderator" || profile.Confirmation.Arguments["role_id"] != "100000000000000777" {
 		t.Fatalf("expected role profile confirmation, got %+v", profile)
+	}
+
+	toolAccess, err := executor.Execute(context.Background(), ExecutionRequest{
+		GuildID: "guild-1",
+		ActorID: "admin",
+		Access:  testAccess(ToolPolicyWriteConfirmed, admin.PermissionAdminConfigWrite),
+		Call: llm.ToolCall{
+			ID:   "call-tool-access",
+			Type: "function",
+			Function: llm.ToolCallFunction{
+				Name:      "panda_manage_tool_access",
+				Arguments: `{"action":"add","tool_name":"web.search","role_name":"Pickle"}`,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Execute role-name tool access: %v", err)
+	}
+	if toolAccess.Confirmation == nil || toolAccess.Confirmation.Action != "tool_access.add" || toolAccess.Confirmation.Arguments["tool_name"] != "web.search" || toolAccess.Confirmation.Arguments["role_id"] != "100000000000000777" {
+		t.Fatalf("expected resolved tool access confirmation, got %+v", toolAccess.Confirmation)
 	}
 
 	memberRole, err := executor.Execute(context.Background(), ExecutionRequest{

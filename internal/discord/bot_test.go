@@ -117,57 +117,43 @@ func (f *fakeCommandSyncer) SetGuildCommands(applicationID snowflake.ID, guildID
 	return nil, f.guildRegistrationErr
 }
 
-func TestApplicationCommandsIncludeContextMenus(t *testing.T) {
+func TestApplicationCommandsExposeOnlyBillingSlashCommandAndContextMenus(t *testing.T) {
 	commands := applicationCommands()
-	names := map[string]bool{}
+	slashNames := map[string]bool{}
+	contextNames := map[string]bool{}
 	for _, command := range commands {
-		names[command.CommandName()] = true
-	}
-	for _, name := range []string{"Explain with Panda", "Summarize with Panda", "help", "ping", "poll", "billing", "support", "data", "reminder"} {
-		if !names[name] {
-			t.Fatalf("expected command %q to be registered", name)
+		switch typed := command.(type) {
+		case disgoDiscord.SlashCommandCreate:
+			slashNames[typed.Name] = true
+		case disgoDiscord.MessageCommandCreate:
+			contextNames[typed.Name] = true
+		default:
+			t.Fatalf("unexpected command type %T", command)
 		}
 	}
-	for _, name := range []string{"ask", "chat", "summarize", "explain", "rewrite", "translate", "memory-consent", "search-memory", "mod", "tool"} {
-		if names[name] {
-			t.Fatalf("expected natural-language command %q not to be registered as a slash command", name)
-		}
-	}
-}
 
-func TestPollCommandIncludesNativePollOptions(t *testing.T) {
-	var pollCommand *disgoDiscord.SlashCommandCreate
-	for _, command := range applicationCommands() {
-		slash, ok := command.(disgoDiscord.SlashCommandCreate)
-		if ok && slash.Name == "poll" {
-			pollCommand = &slash
-			break
+	if len(slashNames) != 1 || !slashNames["billing"] {
+		t.Fatalf("expected only /billing to be registered as a slash command, got %+v", slashNames)
+	}
+	for _, name := range []string{"Explain with Panda", "Summarize with Panda"} {
+		if !contextNames[name] {
+			t.Fatalf("expected message command %q to be registered", name)
 		}
 	}
-	if pollCommand == nil {
-		t.Fatal("expected /poll command")
+	if len(contextNames) != 2 {
+		t.Fatalf("expected exactly two message commands, got %+v", contextNames)
 	}
-	optionNames := map[string]bool{}
-	for _, option := range pollCommand.Options {
-		switch typed := option.(type) {
-		case disgoDiscord.ApplicationCommandOptionString:
-			optionNames[typed.Name] = true
-			if (typed.Name == "question" || typed.Name == "answers") && !typed.Required {
-				t.Fatalf("%s should be required", typed.Name)
-			}
-		case disgoDiscord.ApplicationCommandOptionInt:
-			optionNames[typed.Name] = true
-			if typed.Name == "duration_hours" && (typed.MinValue == nil || *typed.MinValue != 1 || typed.MaxValue == nil || *typed.MaxValue != polls.MaxDurationHours) {
-				t.Fatalf("unexpected duration limits: %+v", typed)
-			}
-		case disgoDiscord.ApplicationCommandOptionBool:
-			optionNames[typed.Name] = true
+	if !registeredSlashCommandName("billing") {
+		t.Fatal("expected /billing to be accepted by the stale-command guard")
+	}
+	for _, removed := range []string{"admin", "poll", "reminder", "schedule", "ops", "help", "ping", "support", "data"} {
+		if registeredSlashCommandName(removed) {
+			t.Fatalf("expected removed slash command %q to be rejected by the stale-command guard", removed)
 		}
 	}
-	for _, name := range []string{"question", "answers", "duration_hours", "allow_multiselect"} {
-		if !optionNames[name] {
-			t.Fatalf("expected /poll option %q", name)
-		}
+	response := removedSlashCommandResponse("admin")
+	if !response.Ephemeral || !strings.Contains(response.Content, "natural Panda chat") || !strings.Contains(response.Content, "/billing") {
+		t.Fatalf("unexpected removed command response: %+v", response)
 	}
 }
 
@@ -470,67 +456,22 @@ func TestDeferredProgressContentUsesCommandAction(t *testing.T) {
 	}
 }
 
-func TestAdminBehaviorCommandIncludesRuntimeOptions(t *testing.T) {
-	var behaviorCommand *disgoDiscord.ApplicationCommandOptionSubCommand
-	foundModelCommand := false
-	for _, command := range applicationCommands() {
-		slash, ok := command.(disgoDiscord.SlashCommandCreate)
-		if !ok || slash.Name != "admin" {
-			continue
-		}
-		for _, option := range slash.Options {
-			subcommand, ok := option.(disgoDiscord.ApplicationCommandOptionSubCommand)
-			if !ok {
-				continue
-			}
-			if subcommand.Name == "behavior" {
-				behaviorCommand = &subcommand
-				break
-			}
-			if subcommand.Name == "model" {
-				foundModelCommand = true
-			}
-		}
-	}
-	if foundModelCommand {
-		t.Fatal("did not expect legacy /admin model subcommand")
-	}
-	if behaviorCommand == nil {
-		t.Fatal("expected /admin behavior subcommand")
-	}
-
-	optionNames := map[string]bool{}
-	for _, option := range behaviorCommand.Options {
-		switch typed := option.(type) {
-		case disgoDiscord.ApplicationCommandOptionString:
-			optionNames[typed.Name] = true
-		}
-	}
-	for _, name := range []string{"answer_length", "tool_policy"} {
-		if !optionNames[name] {
-			t.Fatalf("expected /admin behavior option %q", name)
-		}
-	}
-	for _, legacy := range []string{"model", "classifier_model", "fallback_models"} {
-		if optionNames[legacy] {
-			t.Fatalf("did not expect legacy model option %q", legacy)
-		}
-	}
-}
-
 func TestBillingCommandIncludesActivationOptions(t *testing.T) {
 	billingCommand := slashCommand(t, "billing")
 	action := slashStringOption(t, billingCommand, "action")
 	if action.Required {
 		t.Fatal("billing action should be optional so /billing shows status")
 	}
-	for _, expected := range []string{"status", "activate", "revoke"} {
+	for _, expected := range []string{"status", "activate"} {
 		if !stringOptionHasChoice(action, expected) {
 			t.Fatalf("expected billing action choice %q", expected)
 		}
 	}
-	if len(action.Choices) != 3 {
-		t.Fatalf("expected billing action to expose exactly three choices, got %+v", action.Choices)
+	if len(action.Choices) != 2 {
+		t.Fatalf("expected billing action to expose exactly two choices, got %+v", action.Choices)
+	}
+	if stringOptionHasChoice(action, "revoke") {
+		t.Fatal("did not expect billing command to expose operator revocation")
 	}
 	for _, legacy := range []string{"plan", "discount_lamports", "coupon_code", "coupon", "expires_at", "note"} {
 		if slashHasStringOption(billingCommand, legacy) {
@@ -546,87 +487,8 @@ func TestBillingCommandIncludesActivationOptions(t *testing.T) {
 	if !slashHasStringOption(billingCommand, "api_key") {
 		t.Fatal("expected billing command to include activation api key option")
 	}
-	if !slashHasStringOption(billingCommand, "order_id") {
-		t.Fatal("expected billing command to include operator order id option")
-	}
-}
-
-func TestAdminRoleCommandIncludesProfileControls(t *testing.T) {
-	roleCommand := adminSubcommand(t, adminSlashCommand(t), "role")
-	action := subcommandStringOption(t, roleCommand, "action")
-	if !action.Required {
-		t.Fatal("role action should be required")
-	}
-	if !subcommandHasStringOption(roleCommand, "profile") {
-		t.Fatal("expected /admin role to include profile option")
-	}
-	option, ok := findSubcommandRoleOption(roleCommand, "role")
-	if !ok {
-		t.Fatal("expected /admin role to include role picker")
-	}
-	if option.Required {
-		t.Fatal("role should be optional so action=list can omit it")
-	}
-}
-
-func TestAdminMemberRoleCommandIncludesUserAndRolePickers(t *testing.T) {
-	memberRole := adminSubcommand(t, adminSlashCommand(t), "member-role")
-	action := subcommandStringOption(t, memberRole, "action")
-	if !action.Required {
-		t.Fatal("member-role action should be required")
-	}
-	user, ok := findSubcommandUserOption(memberRole, "user")
-	if !ok {
-		t.Fatal("expected /admin member-role to include user picker")
-	}
-	if !user.Required {
-		t.Fatal("member-role user should be required")
-	}
-	role, ok := findSubcommandRoleOption(memberRole, "role")
-	if !ok {
-		t.Fatal("expected /admin member-role to include role picker")
-	}
-	if !role.Required {
-		t.Fatal("member-role role should be required")
-	}
-}
-
-func TestAdminToolCommandIncludesAccessOptions(t *testing.T) {
-	tool := adminSubcommand(t, adminSlashCommand(t), "tool")
-	action := subcommandStringOption(t, tool, "action")
-	if !action.Required {
-		t.Fatal("action should be required")
-	}
-	if !subcommandHasStringOption(tool, "tool_name") {
-		t.Fatal("expected /admin tool to include tool_name")
-	}
-	role, ok := findSubcommandRoleOption(tool, "role")
-	if !ok {
-		t.Fatal("expected /admin tool to include role picker")
-	}
-	if role.Required {
-		t.Fatal("role should be optional so action=list can omit it")
-	}
-}
-
-func TestAdminChannelCommandIncludesAccessOptions(t *testing.T) {
-	channel := adminSubcommand(t, adminSlashCommand(t), "channel")
-	action := subcommandStringOption(t, channel, "action")
-	if !action.Required {
-		t.Fatal("channel action should be required")
-	}
-	option, ok := findSubcommandChannelOption(channel, "channel")
-	if !ok {
-		t.Fatal("expected /admin channel to include channel picker")
-	}
-	if option.Required {
-		t.Fatal("channel should be optional so action=list can omit it")
-	}
-	if len(option.ChannelTypes) == 0 {
-		t.Fatal("channel picker should be limited to guild message channels")
-	}
-	if !subcommandHasBoolOption(channel, "dry_run") {
-		t.Fatal("expected /admin channel to include dry_run option")
+	if slashHasStringOption(billingCommand, "order_id") {
+		t.Fatal("did not expect billing command to include operator order id option")
 	}
 }
 
@@ -701,20 +563,6 @@ func TestMessageEventGuildIDFallsBackToMessageGuildID(t *testing.T) {
 	}
 }
 
-func TestAdminToggleCommandsIncludeSafetyOptions(t *testing.T) {
-	adminCommand := adminSlashCommand(t)
-	disable := adminSubcommand(t, adminCommand, "disable")
-	if !subcommandHasStringOption(disable, "confirm") {
-		t.Fatal("expected /admin disable to include confirm option")
-	}
-	for _, subcommandName := range []string{"behavior", "prompt", "soul", "enable", "disable"} {
-		subcommand := adminSubcommand(t, adminCommand, subcommandName)
-		if !subcommandHasBoolOption(subcommand, "dry_run") {
-			t.Fatalf("expected /admin %s to include dry_run option", subcommandName)
-		}
-	}
-}
-
 func TestConfirmationResponseRendersButtons(t *testing.T) {
 	response := commands.Response{
 		Content:   "Danger ahead.",
@@ -743,6 +591,47 @@ func TestConfirmationResponseRendersButtons(t *testing.T) {
 	cancel, ok := row.Components[1].(disgoDiscord.ButtonComponent)
 	if !ok || cancel.CustomID != commands.ConfirmationCancelID || cancel.Style != disgoDiscord.ButtonStyleSecondary {
 		t.Fatalf("unexpected cancel button: %+v", row.Components[1])
+	}
+}
+
+func TestConfirmationResponseRendersMultipleButtons(t *testing.T) {
+	response := commands.Response{
+		Content: "Confirm setup changes.",
+		Confirmations: []commands.Confirmation{
+			{
+				ID:           "p2t:cs:admin:100000000000000123:allow",
+				ConfirmLabel: "Set rule",
+				CancelID:     commands.ConfirmationCancelID,
+				CancelLabel:  "Cancel",
+				Danger:       true,
+			},
+			{
+				ID:           "p2t:ra:admin:100000000000000456:moderator",
+				ConfirmLabel: "Set role profile",
+				CancelID:     commands.ConfirmationCancelID,
+				CancelLabel:  "Cancel",
+				Danger:       true,
+			},
+		},
+	}
+
+	message := messageCreateFromResponse(response)
+	if len(message.Components) != 1 {
+		t.Fatalf("expected one action row, got %+v", message.Components)
+	}
+	row, ok := message.Components[0].(disgoDiscord.ActionRowComponent)
+	if !ok || len(row.Components) != 3 {
+		t.Fatalf("expected action row with two confirmations and cancel, got %+v", message.Components[0])
+	}
+	for index, want := range response.Confirmations {
+		button, ok := row.Components[index].(disgoDiscord.ButtonComponent)
+		if !ok || button.CustomID != want.ID || button.Style != disgoDiscord.ButtonStyleDanger {
+			t.Fatalf("unexpected confirmation button %d: %+v", index, row.Components[index])
+		}
+	}
+	cancel, ok := row.Components[2].(disgoDiscord.ButtonComponent)
+	if !ok || cancel.CustomID != commands.ConfirmationCancelID || cancel.Style != disgoDiscord.ButtonStyleSecondary {
+		t.Fatalf("unexpected cancel button: %+v", row.Components[2])
 	}
 }
 
@@ -1056,22 +945,6 @@ func TestModalResponseRendersModal(t *testing.T) {
 	}
 }
 
-func TestAdminPromptCommandCanOpenModal(t *testing.T) {
-	prompt := adminSubcommand(t, adminSlashCommand(t), "prompt")
-	option := subcommandStringOption(t, prompt, "prompt")
-	if option.Required {
-		t.Fatal("prompt option should be optional so the modal flow can open")
-	}
-}
-
-func TestAdminSoulCommandCanOpenModal(t *testing.T) {
-	soul := adminSubcommand(t, adminSlashCommand(t), "soul")
-	option := subcommandStringOption(t, soul, "soul")
-	if option.Required {
-		t.Fatal("soul option should be optional so the modal flow can open")
-	}
-}
-
 func TestThreadNoticeMentionsThread(t *testing.T) {
 	got := threadNotice(commands.Response{ThreadID: "12345", ThreadName: "Panda chat"})
 	if got != "Continued this chat in <#12345> (`Panda chat`)." {
@@ -1087,11 +960,6 @@ func TestSafeThreadNameTruncatesUTF8Safely(t *testing.T) {
 	if !utf8.ValidString(name) {
 		t.Fatalf("thread name is not valid UTF-8: %q", name)
 	}
-}
-
-func adminSlashCommand(t *testing.T) disgoDiscord.SlashCommandCreate {
-	t.Helper()
-	return slashCommand(t, "admin")
 }
 
 func slashCommand(t *testing.T, name string) disgoDiscord.SlashCommandCreate {
@@ -1137,90 +1005,4 @@ func stringOptionHasChoice(option disgoDiscord.ApplicationCommandOptionString, v
 		}
 	}
 	return false
-}
-
-func adminSubcommand(t *testing.T, command disgoDiscord.SlashCommandCreate, name string) disgoDiscord.ApplicationCommandOptionSubCommand {
-	t.Helper()
-	return commandSubcommand(t, command, name)
-}
-
-func commandSubcommand(t *testing.T, command disgoDiscord.SlashCommandCreate, name string) disgoDiscord.ApplicationCommandOptionSubCommand {
-	t.Helper()
-	for _, option := range command.Options {
-		subcommand, ok := option.(disgoDiscord.ApplicationCommandOptionSubCommand)
-		if ok && subcommand.Name == name {
-			return subcommand
-		}
-	}
-	t.Fatalf("expected /%s %s subcommand", command.Name, name)
-	return disgoDiscord.ApplicationCommandOptionSubCommand{}
-}
-
-func subcommandHasStringOption(subcommand disgoDiscord.ApplicationCommandOptionSubCommand, name string) bool {
-	_, ok := findSubcommandStringOption(subcommand, name)
-	return ok
-}
-
-func subcommandStringOption(t *testing.T, subcommand disgoDiscord.ApplicationCommandOptionSubCommand, name string) disgoDiscord.ApplicationCommandOptionString {
-	t.Helper()
-	option, ok := findSubcommandStringOption(subcommand, name)
-	if !ok {
-		t.Fatalf("expected string option %q on subcommand %s", name, subcommand.Name)
-	}
-	return option
-}
-
-func findSubcommandStringOption(subcommand disgoDiscord.ApplicationCommandOptionSubCommand, name string) (disgoDiscord.ApplicationCommandOptionString, bool) {
-	for _, option := range subcommand.Options {
-		stringOption, ok := option.(disgoDiscord.ApplicationCommandOptionString)
-		if ok && stringOption.Name == name {
-			return stringOption, true
-		}
-	}
-	return disgoDiscord.ApplicationCommandOptionString{}, false
-}
-
-func subcommandHasBoolOption(subcommand disgoDiscord.ApplicationCommandOptionSubCommand, name string) bool {
-	for _, option := range subcommand.Options {
-		boolOption, ok := option.(disgoDiscord.ApplicationCommandOptionBool)
-		if ok && boolOption.Name == name {
-			return true
-		}
-	}
-	return false
-}
-
-func subcommandHasRoleOption(subcommand disgoDiscord.ApplicationCommandOptionSubCommand, name string) bool {
-	_, ok := findSubcommandRoleOption(subcommand, name)
-	return ok
-}
-
-func findSubcommandRoleOption(subcommand disgoDiscord.ApplicationCommandOptionSubCommand, name string) (disgoDiscord.ApplicationCommandOptionRole, bool) {
-	for _, option := range subcommand.Options {
-		roleOption, ok := option.(disgoDiscord.ApplicationCommandOptionRole)
-		if ok && roleOption.Name == name {
-			return roleOption, true
-		}
-	}
-	return disgoDiscord.ApplicationCommandOptionRole{}, false
-}
-
-func findSubcommandUserOption(subcommand disgoDiscord.ApplicationCommandOptionSubCommand, name string) (disgoDiscord.ApplicationCommandOptionUser, bool) {
-	for _, option := range subcommand.Options {
-		userOption, ok := option.(disgoDiscord.ApplicationCommandOptionUser)
-		if ok && userOption.Name == name {
-			return userOption, true
-		}
-	}
-	return disgoDiscord.ApplicationCommandOptionUser{}, false
-}
-
-func findSubcommandChannelOption(subcommand disgoDiscord.ApplicationCommandOptionSubCommand, name string) (disgoDiscord.ApplicationCommandOptionChannel, bool) {
-	for _, option := range subcommand.Options {
-		channelOption, ok := option.(disgoDiscord.ApplicationCommandOptionChannel)
-		if ok && channelOption.Name == name {
-			return channelOption, true
-		}
-	}
-	return disgoDiscord.ApplicationCommandOptionChannel{}, false
 }

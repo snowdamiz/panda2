@@ -109,12 +109,14 @@ const baseHelpMessage = "### Panda Help\n\n" +
 	"**Chat naturally**\n" +
 	"- Mention `Panda` in a normal message: `Panda is this true?`\n" +
 	"- Casual mentions may not trigger a reply.\n\n" +
+	"**Billing key entry**\n" +
+	"- Use `/billing action:activate api_key:<key>` for one-time activation keys so secrets stay out of normal chat.\n\n" +
 	"**Music**\n" +
 	"- Join a voice channel, then say `Panda play <song>`.\n" +
 	"- Natural controls: `pause`, `resume`, `skip`, `stop`, `queue`, `clear queue`, `now playing`.\n\n" +
 	"**Message actions**\n" +
 	"- Use **Explain with Panda** or **Summarize with Panda** from a message's **Apps** menu.\n" +
-	"- `/poll question:<text> answers:<answer | answer | answer>` creates a native Discord poll."
+	"- Ask Panda in chat to create polls, reminders, schedules, and setup changes; write actions use confirmation buttons."
 
 const regularHelpMessage = baseHelpMessage + "\n\n" +
 	"**Good things to ask**\n" +
@@ -334,21 +336,11 @@ func elevatedHelpMessage(access helpAccess) string {
 	}
 
 	if access.config || access.soul {
-		builder.WriteString("\n\n**Admin commands**\n")
-		if access.config {
-			builder.WriteString("- `/admin role action:list|set|remove profile:admin|moderator role:@Role` - Panda role profiles\n")
-			builder.WriteString("- `/admin member-role action:add|remove user:@User role:@Role` - assign Discord roles to users\n")
-			builder.WriteString("- `/admin tool action:list|add|remove tool_name:<tool> role:@Role` - role tool grants\n")
-			builder.WriteString("- `/admin channel action:list|allow|deny|remove channel:#Channel`\n")
-			builder.WriteString("- `/admin behavior answer_length:brief|standard|detailed tool_policy:<policy>` - response length and tool access\n")
-			builder.WriteString("- `/admin billing` or `/billing` - plan, renewal, and quota status\n")
-			builder.WriteString("- Policies: `off`, `read_only`, `assistive`, `admin_only`, `moderator`, `write_confirmed`, `owner_ops`\n")
-			builder.WriteString("- `/admin prompt prompt:<text> dry_run:<bool>` - server instructions; omit `prompt` for modal\n")
-			builder.WriteString("- `/admin audit` - recent privileged changes\n")
-			builder.WriteString("- `/admin enable dry_run:<bool>` / `/admin disable confirm:<token> dry_run:<bool>`\n")
-		}
+		builder.WriteString("\n\n**Admin setup through chat**\n")
+		builder.WriteString("- Ask Panda to set admin/moderator roles, allowed channels, tool access, prompt, or personality.\n")
+		builder.WriteString("- Panda can inspect settings, ask for missing choices, and prepare confirmations in chat.\n")
 		if access.soul {
-			builder.WriteString("- `/admin soul soul:<text>` - personality/tone; natural chat can brainstorm/set\n")
+			builder.WriteString("- Personality/tone changes can be brainstormed first, then saved when you explicitly ask.\n")
 		}
 	}
 
@@ -637,10 +629,8 @@ func (r *Router) handleBilling(ctx context.Context, request Request) Response {
 	case "", "status":
 	case "activate":
 		return r.handleBillingActivate(ctx, request)
-	case "revoke":
-		return r.handleBillingRevoke(ctx, request)
 	default:
-		return Response{Content: "Billing action must be `status`, `activate`, or `revoke`.", Ephemeral: true, Presentation: Presentation{Title: "Unknown billing action", Accent: AccentWarning}}
+		return Response{Content: "Billing action must be `status` or `activate`.", Ephemeral: true, Presentation: Presentation{Title: "Unknown billing action", Accent: AccentWarning}}
 	}
 
 	entitlement, err := r.billing.Resolve(ctx, request.GuildID)
@@ -688,30 +678,6 @@ func (r *Router) handleBillingActivate(ctx context.Context, request Request) Res
 	}
 }
 
-func (r *Router) handleBillingRevoke(ctx context.Context, request Request) Response {
-	if !request.IsOwner {
-		return Response{Content: "Only Panda operators can revoke activation keys.", Ephemeral: true, Presentation: Presentation{Title: "Operator required", Accent: AccentWarning}}
-	}
-	orderID := strings.TrimSpace(request.Options["order_id"])
-	if orderID == "" {
-		return Response{Content: "Provide the SOL payment order ID to revoke its unused activation key.", Ephemeral: true, Presentation: Presentation{Title: "Order ID required", Accent: AccentWarning}}
-	}
-	revocation, err := r.billing.RevokeActivationAPIKey(ctx, billing.RevokeActivationAPIKeyRequest{
-		PaymentOrderID:  orderID,
-		ActorUserID:     request.UserID,
-		ActorIsOperator: true,
-		Reason:          "operator command",
-	})
-	if err != nil {
-		return billingRevocationErrorResponse(err)
-	}
-	return Response{
-		Content:      fmt.Sprintf("Activation key `%s...` for Panda %s order `%s` was revoked.", revocation.Prefix, revocation.Order.DisplayName, revocation.Order.OrderID),
-		Ephemeral:    true,
-		Presentation: Presentation{Title: "Activation key revoked", Accent: AccentSuccess},
-	}
-}
-
 func billingActivationErrorResponse(err error) Response {
 	switch {
 	case errors.Is(err, billing.ErrBillingAccess):
@@ -728,23 +694,6 @@ func billingActivationErrorResponse(err error) Response {
 		return Response{Content: "The SOL payment for that activation key is not verified yet.", Ephemeral: true, Presentation: Presentation{Title: "Payment not verified", Accent: AccentWarning}}
 	default:
 		return Response{Content: "Billing activation could not be completed. Please try again later or contact Panda support.", Ephemeral: true, Presentation: Presentation{Title: "Activation failed", Accent: AccentWarning}}
-	}
-}
-
-func billingRevocationErrorResponse(err error) Response {
-	switch {
-	case errors.Is(err, billing.ErrBillingAccess):
-		return Response{Content: "Only Panda operators can revoke activation keys.", Ephemeral: true, Presentation: Presentation{Title: "Operator required", Accent: AccentWarning}}
-	case errors.Is(err, billing.ErrActivationKeyConsumed):
-		return Response{Content: "That activation key has already been consumed and cannot be revoked.", Ephemeral: true, Presentation: Presentation{Title: "Key already consumed", Accent: AccentWarning}}
-	case errors.Is(err, billing.ErrActivationKeyRevoked):
-		return Response{Content: "That activation key is already revoked.", Ephemeral: true, Presentation: Presentation{Title: "Key already revoked", Accent: AccentWarning}}
-	case errors.Is(err, billing.ErrActivationKeyExpired):
-		return Response{Content: "That activation key is already expired.", Ephemeral: true, Presentation: Presentation{Title: "Key expired", Accent: AccentWarning}}
-	case errors.Is(err, billing.ErrActivationKeyInvalid), errors.Is(err, billing.ErrSolPaymentOrderNotFound):
-		return Response{Content: "No unused activation key was found for that payment order.", Ephemeral: true, Presentation: Presentation{Title: "Key not found", Accent: AccentWarning}}
-	default:
-		return Response{Content: "Activation key revocation could not be completed.", Ephemeral: true, Presentation: Presentation{Title: "Revocation failed", Accent: AccentWarning}}
 	}
 }
 
@@ -1771,8 +1720,38 @@ func (r *Router) HandleToolConfirmation(ctx context.Context, request ToolConfirm
 			return toolConfirmationError(err, "Composed tool could not be rolled back.", "That approved composed tool version was not found.")
 		}
 		return Response{Content: fmt.Sprintf("Rolled `%s` back to version %d.", result.Tool, result.Version), Ephemeral: true}
+	case toolActionOwnerOpsDrain,
+		toolActionOwnerOpsResume,
+		toolActionOwnerOpsIncidentEnable,
+		toolActionOwnerOpsIncidentDisable:
+		return r.handleOwnerOpsConfirmation(ctx, request)
 	default:
 		return Response{Content: "That confirmation is no longer supported.", Ephemeral: true}
+	}
+}
+
+func (r *Router) handleOwnerOpsConfirmation(ctx context.Context, request ToolConfirmationRequest) Response {
+	if r.ops == nil {
+		return Response{Content: "Owner operations are not configured for this runtime.", Ephemeral: true}
+	}
+	if denied := r.ensureToolConfirmationPermission(ctx, request.Request, r.admin.CanUseOwnerOps, "Only a bot owner can use owner operations."); denied.Content != "" {
+		return denied
+	}
+	switch request.Action {
+	case toolActionOwnerOpsDrain:
+		r.ops.Drain()
+		return Response{Content: "Queue worker is draining and will not claim new jobs.", Ephemeral: true}
+	case toolActionOwnerOpsResume:
+		r.ops.Resume()
+		return Response{Content: "Queue worker resumed job processing.", Ephemeral: true}
+	case toolActionOwnerOpsIncidentEnable:
+		r.ops.EnableIncident()
+		return Response{Content: "Incident mode enabled.", Ephemeral: true}
+	case toolActionOwnerOpsIncidentDisable:
+		r.ops.DisableIncident()
+		return Response{Content: "Incident mode disabled.", Ephemeral: true}
+	default:
+		return Response{Content: "That owner-ops confirmation is invalid.", Ephemeral: true}
 	}
 }
 
@@ -1800,6 +1779,11 @@ func toolConfirmationFeature(action string) string {
 	case toolActionComposedToolApprove,
 		toolActionComposedToolRollback:
 		return features.ComposedTools
+	case toolActionOwnerOpsDrain,
+		toolActionOwnerOpsResume,
+		toolActionOwnerOpsIncidentEnable,
+		toolActionOwnerOpsIncidentDisable:
+		return features.OwnerOps
 	default:
 		return ""
 	}
@@ -2326,11 +2310,13 @@ func (r *Router) responseFromAssistantAnswer(ctx context.Context, request Reques
 		response.Presentation = presentationFromAssistantCard(answer.Card)
 		response.Actions = actionsFromAssistantCard(answer.Card)
 	}
-	if confirmation := ToolConfirmationFromAssistant(request.UserID, answer.Confirmation); confirmation != nil {
-		response.Confirmation = confirmation
-		response.Content = appendConfirmationNotice(response.Content, answer.Confirmation.Summary)
+	pendingConfirmations := answerConfirmations(answer)
+	if confirmations := ToolConfirmationsFromAssistant(request.UserID, pendingConfirmations); len(confirmations) > 0 {
+		response.Confirmations = confirmations
+		response.Confirmation = &response.Confirmations[0]
+		response.Content = appendConfirmationNotices(response.Content, confirmationSummaries(pendingConfirmations), len(confirmations))
 		response.Presentation = Presentation{Title: "Confirmation required", Accent: AccentWarning}
-		if confirmation.Danger {
+		if confirmationsContainDanger(confirmations) {
 			response.Presentation.Accent = AccentDanger
 		}
 		return response
@@ -2353,6 +2339,42 @@ func (r *Router) responseFromAssistantAnswer(ctx context.Context, request Reques
 		}
 	}
 	return response
+}
+
+func answerConfirmations(answer assistant.AskResponse) []assistant.InteractionConfirmation {
+	if len(answer.Confirmations) > 0 {
+		return answer.Confirmations
+	}
+	if answer.Confirmation == nil {
+		return nil
+	}
+	return []assistant.InteractionConfirmation{*answer.Confirmation}
+}
+
+func confirmationSummaries(confirmations []assistant.InteractionConfirmation) []string {
+	summaries := make([]string, 0, len(confirmations))
+	seen := map[string]struct{}{}
+	for _, confirmation := range confirmations {
+		summary := strings.TrimSpace(confirmation.Summary)
+		if summary == "" {
+			continue
+		}
+		if _, ok := seen[summary]; ok {
+			continue
+		}
+		seen[summary] = struct{}{}
+		summaries = append(summaries, summary)
+	}
+	return summaries
+}
+
+func confirmationsContainDanger(confirmations []Confirmation) bool {
+	for _, confirmation := range confirmations {
+		if confirmation.Danger {
+			return true
+		}
+	}
+	return false
 }
 
 func assistantFeedbackEligible(answer assistant.AskResponse, content string) bool {
@@ -2425,9 +2447,16 @@ func actionsFromAssistantCard(card *assistant.ToolCard) []Action {
 }
 
 func appendConfirmationNotice(content, summary string) string {
+	return appendConfirmationNotices(content, []string{summary}, 1)
+}
+
+func appendConfirmationNotices(content string, summaries []string, confirmationCount int) string {
 	content = strings.TrimSpace(content)
-	summary = strings.TrimSpace(summary)
-	if summary != "" && !strings.Contains(content, summary) {
+	for _, summary := range summaries {
+		summary = strings.TrimSpace(summary)
+		if summary == "" || strings.Contains(content, summary) {
+			continue
+		}
 		if content != "" {
 			content += "\n\n"
 		}
@@ -2435,6 +2464,9 @@ func appendConfirmationNotice(content, summary string) string {
 	}
 	if content != "" {
 		content += "\n\n"
+	}
+	if confirmationCount > 1 {
+		return content + "Press each confirmation button you want to apply."
 	}
 	return content + "Press the confirmation button to continue."
 }

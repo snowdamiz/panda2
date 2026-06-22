@@ -51,7 +51,7 @@ func confirmed(request Request, id string) bool {
 }
 
 // RequestFromConfirmationID converts a button custom id into the command request
-// the slash confirmation would have produced.
+// the confirmation flow expects.
 func RequestFromConfirmationID(id string, base Request) (Request, bool) {
 	parts := strings.Split(id, ":")
 	if len(parts) < 3 || parts[0] != confirmationPrefix || parts[2] != cleanConfirmationPart(base.UserID) {

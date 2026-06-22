@@ -97,6 +97,10 @@ func (c *OpenRouterClient) Chat(ctx context.Context, request ChatRequest) (ChatR
 			AllowFallbacks:    &allowFallbacks,
 		}
 	}
+	if len(request.Tools) > 0 {
+		parallelToolCalls := true
+		payload.ParallelToolCalls = &parallelToolCalls
+	}
 	if request.ResponseFormat != nil && request.ResponseFormat.Type == "json_schema" {
 		structuredOutputs := true
 		payload.StructuredOutputs = &structuredOutputs
@@ -384,6 +388,7 @@ type chatCompletionRequest struct {
 	Model             string               `json:"model"`
 	Messages          []Message            `json:"messages"`
 	Tools             []Tool               `json:"tools,omitempty"`
+	ParallelToolCalls *bool                `json:"parallel_tool_calls,omitempty"`
 	ResponseFormat    *ResponseFormat      `json:"response_format,omitempty"`
 	StructuredOutputs *bool                `json:"structured_outputs,omitempty"`
 	Provider          *providerPreferences `json:"provider,omitempty"`

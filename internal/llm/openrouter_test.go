@@ -32,6 +32,9 @@ func TestOpenRouterChatSendsExpectedRequest(t *testing.T) {
 		if len(payload.Tools) != 1 || payload.Tools[0].Function.Name != "fixture_tool" {
 			t.Fatalf("unexpected tools payload: %+v", payload.Tools)
 		}
+		if payload.ParallelToolCalls == nil || !*payload.ParallelToolCalls {
+			t.Fatalf("tool requests should explicitly enable parallel tool calls: %+v", payload.ParallelToolCalls)
+		}
 		if payload.Provider == nil || !payload.Provider.RequireParameters || payload.Provider.AllowFallbacks == nil || *payload.Provider.AllowFallbacks {
 			t.Fatalf("tool requests should require provider parameter support and disable provider fallback: %+v", payload.Provider)
 		}
@@ -91,6 +94,13 @@ func TestOpenRouterChatParsesToolCalls(t *testing.T) {
 							"name":      "search_knowledge",
 							"arguments": `{"query":"deploys","limit":"1"}`,
 						},
+					}, {
+						"id":   "call-2",
+						"type": "function",
+						"function": map[string]string{
+							"name":      "read_config",
+							"arguments": `{}`,
+						},
 					}},
 				},
 			}},
@@ -103,7 +113,7 @@ func TestOpenRouterChatParsesToolCalls(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Chat returned error: %v", err)
 	}
-	if len(response.ToolCalls) != 1 || response.ToolCalls[0].Function.Name != "search_knowledge" {
+	if len(response.ToolCalls) != 2 || response.ToolCalls[0].Function.Name != "search_knowledge" || response.ToolCalls[1].Function.Name != "read_config" {
 		t.Fatalf("unexpected tool calls: %+v", response.ToolCalls)
 	}
 }

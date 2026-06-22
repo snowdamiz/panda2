@@ -15,6 +15,7 @@ import (
 	contextsvc "github.com/sn0w/panda2/internal/context"
 	"github.com/sn0w/panda2/internal/llm"
 	"github.com/sn0w/panda2/internal/memory"
+	"github.com/sn0w/panda2/internal/ops"
 	"github.com/sn0w/panda2/internal/repository"
 	"github.com/sn0w/panda2/internal/security"
 	"github.com/sn0w/panda2/internal/store"
@@ -68,12 +69,22 @@ type MusicManager interface {
 	ManageMusic(ctx context.Context, request MusicManagementRequest) (any, error)
 }
 
+type OpsManager interface {
+	Health(ctx context.Context) (ops.Health, error)
+	Drain()
+	Resume()
+	EnableIncident()
+	DisableIncident()
+	Reload(ctx context.Context) error
+}
+
 type AuditRecorder interface {
 	Record(ctx context.Context, event store.AuditEvent) error
 }
 
 type AdminOperations interface {
 	UsageReport(ctx context.Context, guildID string, window time.Duration, dimension string, limit int) (admin.UsageReport, error)
+	SetPrompt(ctx context.Context, guildID, actorID, prompt string) (store.GuildConfig, error)
 	SetSoul(ctx context.Context, guildID, actorID, soul string) (store.GuildConfig, error)
 	SetMemoryEnabled(ctx context.Context, guildID, actorID string, enabled bool) (store.GuildConfig, error)
 	AddMemoryDocument(ctx context.Context, request memory.AddDocumentRequest) (store.KnowledgeDocument, error)
@@ -126,6 +137,7 @@ type Executor struct {
 	schedule    ScheduleManager
 	reminder    ReminderManager
 	music       MusicManager
+	ops         OpsManager
 }
 
 type ExecutionRequest struct {
@@ -324,6 +336,11 @@ func (e *Executor) WithMusicManager(manager MusicManager) *Executor {
 	return e
 }
 
+func (e *Executor) WithOpsManager(manager OpsManager) *Executor {
+	e.ops = manager
+	return e
+}
+
 func (e *Executor) OpenRouterTools(access ToolAccess) []llm.Tool {
 	if e == nil || e.registry == nil {
 		return nil
@@ -445,6 +462,8 @@ func (e *Executor) Execute(ctx context.Context, request ExecutionRequest) (Execu
 		payload, err = e.usageReport(toolCtx, request, arguments)
 	case "panda.manage_soul":
 		payload, err = e.manageSoul(toolCtx, request, arguments)
+	case "panda.manage_prompt":
+		payload, err = e.managePrompt(toolCtx, request, arguments)
 	case "panda.manage_budget_limit":
 		payload, err = e.manageBudgetLimit(toolCtx, request, arguments)
 	case "panda.manage_knowledge":
@@ -465,6 +484,8 @@ func (e *Executor) Execute(ctx context.Context, request ExecutionRequest) (Execu
 		payload, err = e.manageReminder(toolCtx, request, arguments)
 	case "panda.manage_music":
 		payload, err = e.manageMusic(toolCtx, request, arguments)
+	case "panda.manage_ops":
+		payload, err = e.manageOps(toolCtx, arguments)
 	case "panda.manage_channel_rule":
 		payload, err = e.manageChannelRule(toolCtx, request, arguments)
 	case "panda.list_tools":
@@ -921,13 +942,14 @@ func (e *Executor) readConfig(ctx context.Context, request ExecutionRequest, arg
 		return map[string]any{"configured": false}, nil
 	}
 	return map[string]any{
-		"configured":        true,
-		"guild_id":          config.GuildID,
-		"assistant_enabled": config.AssistantEnabled,
-		"memory_enabled":    config.MemoryEnabled,
-		"tool_policy":       config.ToolPolicy,
-		"answer_length":     answerLengthFromMaxTokens(config.MaxResponseTokens),
-		"agent_soul":        config.AgentSoul,
+		"configured":            true,
+		"guild_id":              config.GuildID,
+		"assistant_enabled":     config.AssistantEnabled,
+		"memory_enabled":        config.MemoryEnabled,
+		"tool_policy":           config.ToolPolicy,
+		"answer_length":         answerLengthFromMaxTokens(config.MaxResponseTokens),
+		"agent_soul":            config.AgentSoul,
+		"system_prompt_overlay": config.SystemPromptOverlay,
 	}, nil
 }
 
@@ -978,6 +1000,54 @@ func (e *Executor) manageSoul(ctx context.Context, request ExecutionRequest, arg
 			return nil, err
 		}
 		return map[string]any{"result": map[string]any{"agent_soul": config.AgentSoul, "soul_chars": len(config.AgentSoul)}}, nil
+	default:
+		return nil, fmt.Errorf("action must be status, set, or update")
+	}
+}
+
+func (e *Executor) managePrompt(ctx context.Context, request ExecutionRequest, arguments string) (any, error) {
+	if e.adminOps == nil {
+		return nil, fmt.Errorf("admin operations are not configured")
+	}
+	args, err := parseArguments(arguments)
+	if err != nil {
+		return nil, err
+	}
+	action := strings.ToLower(firstNonEmpty(stringArgument(args, "action"), "status"))
+	switch action {
+	case "status":
+		if e.configs == nil {
+			return nil, fmt.Errorf("config reads are not configured")
+		}
+		config, ok, err := e.configs.Get(ctx, request.GuildID)
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			return map[string]any{"result": map[string]any{"configured": false}}, nil
+		}
+		return map[string]any{"result": map[string]any{
+			"configured":            true,
+			"system_prompt_overlay": config.SystemPromptOverlay,
+			"prompt_chars":          len(config.SystemPromptOverlay),
+		}}, nil
+	case "set", "update":
+		prompt := firstNonEmpty(stringArgument(args, "prompt"), stringArgument(args, "instructions"))
+		if prompt == "" {
+			return nil, fmt.Errorf("prompt is required")
+		}
+		preview := map[string]any{"prompt_chars": len(prompt)}
+		if boolArgument(args, "dry_run") {
+			return dryRunToolResult("prompt.set", preview), nil
+		}
+		config, err := e.adminOps.SetPrompt(ctx, request.GuildID, request.ActorID, prompt)
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{"result": map[string]any{
+			"system_prompt_overlay": config.SystemPromptOverlay,
+			"prompt_chars":          len(config.SystemPromptOverlay),
+		}}, nil
 	default:
 		return nil, fmt.Errorf("action must be status, set, or update")
 	}
@@ -1048,6 +1118,88 @@ func (e *Executor) usageReport(ctx context.Context, request ExecutionRequest, ar
 		"dimension": report.Dimension,
 		"breakdown": breakdown,
 	}, nil
+}
+
+func (e *Executor) manageOps(ctx context.Context, arguments string) (any, error) {
+	if e.ops == nil {
+		return nil, fmt.Errorf("owner operations are not configured")
+	}
+	args, err := parseArguments(arguments)
+	if err != nil {
+		return nil, err
+	}
+	action := strings.ToLower(stringArgument(args, "action"))
+	switch action {
+	case "health", "status":
+		health, err := e.ops.Health(ctx)
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{"result": opsHealthPayload(health)}, nil
+	case "guilds", "guild_count":
+		health, err := e.ops.Health(ctx)
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{"result": map[string]any{"configured_guild_count": health.ConfiguredGuildCount}}, nil
+	case "reload":
+		if err := e.ops.Reload(ctx); err != nil {
+			return nil, err
+		}
+		return map[string]any{"result": map[string]any{"reloaded": true, "message": "Runtime config reload check passed."}}, nil
+	case "drain":
+		preview := map[string]any{"operation": "drain"}
+		if boolArgument(args, "dry_run") {
+			return dryRunToolResult("owner_ops.drain", preview), nil
+		}
+		return confirmationRequired("owner_ops.drain", preview), nil
+	case "resume":
+		preview := map[string]any{"operation": "resume"}
+		if boolArgument(args, "dry_run") {
+			return dryRunToolResult("owner_ops.resume", preview), nil
+		}
+		return confirmationRequired("owner_ops.resume", preview), nil
+	case "incident":
+		state := strings.ToLower(firstNonEmpty(stringArgument(args, "state"), stringArgument(args, "mode")))
+		switch state {
+		case "", "status":
+			health, err := e.ops.Health(ctx)
+			if err != nil {
+				return nil, err
+			}
+			return map[string]any{"result": map[string]any{"incident": health.Incident}}, nil
+		case "enable", "enabled", "on":
+			preview := map[string]any{"operation": "incident_enable"}
+			if boolArgument(args, "dry_run") {
+				return dryRunToolResult("owner_ops.incident_enable", preview), nil
+			}
+			return confirmationRequired("owner_ops.incident_enable", preview), nil
+		case "disable", "disabled", "off":
+			preview := map[string]any{"operation": "incident_disable"}
+			if boolArgument(args, "dry_run") {
+				return dryRunToolResult("owner_ops.incident_disable", preview), nil
+			}
+			return confirmationRequired("owner_ops.incident_disable", preview), nil
+		default:
+			return nil, fmt.Errorf("incident state must be status, enable, or disable")
+		}
+	default:
+		return nil, fmt.Errorf("action must be health, guilds, reload, drain, resume, or incident")
+	}
+}
+
+func opsHealthPayload(health ops.Health) map[string]any {
+	return map[string]any{
+		"sqlite":                 health.SQLite,
+		"discord":                health.Discord,
+		"shards":                 health.Shards,
+		"ai_service":             health.AIService,
+		"data_dir":               health.DataDir,
+		"queued_jobs":            health.QueuedJobs,
+		"configured_guild_count": health.ConfiguredGuildCount,
+		"draining":               health.Draining,
+		"incident":               health.Incident,
+	}
 }
 
 func (e *Executor) manageBudgetLimit(ctx context.Context, request ExecutionRequest, arguments string) (any, error) {
@@ -1313,7 +1465,13 @@ func (e *Executor) manageDiscordRole(arguments string) (any, error) {
 }
 
 func (e *Executor) roleIDArgument(ctx context.Context, request ExecutionRequest, args map[string]any) (string, error) {
-	if roleID := discordIDArgument(firstNonEmpty(stringArgument(args, "role_id"), stringArgument(args, "role"))); roleID != "" {
+	if explicitRoleID := strings.TrimSpace(stringArgument(args, "role_id")); explicitRoleID != "" {
+		if roleID := discordIDArgument(explicitRoleID); roleID != "" {
+			return roleID, nil
+		}
+		return explicitRoleID, nil
+	}
+	if roleID := discordIDArgument(stringArgument(args, "role")); roleID != "" {
 		return roleID, nil
 	}
 	roleName := firstNonEmpty(stringArgument(args, "role_name"), stringArgument(args, "role"))
@@ -1422,7 +1580,10 @@ func (e *Executor) manageToolAccess(ctx context.Context, request ExecutionReques
 		}
 		return map[string]any{"result": map[string]any{"tools": toolRolePayloads(roles)}}, nil
 	case "add", "allow":
-		roleID := stringArgument(args, "role_id")
+		roleID, err := e.roleIDArgument(ctx, request, args)
+		if err != nil {
+			return nil, err
+		}
 		if toolName == "" || roleID == "" {
 			return nil, fmt.Errorf("tool_name and role_id are required")
 		}
@@ -1432,7 +1593,10 @@ func (e *Executor) manageToolAccess(ctx context.Context, request ExecutionReques
 		}
 		return confirmationRequired("tool_access.add", preview), nil
 	case "remove", "deny":
-		roleID := stringArgument(args, "role_id")
+		roleID, err := e.roleIDArgument(ctx, request, args)
+		if err != nil {
+			return nil, err
+		}
 		if toolName == "" || roleID == "" {
 			return nil, fmt.Errorf("tool_name and role_id are required")
 		}
@@ -2050,6 +2214,9 @@ func userNativeCapabilities(definitions map[string]Definition) []map[string]any 
 	if has("panda.manage_music") {
 		add("manage_music", "Manage music", "Play music, inspect the queue, and control playback from natural requests.", false)
 	}
+	if has("panda.manage_ops") {
+		add("owner_operations", "Owner operations", "Read operational status or prepare drain, resume, and incident-mode changes for confirmation.", true)
+	}
 	if has("panda.list_tools") {
 		add("current_capabilities", "Show current capabilities", "Summarize the Panda capabilities available to you in this channel.", false)
 	}
@@ -2107,7 +2274,7 @@ func (e *Executor) canExecute(name string) bool {
 		return e.attachments != nil
 	case "read_config":
 		return e.configs != nil
-	case "manage_memory_consent", "panda.usage_report", "panda.manage_soul", "panda.manage_budget_limit", "panda.manage_knowledge", "panda.manage_role_permission", "panda.manage_tool_access", "panda.manage_channel_rule":
+	case "manage_memory_consent", "panda.usage_report", "panda.manage_soul", "panda.manage_prompt", "panda.manage_budget_limit", "panda.manage_knowledge", "panda.manage_role_permission", "panda.manage_tool_access", "panda.manage_channel_rule":
 		return e.adminOps != nil
 	case "panda.manage_member_role":
 		return e.discord != nil
@@ -2121,6 +2288,8 @@ func (e *Executor) canExecute(name string) bool {
 		return e.reminder != nil
 	case "panda.manage_music":
 		return e.music != nil
+	case "panda.manage_ops":
+		return e.ops != nil
 	case "draft_moderator_note", "generate_workflow_json", "panda.list_tools":
 		return true
 	default:
@@ -2217,6 +2386,8 @@ func confirmationArguments(action string, preview map[string]any) map[string]str
 		return stringArguments(preview, "channel_id")
 	case "composed_tool.approve", "composed_tool.rollback":
 		return stringArguments(preview, "tool_name", "version")
+	case "owner_ops.drain", "owner_ops.resume", "owner_ops.incident_enable", "owner_ops.incident_disable":
+		return stringArguments(preview, "operation")
 	default:
 		return nil
 	}
@@ -2290,6 +2461,14 @@ func confirmationCopy(action string, arguments map[string]string) (string, strin
 		return fmt.Sprintf("Panda prepared approval of `%s` version `%s`.", arguments["tool_name"], arguments["version"]), "Approve tool"
 	case "composed_tool.rollback":
 		return fmt.Sprintf("Panda prepared rollback of `%s` to version `%s`.", arguments["tool_name"], arguments["version"]), "Roll back tool"
+	case "owner_ops.drain":
+		return "Panda prepared draining the queue worker so it will not claim new jobs.", "Drain worker"
+	case "owner_ops.resume":
+		return "Panda prepared resuming queue worker job processing.", "Resume worker"
+	case "owner_ops.incident_enable":
+		return "Panda prepared enabling incident mode.", "Enable incident"
+	case "owner_ops.incident_disable":
+		return "Panda prepared disabling incident mode.", "Disable incident"
 	default:
 		return "", ""
 	}

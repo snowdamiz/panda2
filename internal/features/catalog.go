@@ -48,7 +48,6 @@ type Feature struct {
 	DiscordPermissions    []string `json:"discord_permissions"`
 	PandaPermissions      []string `json:"panda_permissions"`
 	ToolNames             []string `json:"tool_names,omitempty"`
-	CommandNames          []string `json:"command_names,omitempty"`
 	RequiresGatewayIntent bool     `json:"requires_gateway_intent"`
 	ConsumesPlanQuota     bool     `json:"consumes_plan_quota"`
 	RequiresConfirmation  bool     `json:"requires_confirmation"`
@@ -292,7 +291,6 @@ func cloneFeature(feature Feature) Feature {
 	feature.DiscordPermissions = append([]string(nil), feature.DiscordPermissions...)
 	feature.PandaPermissions = append([]string(nil), feature.PandaPermissions...)
 	feature.ToolNames = append([]string(nil), feature.ToolNames...)
-	feature.CommandNames = append([]string(nil), feature.CommandNames...)
 	feature.Dependencies = append([]string(nil), feature.Dependencies...)
 	return feature
 }
@@ -301,10 +299,9 @@ var catalog = []Feature{
 	{
 		ID:                 AssistantChat,
 		Label:              "Assistant chat",
-		Description:        "Mentions, ask/chat commands, explain, summarize, rewrite, and translate.",
+		Description:        "Natural messages plus explain, summarize, rewrite, and translate workflows.",
 		DiscordPermissions: []string{"VIEW_CHANNEL", "SEND_MESSAGES", "READ_MESSAGE_HISTORY", "EMBED_LINKS"},
 		PandaPermissions:   []string{admin.PermissionAssistantUse},
-		CommandNames:       []string{"ask", "chat", "summarize", "explain", "rewrite", "translate"},
 		ConsumesPlanQuota:  true,
 		Public:             true,
 	},
@@ -321,10 +318,9 @@ var catalog = []Feature{
 	{
 		ID:                 Polls,
 		Label:              "Polls",
-		Description:        "Native Discord polls from slash commands or confirmed assistant actions.",
+		Description:        "Native Discord polls from confirmed assistant actions.",
 		DiscordPermissions: []string{"VIEW_CHANNEL", "SEND_MESSAGES", "SEND_POLLS", "READ_MESSAGE_HISTORY"},
 		PandaPermissions:   []string{admin.PermissionAssistantUse},
-		CommandNames:       []string{"poll"},
 		ToolNames:          []string{"discord.create_poll", "discord.get_poll_answer_voters", "discord.end_poll"},
 		Public:             true,
 		Dependencies:       []string{AssistantChat},
@@ -335,7 +331,6 @@ var catalog = []Feature{
 		Description:        "User, channel, role, and follow-up reminders.",
 		DiscordPermissions: []string{"VIEW_CHANNEL", "SEND_MESSAGES"},
 		PandaPermissions:   []string{admin.PermissionAssistantUse},
-		CommandNames:       []string{"reminder", "reminders"},
 		ToolNames:          []string{"panda.manage_reminder"},
 		ConsumesPlanQuota:  true,
 		Public:             true,
@@ -387,8 +382,7 @@ var catalog = []Feature{
 		Label:            "Admin setup",
 		Description:      "Setup checklist, behavior, prompts, soul, billing status, feedback, alerts, and support-oriented admin views.",
 		PandaPermissions: []string{admin.PermissionAdminConfigRead, admin.PermissionAdminConfigWrite, admin.PermissionAssistantSoulWrite, admin.PermissionAdminUsageRead},
-		CommandNames:     []string{"admin"},
-		ToolNames:        []string{"read_config", "panda.manage_soul"},
+		ToolNames:        []string{"read_config", "panda.manage_soul", "panda.manage_prompt"},
 		Public:           true,
 	},
 	{
@@ -414,7 +408,6 @@ var catalog = []Feature{
 		Label:                "Composed tools",
 		Description:          "Draft, approve, run, schedule, and audit server automations.",
 		PandaPermissions:     []string{admin.PermissionToolComposeDraft, admin.PermissionToolComposeApprove, admin.PermissionToolComposeInvoke, admin.PermissionToolComposeAudit},
-		CommandNames:         []string{"schedule", "schedules"},
 		ToolNames:            []string{"panda.manage_composed_tool", "panda.manage_schedule"},
 		ConsumesPlanQuota:    true,
 		RequiresConfirmation: true,
@@ -490,9 +483,8 @@ var catalog = []Feature{
 	{
 		ID:               OwnerOps,
 		Label:            "Owner operations",
-		Description:      "Bot-owner operational health, guild count, incident, drain, resume, and reload controls.",
+		Description:      "Bot-owner operational health, guild count, incident, drain, resume, and reload controls from internal operator surfaces.",
 		PandaPermissions: []string{admin.PermissionOwnerOps},
-		CommandNames:     []string{"ops"},
 		Public:           false,
 	},
 }

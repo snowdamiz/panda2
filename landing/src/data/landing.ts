@@ -161,7 +161,7 @@ export const commandRows = [
   {
     key: 'behavior',
     symbol: 'B',
-    command: '/admin behavior',
+    command: 'Panda set behavior',
     description: 'Answer length and tool policy',
     order: '01',
   },
@@ -175,14 +175,14 @@ export const commandRows = [
   {
     key: 'tool',
     symbol: 'T',
-    command: '/admin tool',
+    command: 'Panda allow tool',
     description: 'Role-based tool access',
     order: '03',
   },
   {
     key: 'audit',
     symbol: 'A',
-    command: '/admin audit',
+    command: 'Panda show audit',
     description: 'Privileged action history',
     order: '04',
   },

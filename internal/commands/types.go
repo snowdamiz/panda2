@@ -27,17 +27,18 @@ type Request struct {
 }
 
 type Response struct {
-	Content      string
-	Ephemeral    bool
-	ThreadID     string
-	ThreadName   string
-	Presentation Presentation
-	Actions      []Action
-	Confirmation *Confirmation
-	Modal        *Modal
-	Background   *BackgroundTask
-	Poll         *polls.Poll
-	Feedback     *FeedbackControls
+	Content       string
+	Ephemeral     bool
+	ThreadID      string
+	ThreadName    string
+	Presentation  Presentation
+	Actions       []Action
+	Confirmation  *Confirmation
+	Confirmations []Confirmation
+	Modal         *Modal
+	Background    *BackgroundTask
+	Poll          *polls.Poll
+	Feedback      *FeedbackControls
 }
 
 type FeatureInstallIntentCreator interface {

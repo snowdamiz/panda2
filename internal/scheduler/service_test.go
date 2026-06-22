@@ -173,7 +173,7 @@ func TestManageReminderCreatesPersonalReminder(t *testing.T) {
 	}
 }
 
-func TestManageReminderRejectsPublicReminderWithoutExplicitCommandConfirmation(t *testing.T) {
+func TestManageReminderRejectsPublicReminderWithoutConfirmation(t *testing.T) {
 	now := time.Date(2026, 6, 21, 12, 0, 0, 0, time.UTC)
 	service, db, _, _ := newSchedulerTestService(t, now)
 	defer db.Close()
@@ -187,7 +187,7 @@ func TestManageReminderRejectsPublicReminderWithoutExplicitCommandConfirmation(t
 		In:        "10 minutes",
 		Target:    "channel",
 	})
-	if err == nil || !strings.Contains(err.Error(), "confirm_public") {
+	if err == nil || !strings.Contains(err.Error(), "confirmation button") {
 		t.Fatalf("expected public reminder confirmation error, got %v", err)
 	}
 }

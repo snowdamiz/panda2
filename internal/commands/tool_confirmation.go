@@ -49,6 +49,10 @@ const (
 	toolActionComposedToolApprove          = "composed_tool.approve"
 	toolActionComposedToolRollback         = "composed_tool.rollback"
 	toolActionDiscordPollCreate            = "discord_poll.create"
+	toolActionOwnerOpsDrain                = "owner_ops.drain"
+	toolActionOwnerOpsResume               = "owner_ops.resume"
+	toolActionOwnerOpsIncidentEnable       = "owner_ops.incident_enable"
+	toolActionOwnerOpsIncidentDisable      = "owner_ops.incident_disable"
 )
 
 type ToolConfirmationRequest struct {
@@ -75,7 +79,7 @@ func ToolConfirmationFromAssistant(userID string, pending *assistant.Interaction
 	if pending == nil {
 		return nil
 	}
-	if pending.Action == toolActionDiscordPollCreate {
+	if pending.Action == toolActionDiscordPollCreate || ownerOpsConfirmationAction(pending.Action) {
 		return confirmationFromPendingTool(userID, pending)
 	}
 	id := toolConfirmationID(userID, pending.Action, pending.Arguments)
@@ -92,6 +96,35 @@ func ToolConfirmationFromAssistant(userID string, pending *assistant.Interaction
 		CancelID:     ConfirmationCancelID,
 		CancelLabel:  "Cancel",
 		Danger:       pending.Danger,
+	}
+}
+
+func ToolConfirmationsFromAssistant(userID string, pending []assistant.InteractionConfirmation) []Confirmation {
+	confirmations := make([]Confirmation, 0, len(pending))
+	seen := map[string]struct{}{}
+	for index := range pending {
+		confirmation := ToolConfirmationFromAssistant(userID, &pending[index])
+		if confirmation == nil || strings.TrimSpace(confirmation.ID) == "" {
+			continue
+		}
+		if _, ok := seen[confirmation.ID]; ok {
+			continue
+		}
+		seen[confirmation.ID] = struct{}{}
+		confirmations = append(confirmations, *confirmation)
+	}
+	return confirmations
+}
+
+func ownerOpsConfirmationAction(action string) bool {
+	switch action {
+	case toolActionOwnerOpsDrain,
+		toolActionOwnerOpsResume,
+		toolActionOwnerOpsIncidentEnable,
+		toolActionOwnerOpsIncidentDisable:
+		return true
+	default:
+		return false
 	}
 }
 

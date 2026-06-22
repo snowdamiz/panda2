@@ -350,7 +350,9 @@ func TestNaturalTriggerPromptCoversDirectCapabilityQuestionWithoutMention(t *tes
 		"Do not require an @mention",
 		"naturally addresses Panda by name",
 		"word Panda appears anywhere",
+		"asks to set up or configure Panda",
 		"panda_manage_music",
+		"panda_manage_role_permission",
 	} {
 		if !strings.Contains(system, want) {
 			t.Fatalf("natural trigger prompt missing %q:\n%s", want, system)
@@ -426,6 +428,10 @@ func naturalTriggerRequestHasSchema(request llm.ChatRequest) bool {
 		strings.Contains(schema, `"prompt"`) &&
 		strings.Contains(schema, `"tool_name"`) &&
 		strings.Contains(schema, `"panda_manage_music"`) &&
+		strings.Contains(schema, `"panda_manage_role_permission"`) &&
+		strings.Contains(schema, `"panda_manage_channel_rule"`) &&
+		strings.Contains(schema, `"panda_manage_tool_access"`) &&
+		strings.Contains(schema, `"panda_manage_prompt"`) &&
 		strings.Contains(schema, `"additionalProperties": false`)
 }
 
@@ -435,6 +441,16 @@ func TestParseNaturalMessageDecisionExtractsWrappedJSON(t *testing.T) {
 		t.Fatalf("parseNaturalMessageDecision: %v", err)
 	}
 	if !decision.Respond || decision.Prompt != "Play music" || decision.ToolName != "panda_manage_music" {
+		t.Fatalf("unexpected decision: %+v", decision)
+	}
+}
+
+func TestParseNaturalMessageDecisionKeepsAdminSetupToolHints(t *testing.T) {
+	decision, err := parseNaturalMessageDecision(`{"respond":true,"prompt":"make Mods the moderator role","tool_name":"panda.manage_role_permission"}`)
+	if err != nil {
+		t.Fatalf("parseNaturalMessageDecision: %v", err)
+	}
+	if !decision.Respond || decision.Prompt != "make Mods the moderator role" || decision.ToolName != "panda_manage_role_permission" {
 		t.Fatalf("unexpected decision: %+v", decision)
 	}
 }
@@ -731,6 +747,48 @@ func TestAskFiltersFeatureDisabledToolsBeforeModelRequest(t *testing.T) {
 	}
 }
 
+func TestAskIncludesDisabledFeatureContextWhenFeatureGateActive(t *testing.T) {
+	ctx := context.Background()
+	client := &fakeClient{response: llm.ChatResponse{Model: "fixture/model", Content: "Music is not enabled."}}
+	service, _ := newTestService(t, client)
+
+	if _, err := service.Ask(ctx, AskRequest{
+		GuildID:   "guild-1",
+		UserID:    "user-1",
+		ChannelID: "channel-1",
+		Question:  "Panda play some music",
+		AllowedPermissions: map[string]struct{}{
+			admin.PermissionAssistantUse: {},
+		},
+		EnabledFeatures: map[string]struct{}{
+			features.AssistantChat: {},
+		},
+		FeatureGateActive: true,
+	}); err != nil {
+		t.Fatalf("Ask: %v", err)
+	}
+	if len(client.requests) != 1 {
+		t.Fatalf("expected one LLM request, got %d", len(client.requests))
+	}
+	joined := joinMessages(client.requests[0].Messages)
+	for _, want := range []string{
+		"Server feature status",
+		"Music (`music`)",
+		"feature is not enabled for this server",
+		"ask Panda to enable or reauthorize that feature",
+		"reauthorization link",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("disabled feature context missing %q: %s", want, joined)
+		}
+	}
+	for _, hiddenTool := range []string{"panda_manage_music", "panda.manage_music"} {
+		if strings.Contains(joined, hiddenTool) {
+			t.Fatalf("disabled feature context leaked tool name %q: %s", hiddenTool, joined)
+		}
+	}
+}
+
 func TestToolAvailabilityMessageExplainsAdminOnlyPolicyForNormalUsers(t *testing.T) {
 	message := toolAvailabilityMessage([]llm.Tool{{
 		Type: "function",
@@ -872,6 +930,76 @@ func TestAskExecutesTextToolCallFallback(t *testing.T) {
 	for _, want := range []string{"text_tool_call_1", `"presentation":"capabilities"`, `"name":"current_capabilities"`} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("expected fallback tool execution to add %s to final request, got %s", want, joined)
+		}
+	}
+}
+
+func TestAskContinuesSequentialToolRoundsWithinOnePrompt(t *testing.T) {
+	ctx := context.Background()
+	client := &fakeClient{responses: []llm.ChatResponse{
+		{
+			Model: "fixture/model",
+			ToolCalls: []llm.ToolCall{{
+				ID:   "call-list-tools",
+				Type: "function",
+				Function: llm.ToolCallFunction{
+					Name:      "panda_list_tools",
+					Arguments: `{}`,
+				},
+			}},
+		},
+		{
+			Model: "fixture/model",
+			ToolCalls: []llm.ToolCall{{
+				ID:   "call-read-config",
+				Type: "function",
+				Function: llm.ToolCallFunction{
+					Name:      "read_config",
+					Arguments: `{}`,
+				},
+			}},
+		},
+		{Model: "fixture/model", Content: "I checked the tools and current config."},
+	}}
+	service, db := newTestService(t, client)
+	configs := repository.NewGuildConfigRepository(db.DB)
+	registry, err := tools.NewDefaultRegistry()
+	if err != nil {
+		t.Fatalf("NewDefaultRegistry: %v", err)
+	}
+	service.WithToolExecutor(tools.NewExecutor(registry, nil, configs))
+
+	if _, err := configs.EnsureDefault(ctx, "guild-1"); err != nil {
+		t.Fatalf("EnsureDefault: %v", err)
+	}
+
+	response, err := service.Ask(ctx, AskRequest{
+		GuildID:   "guild-1",
+		UserID:    "admin",
+		ChannelID: "channel-1",
+		Question:  "Inspect the setup, then tell me what changed.",
+		AllowedPermissions: map[string]struct{}{
+			admin.PermissionAssistantUse:     {},
+			admin.PermissionAdminConfigRead:  {},
+			admin.PermissionAdminConfigWrite: {},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Ask: %v", err)
+	}
+	if response.Content != "I checked the tools and current config." {
+		t.Fatalf("unexpected response: %q", response.Content)
+	}
+	if len(client.requests) != 3 {
+		t.Fatalf("expected two tool rounds and one final answer request, got %d request(s)", len(client.requests))
+	}
+	if !toolNamePresent(client.requests[1].Tools, "read_config") {
+		t.Fatalf("expected tools to remain available on second tool round, got %+v", client.requests[1].Tools)
+	}
+	finalMessages := joinMessages(client.requests[2].Messages)
+	for _, want := range []string{"call-list-tools", "call-read-config", `"policy":"admin_only"`, `"tool_policy"`} {
+		if !strings.Contains(finalMessages, want) {
+			t.Fatalf("final request should include %s from prior tool rounds, got %s", want, finalMessages)
 		}
 	}
 }
