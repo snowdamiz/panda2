@@ -5,8 +5,11 @@ primary_region = "sjc"
   dockerfile = "Dockerfile"
 
 [env]
-  PUBLIC_APP_URL = "https://panda2-landing.fly.dev"
-  BILLING_ALLOWED_ORIGINS = "https://panda2-landing.fly.dev"
+  ENVIRONMENT = "production"
+  DATA_DIR = "/data"
+  SQLITE_PATH = "/data/panda.db"
+  PUBLIC_APP_URL = "https://pandaclanker.xyz"
+  BILLING_ALLOWED_ORIGINS = "https://pandaclanker.xyz,https://www.pandaclanker.xyz"
 
 [[mounts]]
   source = "data"
