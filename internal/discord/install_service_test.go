@@ -58,7 +58,7 @@ func TestCallbackRedirectURLKeepsLocalDevelopmentPort(t *testing.T) {
 		SuccessRedirect: "http://localhost:4321/install/success",
 	})
 
-	if got := service.callbackRedirectURL(true, "guild-1"); got != "http://localhost:4321/install/success?guild_id=guild-1&status=success" {
+	if got := service.callbackRedirectURL(true, "guild-1"); got != "http://localhost:4321/install/success/?guild_id=guild-1&status=success" {
 		t.Fatalf("unexpected local redirect: %q", got)
 	}
 }
@@ -352,7 +352,7 @@ func TestInstallServiceBindsFeaturesFromRecordedWebhookWhenBotRedirectHasNoCode(
 	if result.GuildID != "guild-1" || result.InstallerUserID != "installer-1" || result.IntentID != intent.IntentID {
 		t.Fatalf("unexpected callback result: %+v", result)
 	}
-	if !strings.HasPrefix(result.RedirectURL, "https://panda.example.test/install/success?") || !strings.Contains(result.RedirectURL, "guild_id=guild-1") {
+	if !strings.HasPrefix(result.RedirectURL, "https://panda.example.test/install/success/?") || !strings.Contains(result.RedirectURL, "guild_id=guild-1") {
 		t.Fatalf("unexpected success redirect: %q", result.RedirectURL)
 	}
 

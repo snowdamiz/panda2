@@ -307,14 +307,14 @@ func isLocalAppURL(value string) bool {
 }
 
 func installSuccessRedirect(publicURL, guildID string) string {
-	return installResultRedirect(publicURL, "/install/success", map[string]string{
+	return installResultRedirect(publicURL, "/install/success/", map[string]string{
 		"guild_id": guildID,
 		"status":   "success",
 	})
 }
 
 func installFailureRedirect(publicURL string, err error) string {
-	return installResultRedirect(publicURL, "/install/failed", map[string]string{
+	return installResultRedirect(publicURL, "/install/failed/", map[string]string{
 		"error":  installErrorCode(err),
 		"status": "failed",
 	})
@@ -340,11 +340,18 @@ func installResultRedirect(publicURL, path string, values map[string]string) str
 	}
 	u.RawQuery = q.Encode()
 	urlutil.StripNonLocalPort(u)
+	urlutil.EnsurePathTrailingSlash(u, "/install/success", "/install/failed")
 	return u.String()
 }
 
 func installRedirectLocation(raw string) string {
-	return urlutil.WithNonLocalPortStripped(raw)
+	raw = urlutil.WithNonLocalPortStripped(raw)
+	u, err := stdurl.Parse(raw)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return raw
+	}
+	urlutil.EnsurePathTrailingSlash(u, "/install/success", "/install/failed")
+	return u.String()
 }
 
 func writeInstallError(c *fiber.Ctx, err error) error {

@@ -622,6 +622,7 @@ func (s *InstallService) callbackRedirectURL(success bool, guildID string) strin
 		return base
 	}
 	urlutil.StripNonLocalPort(u)
+	urlutil.EnsurePathTrailingSlash(u, "/install/success", "/install/failed")
 	q := u.Query()
 	q.Set("status", status)
 	if guildID = strings.TrimSpace(guildID); guildID != "" {

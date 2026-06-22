@@ -181,7 +181,7 @@ func TestDiscordInstallCallbackPassesDiscordInstallHints(t *testing.T) {
 	if resp.StatusCode != stdhttp.StatusFound {
 		t.Fatalf("expected 302, got %d", resp.StatusCode)
 	}
-	if location := resp.Header.Get("Location"); location != handler.callbackResult.RedirectURL {
+	if location := resp.Header.Get("Location"); location != "https://landing.example.test/install/success/?guild_id=guild-1&status=success" {
 		t.Fatalf("unexpected redirect location: %q", location)
 	}
 	if handler.callbackRequest.State != "st_1" || handler.callbackRequest.Code != "code_1" || handler.callbackRequest.GuildID != "guild-1" || handler.callbackRequest.PermissionBitfield != "1024" {
@@ -256,13 +256,13 @@ func TestDiscordInstallCallbackKeepsFailureRedirectInProduction(t *testing.T) {
 	if resp.StatusCode != stdhttp.StatusFound {
 		t.Fatalf("expected 302, got %d", resp.StatusCode)
 	}
-	if location := resp.Header.Get("Location"); location != "https://landing.example.test/install/failed?error=install_failed&status=failed" {
+	if location := resp.Header.Get("Location"); location != "https://landing.example.test/install/failed/?error=install_failed&status=failed" {
 		t.Fatalf("unexpected redirect location: %q", location)
 	}
 }
 
 func TestInstallFailureRedirectStripsNonLocalPort(t *testing.T) {
-	if got := installFailureRedirect("https://pandaclanker.xyz:8080", errors.New("install failed")); got != "https://pandaclanker.xyz/install/failed?error=install_failed&status=failed" {
+	if got := installFailureRedirect("https://pandaclanker.xyz:8080", errors.New("install failed")); got != "https://pandaclanker.xyz/install/failed/?error=install_failed&status=failed" {
 		t.Fatalf("unexpected failure redirect: %q", got)
 	}
 }
@@ -295,7 +295,7 @@ func TestDiscordInstallCallbackAssumesSuccessForLocalDevelopment(t *testing.T) {
 	if resp.StatusCode != stdhttp.StatusFound {
 		t.Fatalf("expected 302, got %d", resp.StatusCode)
 	}
-	if location := resp.Header.Get("Location"); location != "http://localhost:4321/install/success?guild_id=guild-1&status=success" {
+	if location := resp.Header.Get("Location"); location != "http://localhost:4321/install/success/?guild_id=guild-1&status=success" {
 		t.Fatalf("unexpected redirect location: %q", location)
 	}
 }
@@ -328,7 +328,7 @@ func TestDiscordInstallCallbackKeepsFailureRedirectForRemoteDevelopmentURL(t *te
 	if resp.StatusCode != stdhttp.StatusFound {
 		t.Fatalf("expected 302, got %d", resp.StatusCode)
 	}
-	if location := resp.Header.Get("Location"); location != "https://landing.example.test/install/failed?error=install_failed&status=failed" {
+	if location := resp.Header.Get("Location"); location != "https://landing.example.test/install/failed/?error=install_failed&status=failed" {
 		t.Fatalf("unexpected redirect location: %q", location)
 	}
 }

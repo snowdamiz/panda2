@@ -171,8 +171,8 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 			ApplicationID:   cfg.DiscordApplicationID,
 			ClientSecret:    cfg.DiscordClientSecret,
 			RedirectURI:     cfg.DiscordInstallRedirectURI,
-			SuccessRedirect: installResultURL(cfg.PublicAppURL, "/install/success"),
-			FailureRedirect: installResultURL(cfg.PublicAppURL, "/install/failed"),
+			SuccessRedirect: installResultURL(cfg.PublicAppURL, "/install/success/"),
+			FailureRedirect: installResultURL(cfg.PublicAppURL, "/install/failed/"),
 		})
 	router := commands.NewRouter(adminService, assistantService, opsService, ratelimit.New(cfg.UserRateLimit, cfg.UserRateLimitWindow)).
 		WithComposedService(composedService).
