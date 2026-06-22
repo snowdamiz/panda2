@@ -77,6 +77,22 @@ func TestOpenRunsMigrationsAndPragmas(t *testing.T) {
 		t.Fatalf("expected guild_tool_roles table, got %d", tableCount)
 	}
 
+	for _, table := range []string{"install_intents", "guild_features"} {
+		if err := store.DB.Raw("SELECT COUNT(*) FROM sqlite_master WHERE name = ?", table).Scan(&tableCount).Error; err != nil {
+			t.Fatalf("%s table lookup failed: %v", table, err)
+		}
+		if tableCount != 1 {
+			t.Fatalf("expected %s table, got %d", table, tableCount)
+		}
+	}
+
+	if err := store.DB.Raw("SELECT COUNT(*) FROM pragma_table_info('guilds') WHERE name = 'feature_flags'").Scan(&tableCount).Error; err != nil {
+		t.Fatalf("feature_flags column lookup failed: %v", err)
+	}
+	if tableCount != 0 {
+		t.Fatalf("expected guilds.feature_flags to be removed, got %d", tableCount)
+	}
+
 	for _, table := range []string{"schedules", "alert_rules", "feedback_targets", "music_queue_items", "music_playlists"} {
 		if err := store.DB.Raw("SELECT COUNT(*) FROM sqlite_master WHERE name = ?", table).Scan(&tableCount).Error; err != nil {
 			t.Fatalf("%s table lookup failed: %v", table, err)

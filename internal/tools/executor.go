@@ -353,7 +353,31 @@ func (e *Executor) OpenRouterToolsForRequest(ctx context.Context, request Dynami
 	if err != nil {
 		return result
 	}
-	return append(result, dynamicTools...)
+	seen := map[string]struct{}{}
+	for _, tool := range result {
+		if name := strings.TrimSpace(tool.Function.Name); name != "" {
+			seen[name] = struct{}{}
+		}
+	}
+	for _, tool := range dynamicTools {
+		name := strings.TrimSpace(tool.Function.Name)
+		if name == "" {
+			continue
+		}
+		if _, ok := seen[name]; ok {
+			continue
+		}
+		if e.registry != nil {
+			if definition, ok := e.registry.Get(name); ok {
+				if !definition.AvailableTo(request.Access) || !e.canExecute(definition.Name) {
+					continue
+				}
+			}
+		}
+		result = append(result, tool)
+		seen[name] = struct{}{}
+	}
+	return result
 }
 
 func (e *Executor) Execute(ctx context.Context, request ExecutionRequest) (ExecutionResult, error) {

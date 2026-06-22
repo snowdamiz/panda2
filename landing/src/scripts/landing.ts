@@ -1,4 +1,6 @@
 import { commandViews } from '../data/landing';
+import { initAdminCoupons } from './admin-coupons';
+import { initWalletAccount } from './account';
 import { initSolPayments } from './sol-payments';
 
 (() => {
@@ -103,5 +105,7 @@ import { initSolPayments } from './sol-payments';
     node.textContent = String(new Date().getFullYear());
   });
 
+  initWalletAccount();
   initSolPayments();
+  initAdminCoupons();
 })();

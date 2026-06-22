@@ -6,7 +6,9 @@ export const siteMeta = {
   ogDescription:
     'Install Panda, start a server trial, and give your community a reliable assistant with predictable usage limits.',
   repositoryUrl: 'https://github.com/snowdamiz/panda2',
-  installUrl: 'https://discord.com/oauth2/authorize',
+  installUrl: '/#install',
+  accountUrl: '/account',
+  billingUrl: '/billing',
   supportUrl: '/support',
   statusUrl: '/status',
   privacyUrl: '/privacy',
@@ -31,10 +33,10 @@ export const siteMeta = {
 } as const;
 
 export const navLinks = [
-  { href: '#features', label: 'Features' },
-  { href: '#pricing', label: 'Pricing' },
-  { href: '#control', label: 'Control' },
-  { href: '#privacy', label: 'Privacy' },
+  { href: '/#features', label: 'Features' },
+  { href: '/#pricing', label: 'Pricing' },
+  { href: '/#control', label: 'Control' },
+  { href: '/#privacy', label: 'Privacy' },
 ] as const;
 
 export const heroMeta = ['14-day trial', 'Usage limits', 'Admin controls', 'Server knowledge'] as const;
@@ -274,9 +276,11 @@ export const footerGroups = [
   {
     title: 'PRODUCT',
     links: [
-      { href: '#features', label: 'Features', external: false },
-      { href: '#pricing', label: 'Pricing', external: false },
-      { href: '#privacy', label: 'Privacy', external: false },
+      { href: '/#features', label: 'Features', external: false },
+      { href: '/#pricing', label: 'Pricing', external: false },
+      { href: siteMeta.accountUrl, label: 'Account', external: false },
+      { href: siteMeta.billingUrl, label: 'Billing', external: false },
+      { href: '/#privacy', label: 'Privacy', external: false },
       { href: siteMeta.statusUrl, label: 'Status', external: false },
     ],
   },
@@ -294,7 +298,9 @@ export const footerGroups = [
   {
     title: 'SUPPORT',
     links: [
-      { href: siteMeta.installUrl, label: 'Install', external: true },
+      { href: siteMeta.installUrl, label: 'Install', external: false },
+      { href: siteMeta.accountUrl, label: 'Wallet account', external: false },
+      { href: siteMeta.billingUrl, label: 'Billing', external: false },
       { href: siteMeta.supportUrl, label: 'Support', external: false },
       { href: siteMeta.operationsUrl, label: 'Operator Runbook', external: true },
     ],

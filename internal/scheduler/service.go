@@ -11,6 +11,7 @@ import (
 
 	"github.com/sn0w/panda2/internal/billing"
 	"github.com/sn0w/panda2/internal/composed"
+	"github.com/sn0w/panda2/internal/features"
 	"github.com/sn0w/panda2/internal/repository"
 	"github.com/sn0w/panda2/internal/security"
 	"github.com/sn0w/panda2/internal/store"
@@ -51,6 +52,7 @@ type Service struct {
 	delivery  DeliverySender
 	audit     AuditRecorder
 	billing   *billing.Service
+	features  *features.Service
 	now       func() time.Time
 }
 
@@ -140,6 +142,11 @@ func (s *Service) WithBilling(billingService *billing.Service) *Service {
 	return s
 }
 
+func (s *Service) WithFeatureService(featureService *features.Service) *Service {
+	s.features = featureService
+	return s
+}
+
 func (s *Service) SetClock(now func() time.Time) {
 	if now != nil {
 		s.now = now
@@ -148,6 +155,9 @@ func (s *Service) SetClock(now func() time.Time) {
 
 func (s *Service) CreateReminder(ctx context.Context, request CreateReminderRequest) (store.Schedule, error) {
 	if err := validateReminderRequest(request); err != nil {
+		return store.Schedule{}, err
+	}
+	if err := s.requireFeature(ctx, request.GuildID, features.Reminders); err != nil {
 		return store.Schedule{}, err
 	}
 	if err := s.ensureScheduleCapacity(ctx, request.GuildID); err != nil {
@@ -199,6 +209,9 @@ func (s *Service) CreateReminder(ctx context.Context, request CreateReminderRequ
 func (s *Service) CreateComposed(ctx context.Context, request CreateComposedRequest) (store.Schedule, error) {
 	if strings.TrimSpace(request.GuildID) == "" || strings.TrimSpace(request.ToolName) == "" {
 		return store.Schedule{}, fmt.Errorf("guild_id and tool_name are required")
+	}
+	if err := s.requireFeature(ctx, request.GuildID, features.ComposedTools); err != nil {
+		return store.Schedule{}, err
 	}
 	next := request.NextRunAt.UTC()
 	if next.IsZero() {
@@ -399,10 +412,20 @@ func (s *Service) HandleJob(ctx context.Context, job store.Job) error {
 func (s *Service) executeSchedule(ctx context.Context, schedule store.Schedule, now time.Time) (string, error) {
 	switch schedule.Kind {
 	case KindReminder:
+		if enabled, err := s.featureEnabled(ctx, schedule.GuildID, features.Reminders); err != nil {
+			return repository.ScheduleLastFailed, err
+		} else if !enabled {
+			return repository.ScheduleLastSkipped, nil
+		}
 		return s.withScheduledRunQuota(ctx, schedule, func() (string, error) {
 			return repository.ScheduleLastSucceeded, s.deliverReminder(ctx, schedule)
 		})
 	case KindFollowUp:
+		if enabled, err := s.featureEnabled(ctx, schedule.GuildID, features.Reminders); err != nil {
+			return repository.ScheduleLastFailed, err
+		} else if !enabled {
+			return repository.ScheduleLastSkipped, nil
+		}
 		resolved, err := s.followUpResolved(ctx, schedule, now)
 		if err != nil {
 			return repository.ScheduleLastFailed, err
@@ -414,6 +437,11 @@ func (s *Service) executeSchedule(ctx context.Context, schedule store.Schedule, 
 			return repository.ScheduleLastSucceeded, s.deliverReminder(ctx, schedule)
 		})
 	case KindComposed:
+		if enabled, err := s.featureEnabled(ctx, schedule.GuildID, features.ComposedTools); err != nil {
+			return repository.ScheduleLastFailed, err
+		} else if !enabled {
+			return repository.ScheduleLastSkipped, nil
+		}
 		if s.composed == nil {
 			return repository.ScheduleLastSkipped, nil
 		}
@@ -421,6 +449,20 @@ func (s *Service) executeSchedule(ctx context.Context, schedule store.Schedule, 
 	default:
 		return repository.ScheduleLastFailed, fmt.Errorf("unsupported schedule kind %q", schedule.Kind)
 	}
+}
+
+func (s *Service) requireFeature(ctx context.Context, guildID, featureID string) error {
+	if s == nil || s.features == nil {
+		return nil
+	}
+	return s.features.Require(ctx, guildID, featureID)
+}
+
+func (s *Service) featureEnabled(ctx context.Context, guildID, featureID string) (bool, error) {
+	if s == nil || s.features == nil {
+		return true, nil
+	}
+	return s.features.Enabled(ctx, guildID, featureID)
 }
 
 func (s *Service) withScheduledRunQuota(ctx context.Context, schedule store.Schedule, run func() (string, error)) (string, error) {

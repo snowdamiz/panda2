@@ -43,11 +43,44 @@ type Guild struct {
 	OwnerUserID       string    `gorm:"not null;default:'';size:32"`
 	InstalledByUserID string    `gorm:"not null;default:'';size:32"`
 	Locale            string    `gorm:"not null;default:''"`
-	FeatureFlags      string    `gorm:"not null;default:''"`
 	JoinedAt          time.Time `gorm:"not null"`
 	LeftAt            *time.Time
 	CreatedAt         time.Time `gorm:"not null"`
 	UpdatedAt         time.Time `gorm:"not null"`
+}
+
+type InstallIntent struct {
+	IntentID                    string    `gorm:"primaryKey;size:64"`
+	StateHash                   string    `gorm:"uniqueIndex;not null;size:96"`
+	SelectedFeatureIDs          string    `gorm:"not null;default:'[]'"`
+	ExpandedFeatureIDs          string    `gorm:"not null;default:'[]'"`
+	RequestedDiscordPermissions string    `gorm:"not null;default:'[]'"`
+	RequestedPermissionBitfield string    `gorm:"not null;default:'0'"`
+	GrantedDiscordPermissions   string    `gorm:"not null;default:'[]'"`
+	GrantedScopes               string    `gorm:"not null;default:'[]'"`
+	Source                      string    `gorm:"index;not null;default:'';size:64"`
+	DesiredPlan                 string    `gorm:"not null;default:'';size:64"`
+	Referrer                    string    `gorm:"not null;default:''"`
+	Campaign                    string    `gorm:"not null;default:'';size:128"`
+	InstallerSessionMetadata    string    `gorm:"not null;default:'{}'"`
+	Status                      string    `gorm:"index;not null;default:'pending';size:32"`
+	GuildID                     string    `gorm:"index;not null;default:'';size:32"`
+	InstallerUserID             string    `gorm:"index;not null;default:'';size:32"`
+	ExpiresAt                   time.Time `gorm:"index;not null"`
+	ConsumedAt                  *time.Time
+	CreatedAt                   time.Time `gorm:"not null"`
+	UpdatedAt                   time.Time `gorm:"not null"`
+}
+
+type GuildFeature struct {
+	ID                    uint      `gorm:"primaryKey"`
+	GuildID               string    `gorm:"uniqueIndex:idx_guild_features_guild_feature;index;not null;size:32"`
+	FeatureID             string    `gorm:"uniqueIndex:idx_guild_features_guild_feature;index;not null;size:64"`
+	Enabled               bool      `gorm:"index;not null;default:true"`
+	SourceInstallIntentID string    `gorm:"index;not null;default:'';size:64"`
+	EnabledByUserID       string    `gorm:"index;not null;default:'';size:32"`
+	CreatedAt             time.Time `gorm:"not null"`
+	UpdatedAt             time.Time `gorm:"not null"`
 }
 
 type GuildRole struct {

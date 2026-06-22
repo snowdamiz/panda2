@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/sn0w/panda2/internal/admin"
+	"github.com/sn0w/panda2/internal/features"
 	"github.com/sn0w/panda2/internal/llm"
 )
 
@@ -58,6 +59,8 @@ type ToolAccess struct {
 	Permissions                  map[string]struct{}
 	AllowedTools                 map[string]struct{}
 	RestrictedTools              map[string]struct{}
+	EnabledFeatures              map[string]struct{}
+	FeatureGateActive            bool
 	RequireExplicitComposedTools bool
 }
 
@@ -67,6 +70,7 @@ type Definition struct {
 	Description           string
 	RequiredPermission    string
 	AlternatePermissions  []string
+	FeatureID             string
 	ToolClass             ToolClass
 	InputSchema           json.RawMessage
 	OutputSchema          json.RawMessage
@@ -198,6 +202,9 @@ func (d Definition) OpenRouterTool() llm.Tool {
 }
 
 func (d Definition) AvailableTo(access ToolAccess) bool {
+	if access.FeatureGateActive && d.FeatureID != "" && !access.HasFeature(d.FeatureID) {
+		return false
+	}
 	if !access.HasAnyPermission(append([]string{d.RequiredPermission}, d.AlternatePermissions...)...) {
 		return false
 	}
@@ -234,6 +241,7 @@ func (d Definition) AvailableTo(access ToolAccess) bool {
 			d.ToolClass == ToolClassWebRead ||
 			d.ToolClass == ToolClassWorkflow ||
 			d.ToolClass == ToolClassMetadata ||
+			d.ToolClass == ToolClassAdminRead ||
 			d.ToolClass == ToolClassAdminWrite ||
 			d.ToolClass == ToolClassDiscordWrite ||
 			d.ToolClass == ToolClassModerationWrite
@@ -253,6 +261,16 @@ func (d Definition) AvailableTo(access ToolAccess) bool {
 	}
 }
 
+func (access ToolAccess) HasFeature(featureID string) bool {
+	if strings.TrimSpace(featureID) == "" {
+		return true
+	}
+	if !access.FeatureGateActive {
+		return true
+	}
+	return features.Has(access.EnabledFeatures, featureID)
+}
+
 func hasAdminPolicyAccess(access ToolAccess) bool {
 	return access.HasAnyPermission(
 		admin.PermissionAdminConfigRead,
@@ -260,6 +278,7 @@ func hasAdminPolicyAccess(access ToolAccess) bool {
 		admin.PermissionAdminUsageRead,
 		admin.PermissionAdminAuditRead,
 		admin.PermissionAdminMemoryManage,
+		admin.PermissionAssistantSoulWrite,
 		admin.PermissionOwnerOps,
 	)
 }
@@ -349,11 +368,12 @@ func DefaultDefinitions() []Definition {
 		discordRead("discord.list_soundboard_sounds", "List guild soundboard sounds.", []string{}, 3*time.Second, 100, "VIEW_CHANNEL"),
 		discordRead("discord.recent_events", "Read Panda's bounded local Discord event cache.", []string{}, 2*time.Second, 100),
 		discordRead("discord.channel_activity_summary", "Summarize recent cached Discord activity for one channel.", []string{"channel_id"}, 2*time.Second, 100),
-		discordRead("discord.get_poll_answer_voters", "List users who voted for one answer in a native Discord poll.", []string{"channel_id", "message_id", "answer_id"}, 3*time.Second, 100, "VIEW_CHANNEL", "READ_MESSAGE_HISTORY"),
+		pollRead("discord.get_poll_answer_voters", "List users who voted for one answer in a native Discord poll.", []string{"channel_id", "message_id", "answer_id"}, 3*time.Second, 100, "VIEW_CHANNEL", "READ_MESSAGE_HISTORY"),
 		{
 			Name:                  "search_knowledge",
 			Description:           "Search guild knowledge.",
 			RequiredPermission:    admin.PermissionAssistantMemoryRead,
+			FeatureID:             features.Knowledge,
 			ToolClass:             ToolClassMemory,
 			InputSchema:           objectSchema("query", "limit"),
 			OutputSchema:          objectSchema("results"),
@@ -366,6 +386,7 @@ func DefaultDefinitions() []Definition {
 			Name:                  "web.search",
 			Description:           "Search the public web with Brave Search and return ranked URLs, titles, and snippets for current-information answers. Final answers based on this tool should include source links.",
 			RequiredPermission:    admin.PermissionAssistantWebSearch,
+			FeatureID:             features.WebSearch,
 			ToolClass:             ToolClassWebRead,
 			InputSchema:           webSearchSchema(),
 			OutputSchema:          objectSchema("results"),
@@ -379,6 +400,7 @@ func DefaultDefinitions() []Definition {
 			Name:                  "summarize_text_file",
 			Description:           "Summarize extracted text from a safe uploaded file.",
 			RequiredPermission:    admin.PermissionAssistantAttachments,
+			FeatureID:             features.Attachments,
 			ToolClass:             ToolClassDiscordRead,
 			InputSchema:           objectSchema("attachment_id", "detail"),
 			OutputSchema:          objectSchema("summary"),
@@ -391,6 +413,7 @@ func DefaultDefinitions() []Definition {
 			Name:                  "manage_memory_consent",
 			Description:           "Read or update the current user's memory consent for this guild.",
 			RequiredPermission:    admin.PermissionAssistantUse,
+			FeatureID:             features.AssistantChat,
 			ToolClass:             ToolClassWorkflow,
 			InputSchema:           actionSchema([]string{"action"}, "action", "dry_run"),
 			OutputSchema:          objectSchema("result"),
@@ -403,6 +426,7 @@ func DefaultDefinitions() []Definition {
 			Name:                  "panda.manage_reminder",
 			Description:           "Create, list, cancel, complete, or snooze the user's reminders from natural-language reminder requests. Use this for reminders and follow-ups that should notify the user later.",
 			RequiredPermission:    admin.PermissionAssistantUse,
+			FeatureID:             features.Reminders,
 			ToolClass:             ToolClassWorkflow,
 			InputSchema:           reminderManagementSchema(),
 			OutputSchema:          objectSchema("result"),
@@ -417,6 +441,7 @@ func DefaultDefinitions() []Definition {
 			Name:                  "panda.manage_music",
 			Description:           "Play music, inspect the queue, and control playback from natural-language music requests. Use this for requests like play, pause, resume, skip, stop, queue, now playing, loop, shuffle, playlist, and volume.",
 			RequiredPermission:    admin.PermissionAssistantUse,
+			FeatureID:             features.Music,
 			ToolClass:             ToolClassWorkflow,
 			InputSchema:           musicManagementSchema(),
 			OutputSchema:          objectSchema("result"),
@@ -430,6 +455,7 @@ func DefaultDefinitions() []Definition {
 			Name:                  "panda.list_tools",
 			Description:           "Call this before answering questions about what tools or capabilities Panda has. It lists callable tools in the current guild and channel context.",
 			RequiredPermission:    admin.PermissionAssistantUse,
+			FeatureID:             features.AssistantChat,
 			ToolClass:             ToolClassMetadata,
 			InputSchema:           toolListSchema(),
 			OutputSchema:          objectSchema("tools"),
@@ -443,6 +469,7 @@ func DefaultDefinitions() []Definition {
 			Name:                  "generate_workflow_json",
 			Description:           "Generate structured JSON for command workflows without taking action.",
 			RequiredPermission:    admin.PermissionAssistantUse,
+			FeatureID:             features.AssistantChat,
 			ToolClass:             ToolClassWorkflow,
 			InputSchema:           objectSchema("workflow", "inputs"),
 			OutputSchema:          objectSchema("json"),
@@ -451,6 +478,106 @@ func DefaultDefinitions() []Definition {
 			Audit:                 AuditNone,
 			IncludeInModelContext: true,
 		},
+		adminRead("read_config", "Read Panda configuration for the current guild.", []string{}, 2*time.Second, 1),
+		auditRead("panda.usage_report", "Read Panda usage totals and breakdowns for this server.", []string{}, 3*time.Second, 25),
+		soulWrite("panda.manage_soul", "Read or update Panda's server-specific response style and personality.", []string{"action"}),
+		adminWrite("panda.manage_budget_limit", "Set, remove, or list Panda budget limits for a guild, channel, or user.", []string{"action"}),
+		knowledgeAdminWrite("panda.manage_knowledge", "List, add, search, or delete server knowledge documents.", []string{"action"}),
+		adminWrite("panda.manage_role_permission", "Grant or remove Panda permission names for a Discord role.", []string{"action"}),
+		adminDiscordWrite(features.DiscordRoleManagement, "panda.manage_member_role", "Prepare confirmed Discord member role assignment changes.", []string{"action"}, "MANAGE_ROLES"),
+		adminDiscordWrite(features.DiscordRoleManagement, "panda.manage_discord_role", "Prepare confirmed Discord role creation with safe defaults.", []string{"action"}, "MANAGE_ROLES"),
+		adminWrite("panda.manage_tool_access", "Allow or remove role access to native or composed Panda tools.", []string{"action"}),
+		adminWrite("panda.manage_channel_rule", "Set or remove Panda channel allow/deny rules.", []string{"action"}),
+		{
+			Name:                  "panda.manage_composed_tool",
+			Description:           "Preview, draft, list, show, approve, run, simulate, export, pause, resume, disable, archive, or roll back composed tools.",
+			RequiredPermission:    admin.PermissionToolComposeDraft,
+			AlternatePermissions:  []string{admin.PermissionToolComposeApprove, admin.PermissionToolComposeInvoke, admin.PermissionToolComposeAudit},
+			FeatureID:             features.ComposedTools,
+			ToolClass:             ToolClassWorkflow,
+			InputSchema:           composedToolManagementSchema(),
+			OutputSchema:          objectSchema("result"),
+			Timeout:               20 * time.Second,
+			Redaction:             RedactSecrets,
+			Audit:                 AuditSensitive,
+			IncludeInModelContext: true,
+			SupportsDryRun:        true,
+		},
+		{
+			Name:                  "panda.manage_schedule",
+			Description:           "Create, list, or cancel scheduled approved composed-tool runs.",
+			RequiredPermission:    admin.PermissionToolComposeInvoke,
+			FeatureID:             features.ComposedTools,
+			ToolClass:             ToolClassWorkflow,
+			InputSchema:           scheduleManagementSchema(),
+			OutputSchema:          objectSchema("result"),
+			Timeout:               5 * time.Second,
+			Redaction:             RedactContent,
+			Audit:                 AuditSensitive,
+			IncludeInModelContext: true,
+			SupportsDryRun:        true,
+		},
+		{
+			Name:                  "draft_moderator_note",
+			Description:           "Draft a concise moderation note or action rationale without taking moderator action.",
+			RequiredPermission:    admin.PermissionModerationUse,
+			FeatureID:             features.ModerationAssist,
+			ToolClass:             ToolClassWorkflow,
+			InputSchema:           objectSchema("situation"),
+			OutputSchema:          objectSchema("note"),
+			Timeout:               2 * time.Second,
+			Redaction:             RedactContent,
+			Audit:                 AuditOnUse,
+			IncludeInModelContext: true,
+		},
+		discordWrite("discord.send_message", "Send a confirmed Discord message to a channel.", []string{"channel_id", "content"}, "VIEW_CHANNEL", "SEND_MESSAGES"),
+		discordWrite("discord.reply_message", "Reply to a Discord message after confirmation.", []string{"channel_id", "message_id", "content"}, "VIEW_CHANNEL", "SEND_MESSAGES", "READ_MESSAGE_HISTORY"),
+		discordWrite("discord.edit_own_message", "Edit a Panda-authored Discord message after confirmation.", []string{"channel_id", "message_id", "content"}, "VIEW_CHANNEL", "SEND_MESSAGES"),
+		discordWrite("discord.delete_own_message", "Delete a Panda-authored Discord message after confirmation.", []string{"channel_id", "message_id"}, "VIEW_CHANNEL", "MANAGE_MESSAGES"),
+		moderationWrite("discord.delete_message", "Delete a Discord message after confirmation.", []string{"channel_id", "message_id"}, "VIEW_CHANNEL", "MANAGE_MESSAGES"),
+		moderationWrite("discord.bulk_delete_messages", "Bulk delete recent Discord messages after confirmation.", []string{"channel_id", "message_ids"}, "VIEW_CHANNEL", "MANAGE_MESSAGES"),
+		discordWrite("discord.pin_message", "Pin a Discord message after confirmation.", []string{"channel_id", "message_id"}, "VIEW_CHANNEL", "PIN_MESSAGES"),
+		discordWrite("discord.unpin_message", "Unpin a Discord message after confirmation.", []string{"channel_id", "message_id"}, "VIEW_CHANNEL", "PIN_MESSAGES"),
+		discordWrite("discord.add_reaction", "Add a reaction to a Discord message.", []string{"channel_id", "message_id", "emoji"}, "VIEW_CHANNEL", "ADD_REACTIONS"),
+		discordWrite("discord.remove_own_reaction", "Remove Panda's reaction from a Discord message.", []string{"channel_id", "message_id", "emoji"}, "VIEW_CHANNEL"),
+		threadWrite("discord.create_thread", "Create a public or private thread after confirmation.", []string{"channel_id", "name"}, "VIEW_CHANNEL", "CREATE_PUBLIC_THREADS", "SEND_MESSAGES_IN_THREADS"),
+		threadWrite("discord.rename_thread", "Rename a thread after confirmation.", []string{"thread_id", "name"}, "VIEW_CHANNEL", "MANAGE_THREADS"),
+		threadWrite("discord.archive_thread", "Archive or unarchive a thread after confirmation.", []string{"thread_id"}, "VIEW_CHANNEL", "MANAGE_THREADS"),
+		threadWrite("discord.add_thread_member", "Add a user to a thread after confirmation.", []string{"thread_id", "user_id"}, "VIEW_CHANNEL", "MANAGE_THREADS"),
+		threadWrite("discord.remove_thread_member", "Remove a user from a thread after confirmation.", []string{"thread_id", "user_id"}, "VIEW_CHANNEL", "MANAGE_THREADS"),
+		pollWrite("discord.create_poll", "Create a native Discord poll after confirmation.", []string{"channel_id", "question", "answers"}, "VIEW_CHANNEL", "SEND_MESSAGES", "SEND_POLLS"),
+		pollWrite("discord.end_poll", "End a Panda-authored native Discord poll after confirmation.", []string{"channel_id", "message_id"}, "VIEW_CHANNEL", "SEND_MESSAGES"),
+		adminDiscordWrite(features.DiscordRoleManagement, "discord.create_role", "Create a Discord role with no elevated permissions after confirmation.", []string{"name"}, "MANAGE_ROLES"),
+		adminDiscordWrite(features.DiscordRoleManagement, "discord.add_member_role", "Assign a Discord role to a user after confirmation.", []string{"user_id", "role_id"}, "MANAGE_ROLES"),
+		adminDiscordWrite(features.DiscordRoleManagement, "discord.remove_member_role", "Remove a Discord role from a user after confirmation.", []string{"user_id", "role_id"}, "MANAGE_ROLES"),
+		adminDiscordWrite(features.DiscordRoleManagement, "discord.set_member_nick", "Set a member nickname after confirmation.", []string{"user_id", "nick"}, "MANAGE_NICKNAMES"),
+		adminDiscordWrite(features.DiscordChannelTools, "discord.modify_channel_permissions", "Modify a channel permission overwrite after confirmation.", []string{"channel_id", "overwrite_id", "allow", "deny"}, "MANAGE_CHANNELS"),
+		adminDiscordWrite(features.DiscordChannelTools, "discord.set_channel_slowmode", "Set channel slowmode after confirmation.", []string{"channel_id", "seconds"}, "MANAGE_CHANNELS"),
+		adminDiscordWrite(features.DiscordChannelTools, "discord.lock_thread", "Lock or unlock a thread after confirmation.", []string{"thread_id"}, "MANAGE_THREADS"),
+		adminDiscordRead(features.DiscordWebhooks, "discord.list_webhooks", "List guild or channel webhooks.", []string{}, 3*time.Second, 100, "VIEW_CHANNEL", "MANAGE_WEBHOOKS"),
+		adminDiscordWrite(features.DiscordWebhooks, "discord.create_webhook", "Create a channel webhook after confirmation.", []string{"channel_id", "name"}, "MANAGE_WEBHOOKS"),
+		adminDiscordWrite(features.DiscordWebhooks, "discord.update_webhook", "Update a webhook after confirmation.", []string{"webhook_id"}, "MANAGE_WEBHOOKS"),
+		adminDiscordWrite(features.DiscordWebhooks, "discord.delete_webhook", "Delete a webhook after confirmation.", []string{"webhook_id"}, "MANAGE_WEBHOOKS"),
+		adminDiscordRead(features.DiscordInvitesEvents, "discord.get_invite", "Read one Discord invite.", []string{"code"}, 2*time.Second, 1, "VIEW_CHANNEL"),
+		adminDiscordRead(features.DiscordInvitesEvents, "discord.list_invites", "List guild or channel invites.", []string{}, 3*time.Second, 100, "CREATE_INSTANT_INVITE"),
+		adminDiscordWrite(features.DiscordInvitesEvents, "discord.create_invite", "Create a channel invite after confirmation.", []string{"channel_id"}, "CREATE_INSTANT_INVITE"),
+		adminDiscordWrite(features.DiscordInvitesEvents, "discord.delete_invite", "Delete an invite after confirmation.", []string{"code"}, "CREATE_INSTANT_INVITE"),
+		adminDiscordWrite(features.DiscordInvitesEvents, "discord.create_scheduled_event", "Create a scheduled event after confirmation.", []string{"event_json"}, "MANAGE_EVENTS"),
+		adminDiscordWrite(features.DiscordInvitesEvents, "discord.update_scheduled_event", "Update a scheduled event after confirmation.", []string{"event_id", "event_json"}, "MANAGE_EVENTS"),
+		adminDiscordWrite(features.DiscordInvitesEvents, "discord.delete_scheduled_event", "Delete a scheduled event after confirmation.", []string{"event_id"}, "MANAGE_EVENTS"),
+		moderationWrite("discord.timeout_member", "Time out a member after confirmation.", []string{"user_id", "duration"}, "MODERATE_MEMBERS"),
+		moderationWrite("discord.remove_timeout", "Remove a member timeout after confirmation.", []string{"user_id"}, "MODERATE_MEMBERS"),
+		moderationWrite("discord.kick_member", "Kick a member after confirmation.", []string{"user_id"}, "KICK_MEMBERS"),
+		moderationWrite("discord.ban_member", "Ban a member after confirmation.", []string{"user_id"}, "BAN_MEMBERS"),
+		moderationWrite("discord.unban_member", "Unban a user after confirmation.", []string{"user_id"}, "BAN_MEMBERS"),
+		moderationWrite("discord.bulk_ban_members", "Bulk ban users after confirmation.", []string{"user_ids"}, "BAN_MEMBERS"),
+		moderationWrite("discord.create_auto_moderation_rule", "Create an auto-moderation rule after confirmation.", []string{"rule_json"}, "MANAGE_GUILD"),
+		moderationWrite("discord.update_auto_moderation_rule", "Update an auto-moderation rule after confirmation.", []string{"rule_id", "rule_json"}, "MANAGE_GUILD"),
+		moderationWrite("discord.delete_auto_moderation_rule", "Delete an auto-moderation rule after confirmation.", []string{"rule_id"}, "MANAGE_GUILD"),
+		adminDiscordRead(features.ModerationAssist, "discord.list_auto_moderation_rules", "List auto-moderation rules.", []string{}, 3*time.Second, 100, "MANAGE_GUILD"),
+		adminDiscordRead(features.ModerationAssist, "discord.list_bans", "List guild bans.", []string{}, 3*time.Second, 100, "BAN_MEMBERS"),
+		adminDiscordRead(features.ModerationAssist, "discord.get_audit_logs", "Read Discord audit log entries.", []string{}, 3*time.Second, 25, "VIEW_AUDIT_LOG"),
+		adminDiscordRead(features.ModerationAssist, "discord.list_members", "List guild members when Discord-side access allows it.", []string{}, 3*time.Second, 100, "VIEW_CHANNEL"),
 	}
 }
 
@@ -665,6 +792,7 @@ func discordRead(name, description string, required []string, timeout time.Durat
 		Name:                  name,
 		Description:           description,
 		RequiredPermission:    admin.PermissionAssistantUse,
+		FeatureID:             features.AssistantChat,
 		ToolClass:             ToolClassDiscordRead,
 		InputSchema:           toolInputSchema(required),
 		OutputSchema:          objectSchema("result"),
@@ -680,6 +808,7 @@ func discordRead(name, description string, required []string, timeout time.Durat
 func adminRead(name, description string, required []string, timeout time.Duration, maxLimit int, permissions ...string) Definition {
 	definition := discordRead(name, description, required, timeout, maxLimit, permissions...)
 	definition.RequiredPermission = admin.PermissionAdminConfigRead
+	definition.FeatureID = features.AdminSetup
 	definition.ToolClass = ToolClassAdminRead
 	definition.Redaction = RedactSecrets
 	return definition
@@ -688,6 +817,7 @@ func adminRead(name, description string, required []string, timeout time.Duratio
 func auditRead(name, description string, required []string, timeout time.Duration, maxLimit int, permissions ...string) Definition {
 	definition := adminRead(name, description, required, timeout, maxLimit, permissions...)
 	definition.RequiredPermission = admin.PermissionAdminAuditRead
+	definition.FeatureID = features.AdminAudit
 	return definition
 }
 
@@ -696,6 +826,7 @@ func discordWrite(name, description string, required []string, permissions ...st
 		Name:                  name,
 		Description:           description,
 		RequiredPermission:    admin.PermissionAssistantUse,
+		FeatureID:             features.DiscordMessages,
 		ToolClass:             ToolClassDiscordWrite,
 		InputSchema:           toolInputSchema(required),
 		OutputSchema:          objectSchema("result"),
@@ -713,12 +844,14 @@ func discordWrite(name, description string, required []string, permissions ...st
 func threadWrite(name, description string, required []string, permissions ...string) Definition {
 	definition := discordWrite(name, description, required, permissions...)
 	definition.RequiredPermission = admin.PermissionAssistantUseThreads
+	definition.FeatureID = features.Threads
 	return definition
 }
 
 func moderationWrite(name, description string, required []string, permissions ...string) Definition {
 	definition := discordWrite(name, description, required, permissions...)
 	definition.RequiredPermission = admin.PermissionModerationUse
+	definition.FeatureID = features.ModerationAssist
 	definition.ToolClass = ToolClassModerationWrite
 	return definition
 }
@@ -726,6 +859,59 @@ func moderationWrite(name, description string, required []string, permissions ..
 func adminWrite(name, description string, required []string, permissions ...string) Definition {
 	definition := discordWrite(name, description, required, permissions...)
 	definition.RequiredPermission = admin.PermissionAdminConfigWrite
+	definition.FeatureID = features.AdminAccessControl
+	definition.ToolClass = ToolClassAdminWrite
+	return definition
+}
+
+func adminSetupWrite(name, description string, required []string, permissions ...string) Definition {
+	definition := adminWrite(name, description, required, permissions...)
+	definition.FeatureID = features.AdminSetup
+	return definition
+}
+
+func soulWrite(name, description string, required []string, permissions ...string) Definition {
+	definition := adminSetupWrite(name, description, required, permissions...)
+	definition.RequiredPermission = admin.PermissionAssistantSoulWrite
+	return definition
+}
+
+func knowledgeAdminWrite(name, description string, required []string, permissions ...string) Definition {
+	definition := adminWrite(name, description, required, permissions...)
+	definition.RequiredPermission = admin.PermissionAdminMemoryManage
+	definition.FeatureID = features.Knowledge
+	return definition
+}
+
+func pollWrite(name, description string, required []string, permissions ...string) Definition {
+	definition := discordWrite(name, description, required, permissions...)
+	definition.FeatureID = features.Polls
+	return definition
+}
+
+func pollRead(name, description string, required []string, timeout time.Duration, maxLimit int, permissions ...string) Definition {
+	definition := discordRead(name, description, required, timeout, maxLimit, permissions...)
+	definition.FeatureID = features.Polls
+	return definition
+}
+
+func adminDiscordRead(featureID, name, description string, required []string, timeout time.Duration, maxLimit int, permissions ...string) Definition {
+	definition := discordRead(name, description, required, timeout, maxLimit, permissions...)
+	definition.RequiredPermission = admin.PermissionAdminConfigRead
+	definition.FeatureID = featureID
+	definition.ToolClass = ToolClassAdminRead
+	definition.Redaction = RedactSecrets
+	if featureID == features.ModerationAssist {
+		definition.RequiredPermission = admin.PermissionModerationUse
+		definition.ToolClass = ToolClassDiscordRead
+	}
+	return definition
+}
+
+func adminDiscordWrite(featureID, name, description string, required []string, permissions ...string) Definition {
+	definition := discordWrite(name, description, required, permissions...)
+	definition.RequiredPermission = admin.PermissionAdminConfigWrite
+	definition.FeatureID = featureID
 	definition.ToolClass = ToolClassAdminWrite
 	return definition
 }

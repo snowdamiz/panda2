@@ -16,6 +16,7 @@
   --color-tag-fg: #121212;
   --color-tag-bg: #d8d8d2;
   --color-status: #dfdfd8;
+  --color-status-good: #d8f8ce;
   --color-status-error: #ffb4a8;
   --color-white: #ffffff;
 
@@ -52,6 +53,7 @@
   --shadow-chip: 0 18px 40px rgba(0, 0, 0, .35);
   --shadow-feature-hover: 0 24px 60px rgba(5, 5, 5, .08);
   --shadow-feature-dark-hover: 0 28px 70px rgba(5, 5, 5, .2);
+  --shadow-install-paper: 0 18px 54px rgba(5, 5, 5, .075), inset 0 1px rgba(255, 255, 255, .28);
   --shadow-context-inset: inset 0 0 0 1px rgba(255, 255, 255, .08);
   --shadow-feature-halo: 0 0 0 18px rgba(5, 5, 5, .025), 0 0 0 36px rgba(5, 5, 5, .014);
   --shadow-step-halo: 0 0 0 18px rgba(5, 5, 5, .02), 0 0 0 36px rgba(5, 5, 5, .01);
@@ -60,7 +62,9 @@
   --shadow-console: 0 42px 100px rgba(0, 0, 0, .45);
   --shadow-privacy-orbit: 0 0 0 100px rgba(255, 255, 255, .018), 0 0 0 200px rgba(255, 255, 255, .01);
   --shadow-privacy-core: 0 0 80px rgba(255, 255, 255, .05);
-  --shadow-cta-halo: 0 0 0 18px rgba(5, 5, 5, .025), 0 0 0 36px rgba(5, 5, 5, .012);
+  --shadow-account-login: 0 28px 78px rgba(0, 0, 0, .28);
+  --shadow-account-panel: 0 28px 78px rgba(0, 0, 0, .24);
+  --shadow-legal-brief: 0 34px 90px rgba(0, 0, 0, .34);
 }
 
 :root {

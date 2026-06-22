@@ -9,6 +9,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/sn0w/panda2/internal/admin"
+	"github.com/sn0w/panda2/internal/features"
 	"github.com/sn0w/panda2/internal/llm"
 	"github.com/sn0w/panda2/internal/memory"
 	"github.com/sn0w/panda2/internal/repository"
@@ -669,7 +670,7 @@ func TestAskListsActualAvailableToolNamesInPrompt(t *testing.T) {
 	}
 }
 
-func TestAskFiltersDisabledConversationToolsBeforeModelRequest(t *testing.T) {
+func TestAskFiltersFeatureDisabledToolsBeforeModelRequest(t *testing.T) {
 	ctx := context.Background()
 	client := &fakeClient{response: llm.ChatResponse{Model: "fixture/model", Content: "ok"}}
 	service, db := newTestService(t, client)
@@ -703,6 +704,10 @@ func TestAskFiltersDisabledConversationToolsBeforeModelRequest(t *testing.T) {
 			admin.PermissionToolComposeInvoke: {},
 			admin.PermissionOwnerOps:          {},
 		},
+		EnabledFeatures: map[string]struct{}{
+			features.AssistantChat: {},
+		},
+		FeatureGateActive: true,
 	})
 	if err != nil {
 		t.Fatalf("Ask: %v", err)
@@ -712,7 +717,7 @@ func TestAskFiltersDisabledConversationToolsBeforeModelRequest(t *testing.T) {
 	}
 	for _, disabled := range []string{"discord_send_message", "panda_manage_composed_tool", "read_config"} {
 		if toolNamePresent(client.requests[0].Tools, disabled) {
-			t.Fatalf("disabled tool %s was exposed to model: %+v", disabled, client.requests[0].Tools)
+			t.Fatalf("feature-disabled tool %s was exposed to model: %+v", disabled, client.requests[0].Tools)
 		}
 	}
 	if !toolNamePresent(client.requests[0].Tools, "custom_safe_reader") {
@@ -721,7 +726,7 @@ func TestAskFiltersDisabledConversationToolsBeforeModelRequest(t *testing.T) {
 	joined := joinMessages(client.requests[0].Messages)
 	for _, disabled := range []string{"discord_send_message", "panda_manage_composed_tool", "read_config"} {
 		if strings.Contains(joined, disabled) {
-			t.Fatalf("disabled tool %s leaked into tool availability prompt: %s", disabled, joined)
+			t.Fatalf("feature-disabled tool %s leaked into tool availability prompt: %s", disabled, joined)
 		}
 	}
 }
@@ -1059,6 +1064,8 @@ func TestToolAccessOwnerOpsPermissionOverridesConfiguredPolicy(t *testing.T) {
 		},
 		nil,
 		nil,
+		nil,
+		false,
 		false,
 	)
 	if access.Policy != tools.ToolPolicyOwnerOps {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
@@ -12,9 +13,11 @@ import (
 	"github.com/sn0w/panda2/internal/assistant"
 	"github.com/sn0w/panda2/internal/billing"
 	"github.com/sn0w/panda2/internal/commands"
+	"github.com/sn0w/panda2/internal/composed"
 	"github.com/sn0w/panda2/internal/config"
 	"github.com/sn0w/panda2/internal/curation"
 	discordbot "github.com/sn0w/panda2/internal/discord"
+	"github.com/sn0w/panda2/internal/features"
 	"github.com/sn0w/panda2/internal/feedback"
 	pandahttp "github.com/sn0w/panda2/internal/http"
 	"github.com/sn0w/panda2/internal/llm"
@@ -38,6 +41,26 @@ type App struct {
 	discord    *discordbot.Bot
 	worker     *queue.Worker
 	scheduler  *scheduler.Service
+}
+
+type commandInstallIntentAdapter struct {
+	service *discordbot.InstallService
+}
+
+func (a commandInstallIntentAdapter) CreateFeatureInstallIntent(ctx context.Context, request commands.FeatureInstallIntentRequest) (commands.FeatureInstallIntentResult, error) {
+	result, err := a.service.CreateInstallIntent(ctx, discordbot.CreateInstallIntentRequest{
+		FeatureIDs: request.FeatureIDs,
+		Source:     request.Source,
+		Metadata:   request.Metadata,
+	})
+	if err != nil {
+		return commands.FeatureInstallIntentResult{}, err
+	}
+	return commands.FeatureInstallIntentResult{
+		AuthorizeURL: result.AuthorizeURL,
+		ExpiresAt:    result.ExpiresAt,
+		Selection:    result.Selection,
+	}, nil
 }
 
 func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, error) {
@@ -64,6 +87,9 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 	alertRules := repository.NewAlertRuleRepository(dataStore.DB)
 	feedbackRepo := repository.NewFeedbackRepository(dataStore.DB)
 	musicRepo := repository.NewMusicRepository(dataStore.DB)
+	featureRepo := repository.NewFeatureRepository(dataStore.DB)
+	composedRepo := repository.NewComposedToolRepository(dataStore.DB)
+	featureService := features.NewService(featureRepo)
 	openRouter := llm.NewOpenRouterClient(llm.OpenRouterConfig{
 		APIKey:                         cfg.OpenRouterAPIKey,
 		BaseURL:                        cfg.OpenRouterBaseURL,
@@ -110,6 +136,12 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 		WithAuditRecorder(audit).
 		WithAdminOperations(adminService).
 		WithBilling(billingService)
+	composedService := composed.NewService(composedRepo, toolRegistry, toolExecutor, openRouter, cfg.OpenRouterModel).
+		WithAuditRecorder(audit).
+		WithBilling(billingService).
+		WithFeatureService(featureService)
+	toolExecutor.WithDynamicToolProvider(composedService).
+		WithComposedToolManager(composedService)
 	if cfg.BraveSearchConfigured() {
 		toolExecutor.WithWebSearcher(websearch.NewBraveClient(websearch.Config{
 			APIKey:  cfg.BraveSearchAPIKey,
@@ -117,9 +149,11 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 		}))
 	}
 	schedulerService := scheduler.NewService(schedules, jobs).
+		WithComposedService(composedService).
 		WithDiscordEvents(discordEvents).
 		WithAuditRecorder(audit).
-		WithBilling(billingService)
+		WithBilling(billingService).
+		WithFeatureService(featureService)
 	alertService := alerts.NewService(alertRules).WithAuditRecorder(audit)
 	feedbackService := feedback.NewService(feedbackRepo)
 	toolExecutor.WithScheduleManager(schedulerService)
@@ -128,14 +162,30 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 		WithToolExecutor(toolExecutor).
 		WithBilling(billingService).
 		WithCurator(curator)
+	successRedirect := installRedirect(cfg.PublicAppURL, "/install/success")
+	failureRedirect := installRedirect(cfg.PublicAppURL, "/install/failed")
+	installService := discordbot.NewInstallService(guilds, audit).
+		WithBilling(billingService).
+		WithFeatureRepository(featureRepo).
+		WithGuildInstallVerifier(discordbot.NewDiscordInstallVerifier(cfg.DiscordBotToken)).
+		WithInstallConfig(discordbot.InstallConfig{
+			ApplicationID:   cfg.DiscordApplicationID,
+			ClientSecret:    cfg.DiscordClientSecret,
+			RedirectURI:     cfg.DiscordInstallRedirectURI,
+			SuccessRedirect: successRedirect,
+			FailureRedirect: failureRedirect,
+		})
 	router := commands.NewRouter(adminService, assistantService, opsService, ratelimit.New(cfg.UserRateLimit, cfg.UserRateLimitWindow)).
+		WithComposedService(composedService).
 		WithAttachmentReader(attachments).
 		WithScheduler(schedulerService).
 		WithAlertService(alertService).
 		WithBilling(billingService).
 		WithDataRepository(dataRepo).
 		WithFeedbackService(feedbackService).
-		WithToolExecutor(toolExecutor)
+		WithToolExecutor(toolExecutor).
+		WithFeatureService(featureService).
+		WithFeatureInstallIntents(commandInstallIntentAdapter{service: installService})
 
 	discord, err := discordbot.New(cfg, router, logger)
 	if err != nil {
@@ -156,9 +206,10 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 	}
 	if provider := discord.ToolProvider(discordEvents); provider != nil {
 		toolExecutor.WithDiscordToolProvider(provider)
+		composedService.WithDiscordResolver(provider)
 	}
-	installService := discordbot.NewInstallService(guilds, audit).WithBilling(billingService)
 	worker.Register(discordbot.InteractionJobKind, discord.HandleInteractionJob)
+	worker.Register(composed.EventJobKind, composedService.HandleEventJob)
 	worker.Register(scheduler.JobKind, schedulerService.HandleJob)
 
 	return &App{
@@ -167,6 +218,7 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 		store:  dataStore,
 		httpServer: pandahttp.New(cfg, dataStore).
 			WithDiscordWebhookHandler(installService).
+			WithInstallHandler(installService).
 			WithBillingService(billingService),
 		discord:   discord,
 		worker:    worker,
@@ -222,6 +274,17 @@ func (a *App) Run(ctx context.Context) error {
 	a.discord.Close(shutdownCtx)
 	wg.Wait()
 	return ctx.Err()
+}
+
+func installRedirect(publicURL, path string) string {
+	publicURL = strings.TrimRight(strings.TrimSpace(publicURL), "/")
+	if publicURL == "" {
+		return ""
+	}
+	if !strings.HasPrefix(path, "/") {
+		path = "/" + path
+	}
+	return publicURL + path
 }
 
 func (a *App) Close(ctx context.Context) {

@@ -5,6 +5,7 @@
 /tmp/
 /bin/
 /.dev/
+/node_modules/
 *.db
 *.db-*
 coverage.out

@@ -961,6 +961,23 @@ func (s *Service) RecordSensitiveReadAudit(ctx context.Context, guildID, actorID
 	})
 }
 
+func (s *Service) RecordFeatureAudit(ctx context.Context, guildID, actorID, action string, values map[string]any) {
+	if s.audit == nil {
+		return
+	}
+	if values == nil {
+		values = map[string]any{}
+	}
+	_ = s.audit.Record(ctx, store.AuditEvent{
+		GuildID:    strings.TrimSpace(guildID),
+		ActorID:    strings.TrimSpace(actorID),
+		Action:     strings.TrimSpace(action),
+		TargetType: "guild_features",
+		TargetID:   strings.TrimSpace(guildID),
+		Metadata:   metadataAny(values),
+	})
+}
+
 func (s *Service) canUseOptionalAssistantPermission(ctx context.Context, request AssistantAccessRequest, permission string) (bool, error) {
 	hasControl, err := s.hasGuildControl(ctx, request)
 	if err != nil || hasControl || request.GuildID == "" {
@@ -1080,6 +1097,14 @@ func cleanInstruction(value, field string) (string, error) {
 }
 
 func metadata(values map[string]string) string {
+	data, err := json.Marshal(values)
+	if err != nil {
+		return "{}"
+	}
+	return string(data)
+}
+
+func metadataAny(values map[string]any) string {
 	data, err := json.Marshal(values)
 	if err != nil {
 		return "{}"

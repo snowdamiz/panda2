@@ -16,7 +16,7 @@ The default test run covers the SQLite fallback search path. The tagged run cove
 
 1. Run one primary writable database for v1. Keep SQLite attached to one primary Machine unless the storage plan moves to LiteFS, Postgres, or another explicitly owned single-writer design.
 2. Create one Fly volume mounted at `/data`.
-3. Configure Discord application ID, public key, owner user IDs, public landing URL, SOL payment settings, and runtime settings in `panda.config.json` or environment overrides.
+3. Configure Discord application ID, public key, owner user IDs, public landing URL, Discord install callback URL, SOL payment settings, and runtime settings in `panda.config.json` or environment overrides.
 4. Store secrets with the deployment secret manager:
    - `DISCORD_BOT_TOKEN`
    - `OPENROUTER_API_KEY`
@@ -36,10 +36,11 @@ Production validation fails when Discord credentials, the managed AI service key
 Required for SOL self-serve billing:
 
 - `PUBLIC_APP_URL`: the hosted landing origin used in Discord billing links and payment CORS.
-- `BILLING_ALLOWED_ORIGINS`: comma-separated origins allowed to call `/billing/sol/*`; defaults effectively include `PUBLIC_APP_URL`.
+- `DISCORD_INSTALL_REDIRECT_URI`: API callback URL registered in the Discord Developer Portal OAuth2 redirects, for example `https://<api-host>/discord/install/callback`. Do not point this at the static landing host unless that host serves the API callback.
+- `BILLING_ALLOWED_ORIGINS`: comma-separated origins allowed to call `/billing/*` and `/admin/*`; defaults effectively include `PUBLIC_APP_URL`. Development also allows the local Astro origins `http://localhost:4321` and `http://127.0.0.1:4321`.
 - `SOLANA_RPC_URL`: backend-only RPC endpoint used to prepare, submit, and verify Solana transactions. Do not publish this value to browser builds.
 - `SOLANA_CLUSTER`: `devnet`, `testnet`, `mainnet`, or `mainnet-beta`; defaults to `devnet`.
-- `SOLANA_TREASURY_WALLET`: treasury wallet receiving native SOL transfers.
+- `SOLANA_TREASURY_WALLET`: treasury wallet receiving native SOL transfers. The landing `/admin` page also requires this wallet to sign the admin login challenge.
 - `SOLANA_CONFIRMATION`: `confirmed` or `finalized`; defaults to `finalized`.
 - `SOLANA_ORDER_EXPIRATION`: order lifetime; defaults to `30m`.
 - `SOLANA_ACTIVATION_KEY_TTL`: one-time key lifetime after reveal; defaults to `48h`.
@@ -61,6 +62,7 @@ SOL payment setup:
 - The backend fetches the latest blockhash, serializes the native SOL transfer plus memo/reference, submits signed transaction bytes through Solana RPC, verifies structured Solana RPC responses, rejects token transfers, requires one matching native SOL transfer to the treasury wallet, requires the order memo/reference, and only accepts transactions at or above the configured confirmation threshold.
 - Verified orders reveal one activation key once. The key is stored hashed, consumed by `/billing action:activate api_key:<key>`, and cannot be re-revealed.
 - Operators can revoke an unused activation key by payment order with `/billing action:revoke order_id:<order>`. Revocation, creation, one-time viewing, consumption, and expiration are recorded in audit events.
+- Operators manage coupon creation, listing, and revocation from the landing admin page at `/admin`. Admin access requires signing a short login challenge with the configured `SOLANA_TREASURY_WALLET`; coupon management is intentionally not exposed through Discord bot commands.
 
 ## Health Checks
 

@@ -25,131 +25,6 @@ import (
 
 var ErrAssistantDisabled = errors.New("assistant is disabled for this guild")
 
-var disabledConversationToolNames = map[string]struct{}{
-	"discord.add_member_role":             {},
-	"discord.add_reaction":                {},
-	"discord.add_thread_member":           {},
-	"discord.archive_thread":              {},
-	"discord.ban_member":                  {},
-	"discord.bulk_ban_members":            {},
-	"discord.bulk_delete_messages":        {},
-	"discord.create_auto_moderation_rule": {},
-	"discord.create_invite":               {},
-	"discord.create_poll":                 {},
-	"discord.create_role":                 {},
-	"discord.create_scheduled_event":      {},
-	"discord.create_thread":               {},
-	"discord.create_webhook":              {},
-	"discord.delete_auto_moderation_rule": {},
-	"discord.delete_invite":               {},
-	"discord.delete_message":              {},
-	"discord.delete_own_message":          {},
-	"discord.delete_scheduled_event":      {},
-	"discord.delete_webhook":              {},
-	"discord.edit_own_message":            {},
-	"discord.end_poll":                    {},
-	"discord.get_audit_logs":              {},
-	"discord.get_invite":                  {},
-	"discord.kick_member":                 {},
-	"discord.list_auto_moderation_rules":  {},
-	"discord.list_bans":                   {},
-	"discord.list_invites":                {},
-	"discord.list_members":                {},
-	"discord.list_webhooks":               {},
-	"discord.lock_thread":                 {},
-	"discord.modify_channel_permissions":  {},
-	"discord.pin_message":                 {},
-	"discord.remove_member_role":          {},
-	"discord.remove_own_reaction":         {},
-	"discord.remove_thread_member":        {},
-	"discord.remove_timeout":              {},
-	"discord.rename_thread":               {},
-	"discord.reply_message":               {},
-	"discord.search_messages":             {},
-	"discord.send_message":                {},
-	"discord.set_channel_slowmode":        {},
-	"discord.set_member_nick":             {},
-	"discord.timeout_member":              {},
-	"discord.unban_member":                {},
-	"discord.unpin_message":               {},
-	"discord.update_auto_moderation_rule": {},
-	"discord.update_scheduled_event":      {},
-	"discord.update_webhook":              {},
-	"draft_moderator_note":                {},
-	"panda.manage_budget_limit":           {},
-	"panda.manage_channel_rule":           {},
-	"panda.manage_composed_tool":          {},
-	"panda.manage_discord_role":           {},
-	"panda.manage_knowledge":              {},
-	"panda.manage_member_role":            {},
-	"panda.manage_role_permission":        {},
-	"panda.manage_schedule":               {},
-	"panda.manage_soul":                   {},
-	"panda.manage_tool_access":            {},
-	"panda.usage_report":                  {},
-	"read_config":                         {},
-	"discord_add_member_role":             {},
-	"discord_add_reaction":                {},
-	"discord_add_thread_member":           {},
-	"discord_archive_thread":              {},
-	"discord_ban_member":                  {},
-	"discord_bulk_ban_members":            {},
-	"discord_bulk_delete_messages":        {},
-	"discord_create_auto_moderation_rule": {},
-	"discord_create_invite":               {},
-	"discord_create_poll":                 {},
-	"discord_create_role":                 {},
-	"discord_create_scheduled_event":      {},
-	"discord_create_thread":               {},
-	"discord_create_webhook":              {},
-	"discord_delete_auto_moderation_rule": {},
-	"discord_delete_invite":               {},
-	"discord_delete_message":              {},
-	"discord_delete_own_message":          {},
-	"discord_delete_scheduled_event":      {},
-	"discord_delete_webhook":              {},
-	"discord_edit_own_message":            {},
-	"discord_end_poll":                    {},
-	"discord_get_audit_logs":              {},
-	"discord_get_invite":                  {},
-	"discord_kick_member":                 {},
-	"discord_list_auto_moderation_rules":  {},
-	"discord_list_bans":                   {},
-	"discord_list_invites":                {},
-	"discord_list_members":                {},
-	"discord_list_webhooks":               {},
-	"discord_lock_thread":                 {},
-	"discord_modify_channel_permissions":  {},
-	"discord_pin_message":                 {},
-	"discord_remove_member_role":          {},
-	"discord_remove_own_reaction":         {},
-	"discord_remove_thread_member":        {},
-	"discord_remove_timeout":              {},
-	"discord_rename_thread":               {},
-	"discord_reply_message":               {},
-	"discord_search_messages":             {},
-	"discord_send_message":                {},
-	"discord_set_channel_slowmode":        {},
-	"discord_set_member_nick":             {},
-	"discord_timeout_member":              {},
-	"discord_unban_member":                {},
-	"discord_unpin_message":               {},
-	"discord_update_auto_moderation_rule": {},
-	"discord_update_scheduled_event":      {},
-	"discord_update_webhook":              {},
-	"panda_manage_budget_limit":           {},
-	"panda_manage_channel_rule":           {},
-	"panda_manage_composed_tool":          {},
-	"panda_manage_discord_role":           {},
-	"panda_manage_knowledge":              {},
-	"panda_manage_member_role":            {},
-	"panda_manage_role_permission":        {},
-	"panda_manage_schedule":               {},
-	"panda_manage_soul":                   {},
-	"panda_manage_tool_access":            {},
-	"panda_usage_report":                  {},
-}
-
 type Service struct {
 	llm                    llm.Client
 	usage                  *repository.UsageRepository
@@ -183,6 +58,8 @@ type AskRequest struct {
 	AllowedPermissions           map[string]struct{}
 	AllowedTools                 map[string]struct{}
 	RestrictedTools              map[string]struct{}
+	EnabledFeatures              map[string]struct{}
+	FeatureGateActive            bool
 	RequireExplicitComposedTools bool
 }
 
@@ -242,6 +119,8 @@ type TaskRequest struct {
 	AllowedPermissions           map[string]struct{}
 	AllowedTools                 map[string]struct{}
 	RestrictedTools              map[string]struct{}
+	EnabledFeatures              map[string]struct{}
+	FeatureGateActive            bool
 	RequireExplicitComposedTools bool
 }
 
@@ -281,6 +160,8 @@ type toolExecutionContext struct {
 	AllowedPermissions           map[string]struct{}
 	AllowedTools                 map[string]struct{}
 	RestrictedTools              map[string]struct{}
+	EnabledFeatures              map[string]struct{}
+	FeatureGateActive            bool
 	RequireExplicitComposedTools bool
 }
 
@@ -301,6 +182,8 @@ func (s *Service) Ask(ctx context.Context, request AskRequest) (AskResponse, err
 		AllowedPermissions:           request.AllowedPermissions,
 		AllowedTools:                 request.AllowedTools,
 		RestrictedTools:              request.RestrictedTools,
+		EnabledFeatures:              request.EnabledFeatures,
+		FeatureGateActive:            request.FeatureGateActive,
 		RequireExplicitComposedTools: request.RequireExplicitComposedTools,
 	})
 }
@@ -446,6 +329,8 @@ func (s *Service) Chat(ctx context.Context, request AskRequest) (AskResponse, er
 		AllowedPermissions:           request.AllowedPermissions,
 		AllowedTools:                 request.AllowedTools,
 		RestrictedTools:              request.RestrictedTools,
+		EnabledFeatures:              request.EnabledFeatures,
+		FeatureGateActive:            request.FeatureGateActive,
 		RequireExplicitComposedTools: request.RequireExplicitComposedTools,
 	}, llm.ChatRequest{
 		Messages:    messages,
@@ -547,6 +432,8 @@ func (s *Service) complete(ctx context.Context, request TaskRequest) (AskRespons
 		AllowedPermissions:           request.AllowedPermissions,
 		AllowedTools:                 request.AllowedTools,
 		RestrictedTools:              request.RestrictedTools,
+		EnabledFeatures:              request.EnabledFeatures,
+		FeatureGateActive:            request.FeatureGateActive,
 		RequireExplicitComposedTools: request.RequireExplicitComposedTools,
 	}, llm.ChatRequest{
 		Messages:    s.taskMessages(ctx, config, request),
@@ -760,7 +647,7 @@ func (s *Service) guildConfig(ctx context.Context, guildID string) (store.GuildC
 }
 
 func (s *Service) completeWithTools(ctx context.Context, config store.GuildConfig, toolContext toolExecutionContext, request llm.ChatRequest) (llm.ChatResponse, []InteractionConfirmation, *ToolCard, []tools.SourceLink, bool, error) {
-	access := toolAccess(config, toolContext.AllowedPermissions, toolContext.AllowedTools, toolContext.RestrictedTools, toolContext.RequireExplicitComposedTools)
+	access := toolAccess(config, toolContext.AllowedPermissions, toolContext.AllowedTools, toolContext.RestrictedTools, toolContext.EnabledFeatures, toolContext.FeatureGateActive, toolContext.RequireExplicitComposedTools)
 	if s.toolExecutor != nil && len(access.Permissions) > 0 {
 		request.Tools = s.toolExecutor.OpenRouterToolsForRequest(ctx, tools.DynamicToolListRequest{
 			GuildID:        config.GuildID,
@@ -769,7 +656,6 @@ func (s *Service) completeWithTools(ctx context.Context, config store.GuildConfi
 			Access:         access,
 			InvocationType: "chat_tool",
 		})
-		request.Tools = filterDisabledConversationTools(request.Tools)
 		var preferredToolMessage llm.Message
 		request.Tools, preferredToolMessage = applyPreferredToolSelection(request.Tools, toolContext.PreferredTool)
 		if preferredToolMessage.Content != "" {
@@ -859,21 +745,6 @@ func isWebSearchToolName(toolName string) bool {
 	default:
 		return false
 	}
-}
-
-func filterDisabledConversationTools(availableTools []llm.Tool) []llm.Tool {
-	if len(availableTools) == 0 {
-		return availableTools
-	}
-	filtered := availableTools[:0]
-	for _, tool := range availableTools {
-		name := strings.ToLower(strings.TrimSpace(tool.Function.Name))
-		if _, disabled := disabledConversationToolNames[name]; disabled {
-			continue
-		}
-		filtered = append(filtered, tool)
-	}
-	return filtered
 }
 
 func filterUnavailableToolCalls(toolCalls []llm.ToolCall, availableTools []llm.Tool) []llm.ToolCall {
@@ -1569,7 +1440,7 @@ func defaultMaxTokensForCommand(command string) int {
 	}
 }
 
-func toolAccess(config store.GuildConfig, allowedPermissions, allowedTools, restrictedTools map[string]struct{}, requireExplicitComposedTools bool) tools.ToolAccess {
+func toolAccess(config store.GuildConfig, allowedPermissions, allowedTools, restrictedTools, enabledFeatures map[string]struct{}, featureGateActive bool, requireExplicitComposedTools bool) tools.ToolAccess {
 	policy := strings.ToLower(strings.TrimSpace(config.ToolPolicy))
 	if policy == "" {
 		policy = tools.ToolPolicyAdminOnly
@@ -1586,6 +1457,8 @@ func toolAccess(config store.GuildConfig, allowedPermissions, allowedTools, rest
 		Permissions:                  permissions,
 		AllowedTools:                 clonePermissions(allowedTools),
 		RestrictedTools:              clonePermissions(restrictedTools),
+		EnabledFeatures:              clonePermissions(enabledFeatures),
+		FeatureGateActive:            featureGateActive,
 		RequireExplicitComposedTools: requireExplicitComposedTools,
 	}
 }

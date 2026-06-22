@@ -18,6 +18,7 @@ import (
 	"github.com/sn0w/panda2/internal/billing"
 	"github.com/sn0w/panda2/internal/composed"
 	contextsvc "github.com/sn0w/panda2/internal/context"
+	"github.com/sn0w/panda2/internal/features"
 	"github.com/sn0w/panda2/internal/feedback"
 	"github.com/sn0w/panda2/internal/llm"
 	"github.com/sn0w/panda2/internal/music"
@@ -51,6 +52,8 @@ type Router struct {
 	setup       SetupChecker
 	tools       *toolsvc.Executor
 	rateLimit   *ratelimit.Limiter
+	features    *features.Service
+	install     FeatureInstallIntentCreator
 }
 
 type ThreadManager interface {
@@ -204,6 +207,16 @@ func (r *Router) WithToolExecutor(executor *toolsvc.Executor) *Router {
 	return r
 }
 
+func (r *Router) WithFeatureService(featureService *features.Service) *Router {
+	r.features = featureService
+	return r
+}
+
+func (r *Router) WithFeatureInstallIntents(creator FeatureInstallIntentCreator) *Router {
+	r.install = creator
+	return r
+}
+
 func (r *Router) Handle(ctx context.Context, request Request) Response {
 	switch strings.ToLower(request.Command) {
 	case "ping":
@@ -211,9 +224,22 @@ func (r *Router) Handle(ctx context.Context, request Request) Response {
 	case "help":
 		return r.handleHelp(ctx, request)
 	case "poll":
+		if denied := r.ensureFeatureEnabled(ctx, request, features.Polls); denied.Content != "" {
+			return denied
+		}
 		return r.handlePoll(request)
-	case "admin", "ops", "schedule", "schedules":
-		return adminDisabledResponse()
+	case "admin":
+		return r.handleAdmin(ctx, request)
+	case "ops":
+		if denied := r.ensureFeatureEnabled(ctx, request, features.OwnerOps); denied.Content != "" {
+			return denied
+		}
+		return r.handleOps(ctx, request)
+	case "schedule", "schedules":
+		if denied := r.ensureFeatureEnabled(ctx, request, features.ComposedTools); denied.Content != "" {
+			return denied
+		}
+		return r.handleSchedule(ctx, request)
 	case "billing":
 		return r.handleBilling(ctx, request)
 	case "support":
@@ -221,6 +247,9 @@ func (r *Router) Handle(ctx context.Context, request Request) Response {
 	case "data":
 		return r.handleData(ctx, request)
 	case "reminder", "reminders":
+		if denied := r.ensureFeatureEnabled(ctx, request, features.Reminders); denied.Content != "" {
+			return denied
+		}
 		return r.handleReminder(ctx, request)
 	case "ask":
 		return r.handleAsk(ctx, request, "ask")
@@ -250,18 +279,11 @@ func (r *Router) handleHelp(ctx context.Context, request Request) Response {
 	}
 }
 
-func adminDisabledResponse() Response {
-	return Response{
-		Content:   "Panda admin and moderation controls are disabled in this build.",
-		Ephemeral: true,
-		Presentation: Presentation{
-			Title:  "Admin controls disabled",
-			Accent: AccentWarning,
-		},
-	}
-}
-
 func (r *Router) helpMessage(ctx context.Context, request Request) string {
+	access := r.helpAccess(ctx, request)
+	if access.elevated() {
+		return elevatedHelpMessage(access)
+	}
 	return regularHelpMessage
 }
 
@@ -403,6 +425,9 @@ func (r *Router) canHandleNaturalMessage(ctx context.Context, request Request) b
 	if r.admin == nil {
 		return false
 	}
+	if denied := r.ensureFeatureEnabled(ctx, request, features.AssistantChat); denied.Content != "" {
+		return false
+	}
 	accessRequest := assistantAccessRequest(request)
 	allowed, err := r.admin.CanUseAssistant(ctx, accessRequest)
 	if err != nil {
@@ -423,6 +448,9 @@ func (r *Router) canWriteSoul(ctx context.Context, request Request) bool {
 }
 
 func (r *Router) handleOps(ctx context.Context, request Request) Response {
+	if r.ops == nil {
+		return Response{Content: "Ops commands are not configured for this runtime.", Ephemeral: true}
+	}
 	if !request.IsOwner {
 		return Response{Content: "Only a bot owner can use ops commands.", Ephemeral: true}
 	}
@@ -531,6 +559,9 @@ func (r *Router) handleData(ctx context.Context, request Request) Response {
 	}
 	switch action {
 	case "export":
+		if denied := r.ensureFeatureEnabled(ctx, request, features.AdminSetup); denied.Content != "" {
+			return denied
+		}
 		if denied := r.ensureDataPermission(ctx, request, false); denied.Content != "" {
 			return denied
 		}
@@ -540,7 +571,32 @@ func (r *Router) handleData(ctx context.Context, request Request) Response {
 		}
 		return Response{Content: renderDataSummary(summary), Ephemeral: true, Presentation: Presentation{Title: "Panda Data Export", Accent: AccentInfo}}
 	case "delete":
-		return adminDisabledResponse()
+		if denied := r.ensureFeatureEnabled(ctx, request, features.AdminAccessControl); denied.Content != "" {
+			return denied
+		}
+		if denied := r.ensureDataPermission(ctx, request, true); denied.Content != "" {
+			return denied
+		}
+		scope, ok := repository.NormalizeDataScope(request.Options["scope"])
+		if !ok {
+			return Response{Content: "`scope` must be `knowledge`, `memory`, `conversations`, `billing`, or `all`.", Ephemeral: true}
+		}
+		if dryRunRequested(request) {
+			summary, err := r.data.Summary(ctx, request.GuildID)
+			if err != nil {
+				return Response{Content: "Data deletion preview could not be generated.", Ephemeral: true}
+			}
+			return Response{Content: fmt.Sprintf("Data deletion dry run for scope `%s`:\n%s", scope, renderDataSummary(summary)), Ephemeral: true, Presentation: Presentation{Title: "Data deletion preview", Accent: AccentWarning}}
+		}
+		confirmationID := dataDeleteConfirmationID(request.UserID, scope)
+		if !confirmed(request, confirmationID) {
+			return destructiveConfirmation(confirmationID, "Delete Panda data", fmt.Sprintf("This deletes `%s` Panda data for this server except audit logs.", scope))
+		}
+		summary, err := r.data.Delete(ctx, request.GuildID, scope)
+		if err != nil {
+			return Response{Content: "Data deletion could not be completed.", Ephemeral: true, Presentation: Presentation{Title: "Data deletion failed", Accent: AccentDanger}}
+		}
+		return Response{Content: renderDataDeletion(summary), Ephemeral: true, Presentation: Presentation{Title: "Data deleted", Accent: AccentDanger}}
 	default:
 		return Response{Content: "Data action must be `export` or `delete`.", Ephemeral: true}
 	}
@@ -583,14 +639,8 @@ func (r *Router) handleBilling(ctx context.Context, request Request) Response {
 		return r.handleBillingActivate(ctx, request)
 	case "revoke":
 		return r.handleBillingRevoke(ctx, request)
-	case "coupon_create":
-		return r.handleBillingCouponCreate(ctx, request)
-	case "coupon_list":
-		return r.handleBillingCouponList(ctx, request)
-	case "coupon_revoke":
-		return r.handleBillingCouponRevoke(ctx, request)
 	default:
-		return Response{Content: "Billing action must be `status`, `activate`, `revoke`, `coupon_create`, `coupon_list`, or `coupon_revoke`.", Ephemeral: true, Presentation: Presentation{Title: "Unknown billing action", Accent: AccentWarning}}
+		return Response{Content: "Billing action must be `status`, `activate`, or `revoke`.", Ephemeral: true, Presentation: Presentation{Title: "Unknown billing action", Accent: AccentWarning}}
 	}
 
 	entitlement, err := r.billing.Resolve(ctx, request.GuildID)
@@ -662,109 +712,6 @@ func (r *Router) handleBillingRevoke(ctx context.Context, request Request) Respo
 	}
 }
 
-func (r *Router) handleBillingCouponCreate(ctx context.Context, request Request) Response {
-	if !request.IsOwner {
-		return Response{Content: "Only Panda owners can create coupon codes.", Ephemeral: true, Presentation: Presentation{Title: "Owner required", Accent: AccentWarning}}
-	}
-	discountLamports, err := strconv.ParseInt(strings.TrimSpace(request.Options["discount_lamports"]), 10, 64)
-	if err != nil || discountLamports <= 0 {
-		return Response{Content: "Provide `discount_lamports` as a positive integer.", Ephemeral: true, Presentation: Presentation{Title: "Discount required", Accent: AccentWarning}}
-	}
-	maxRedemptions := 0
-	if value := strings.TrimSpace(request.Options["max_redemptions"]); value != "" {
-		parsed, err := strconv.Atoi(value)
-		if err != nil || parsed < 0 {
-			return Response{Content: "`max_redemptions` must be zero or a positive integer.", Ephemeral: true, Presentation: Presentation{Title: "Invalid limit", Accent: AccentWarning}}
-		}
-		maxRedemptions = parsed
-	}
-	expiresAt, err := parseCouponExpiry(request.Options["expires_at"])
-	if err != nil {
-		return Response{Content: "Use `expires_at` as RFC3339 time or YYYY-MM-DD.", Ephemeral: true, Presentation: Presentation{Title: "Invalid expiration", Accent: AccentWarning}}
-	}
-	result, err := r.billing.CreateCoupon(ctx, billing.CreateCouponRequest{
-		ActorUserID:      request.UserID,
-		ActorIsOwner:     request.IsOwner,
-		Plan:             request.Options["plan"],
-		DiscountLamports: discountLamports,
-		Code:             request.Options["coupon_code"],
-		MaxRedemptions:   maxRedemptions,
-		ExpiresAt:        expiresAt,
-		Note:             request.Options["note"],
-	})
-	if err != nil {
-		return billingCouponErrorResponse(err)
-	}
-	content := fmt.Sprintf("Coupon `%s` for Panda %s created.\nRaw code, shown once: `%s`\nDiscount: `%d` lamports. Limit: `%s`.",
-		result.Coupon.CouponID,
-		result.Coupon.DisplayName,
-		result.Code,
-		result.Coupon.DiscountLamports,
-		formatCouponLimit(result.Coupon.MaxRedemptions),
-	)
-	if result.Coupon.ExpiresAt != nil {
-		content += "\nExpires: `" + result.Coupon.ExpiresAt.Format(time.RFC3339) + "`."
-	}
-	return Response{Content: content, Ephemeral: true, Presentation: Presentation{Title: "Coupon created", Accent: AccentSuccess}}
-}
-
-func (r *Router) handleBillingCouponList(ctx context.Context, request Request) Response {
-	if !request.IsOwner {
-		return Response{Content: "Only Panda owners can list coupon codes.", Ephemeral: true, Presentation: Presentation{Title: "Owner required", Accent: AccentWarning}}
-	}
-	coupons, err := r.billing.ListCoupons(ctx, billing.ListCouponsRequest{ActorUserID: request.UserID, ActorIsOwner: request.IsOwner})
-	if err != nil {
-		return billingCouponErrorResponse(err)
-	}
-	if len(coupons) == 0 {
-		return Response{Content: "No coupon codes have been created.", Ephemeral: true, Presentation: Presentation{Title: "Coupons", Accent: AccentInfo}}
-	}
-	lines := make([]string, 0, len(coupons))
-	for _, coupon := range coupons {
-		expires := "never"
-		if coupon.ExpiresAt != nil {
-			expires = coupon.ExpiresAt.Format("2006-01-02")
-		}
-		lines = append(lines, fmt.Sprintf("`%s` `%s...` %s %d lamports %s expires %s pending=%d consumed=%d released=%d",
-			coupon.CouponID,
-			coupon.CodePrefix,
-			coupon.DisplayName,
-			coupon.DiscountLamports,
-			coupon.Status,
-			expires,
-			coupon.Pending,
-			coupon.Consumed,
-			coupon.Released,
-		))
-	}
-	return Response{Content: strings.Join(lines, "\n"), Ephemeral: true, Presentation: Presentation{Title: "Coupons", Accent: AccentInfo}}
-}
-
-func (r *Router) handleBillingCouponRevoke(ctx context.Context, request Request) Response {
-	if !request.IsOwner {
-		return Response{Content: "Only Panda owners can revoke coupon codes.", Ephemeral: true, Presentation: Presentation{Title: "Owner required", Accent: AccentWarning}}
-	}
-	identifier := strings.TrimSpace(firstNonEmpty(request.Options["coupon"], request.Options["coupon_id"]))
-	if identifier == "" {
-		return Response{Content: "Provide a coupon id or code prefix.", Ephemeral: true, Presentation: Presentation{Title: "Coupon required", Accent: AccentWarning}}
-	}
-	revoke := billing.RevokeCouponRequest{ActorUserID: request.UserID, ActorIsOwner: request.IsOwner}
-	if strings.HasPrefix(identifier, "cpn_") {
-		revoke.CouponID = identifier
-	} else {
-		revoke.Prefix = identifier
-	}
-	coupon, err := r.billing.RevokeCoupon(ctx, revoke)
-	if err != nil {
-		return billingCouponErrorResponse(err)
-	}
-	return Response{
-		Content:      fmt.Sprintf("Coupon `%s` (`%s...`) for Panda %s was revoked.", coupon.CouponID, coupon.CodePrefix, coupon.DisplayName),
-		Ephemeral:    true,
-		Presentation: Presentation{Title: "Coupon revoked", Accent: AccentSuccess},
-	}
-}
-
 func billingActivationErrorResponse(err error) Response {
 	switch {
 	case errors.Is(err, billing.ErrBillingAccess):
@@ -799,51 +746,6 @@ func billingRevocationErrorResponse(err error) Response {
 	default:
 		return Response{Content: "Activation key revocation could not be completed.", Ephemeral: true, Presentation: Presentation{Title: "Revocation failed", Accent: AccentWarning}}
 	}
-}
-
-func billingCouponErrorResponse(err error) Response {
-	switch {
-	case errors.Is(err, billing.ErrBillingAccess):
-		return Response{Content: "Only Panda owners can manage coupon codes.", Ephemeral: true, Presentation: Presentation{Title: "Owner required", Accent: AccentWarning}}
-	case errors.Is(err, billing.ErrUnknownPlan):
-		return Response{Content: "Choose a paid Panda plan for this coupon.", Ephemeral: true, Presentation: Presentation{Title: "Unknown plan", Accent: AccentWarning}}
-	case errors.Is(err, billing.ErrCouponDuplicate):
-		return Response{Content: "That coupon code already exists. Choose a different custom code.", Ephemeral: true, Presentation: Presentation{Title: "Duplicate coupon", Accent: AccentWarning}}
-	case errors.Is(err, billing.ErrCouponExpired):
-		return Response{Content: "That coupon is expired or the expiration time is not in the future.", Ephemeral: true, Presentation: Presentation{Title: "Coupon expired", Accent: AccentWarning}}
-	case errors.Is(err, billing.ErrCouponRevoked):
-		return Response{Content: "That coupon has already been revoked.", Ephemeral: true, Presentation: Presentation{Title: "Coupon revoked", Accent: AccentWarning}}
-	case errors.Is(err, billing.ErrCouponNotFound):
-		return Response{Content: "No coupon matched that id or prefix.", Ephemeral: true, Presentation: Presentation{Title: "Coupon not found", Accent: AccentWarning}}
-	case errors.Is(err, billing.ErrCouponAmbiguous):
-		return Response{Content: "That prefix matches more than one coupon. Use the coupon id instead.", Ephemeral: true, Presentation: Presentation{Title: "Coupon ambiguous", Accent: AccentWarning}}
-	default:
-		return Response{Content: "Coupon management could not be completed.", Ephemeral: true, Presentation: Presentation{Title: "Coupon failed", Accent: AccentWarning}}
-	}
-}
-
-func parseCouponExpiry(value string) (*time.Time, error) {
-	value = strings.TrimSpace(value)
-	if value == "" {
-		return nil, nil
-	}
-	if parsed, err := time.Parse(time.RFC3339, value); err == nil {
-		parsed = parsed.UTC()
-		return &parsed, nil
-	}
-	parsed, err := time.Parse("2006-01-02", value)
-	if err != nil {
-		return nil, err
-	}
-	parsed = parsed.UTC()
-	return &parsed, nil
-}
-
-func formatCouponLimit(limit int) string {
-	if limit == 0 {
-		return "unlimited"
-	}
-	return strconv.Itoa(limit)
 }
 
 func renderDataSummary(summary repository.GuildDataSummary) string {
@@ -895,8 +797,20 @@ func (r *Router) handleAdmin(ctx context.Context, request Request) Response {
 	if request.GuildID == "" {
 		return Response{Content: "Admin commands must be run inside a Discord server.", Ephemeral: true}
 	}
+	if r.admin == nil {
+		return Response{Content: "Admin commands are not configured for this runtime.", Ephemeral: true}
+	}
 
 	subcommand := strings.ToLower(request.Subcommand)
+	if subcommand == "" {
+		subcommand = "status"
+	}
+	if denied := r.ensureFeatureEnabled(ctx, request, adminFeatureForSubcommand(subcommand)); denied.Content != "" {
+		return denied
+	}
+	if subcommand == "feature" || subcommand == "features" {
+		return r.handleAdminFeatures(ctx, request)
+	}
 	if !request.IsGuildAdmin && !request.IsOwner {
 		if subcommand == "soul" {
 			allowed, err := r.admin.CanWriteSoul(ctx, assistantAccessRequest(request))
@@ -1370,6 +1284,7 @@ func (r *Router) handleAsk(ctx context.Context, request Request, command string)
 	}
 
 	toolFilter := r.toolFilter(ctx, request)
+	enabledFeatures, featureGateActive := r.featureSetForAccess(ctx, request.GuildID)
 	invocationContext := r.invocationContext(ctx, request)
 	answer, err := r.assistant.Ask(ctx, assistant.AskRequest{
 		RequestID:                    request.RequestID,
@@ -1385,6 +1300,8 @@ func (r *Router) handleAsk(ctx context.Context, request Request, command string)
 		AllowedPermissions:           r.allowedToolPermissions(ctx, request),
 		AllowedTools:                 toolFilter.allowed,
 		RestrictedTools:              toolFilter.restricted,
+		EnabledFeatures:              enabledFeatures,
+		FeatureGateActive:            featureGateActive,
 		RequireExplicitComposedTools: toolFilter.requireExplicitComposed,
 	})
 	if err != nil {
@@ -1453,6 +1370,7 @@ func (r *Router) handleChatModeWithAccess(ctx context.Context, request Request, 
 	}
 
 	toolFilter := r.toolFilter(ctx, request)
+	enabledFeatures, featureGateActive := r.featureSetForAccess(ctx, request.GuildID)
 	invocationContext := r.invocationContext(ctx, request)
 	answer, err := r.assistant.Chat(ctx, assistant.AskRequest{
 		RequestID:                    request.RequestID,
@@ -1473,6 +1391,8 @@ func (r *Router) handleChatModeWithAccess(ctx context.Context, request Request, 
 		AllowedPermissions:           r.allowedToolPermissions(ctx, request),
 		AllowedTools:                 toolFilter.allowed,
 		RestrictedTools:              toolFilter.restricted,
+		EnabledFeatures:              enabledFeatures,
+		FeatureGateActive:            featureGateActive,
 		RequireExplicitComposedTools: toolFilter.requireExplicitComposed,
 	})
 	if err != nil {
@@ -1499,6 +1419,7 @@ func (r *Router) handleTask(ctx context.Context, request Request) Response {
 	}
 
 	toolFilter := r.toolFilter(ctx, request)
+	enabledFeatures, featureGateActive := r.featureSetForAccess(ctx, request.GuildID)
 	invocationContext := r.invocationContext(ctx, request)
 	task := BackgroundTask{
 		RequestID:                    request.RequestID,
@@ -1518,6 +1439,8 @@ func (r *Router) handleTask(ctx context.Context, request Request) Response {
 		AllowedPermissions:           permissionNames(r.allowedToolPermissions(ctx, request)),
 		AllowedTools:                 permissionNames(toolFilter.allowed),
 		RestrictedTools:              permissionNames(toolFilter.restricted),
+		EnabledFeatures:              permissionNames(enabledFeatures),
+		FeatureGateActive:            featureGateActive,
 		RequireExplicitComposedTools: toolFilter.requireExplicitComposed,
 	}
 	if shouldBackgroundTask(request, input) {
@@ -1534,6 +1457,16 @@ func (r *Router) handleTask(ctx context.Context, request Request) Response {
 }
 
 func (r *Router) HandleBackgroundTask(ctx context.Context, task BackgroundTask) Response {
+	request := Request{
+		RequestID: task.RequestID,
+		Command:   task.Command,
+		GuildID:   task.GuildID,
+		ChannelID: task.ChannelID,
+		UserID:    task.UserID,
+	}
+	if denied := r.ensureFeatureEnabled(ctx, request, features.AssistantChat); denied.Content != "" {
+		return denied
+	}
 	reservation, denied := r.beginAIUsage(ctx, Request{
 		RequestID: task.RequestID,
 		Command:   task.Command,
@@ -1543,6 +1476,11 @@ func (r *Router) HandleBackgroundTask(ctx context.Context, task BackgroundTask) 
 	})
 	if denied.Content != "" {
 		return denied
+	}
+	enabledFeatures, featureGateActive := r.featureSetForAccess(ctx, task.GuildID)
+	if !featureGateActive && task.FeatureGateActive {
+		enabledFeatures = permissionsFromNames(task.EnabledFeatures)
+		featureGateActive = true
 	}
 	answer, err := r.assistant.CompleteTask(ctx, assistant.TaskRequest{
 		RequestID:                    task.RequestID,
@@ -1562,6 +1500,8 @@ func (r *Router) HandleBackgroundTask(ctx context.Context, task BackgroundTask) 
 		AllowedPermissions:           permissionsFromNames(task.AllowedPermissions),
 		AllowedTools:                 permissionsFromNames(task.AllowedTools),
 		RestrictedTools:              permissionsFromNames(task.RestrictedTools),
+		EnabledFeatures:              enabledFeatures,
+		FeatureGateActive:            featureGateActive,
 		RequireExplicitComposedTools: task.RequireExplicitComposedTools,
 	})
 	if err != nil {
@@ -1582,8 +1522,8 @@ func (r *Router) HandleToolConfirmation(ctx context.Context, request ToolConfirm
 	if request.Request.GuildID == "" {
 		return Response{Content: "This confirmation must be used inside a Discord server.", Ephemeral: true}
 	}
-	if adminToolConfirmationDisabled(request.Action) {
-		return adminDisabledResponse()
+	if denied := r.ensureFeatureEnabled(ctx, request.Request, toolConfirmationFeature(request.Action)); denied.Content != "" {
+		return denied
 	}
 	switch request.Action {
 	case toolActionKnowledgeDelete:
@@ -1836,27 +1776,32 @@ func (r *Router) HandleToolConfirmation(ctx context.Context, request ToolConfirm
 	}
 }
 
-func adminToolConfirmationDisabled(action string) bool {
+func toolConfirmationFeature(action string) string {
 	switch action {
-	case toolActionKnowledgeDelete,
-		toolActionBudgetLimitSet,
+	case toolActionKnowledgeDelete:
+		return features.Knowledge
+	case toolActionBudgetLimitSet,
 		toolActionBudgetLimitRemove,
 		toolActionRolePermissionAdd,
 		toolActionRolePermissionRemove,
 		toolActionRoleProfileAdd,
 		toolActionRoleProfileRemove,
-		toolActionDiscordRoleCreate,
-		toolActionMemberRoleAdd,
-		toolActionMemberRoleRemove,
 		toolActionToolAccessAdd,
 		toolActionToolAccessRemove,
 		toolActionChannelRuleSet,
-		toolActionChannelRuleRemove,
-		toolActionComposedToolApprove,
+		toolActionChannelRuleRemove:
+		return features.AdminAccessControl
+	case toolActionDiscordRoleCreate,
+		toolActionMemberRoleAdd,
+		toolActionMemberRoleRemove:
+		return features.DiscordRoleManagement
+	case toolActionDiscordPollCreate:
+		return features.Polls
+	case toolActionComposedToolApprove,
 		toolActionComposedToolRollback:
-		return true
+		return features.ComposedTools
 	default:
-		return false
+		return ""
 	}
 }
 
@@ -2021,6 +1966,9 @@ func (r *Router) attachmentInput(ctx context.Context, request Request, rawID str
 }
 
 func (r *Router) ensureAssistantAllowed(ctx context.Context, request Request) Response {
+	if denied := r.ensureFeatureEnabled(ctx, request, features.AssistantChat); denied.Content != "" {
+		return denied
+	}
 	allowed, err := r.admin.CanUseAssistant(ctx, assistantAccessRequest(request))
 	if err != nil {
 		return Response{Content: "Permission lookup failed. Please try again later.", Ephemeral: true}
@@ -2032,6 +1980,9 @@ func (r *Router) ensureAssistantAllowed(ctx context.Context, request Request) Re
 }
 
 func (r *Router) ensureThreadsAllowed(ctx context.Context, request Request) Response {
+	if denied := r.ensureFeatureEnabled(ctx, request, features.Threads); denied.Content != "" {
+		return denied
+	}
 	allowed, err := r.admin.CanUseThreads(ctx, assistantAccessRequest(request))
 	if err != nil {
 		return Response{Content: "Permission lookup failed. Please try again later.", Ephemeral: true}
@@ -2043,6 +1994,9 @@ func (r *Router) ensureThreadsAllowed(ctx context.Context, request Request) Resp
 }
 
 func (r *Router) ensureAttachmentsAllowed(ctx context.Context, request Request) Response {
+	if denied := r.ensureFeatureEnabled(ctx, request, features.Attachments); denied.Content != "" {
+		return denied
+	}
 	allowed, err := r.admin.CanUseAttachments(ctx, assistantAccessRequest(request))
 	if err != nil {
 		return Response{Content: "Permission lookup failed. Please try again later.", Ephemeral: true}
@@ -2054,6 +2008,9 @@ func (r *Router) ensureAttachmentsAllowed(ctx context.Context, request Request) 
 }
 
 func (r *Router) ensureMemoryReadAllowed(ctx context.Context, request Request) Response {
+	if denied := r.ensureFeatureEnabled(ctx, request, features.Knowledge); denied.Content != "" {
+		return denied
+	}
 	allowed, err := r.admin.CanReadMemory(ctx, assistantAccessRequest(request))
 	if err != nil {
 		return Response{Content: "Permission lookup failed. Please try again later.", Ephemeral: true}
@@ -2062,6 +2019,45 @@ func (r *Router) ensureMemoryReadAllowed(ctx context.Context, request Request) R
 		return Response{Content: "You do not have permission to search server knowledge.", Ephemeral: true}
 	}
 	return Response{}
+}
+
+func (r *Router) ensureFeatureEnabled(ctx context.Context, request Request, featureID string) Response {
+	featureID = strings.TrimSpace(featureID)
+	if featureID == "" || r.features == nil {
+		return Response{}
+	}
+	if featureID == features.OwnerOps && request.IsOwner && strings.TrimSpace(request.GuildID) == "" {
+		return Response{}
+	}
+	enabled, err := r.features.Enabled(ctx, request.GuildID, featureID)
+	if err != nil {
+		slog.Warn("feature lookup failed", slog.Any("err", err), slog.String("guild_id", request.GuildID), slog.String("feature_id", featureID), slog.String("request_id", request.RequestID))
+		return Response{Content: "Feature status could not be checked. Please try again later.", Ephemeral: true, Presentation: Presentation{Title: "Feature lookup failed", Accent: AccentWarning}}
+	}
+	if enabled {
+		return Response{}
+	}
+	return disabledFeatureResponse(featureID)
+}
+
+func disabledFeatureResponse(featureID string) Response {
+	label := featureLabel(featureID)
+	return Response{
+		Content:   fmt.Sprintf("The `%s` feature is not enabled for this server. A server admin can enable it from Panda setup and reauthorize if Discord permissions are needed.", label),
+		Ephemeral: true,
+		Presentation: Presentation{
+			Title:  "Feature not enabled",
+			Accent: AccentWarning,
+		},
+	}
+}
+
+func featureLabel(featureID string) string {
+	feature, ok := features.Lookup(featureID)
+	if !ok || strings.TrimSpace(feature.Label) == "" {
+		return strings.TrimSpace(featureID)
+	}
+	return feature.Label
 }
 
 func (r *Router) ensureGuildControl(ctx context.Context, request Request, denial string) Response {
@@ -2114,11 +2110,14 @@ func (r *Router) toolFilter(ctx context.Context, request Request) toolFilter {
 
 func (r *Router) toolAccess(ctx context.Context, request Request, policy string) toolsvc.ToolAccess {
 	filter := r.toolFilter(ctx, request)
+	enabledFeatures, featureGateActive := r.featureSetForAccess(ctx, request.GuildID)
 	return toolsvc.ToolAccess{
 		Policy:                       policy,
 		Permissions:                  r.allowedToolPermissions(ctx, request),
 		AllowedTools:                 filter.allowed,
 		RestrictedTools:              filter.restricted,
+		EnabledFeatures:              enabledFeatures,
+		FeatureGateActive:            featureGateActive,
 		RequireExplicitComposedTools: filter.requireExplicitComposed,
 	}
 }
@@ -2128,12 +2127,58 @@ func (r *Router) allowedToolPermissions(ctx context.Context, request Request) ma
 	if r.admin == nil {
 		return permissions
 	}
-	r.addPermissionIfAllowed(ctx, request, permissions, admin.PermissionAssistantUse, r.admin.CanUseAssistant)
-	r.addPermissionIfAllowed(ctx, request, permissions, admin.PermissionAssistantUseThreads, r.admin.CanUseThreads)
-	r.addPermissionIfAllowed(ctx, request, permissions, admin.PermissionAssistantAttachments, r.admin.CanUseAttachments)
-	r.addPermissionIfAllowed(ctx, request, permissions, admin.PermissionAssistantMemoryRead, r.admin.CanReadMemory)
-	r.addPermissionIfAllowed(ctx, request, permissions, admin.PermissionAssistantWebSearch, r.admin.CanUseWebSearch)
+	enabledFeatures, featureGateActive := r.featureSetForAccess(ctx, request.GuildID)
+	featureEnabled := func(featureID string) bool {
+		return !featureGateActive || features.Has(enabledFeatures, featureID)
+	}
+	if featureEnabled(features.AssistantChat) {
+		r.addPermissionIfAllowed(ctx, request, permissions, admin.PermissionAssistantUse, r.admin.CanUseAssistant)
+	}
+	if featureEnabled(features.Threads) {
+		r.addPermissionIfAllowed(ctx, request, permissions, admin.PermissionAssistantUseThreads, r.admin.CanUseThreads)
+	}
+	if featureEnabled(features.Attachments) {
+		r.addPermissionIfAllowed(ctx, request, permissions, admin.PermissionAssistantAttachments, r.admin.CanUseAttachments)
+	}
+	if featureEnabled(features.Knowledge) {
+		r.addPermissionIfAllowed(ctx, request, permissions, admin.PermissionAssistantMemoryRead, r.admin.CanReadMemory)
+		r.addPermissionIfAllowed(ctx, request, permissions, admin.PermissionAdminMemoryManage, r.admin.CanManageMemory)
+	}
+	if featureEnabled(features.WebSearch) {
+		r.addPermissionIfAllowed(ctx, request, permissions, admin.PermissionAssistantWebSearch, r.admin.CanUseWebSearch)
+	}
+	if featureEnabled(features.AdminSetup) || featureEnabled(features.AdminAccessControl) || featureEnabled(features.AdminAudit) {
+		r.addPermissionIfAllowed(ctx, request, permissions, admin.PermissionAdminConfigRead, r.admin.CanReadConfig)
+		r.addPermissionIfAllowed(ctx, request, permissions, admin.PermissionAdminConfigWrite, r.admin.CanWriteConfig)
+		r.addPermissionIfAllowed(ctx, request, permissions, admin.PermissionAssistantSoulWrite, r.admin.CanWriteSoul)
+		r.addPermissionIfAllowed(ctx, request, permissions, admin.PermissionAdminUsageRead, r.admin.CanReadUsage)
+		r.addPermissionIfAllowed(ctx, request, permissions, admin.PermissionAdminAuditRead, r.admin.CanReadAudit)
+	}
+	if featureEnabled(features.ComposedTools) {
+		r.addPermissionIfAllowed(ctx, request, permissions, admin.PermissionToolComposeDraft, r.admin.CanDraftComposedTool)
+		r.addPermissionIfAllowed(ctx, request, permissions, admin.PermissionToolComposeApprove, r.admin.CanApproveComposedTool)
+		r.addPermissionIfAllowed(ctx, request, permissions, admin.PermissionToolComposeInvoke, r.admin.CanInvokeComposedTool)
+		r.addPermissionIfAllowed(ctx, request, permissions, admin.PermissionToolComposeAudit, r.admin.CanAuditComposedTool)
+	}
+	if featureEnabled(features.ModerationAssist) {
+		r.addPermissionIfAllowed(ctx, request, permissions, admin.PermissionModerationUse, r.admin.CanUseModeration)
+	}
+	if featureEnabled(features.OwnerOps) || (request.IsOwner && strings.TrimSpace(request.GuildID) == "") {
+		r.addPermissionIfAllowed(ctx, request, permissions, admin.PermissionOwnerOps, r.admin.CanUseOwnerOps)
+	}
 	return permissions
+}
+
+func (r *Router) featureSetForAccess(ctx context.Context, guildID string) (map[string]struct{}, bool) {
+	if r.features == nil || strings.TrimSpace(guildID) == "" {
+		return map[string]struct{}{}, false
+	}
+	enabled, err := r.features.EnabledSet(ctx, guildID)
+	if err != nil {
+		slog.Warn("feature set lookup failed", slog.Any("err", err), slog.String("guild_id", guildID))
+		return map[string]struct{}{}, true
+	}
+	return enabled, true
 }
 
 func namesToSet(names []string) map[string]struct{} {

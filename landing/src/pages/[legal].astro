@@ -1,8 +1,11 @@
 ---
 import Footer from '../components/Footer.astro';
 import Header from '../components/Header.astro';
+import Button from '../components/ui/Button.astro';
+import Kicker from '../components/ui/Kicker.astro';
 import BaseLayout from '../layouts/BaseLayout.astro';
-import { legalDocuments } from '../data/legal';
+import { legalDocumentMap, legalDocuments } from '../data/legal';
+import type { LegalDocument } from '../data/legal';
 
 export function getStaticPaths() {
   return legalDocuments.map((document) => ({
@@ -11,31 +14,182 @@ export function getStaticPaths() {
   }));
 }
 
-const { document } = Astro.props;
+type Props = {
+  document: LegalDocument;
+};
+
+const { document: legalDocument } = Astro.props as Props;
+const currentIndex = legalDocuments.findIndex((item) => item.slug === legalDocument.slug);
+const documentNumber = String(currentIndex + 1).padStart(2, '0');
+const totalDocuments = String(legalDocuments.length).padStart(2, '0');
+const sectionWord = legalDocument.sections.length === 1 ? 'section' : 'sections';
+const sectionLinks = legalDocument.sections.map((section, index) => {
+  const slug = section.heading
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-|-$/g, '');
+
+  return {
+    id: `${String(index + 1).padStart(2, '0')}-${slug}`,
+    number: String(index + 1).padStart(2, '0'),
+    section,
+  };
+});
+const relatedDocuments = legalDocument.relatedSlugs
+  .map((slug) => legalDocumentMap.get(slug))
+  .filter((item): item is LegalDocument => Boolean(item));
 ---
 
-<BaseLayout title={`${document.title} - Panda`} description={document.description}>
+<BaseLayout title={`${legalDocument.title} - Panda`} description={legalDocument.description}>
   <Header />
   <main id="main" class="legal-page">
-    <section class="legal-hero">
-      <div class="shell legal-shell">
-        <p class="kicker">{document.eyebrow}</p>
-        <h1>{document.title}</h1>
-        <p>{document.description}</p>
-        <small>Effective {document.updated}</small>
+    <section class="legal-hero" aria-labelledby="legal-title">
+      <div class="legal-grid" aria-hidden="true"></div>
+      <div class="shell legal-hero-shell">
+        <div class="legal-hero-copy reveal">
+          <Kicker tone="paper" class="legal-kicker">{legalDocument.eyebrow}</Kicker>
+          <h1 id="legal-title">{legalDocument.title}</h1>
+          <p>{legalDocument.description}</p>
+
+          <div class="legal-hero-meta" aria-label="Document details">
+            <span>Effective {legalDocument.updated}</span>
+            <i aria-hidden="true"></i>
+            <span>{legalDocument.sections.length} {sectionWord}</span>
+            <i aria-hidden="true"></i>
+            <span>Document {documentNumber} of {totalDocuments}</span>
+          </div>
+
+          <div class="legal-hero-actions">
+            <Button href={`#${sectionLinks[0].id}`} variant="light">
+              Read document
+              <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 3v10M4 9l4 4 4-4" /></svg>
+            </Button>
+            {
+              legalDocument.secondaryAction && (
+                <Button
+                  href={legalDocument.secondaryAction.href}
+                  variant="ghost"
+                  external={legalDocument.secondaryAction.external}
+                >
+                  {legalDocument.secondaryAction.label}
+                  <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M5 11 11 5M6 5h5v5" /></svg>
+                </Button>
+              )
+            }
+          </div>
+        </div>
+
+        <aside class="legal-brief reveal reveal-delay" aria-label={`${legalDocument.title} summary`}>
+          <div class="legal-brief-head">
+            <span>Legal desk</span>
+            <strong>{legalDocument.navLabel}</strong>
+          </div>
+          <dl class="legal-facts">
+            {
+              legalDocument.facts.map((fact) => (
+                <div>
+                  <dt>{fact.label}</dt>
+                  <dd>{fact.value}</dd>
+                </div>
+              ))
+            }
+          </dl>
+        </aside>
       </div>
     </section>
 
     <section class="legal-body">
-      <div class="shell legal-shell">
-        {
-          document.sections.map((section) => (
-            <article class="legal-section">
-              <h2>{section.heading}</h2>
-              {section.body.map((paragraph) => <p>{paragraph}</p>)}
-            </article>
-          ))
-        }
+      <div class="shell legal-layout">
+        <aside class="legal-sidebar" aria-label="Document sections">
+          <div class="legal-sidebar-card">
+            <span>On this page</span>
+            <nav>
+              {
+                sectionLinks.map((link) => (
+                  <a href={`#${link.id}`}>
+                    <em>{link.number}</em>
+                    {link.section.heading}
+                  </a>
+                ))
+              }
+            </nav>
+          </div>
+        </aside>
+
+        <div class="legal-content">
+          <section class="legal-summary-panel reveal" aria-labelledby="legal-summary-title">
+            <div>
+              <span>At a glance</span>
+              <h2 id="legal-summary-title">{legalDocument.eyebrow} brief</h2>
+            </div>
+            <ul>
+              {legalDocument.summary.map((item) => <li>{item}</li>)}
+            </ul>
+          </section>
+
+          {
+            sectionLinks.map((link) => (
+              <article class="legal-section reveal" id={link.id}>
+                <div class="legal-section-index">{link.number}</div>
+                <div class="legal-section-copy">
+                  <h2>{link.section.heading}</h2>
+                  {link.section.body.map((paragraph) => <p>{paragraph}</p>)}
+                </div>
+              </article>
+            ))
+          }
+
+          <section class="legal-next-step reveal">
+            <div>
+              <span>Next step</span>
+              <h2>Need a paper trail?</h2>
+              <p>
+                Support can route verified billing, privacy, security, export, deletion, and setup requests to the right owner context.
+              </p>
+            </div>
+            <div class="legal-next-actions">
+              <Button
+                href={legalDocument.primaryAction.href}
+                variant="dark"
+                external={legalDocument.primaryAction.external}
+              >
+                {legalDocument.primaryAction.label}
+                <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M5 11 11 5M6 5h5v5" /></svg>
+              </Button>
+              {
+                legalDocument.secondaryAction && (
+                  <a
+                    class="legal-inline-action"
+                    href={legalDocument.secondaryAction.href}
+                    target={legalDocument.secondaryAction.external ? '_blank' : undefined}
+                    rel={legalDocument.secondaryAction.external ? 'noreferrer' : undefined}
+                  >
+                    {legalDocument.secondaryAction.label}
+                    <span aria-hidden="true">-&gt;</span>
+                  </a>
+                )
+              }
+            </div>
+          </section>
+
+          <section class="legal-related reveal" aria-labelledby="legal-related-title">
+            <div class="legal-related-head">
+              <span>Related documents</span>
+              <h2 id="legal-related-title">Keep reading</h2>
+            </div>
+            <div class="legal-related-grid">
+              {
+                relatedDocuments.map((item) => (
+                  <a href={`/${item.slug}`}>
+                    <span>{item.eyebrow}</span>
+                    <strong>{item.title}</strong>
+                    <small>{item.description}</small>
+                  </a>
+                ))
+              }
+            </div>
+          </section>
+        </div>
       </div>
     </section>
   </main>

@@ -256,7 +256,7 @@ func (r *BillingRepository) CreateBillingOrder(ctx context.Context, order store.
 	order.Status = strings.TrimSpace(order.Status)
 	order.Cluster = strings.TrimSpace(order.Cluster)
 	order.ConfirmationThreshold = strings.TrimSpace(order.ConfirmationThreshold)
-	if order.OrderID == "" || order.GuildID == "" || order.Plan == "" || order.Provider == "" || order.ListLamports <= 0 || order.DueLamports < 0 || order.Reference == "" || order.Status == "" {
+	if order.OrderID == "" || order.Plan == "" || order.Provider == "" || order.ListLamports <= 0 || order.DueLamports < 0 || order.Reference == "" || order.Status == "" {
 		return store.BillingOrder{}, fmt.Errorf("billing order is missing required fields")
 	}
 	if order.DueLamports > 0 && (order.DestinationWallet == "" || order.Cluster == "" || order.ConfirmationThreshold == "") {
@@ -410,7 +410,7 @@ func (r *BillingRepository) CreateCouponRedemption(ctx context.Context, redempti
 	redemption.BillingOwnerUserID = strings.TrimSpace(redemption.BillingOwnerUserID)
 	redemption.Plan = strings.TrimSpace(redemption.Plan)
 	redemption.Status = strings.TrimSpace(redemption.Status)
-	if redemption.RedemptionID == "" || redemption.CouponID == "" || redemption.OrderID == "" || redemption.GuildID == "" || redemption.Plan == "" || redemption.ListLamports <= 0 || redemption.DiscountLamports <= 0 || redemption.DueLamports < 0 || redemption.Status == "" || redemption.ExpiresAt.IsZero() {
+	if redemption.RedemptionID == "" || redemption.CouponID == "" || redemption.OrderID == "" || redemption.Plan == "" || redemption.ListLamports <= 0 || redemption.DiscountLamports <= 0 || redemption.DueLamports < 0 || redemption.Status == "" || redemption.ExpiresAt.IsZero() {
 		return store.BillingCouponRedemption{}, fmt.Errorf("billing coupon redemption is missing required fields")
 	}
 	if redemption.CreatedAt.IsZero() {
@@ -530,7 +530,7 @@ func (r *BillingRepository) RecordSolPaymentTransaction(ctx context.Context, tra
 	transaction.ConfirmationStatus = strings.TrimSpace(transaction.ConfirmationStatus)
 	transaction.Status = strings.TrimSpace(transaction.Status)
 	transaction.ErrorMessage = strings.TrimSpace(transaction.ErrorMessage)
-	if transaction.Signature == "" || transaction.OrderID == "" || transaction.GuildID == "" || transaction.Status == "" {
+	if transaction.Signature == "" || transaction.OrderID == "" || transaction.Status == "" {
 		return false, fmt.Errorf("sol payment transaction is missing required fields")
 	}
 	if transaction.CreatedAt.IsZero() {
@@ -559,7 +559,7 @@ func (r *BillingRepository) CreateActivationAPIKey(ctx context.Context, key stor
 	key.GuildID = strings.TrimSpace(key.GuildID)
 	key.Plan = strings.TrimSpace(key.Plan)
 	key.Status = strings.TrimSpace(key.Status)
-	if key.KeyID == "" || key.KeyHash == "" || key.KeyPrefix == "" || key.BillingOrderID == "" || key.GuildID == "" || key.Plan == "" || key.Status == "" || key.ExpiresAt.IsZero() {
+	if key.KeyID == "" || key.KeyHash == "" || key.KeyPrefix == "" || key.BillingOrderID == "" || key.Plan == "" || key.Status == "" || key.ExpiresAt.IsZero() {
 		return store.ActivationAPIKey{}, fmt.Errorf("activation api key is missing required fields")
 	}
 	if key.CreatedAt.IsZero() {

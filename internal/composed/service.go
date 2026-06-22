@@ -14,6 +14,7 @@ import (
 
 	"github.com/sn0w/panda2/internal/admin"
 	"github.com/sn0w/panda2/internal/billing"
+	"github.com/sn0w/panda2/internal/features"
 	"github.com/sn0w/panda2/internal/llm"
 	"github.com/sn0w/panda2/internal/repository"
 	"github.com/sn0w/panda2/internal/security"
@@ -44,6 +45,7 @@ type Service struct {
 	audit        AuditRecorder
 	resolver     DiscordResolver
 	billing      *billing.Service
+	features     *features.Service
 	defaultModel string
 	now          func() time.Time
 }
@@ -71,6 +73,11 @@ func (s *Service) WithDiscordResolver(resolver DiscordResolver) *Service {
 
 func (s *Service) WithBilling(billingService *billing.Service) *Service {
 	s.billing = billingService
+	return s
+}
+
+func (s *Service) WithFeatureService(featureService *features.Service) *Service {
+	s.features = featureService
 	return s
 }
 
@@ -397,6 +404,9 @@ func (s *Service) OpenRouterTools(ctx context.Context, request tools.DynamicTool
 	if s == nil || s.repo == nil || strings.TrimSpace(request.GuildID) == "" {
 		return nil, nil
 	}
+	if request.Access.FeatureGateActive && !request.Access.HasFeature(features.ComposedTools) {
+		return nil, nil
+	}
 	if !hasPermission(request.Access, admin.PermissionToolComposeInvoke) || strings.TrimSpace(request.Access.Policy) == tools.ToolPolicyOff {
 		return nil, nil
 	}
@@ -424,6 +434,9 @@ func (s *Service) OpenRouterTools(ctx context.Context, request tools.DynamicTool
 }
 
 func (s *Service) CanInvoke(ctx context.Context, guildID, name string, access tools.ToolAccess, invocationType string) (bool, error) {
+	if access.FeatureGateActive && !access.HasFeature(features.ComposedTools) {
+		return false, nil
+	}
 	record, ok, err := s.currentRecordByNameOrWire(ctx, guildID, name)
 	if err != nil || !ok {
 		return false, err
@@ -452,12 +465,14 @@ func (s *Service) ExecuteDynamicTool(ctx context.Context, request tools.DynamicE
 		return tools.ExecutionResult{}, fmt.Errorf("missing permission for composed tool %s", request.Call.Function.Name)
 	}
 	result, err := s.Run(ctx, RunRequest{
-		GuildID:        request.GuildID,
-		ToolName:       request.Call.Function.Name,
-		InvocationType: firstNonEmpty(request.InvocationType, InvocationChatTool),
-		InvokingUserID: request.ActorID,
-		Input:          input,
-		NestedDepth:    request.NestedDepth,
+		GuildID:           request.GuildID,
+		ToolName:          request.Call.Function.Name,
+		InvocationType:    firstNonEmpty(request.InvocationType, InvocationChatTool),
+		InvokingUserID:    request.ActorID,
+		Input:             input,
+		NestedDepth:       request.NestedDepth,
+		EnabledFeatures:   request.Access.EnabledFeatures,
+		FeatureGateActive: request.Access.FeatureGateActive,
 	})
 	payload := map[string]any{"status": result.Status, "output": result.Output, "run_id": result.RunID}
 	if err != nil {
@@ -477,6 +492,9 @@ func (s *Service) ExecuteDynamicTool(ctx context.Context, request tools.DynamicE
 func (s *Service) Run(ctx context.Context, request RunRequest) (RunResult, error) {
 	if s == nil || s.repo == nil || s.executor == nil {
 		return RunResult{}, fmt.Errorf("composed tool runner is not configured")
+	}
+	if err := s.applyFeatureAccess(ctx, &request); err != nil {
+		return RunResult{Status: RunBlocked}, err
 	}
 	request.InvocationType = firstNonEmpty(request.InvocationType, InvocationManual)
 	record, ok, err := s.repo.GetCurrent(ctx, request.GuildID, request.ToolName)
@@ -929,13 +947,15 @@ func (s *Service) executeSteps(ctx context.Context, spec Spec, request RunReques
 		case StepComposedToolCall:
 			nestedInput := renderMap(step.Arguments, request.Input)
 			nested, err := s.Run(ctx, RunRequest{
-				GuildID:        request.GuildID,
-				ToolName:       step.Tool,
-				InvocationType: InvocationNestedTool,
-				InvokingUserID: request.InvokingUserID,
-				Input:          nestedInput,
-				NestedDepth:    request.NestedDepth + 1,
-				DryRun:         request.DryRun,
+				GuildID:           request.GuildID,
+				ToolName:          step.Tool,
+				InvocationType:    InvocationNestedTool,
+				InvokingUserID:    request.InvokingUserID,
+				Input:             nestedInput,
+				NestedDepth:       request.NestedDepth + 1,
+				DryRun:            request.DryRun,
+				EnabledFeatures:   request.EnabledFeatures,
+				FeatureGateActive: request.FeatureGateActive,
 			})
 			entry := TranscriptEntry{StepID: step.ID, Tool: step.Tool, NestedRunID: nested.RunID, Result: nested.Output, Error: nested.Error, ElapsedMS: s.now().Sub(start).Milliseconds()}
 			transcript = append(transcript, entry)
@@ -969,7 +989,7 @@ func (s *Service) executeNativeStep(ctx context.Context, spec Spec, step StepSpe
 		ActorID:              request.InvokingUserID,
 		RequestID:            fmt.Sprintf("composed-%s", spec.Name),
 		InvocationType:       request.InvocationType,
-		Access:               approvedToolAccess(spec),
+		Access:               approvedToolAccess(spec, request.EnabledFeatures, request.FeatureGateActive),
 		AllowConfirmedWrites: !request.DryRun && !spec.Safety.RequiresConfirmationOnWrite,
 		Call: llm.ToolCall{
 			ID:   step.ID,
@@ -1008,7 +1028,8 @@ func (s *Service) executeAgentic(ctx context.Context, spec Spec, request RunRequ
 	if s.client == nil {
 		return nil, nil, fmt.Errorf("agentic composed-tool runner requires an LLM client")
 	}
-	nativeTools := s.allowedNativeTools(spec)
+	access := approvedToolAccess(spec, request.EnabledFeatures, request.FeatureGateActive)
+	nativeTools := s.allowedNativeTools(spec, access)
 	inputJSON := mustJSON(request.Input)
 	messages := []llm.Message{
 		{Role: "system", Content: runnerPrompt(spec)},
@@ -1041,7 +1062,7 @@ func (s *Service) executeAgentic(ctx context.Context, spec Spec, request RunRequ
 				ActorID:              request.InvokingUserID,
 				RequestID:            fmt.Sprintf("composed-%s", spec.Name),
 				InvocationType:       request.InvocationType,
-				Access:               approvedToolAccess(spec),
+				Access:               access,
 				AllowConfirmedWrites: !request.DryRun && !spec.Safety.RequiresConfirmationOnWrite,
 				Call:                 call,
 			})
@@ -1074,12 +1095,15 @@ func (s *Service) executeAgentic(ctx context.Context, spec Spec, request RunRequ
 	return output, transcript, nil
 }
 
-func (s *Service) allowedNativeTools(spec Spec) []llm.Tool {
+func (s *Service) allowedNativeTools(spec Spec, access tools.ToolAccess) []llm.Tool {
 	var result []llm.Tool
 	seen := map[string]struct{}{}
 	for _, name := range spec.Runner.ToolAllowlist {
 		definition, ok := s.registry.Get(name)
 		if !ok {
+			continue
+		}
+		if !definition.AvailableTo(access) {
 			continue
 		}
 		if _, ok := seen[definition.Name]; ok {
@@ -1089,6 +1113,28 @@ func (s *Service) allowedNativeTools(spec Spec) []llm.Tool {
 		result = append(result, definition.OpenRouterTool())
 	}
 	return result
+}
+
+func (s *Service) applyFeatureAccess(ctx context.Context, request *RunRequest) error {
+	if request == nil || s == nil || s.features == nil {
+		return nil
+	}
+	if request.FeatureGateActive {
+		if !features.Has(request.EnabledFeatures, features.ComposedTools) {
+			return fmt.Errorf("%w: %s", features.ErrDisabled, features.ComposedTools)
+		}
+		return nil
+	}
+	enabled, err := s.features.EnabledSet(ctx, request.GuildID)
+	if err != nil {
+		return err
+	}
+	request.EnabledFeatures = enabled
+	request.FeatureGateActive = true
+	if !features.Has(enabled, features.ComposedTools) {
+		return fmt.Errorf("%w: %s", features.ErrDisabled, features.ComposedTools)
+	}
+	return nil
 }
 
 func (s *Service) enforceRunLimits(ctx context.Context, tool store.ComposedTool, spec Spec, request RunRequest) (bool, string, error) {
@@ -1237,7 +1283,7 @@ func (g composedGraph) hasCycle(name string) bool {
 	return visit(name)
 }
 
-func approvedToolAccess(spec Spec) tools.ToolAccess {
+func approvedToolAccess(spec Spec, enabledFeatures map[string]struct{}, featureGateActive bool) tools.ToolAccess {
 	permissions := map[string]struct{}{
 		admin.PermissionAssistantUse:         {},
 		admin.PermissionAssistantAttachments: {},
@@ -1251,7 +1297,23 @@ func approvedToolAccess(spec Spec) tools.ToolAccess {
 		admin.PermissionAdminMemoryManage:    {},
 		admin.PermissionToolComposeInvoke:    {},
 	}
-	return tools.ToolAccess{Policy: tools.ToolPolicyWriteConfirmed, Permissions: permissions}
+	return tools.ToolAccess{
+		Policy:            tools.ToolPolicyWriteConfirmed,
+		Permissions:       permissions,
+		EnabledFeatures:   cloneStringSet(enabledFeatures),
+		FeatureGateActive: featureGateActive,
+	}
+}
+
+func cloneStringSet(values map[string]struct{}) map[string]struct{} {
+	if len(values) == 0 {
+		return map[string]struct{}{}
+	}
+	cloned := make(map[string]struct{}, len(values))
+	for value := range values {
+		cloned[value] = struct{}{}
+	}
+	return cloned
 }
 
 func (s *Service) specAllowedForAccess(spec Spec, access tools.ToolAccess) bool {

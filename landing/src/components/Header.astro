@@ -1,9 +1,15 @@
 ---
 import { navLinks, siteMeta } from '../data/landing';
 import BrandLink from './ui/BrandLink.astro';
+
+interface Props {
+  solid?: boolean;
+}
+
+const { solid = false } = Astro.props;
 ---
 
-<header class="site-header" data-header>
+<header class={solid ? 'site-header solid' : 'site-header'} data-header>
   <div class="shell nav-shell">
     <BrandLink />
 
@@ -12,7 +18,10 @@ import BrandLink from './ui/BrandLink.astro';
     </nav>
 
     <div class="nav-actions">
-      <a class="nav-github" href={siteMeta.installUrl} target="_blank" rel="noreferrer">
+      <a class="nav-github" href={siteMeta.accountUrl}>
+        Account
+      </a>
+      <a class="nav-github" href={siteMeta.installUrl}>
         Start trial
         <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M5 11 11 5M6 5h5v5" /></svg>
       </a>
@@ -31,6 +40,8 @@ import BrandLink from './ui/BrandLink.astro';
 
   <nav class="mobile-nav" id="mobile-nav" aria-label="Mobile navigation" data-mobile-nav hidden>
     {navLinks.map((link) => <a href={link.href}>{link.label}</a>)}
-    <a href={siteMeta.installUrl} target="_blank" rel="noreferrer">Start trial</a>
+    <a href={siteMeta.accountUrl}>Account</a>
+    <a href={siteMeta.billingUrl}>Billing</a>
+    <a href={siteMeta.installUrl}>Start trial</a>
   </nav>
 </header>

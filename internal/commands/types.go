@@ -1,8 +1,11 @@
 package commands
 
 import (
+	"context"
 	"errors"
+	"time"
 
+	"github.com/sn0w/panda2/internal/features"
 	"github.com/sn0w/panda2/internal/polls"
 )
 
@@ -35,6 +38,22 @@ type Response struct {
 	Background   *BackgroundTask
 	Poll         *polls.Poll
 	Feedback     *FeedbackControls
+}
+
+type FeatureInstallIntentCreator interface {
+	CreateFeatureInstallIntent(ctx context.Context, request FeatureInstallIntentRequest) (FeatureInstallIntentResult, error)
+}
+
+type FeatureInstallIntentRequest struct {
+	FeatureIDs []string
+	Source     string
+	Metadata   map[string]any
+}
+
+type FeatureInstallIntentResult struct {
+	AuthorizeURL string
+	ExpiresAt    time.Time
+	Selection    features.Selection
 }
 
 type Accent string
@@ -113,6 +132,8 @@ type BackgroundTask struct {
 	AllowedPermissions           []string `json:"allowed_permissions,omitempty"`
 	AllowedTools                 []string `json:"allowed_tools,omitempty"`
 	RestrictedTools              []string `json:"restricted_tools,omitempty"`
+	EnabledFeatures              []string `json:"enabled_features,omitempty"`
+	FeatureGateActive            bool     `json:"feature_gate_active,omitempty"`
 	RequireExplicitComposedTools bool     `json:"require_explicit_composed_tools,omitempty"`
 }
 

@@ -12,6 +12,7 @@ import (
 	"github.com/sn0w/panda2/internal/admin"
 	"github.com/sn0w/panda2/internal/alerts"
 	"github.com/sn0w/panda2/internal/composed"
+	"github.com/sn0w/panda2/internal/features"
 	"github.com/sn0w/panda2/internal/music"
 	"github.com/sn0w/panda2/internal/repository"
 	"github.com/sn0w/panda2/internal/scheduler"
@@ -33,6 +34,25 @@ func (r *Router) adminPermissionForSubcommand(subcommand string) (func(context.C
 		return r.admin.CanReadUsage, "You do not have permission to read Panda feedback trends."
 	default:
 		return r.admin.CanWriteConfig, "Only the Panda owner, server owner or administrator, or a delegated config role can use that admin command."
+	}
+}
+
+func adminFeatureForSubcommand(subcommand string) string {
+	switch strings.ToLower(strings.TrimSpace(subcommand)) {
+	case "feature", "features":
+		return ""
+	case "", "status", "setup", "behavior", "prompt", "soul", "billing", "enable", "disable", "alerts", "alert":
+		return features.AdminSetup
+	case "role", "tool", "channel", "channels":
+		return features.AdminAccessControl
+	case "member-role", "member_role":
+		return features.DiscordRoleManagement
+	case "audit", "feedback":
+		return features.AdminAudit
+	case "music":
+		return features.Music
+	default:
+		return features.AdminSetup
 	}
 }
 
@@ -294,6 +314,25 @@ func (r *Router) handleAdminStatus(ctx context.Context, request Request) Respons
 	if r.alerts != nil {
 		alertRules, _ = r.alerts.List(ctx, request.GuildID)
 	}
+	featureStatus := "feature store not configured"
+	featurePermissions := "not available"
+	if r.features != nil {
+		states, err := r.features.Status(ctx, request.GuildID)
+		if err != nil {
+			featureStatus = "lookup failed"
+			featurePermissions = "lookup failed"
+		} else {
+			enabledIDs := enabledFeatureIDs(states)
+			featureStatus = renderEnabledFeatureLabels(enabledIDs)
+			if permissions, err := features.PermissionNamesForFeatures(enabledIDs); err == nil {
+				bitfield, _ := features.PermissionBitfield(permissions)
+				featurePermissions = fmt.Sprintf("%s (bitfield `%d`)", strings.Join(permissions, ", "), bitfield)
+				if len(permissions) == 0 {
+					featurePermissions = "none"
+				}
+			}
+		}
+	}
 	lines := []string{
 		"Admin status:",
 		fmt.Sprintf("- subscription: `%s`", billingStatus),
@@ -310,6 +349,8 @@ func (r *Router) handleAdminStatus(ctx context.Context, request Request) Respons
 		fmt.Sprintf("- tool role grants: `%d`", len(toolRoles)),
 		fmt.Sprintf("- channel rules: `%d`", len(channelRules)),
 		fmt.Sprintf("- budget limits: `%d`", len(budgets)),
+		fmt.Sprintf("- enabled features: %s", featureStatus),
+		fmt.Sprintf("- enabled feature Discord permissions: %s", featurePermissions),
 		fmt.Sprintf("- queued jobs: `%d`", queueDepth),
 		fmt.Sprintf("- schedules: active `%d`, paused `%d`, failed `%d`", scheduleStats.Active, scheduleStats.Paused, scheduleStats.FailedRuns),
 		fmt.Sprintf("- alert packs: `%d` configured", len(alertRules)),
@@ -333,6 +374,342 @@ func (r *Router) handleAdminStatus(ctx context.Context, request Request) Respons
 		}
 	}
 	return Response{Content: strings.Join(lines, "\n"), Ephemeral: true, Presentation: Presentation{Title: "Admin status", Accent: AccentInfo}}
+}
+
+func enabledFeatureIDs(states []repository.GuildFeatureState) []string {
+	ids := make([]string, 0, len(states))
+	for _, state := range states {
+		if state.Enabled {
+			ids = append(ids, state.FeatureID)
+		}
+	}
+	sort.Strings(ids)
+	return ids
+}
+
+func renderEnabledFeatureLabels(ids []string) string {
+	if len(ids) == 0 {
+		return "`none`"
+	}
+	labels := make([]string, 0, len(ids))
+	for _, id := range ids {
+		feature, ok := features.Lookup(id)
+		if !ok || strings.TrimSpace(feature.Label) == "" {
+			labels = append(labels, "`"+id+"`")
+			continue
+		}
+		labels = append(labels, "`"+feature.Label+"`")
+	}
+	return strings.Join(labels, ", ")
+}
+
+func (r *Router) handleAdminFeatures(ctx context.Context, request Request) Response {
+	if r.features == nil {
+		return Response{Content: "Feature management is not configured for this runtime.", Ephemeral: true}
+	}
+	action := strings.ToLower(strings.TrimSpace(firstNonEmpty(request.Options["action"], "list")))
+	if denied := r.ensureAdminFeaturePermission(ctx, request, action); denied.Content != "" {
+		return denied
+	}
+	switch action {
+	case "list", "status":
+		states, err := r.features.Status(ctx, request.GuildID)
+		if err != nil {
+			return Response{Content: "Feature status lookup failed.", Ephemeral: true}
+		}
+		return Response{Content: renderAdminFeatureStatus(states), Ephemeral: true, Presentation: Presentation{Title: "Feature status", Accent: AccentInfo}}
+	case "enable", "add":
+		return r.handleAdminFeatureEnable(ctx, request)
+	case "disable", "remove":
+		return r.handleAdminFeatureDisable(ctx, request)
+	case "reauthorize", "reauth":
+		return r.handleAdminFeatureReauthorize(ctx, request)
+	default:
+		return Response{Content: "Feature action must be `list`, `enable`, `disable`, or `reauthorize`.", Ephemeral: true}
+	}
+}
+
+func (r *Router) ensureAdminFeaturePermission(ctx context.Context, request Request, action string) Response {
+	if request.IsGuildAdmin || request.IsOwner {
+		return Response{}
+	}
+	check := r.admin.CanReadConfig
+	denial := "You do not have permission to view Panda features."
+	switch action {
+	case "enable", "add", "disable", "remove", "reauthorize", "reauth":
+		check = r.admin.CanWriteConfig
+		denial = "You do not have permission to manage Panda features."
+	}
+	allowed, err := check(ctx, assistantAccessRequest(request))
+	if err != nil {
+		return Response{Content: "Permission lookup failed. Please try again later.", Ephemeral: true}
+	}
+	if !allowed {
+		return Response{Content: denial, Ephemeral: true}
+	}
+	return Response{}
+}
+
+func (r *Router) handleAdminFeatureEnable(ctx context.Context, request Request) Response {
+	requested, err := requestedPublicFeatureIDs(request)
+	if err != nil {
+		return Response{Content: err.Error(), Ephemeral: true}
+	}
+	current, err := r.currentEnabledFeatureIDs(ctx, request.GuildID)
+	if err != nil {
+		return Response{Content: "Feature status lookup failed.", Ephemeral: true}
+	}
+	target, err := expandedFeatureUnion(current, requested)
+	if err != nil {
+		return Response{Content: "Feature selection could not be expanded.", Ephemeral: true}
+	}
+	newPermissions := newDiscordPermissions(current, target)
+	if dryRunRequested(request) {
+		return Response{Content: renderFeatureEnablePreview(target, newPermissions), Ephemeral: true, Presentation: Presentation{Title: "Feature enable preview", Accent: AccentInfo}}
+	}
+	if len(newPermissions) == 0 {
+		if err := r.features.ReplaceGuildFeatures(ctx, request.GuildID, target, "admin_feature_change", request.UserID, time.Now().UTC()); err != nil {
+			return Response{Content: "Feature update failed.", Ephemeral: true}
+		}
+		r.admin.RecordFeatureAudit(ctx, request.GuildID, request.UserID, "guild_features.enable", map[string]any{
+			"requested_features": requested,
+			"enabled_features":   target,
+			"reauthorization":    false,
+		})
+		return Response{Content: fmt.Sprintf("Enabled features: %s.", renderEnabledFeatureLabels(target)), Ephemeral: true, Presentation: Presentation{Title: "Features enabled", Accent: AccentSuccess}}
+	}
+	result, response := r.createFeatureReauthorizationIntent(ctx, request, target, requested, "enable")
+	if response.Content != "" {
+		return response
+	}
+	return Response{
+		Content:   fmt.Sprintf("Reauthorization is required before enabling %s. New Discord permissions requested: %s. The feature set will activate after Discord redirects back to Panda.", renderEnabledFeatureLabels(requested), renderPermissionNames(newPermissions)),
+		Ephemeral: true,
+		Presentation: Presentation{
+			Title:  "Reauthorization required",
+			Accent: AccentWarning,
+			URL:    result.AuthorizeURL,
+		},
+		Actions: []Action{{Label: "Reauthorize Panda", URL: result.AuthorizeURL}},
+	}
+}
+
+func (r *Router) handleAdminFeatureDisable(ctx context.Context, request Request) Response {
+	requested, err := requestedPublicFeatureIDs(request)
+	if err != nil {
+		return Response{Content: err.Error(), Ephemeral: true}
+	}
+	current, err := r.currentEnabledFeatureIDs(ctx, request.GuildID)
+	if err != nil {
+		return Response{Content: "Feature status lookup failed.", Ephemeral: true}
+	}
+	target, removed := disableFeaturesAndDependents(current, requested)
+	if len(removed) == 0 {
+		return Response{Content: "None of the requested features are enabled.", Ephemeral: true}
+	}
+	if dryRunRequested(request) {
+		return Response{Content: fmt.Sprintf("Would disable %s. Remaining enabled features: %s.", renderEnabledFeatureLabels(removed), renderEnabledFeatureLabels(target)), Ephemeral: true, Presentation: Presentation{Title: "Feature disable preview", Accent: AccentWarning}}
+	}
+	if err := r.features.ReplaceGuildFeatures(ctx, request.GuildID, target, "admin_feature_change", request.UserID, time.Now().UTC()); err != nil {
+		return Response{Content: "Feature update failed.", Ephemeral: true}
+	}
+	r.admin.RecordFeatureAudit(ctx, request.GuildID, request.UserID, "guild_features.disable", map[string]any{
+		"requested_features": requested,
+		"disabled_features":  removed,
+		"enabled_features":   target,
+	})
+	return Response{Content: fmt.Sprintf("Disabled %s. Remaining enabled features: %s.", renderEnabledFeatureLabels(removed), renderEnabledFeatureLabels(target)), Ephemeral: true, Presentation: Presentation{Title: "Features disabled", Accent: AccentSuccess}}
+}
+
+func (r *Router) handleAdminFeatureReauthorize(ctx context.Context, request Request) Response {
+	current, err := r.currentEnabledFeatureIDs(ctx, request.GuildID)
+	if err != nil {
+		return Response{Content: "Feature status lookup failed.", Ephemeral: true}
+	}
+	if len(current) == 0 {
+		return Response{Content: "No features are currently enabled for this server.", Ephemeral: true}
+	}
+	result, response := r.createFeatureReauthorizationIntent(ctx, request, current, nil, "reauthorize")
+	if response.Content != "" {
+		return response
+	}
+	permissions, _ := features.PermissionNamesForFeatures(result.Selection.ExpandedFeatureIDs)
+	return Response{
+		Content:   fmt.Sprintf("Created a fresh Discord reauthorization link for the enabled feature set. Requested Discord permissions: %s.", renderPermissionNames(permissions)),
+		Ephemeral: true,
+		Presentation: Presentation{
+			Title:  "Reauthorization link ready",
+			Accent: AccentInfo,
+			URL:    result.AuthorizeURL,
+		},
+		Actions: []Action{{Label: "Reauthorize Panda", URL: result.AuthorizeURL}},
+	}
+}
+
+func (r *Router) createFeatureReauthorizationIntent(ctx context.Context, request Request, targetFeatureIDs, requestedFeatureIDs []string, action string) (FeatureInstallIntentResult, Response) {
+	if r.install == nil {
+		return FeatureInstallIntentResult{}, Response{Content: "Feature reauthorization is not configured for this runtime.", Ephemeral: true}
+	}
+	result, err := r.install.CreateFeatureInstallIntent(ctx, FeatureInstallIntentRequest{
+		FeatureIDs: targetFeatureIDs,
+		Source:     "admin_reauthorization",
+		Metadata: map[string]any{
+			"guild_id":           request.GuildID,
+			"actor_id":           request.UserID,
+			"action":             action,
+			"requested_features": requestedFeatureIDs,
+		},
+	})
+	if err != nil {
+		return FeatureInstallIntentResult{}, Response{Content: "Feature reauthorization link could not be created.", Ephemeral: true}
+	}
+	r.admin.RecordFeatureAudit(ctx, request.GuildID, request.UserID, "guild_features.reauthorization_created", map[string]any{
+		"requested_features":  requestedFeatureIDs,
+		"target_features":     result.Selection.ExpandedFeatureIDs,
+		"discord_permissions": result.Selection.DiscordPermissionNames,
+		"permission_bitfield": result.Selection.DiscordPermissionBitfield,
+		"expires_at":          result.ExpiresAt.Format(time.RFC3339),
+	})
+	return result, Response{}
+}
+
+func (r *Router) currentEnabledFeatureIDs(ctx context.Context, guildID string) ([]string, error) {
+	states, err := r.features.Status(ctx, guildID)
+	if err != nil {
+		return nil, err
+	}
+	return enabledFeatureIDs(states), nil
+}
+
+func requestedPublicFeatureIDs(request Request) ([]string, error) {
+	raw := strings.TrimSpace(firstNonEmpty(request.Options["feature_id"], request.Options["feature"]))
+	if raw == "" {
+		return nil, fmt.Errorf("`feature_id` is required")
+	}
+	ids := strings.FieldsFunc(raw, func(r rune) bool {
+		return r == ',' || r == ' ' || r == '\n' || r == '\t'
+	})
+	return features.Normalize(ids, true)
+}
+
+func expandedFeatureUnion(current, additions []string) ([]string, error) {
+	merged := append([]string{}, current...)
+	merged = append(merged, additions...)
+	return features.Expand(uniqueFeatureIDs(merged), false)
+}
+
+func uniqueFeatureIDs(ids []string) []string {
+	seen := map[string]struct{}{}
+	result := []string{}
+	for _, id := range ids {
+		id = strings.ToLower(strings.TrimSpace(id))
+		if id == "" {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		result = append(result, id)
+	}
+	sort.Strings(result)
+	return result
+}
+
+func newDiscordPermissions(current, target []string) []string {
+	currentPermissions, _ := features.PermissionNamesForFeatures(current)
+	targetPermissions, _ := features.PermissionNamesForFeatures(target)
+	currentSet := permissionsFromNames(currentPermissions)
+	result := []string{}
+	for _, permission := range targetPermissions {
+		if _, ok := currentSet[permission]; !ok {
+			result = append(result, permission)
+		}
+	}
+	sort.Strings(result)
+	return result
+}
+
+func disableFeaturesAndDependents(current, disabled []string) ([]string, []string) {
+	disabledSet := features.FeatureSet(disabled)
+	currentSet := features.FeatureSet(current)
+	remaining := []string{}
+	removed := []string{}
+	for _, id := range uniqueFeatureIDs(current) {
+		if _, ok := disabledSet[id]; ok || featureDependsOnAny(id, disabledSet, map[string]bool{}) {
+			removed = append(removed, id)
+			continue
+		}
+		if _, ok := currentSet[id]; ok {
+			remaining = append(remaining, id)
+		}
+	}
+	sort.Strings(remaining)
+	sort.Strings(removed)
+	return remaining, removed
+}
+
+func featureDependsOnAny(featureID string, disabled map[string]struct{}, visiting map[string]bool) bool {
+	feature, ok := features.Lookup(featureID)
+	if !ok {
+		return false
+	}
+	if visiting[feature.ID] {
+		return false
+	}
+	visiting[feature.ID] = true
+	defer delete(visiting, feature.ID)
+	for _, dependency := range feature.Dependencies {
+		dependency = strings.ToLower(strings.TrimSpace(dependency))
+		if _, ok := disabled[dependency]; ok {
+			return true
+		}
+		if featureDependsOnAny(dependency, disabled, visiting) {
+			return true
+		}
+	}
+	return false
+}
+
+func renderAdminFeatureStatus(states []repository.GuildFeatureState) string {
+	enabled := features.FeatureSet(enabledFeatureIDs(states))
+	lines := []string{"Feature status:"}
+	for _, feature := range features.Catalog() {
+		if !feature.Public && !features.Has(enabled, feature.ID) {
+			continue
+		}
+		status := "disabled"
+		if features.Has(enabled, feature.ID) {
+			status = "enabled"
+		}
+		permissions := renderPermissionNames(feature.DiscordPermissions)
+		lines = append(lines, fmt.Sprintf("- `%s` (`%s`): `%s`; Discord permissions: %s", feature.Label, feature.ID, status, permissions))
+	}
+	enabledIDs := enabledFeatureIDs(states)
+	permissionNames, _ := features.PermissionNamesForFeatures(enabledIDs)
+	bitfield, _ := features.PermissionBitfield(permissionNames)
+	lines = append(lines, fmt.Sprintf("\nEnabled permission bitfield: `%d`.", bitfield))
+	lines = append(lines, "Use `/admin feature action:reauthorize` to generate a fresh Discord permission link for the enabled features.")
+	return strings.Join(lines, "\n")
+}
+
+func renderFeatureEnablePreview(target, newPermissions []string) string {
+	if len(newPermissions) == 0 {
+		return fmt.Sprintf("Would enable features immediately: %s. No new Discord permissions are required.", renderEnabledFeatureLabels(target))
+	}
+	return fmt.Sprintf("Would request reauthorization for %s. New Discord permissions: %s.", renderEnabledFeatureLabels(target), renderPermissionNames(newPermissions))
+}
+
+func renderPermissionNames(names []string) string {
+	if len(names) == 0 {
+		return "`none`"
+	}
+	friendly := make([]string, 0, len(names))
+	for _, name := range names {
+		friendly = append(friendly, "`"+features.PermissionFriendlyName(name)+"`")
+	}
+	sort.Strings(friendly)
+	return strings.Join(friendly, ", ")
 }
 
 func (r *Router) handleAdminSetup(ctx context.Context, request Request) Response {

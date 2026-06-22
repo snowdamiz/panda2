@@ -1071,6 +1071,77 @@ var migrations = []Migration{
 			`DROP TABLE IF EXISTS sol_payment_orders`,
 		},
 	},
+	{
+		Version: 22,
+		Name:    "install_intents_and_guild_features",
+		SQL: []string{
+			`CREATE TABLE IF NOT EXISTS install_intents (
+				intent_id TEXT PRIMARY KEY,
+				state_hash TEXT NOT NULL,
+				selected_feature_ids TEXT NOT NULL DEFAULT '[]',
+				expanded_feature_ids TEXT NOT NULL DEFAULT '[]',
+				requested_discord_permissions TEXT NOT NULL DEFAULT '[]',
+				requested_permission_bitfield TEXT NOT NULL DEFAULT '0',
+				granted_discord_permissions TEXT NOT NULL DEFAULT '[]',
+				granted_scopes TEXT NOT NULL DEFAULT '[]',
+				source TEXT NOT NULL DEFAULT '',
+				desired_plan TEXT NOT NULL DEFAULT '',
+				referrer TEXT NOT NULL DEFAULT '',
+				campaign TEXT NOT NULL DEFAULT '',
+				installer_session_metadata TEXT NOT NULL DEFAULT '{}',
+				status TEXT NOT NULL DEFAULT 'pending',
+				guild_id TEXT NOT NULL DEFAULT '',
+				installer_user_id TEXT NOT NULL DEFAULT '',
+				expires_at DATETIME NOT NULL,
+				consumed_at DATETIME,
+				created_at DATETIME NOT NULL,
+				updated_at DATETIME NOT NULL
+			)`,
+			`CREATE UNIQUE INDEX IF NOT EXISTS idx_install_intents_state_hash ON install_intents(state_hash)`,
+			`CREATE INDEX IF NOT EXISTS idx_install_intents_source ON install_intents(source)`,
+			`CREATE INDEX IF NOT EXISTS idx_install_intents_status ON install_intents(status)`,
+			`CREATE INDEX IF NOT EXISTS idx_install_intents_guild_id ON install_intents(guild_id)`,
+			`CREATE INDEX IF NOT EXISTS idx_install_intents_installer_user_id ON install_intents(installer_user_id)`,
+			`CREATE INDEX IF NOT EXISTS idx_install_intents_expires_at ON install_intents(expires_at)`,
+			`CREATE TABLE IF NOT EXISTS guild_features (
+				id INTEGER PRIMARY KEY AUTOINCREMENT,
+				guild_id TEXT NOT NULL,
+				feature_id TEXT NOT NULL,
+				enabled INTEGER NOT NULL DEFAULT 1,
+				source_install_intent_id TEXT NOT NULL DEFAULT '',
+				enabled_by_user_id TEXT NOT NULL DEFAULT '',
+				created_at DATETIME NOT NULL,
+				updated_at DATETIME NOT NULL,
+				UNIQUE(guild_id, feature_id)
+			)`,
+			`CREATE INDEX IF NOT EXISTS idx_guild_features_guild_id ON guild_features(guild_id)`,
+			`CREATE INDEX IF NOT EXISTS idx_guild_features_feature_id ON guild_features(feature_id)`,
+			`CREATE INDEX IF NOT EXISTS idx_guild_features_enabled ON guild_features(enabled)`,
+			`CREATE INDEX IF NOT EXISTS idx_guild_features_source_install_intent_id ON guild_features(source_install_intent_id)`,
+			`CREATE INDEX IF NOT EXISTS idx_guild_features_enabled_by_user_id ON guild_features(enabled_by_user_id)`,
+			`INSERT OR IGNORE INTO guild_features (guild_id, feature_id, enabled, source_install_intent_id, enabled_by_user_id, created_at, updated_at)
+				SELECT guild_id, 'assistant_chat', 1, 'migration:default_preset', installed_by_user_id, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP FROM guilds WHERE install_status = 'active'`,
+			`INSERT OR IGNORE INTO guild_features (guild_id, feature_id, enabled, source_install_intent_id, enabled_by_user_id, created_at, updated_at)
+				SELECT guild_id, 'polls', 1, 'migration:default_preset', installed_by_user_id, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP FROM guilds WHERE install_status = 'active'`,
+			`INSERT OR IGNORE INTO guild_features (guild_id, feature_id, enabled, source_install_intent_id, enabled_by_user_id, created_at, updated_at)
+				SELECT guild_id, 'reminders', 1, 'migration:default_preset', installed_by_user_id, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP FROM guilds WHERE install_status = 'active'`,
+			`INSERT OR IGNORE INTO guild_features (guild_id, feature_id, enabled, source_install_intent_id, enabled_by_user_id, created_at, updated_at)
+				SELECT guild_id, 'web_search', 1, 'migration:default_preset', installed_by_user_id, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP FROM guilds WHERE install_status = 'active'`,
+			`INSERT OR IGNORE INTO guild_features (guild_id, feature_id, enabled, source_install_intent_id, enabled_by_user_id, created_at, updated_at)
+				SELECT guild_id, 'knowledge', 1, 'migration:default_preset', installed_by_user_id, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP FROM guilds WHERE install_status = 'active'`,
+			`INSERT OR IGNORE INTO guild_features (guild_id, feature_id, enabled, source_install_intent_id, enabled_by_user_id, created_at, updated_at)
+				SELECT guild_id, 'attachments', 1, 'migration:default_preset', installed_by_user_id, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP FROM guilds WHERE install_status = 'active'`,
+			`INSERT OR IGNORE INTO guild_features (guild_id, feature_id, enabled, source_install_intent_id, enabled_by_user_id, created_at, updated_at)
+				SELECT guild_id, 'music', 1, 'migration:default_preset', installed_by_user_id, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP FROM guilds WHERE install_status = 'active'`,
+			`INSERT INTO audit_events (guild_id, actor_id, action, target_type, target_id, metadata, created_at)
+				SELECT guild_id, installed_by_user_id, 'guild_features.backfill', 'guild', guild_id,
+					'{"source":"migration:default_preset","features":["assistant_chat","polls","reminders","web_search","knowledge","attachments","music"]}',
+					CURRENT_TIMESTAMP
+				FROM guilds
+				WHERE install_status = 'active'`,
+			`ALTER TABLE guilds DROP COLUMN feature_flags`,
+		},
+	},
 }
 
 func RunMigrations(db *gorm.DB) error {

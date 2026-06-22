@@ -1,0 +1,330 @@
+---
+import LogoMark from './LogoMark.astro';
+import Kicker from './ui/Kicker.astro';
+
+const installApiBase = import.meta.env.PUBLIC_PANDA_API_BASE_URL || (import.meta.env.DEV ? 'http://localhost:8080' : 'https://panda-assistant.fly.dev');
+---
+
+<section class="section install-section" id="install" data-install-configurator data-api-base={installApiBase}>
+  <div class="install-grid" aria-hidden="true"></div>
+  <div class="shell install-shell">
+    <div class="install-heading reveal">
+      <div>
+        <Kicker tone="paper">Feature-based install</Kicker>
+        <h2>Choose Panda before Discord asks.</h2>
+      </div>
+      <p>
+        Start with the assistant surface your server needs. Panda will request the matching Discord permissions and remember the feature set for runtime gates.
+      </p>
+    </div>
+
+    <div class="install-layout reveal">
+      <form class="install-options" data-install-form>
+        <div class="install-options-head">
+          <div class="install-brand" aria-hidden="true">
+            <LogoMark class="install-logo" />
+          </div>
+          <div>
+            <span>SERVER FEATURE SET</span>
+            <strong data-install-count>Loading catalog</strong>
+          </div>
+        </div>
+        <div class="install-feature-list" data-feature-list>
+          <p class="install-loading">Loading Panda feature catalog...</p>
+        </div>
+      </form>
+
+      <aside class="install-summary" aria-labelledby="install-summary-title">
+        <div class="install-summary-top">
+          <span>DISCORD REQUEST</span>
+          <strong id="install-summary-title" data-permission-count>Permissions pending</strong>
+        </div>
+        <dl class="install-stats">
+          <div>
+            <dt>Features</dt>
+            <dd data-feature-total>0</dd>
+          </div>
+          <div>
+            <dt>Scopes</dt>
+            <dd data-scope-list>bot, applications.commands, identify, guilds</dd>
+          </div>
+        </dl>
+        <div class="permission-panel">
+          <div class="permission-panel-head">
+            <span>Bot permission set</span>
+            <small>De-duplicated request</small>
+          </div>
+          <div class="permission-list" data-permission-list>
+            <p>Waiting for catalog.</p>
+          </div>
+        </div>
+        <div class="install-actions">
+          <button class="install-secondary" type="button" data-restore-defaults>Restore default</button>
+          <button class="install-primary" type="button" data-install-submit disabled>
+            Start Discord install
+            <svg viewBox="0 0 18 18" aria-hidden="true"><path d="M4 9h10M10 5l4 4-4 4" /></svg>
+          </button>
+        </div>
+        <p class="install-status" role="status" aria-live="polite" data-install-status></p>
+      </aside>
+    </div>
+  </div>
+</section>
+
+<script>
+  type InstallFeature = {
+    id: string;
+    label: string;
+    description: string;
+    discord_permissions?: string[];
+    dependencies?: string[];
+    requires_confirmation?: boolean;
+  };
+
+  const root = document.querySelector('[data-install-configurator]');
+
+  if (root instanceof HTMLElement) {
+    const apiBase = (root.dataset.apiBase || '').replace(/\/+$/, '');
+    const form = root.querySelector('[data-install-form]');
+    const featureList = root.querySelector('[data-feature-list]');
+    const featureCount = root.querySelector('[data-install-count]');
+    const featureTotal = root.querySelector('[data-feature-total]');
+    const permissionCount = root.querySelector('[data-permission-count]');
+    const permissionList = root.querySelector('[data-permission-list]');
+    const scopeList = root.querySelector('[data-scope-list]');
+    const submitButton = root.querySelector('[data-install-submit]');
+    const restoreButton = root.querySelector('[data-restore-defaults]');
+    const statusNode = root.querySelector('[data-install-status]');
+
+    let catalog: InstallFeature[] = [];
+    let featureMap = new Map<string, InstallFeature>();
+    let defaultFeatureIDs: string[] = [];
+    let defaultScopes: string[] = ['bot', 'applications.commands', 'identify', 'guilds'];
+    let selected = new Set<string>();
+    let busy = false;
+
+    const setStatus = (message: string, tone = '') => {
+      if (!(statusNode instanceof HTMLElement)) return;
+      statusNode.textContent = message;
+      statusNode.dataset.tone = tone;
+    };
+
+    const friendlyName = (name: string) => {
+      return String(name || '')
+        .toLowerCase()
+        .split('_')
+        .filter(Boolean)
+        .map((part) => part[0].toUpperCase() + part.slice(1))
+        .join(' ');
+    };
+
+    const expandFeatureIDs = (ids: string[]) => {
+      const expanded = new Set<string>();
+      const visit = (id: string) => {
+        if (!id || expanded.has(id)) return;
+        const feature = featureMap.get(id);
+        if (!feature) return;
+        expanded.add(id);
+        const dependencies = Array.isArray(feature.dependencies) ? feature.dependencies : [];
+        dependencies.forEach(visit);
+      };
+      ids.forEach(visit);
+      return [...expanded].sort();
+    };
+
+    const collectPermissions = (ids: string[]) => {
+      const permissions = new Set<string>();
+      ids.forEach((id) => {
+        const feature = featureMap.get(id);
+        const names = Array.isArray(feature?.discord_permissions) ? feature.discord_permissions : [];
+        names.forEach((permission) => permissions.add(permission));
+      });
+      return [...permissions].sort();
+    };
+
+    const updateSubmitState = () => {
+      if (!(submitButton instanceof HTMLButtonElement)) return;
+      submitButton.disabled = busy || selected.size === 0 || catalog.length === 0;
+      submitButton.textContent = busy ? 'Creating install...' : 'Start Discord install';
+      if (!busy) {
+        const icon = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+        icon.setAttribute('viewBox', '0 0 18 18');
+        icon.setAttribute('aria-hidden', 'true');
+        icon.innerHTML = '<path d="M4 9h10M10 5l4 4-4 4" />';
+        submitButton.append(icon);
+      }
+    };
+
+    const renderSummary = () => {
+      const expanded = expandFeatureIDs([...selected]);
+      const permissions = collectPermissions(expanded);
+
+      if (featureCount instanceof HTMLElement) {
+        featureCount.textContent = `${selected.size} selected / ${expanded.length} active`;
+      }
+      if (featureTotal instanceof HTMLElement) {
+        featureTotal.textContent = String(expanded.length);
+      }
+      if (scopeList instanceof HTMLElement) {
+        scopeList.textContent = defaultScopes.join(', ');
+      }
+      if (permissionCount instanceof HTMLElement) {
+        permissionCount.textContent = permissions.length === 1 ? '1 permission' : `${permissions.length} permissions`;
+      }
+      if (permissionList instanceof HTMLElement) {
+        permissionList.replaceChildren();
+        if (permissions.length === 0) {
+          const empty = document.createElement('p');
+          empty.textContent = 'No Discord bot permissions selected.';
+          permissionList.append(empty);
+        } else {
+          permissions.forEach((permission) => {
+            const item = document.createElement('span');
+            item.textContent = friendlyName(permission);
+            permissionList.append(item);
+          });
+        }
+      }
+
+      root.querySelectorAll('[data-feature-id]').forEach((node) => {
+        if (!(node instanceof HTMLElement)) return;
+        const id = node.dataset.featureId || '';
+        node.classList.toggle('selected', selected.has(id));
+        node.classList.toggle('included', !selected.has(id) && expanded.includes(id));
+      });
+
+      updateSubmitState();
+    };
+
+    const renderFeatures = () => {
+      if (!(featureList instanceof HTMLElement)) return;
+      featureList.replaceChildren();
+
+      catalog.forEach((feature) => {
+        const label = document.createElement('label');
+        label.className = 'install-feature';
+        label.dataset.featureId = feature.id;
+
+        const input = document.createElement('input');
+        input.type = 'checkbox';
+        input.value = feature.id;
+        input.checked = selected.has(feature.id);
+        input.addEventListener('change', () => {
+          if (input.checked) {
+            selected.add(feature.id);
+          } else {
+            selected.delete(feature.id);
+          }
+          renderSummary();
+        });
+
+        const mark = document.createElement('span');
+        mark.className = 'install-check';
+        mark.setAttribute('aria-hidden', 'true');
+
+        const body = document.createElement('span');
+        body.className = 'install-feature-body';
+
+        const title = document.createElement('span');
+        title.className = 'install-feature-title';
+        title.textContent = feature.label;
+
+        const description = document.createElement('span');
+        description.className = 'install-feature-copy';
+        description.textContent = feature.description;
+
+        const meta = document.createElement('span');
+        meta.className = 'install-feature-meta';
+        const dependencyCount = Array.isArray(feature.dependencies) ? feature.dependencies.length : 0;
+        const permissionCount = Array.isArray(feature.discord_permissions) ? feature.discord_permissions.length : 0;
+        const badges: string[] = [];
+        if (dependencyCount > 0) badges.push(`${dependencyCount} dependency`);
+        if (permissionCount > 0) badges.push(`${permissionCount} Discord permission${permissionCount === 1 ? '' : 's'}`);
+        if (feature.requires_confirmation) badges.push('confirmation');
+        meta.textContent = badges.join(' / ') || 'no additional Discord permissions';
+
+        body.append(title, description, meta);
+        label.append(input, mark, body);
+        featureList.append(label);
+      });
+    };
+
+    const loadCatalog = async () => {
+      try {
+        const response = await fetch(`${apiBase}/install/features`, { headers: { Accept: 'application/json' } });
+        if (!response.ok) throw new Error('catalog request failed');
+        const payload = (await response.json()) as { features?: InstallFeature[]; default_feature_ids?: string[]; default_install_scopes?: string[] };
+        catalog = Array.isArray(payload.features) ? payload.features : [];
+        featureMap = new Map(catalog.map((feature) => [feature.id, feature]));
+        defaultFeatureIDs = Array.isArray(payload.default_feature_ids) ? payload.default_feature_ids : [];
+        defaultScopes = Array.isArray(payload.default_install_scopes) ? payload.default_install_scopes : defaultScopes;
+        selected = new Set(defaultFeatureIDs.filter((id) => featureMap.has(id)));
+        renderFeatures();
+        renderSummary();
+        setStatus('Ready to create a Discord install link.');
+      } catch (error) {
+        catalog = [];
+        selected = new Set();
+        if (featureList instanceof HTMLElement) {
+          featureList.innerHTML = '<p class="install-loading">Could not load Panda feature catalog.</p>';
+        }
+        setStatus('Feature catalog is unavailable. Try again after the API is reachable.', 'error');
+        updateSubmitState();
+      }
+    };
+
+    const createIntent = async () => {
+      busy = true;
+      updateSubmitState();
+      setStatus('Creating a single-use Discord install link...');
+      try {
+        const response = await fetch(`${apiBase}/install/intents`, {
+          method: 'POST',
+          headers: {
+            Accept: 'application/json',
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            feature_ids: [...selected].sort(),
+            source: 'landing',
+            referrer: document.referrer || '',
+            metadata: {
+              path: window.location.pathname,
+              timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+            },
+          }),
+        });
+        const payload = (await response.json().catch(() => ({}))) as { authorize_url?: string; error?: string };
+        if (!response.ok || !payload.authorize_url) {
+          throw new Error(payload.error || 'install intent failed');
+        }
+        window.location.assign(payload.authorize_url);
+      } catch (error) {
+        busy = false;
+        updateSubmitState();
+        setStatus('Could not create the install link. Check the selected features and try again.', 'error');
+      }
+    };
+
+    restoreButton?.addEventListener('click', () => {
+      selected = new Set(defaultFeatureIDs.filter((id) => featureMap.has(id)));
+      root.querySelectorAll('[data-feature-id] input[type="checkbox"]').forEach((input) => {
+        if (input instanceof HTMLInputElement) input.checked = selected.has(input.value);
+      });
+      renderSummary();
+      setStatus('Default feature preset restored.');
+    });
+
+    form?.addEventListener('submit', (event) => {
+      event.preventDefault();
+      if (selected.size > 0 && !busy) void createIntent();
+    });
+
+    submitButton?.addEventListener('click', (event) => {
+      event.preventDefault();
+      if (selected.size > 0 && !busy) void createIntent();
+    });
+
+    void loadCatalog();
+  }
+</script>

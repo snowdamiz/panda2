@@ -1,0 +1,129 @@
+---
+import Footer from '../components/Footer.astro';
+import Header from '../components/Header.astro';
+import Kicker from '../components/ui/Kicker.astro';
+import { planOptions } from '../data/landing';
+import BaseLayout from '../layouts/BaseLayout.astro';
+
+const adminApiBase = import.meta.env.PUBLIC_PANDA_API_BASE_URL || (import.meta.env.DEV ? 'http://localhost:8080' : 'https://panda-assistant.fly.dev');
+const defaultPlan = planOptions.find((plan) => plan.featured) ?? planOptions[0];
+---
+
+<BaseLayout
+  title="Panda admin - Coupon management"
+  description="Manage Panda billing coupons from the operator admin page."
+>
+  <Header />
+  <main id="main" class="app-page admin-page">
+    <section class="shell admin-shell" data-admin-coupons data-api-base={adminApiBase}>
+      <div class="app-page-heading admin-heading reveal">
+        <div>
+          <Kicker tone="paper">Admin</Kicker>
+          <h1>Coupon control.</h1>
+        </div>
+        <p>
+          Create, review, and revoke Panda plan coupons from one operator surface.
+        </p>
+      </div>
+
+      <div class="admin-login-card reveal" data-admin-login>
+        <div class="account-panel-head">
+          <span>Operator access</span>
+          <strong>Treasury wallet</strong>
+        </div>
+        <div class="admin-wallet-login-body">
+          <button class="app-primary" type="button" data-admin-wallet-connect>Sign in with treasury wallet</button>
+        </div>
+      </div>
+
+      <div class="admin-dashboard reveal" data-admin-dashboard hidden>
+        <div class="admin-toolbar">
+          <div>
+            <span>Coupons</span>
+            <strong data-admin-count>--</strong>
+            <small data-admin-wallet-summary></small>
+          </div>
+          <div class="admin-toolbar-actions">
+            <button type="button" data-admin-refresh>Refresh</button>
+            <button type="button" data-admin-lock>Log out</button>
+          </div>
+        </div>
+
+        <div class="admin-workspace">
+          <form class="admin-coupon-form" data-admin-coupon-form>
+            <fieldset>
+              <legend>Plan</legend>
+              <div class="admin-plan-picker" role="group" aria-label="Coupon plan">
+                {
+                  planOptions.map((plan) => (
+                    <button
+                      type="button"
+                      class:list={['admin-plan-option', plan.slug === defaultPlan.slug && 'active']}
+                      data-admin-plan={plan.slug}
+                      aria-pressed={plan.slug === defaultPlan.slug ? 'true' : 'false'}
+                    >
+                      <span>{plan.label}</span>
+                      <strong>{plan.price}</strong>
+                    </button>
+                  ))
+                }
+              </div>
+            </fieldset>
+
+            <div class="admin-form-grid">
+              <label>
+                <span>Coupon code</span>
+                <input name="coupon_code" autocomplete="off" spellcheck="false" data-admin-coupon-code />
+              </label>
+              <label>
+                <span>Discount lamports</span>
+                <input type="number" name="discount_lamports" min="1" step="1" required data-admin-discount />
+              </label>
+              <label>
+                <span>Max redemptions</span>
+                <input type="number" name="max_redemptions" min="0" step="1" data-admin-max-redemptions />
+              </label>
+              <label>
+                <span>Expires</span>
+                <input name="expires_at" placeholder="YYYY-MM-DD" autocomplete="off" spellcheck="false" data-admin-expires />
+              </label>
+              <label class="admin-note-field">
+                <span>Owner note</span>
+                <input name="note" autocomplete="off" spellcheck="false" data-admin-note />
+              </label>
+            </div>
+
+            <div class="admin-create-actions">
+              <button class="admin-secondary-button" type="button" data-admin-fill-discount>Use plan price</button>
+              <button class="app-primary" type="submit" data-admin-create>Create coupon</button>
+            </div>
+          </form>
+
+          <div class="admin-created-code" data-admin-created hidden>
+            <div>
+              <span>New coupon code</span>
+              <code data-admin-created-code></code>
+            </div>
+            <button type="button" data-admin-copy-code>Copy</button>
+          </div>
+
+          <div class="admin-coupon-list" data-admin-coupon-list aria-label="Coupons"></div>
+        </div>
+      </div>
+
+      <p class="admin-status" role="status" aria-live="polite" data-admin-status></p>
+
+      <dialog class="wallet-dialog admin-wallet-dialog" data-admin-wallet-dialog>
+        <div class="wallet-dialog-head">
+          <div>
+            <span>Admin access</span>
+            <strong>Choose treasury wallet</strong>
+          </div>
+          <button type="button" aria-label="Close wallet picker" data-admin-wallet-close>Close</button>
+        </div>
+        <div class="account-wallet-list" data-admin-wallet-list></div>
+      </dialog>
+    </section>
+  </main>
+  <Footer />
+</BaseLayout>

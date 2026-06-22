@@ -3,14 +3,19 @@ package http
 import (
 	"context"
 	"crypto/ed25519"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math/big"
 	stdhttp "net/http"
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gofiber/fiber/v2"
@@ -18,7 +23,9 @@ import (
 	"github.com/sn0w/panda2/internal/billing"
 	"github.com/sn0w/panda2/internal/config"
 	discordbot "github.com/sn0w/panda2/internal/discord"
+	"github.com/sn0w/panda2/internal/features"
 	"github.com/sn0w/panda2/internal/ratelimit"
+	"github.com/sn0w/panda2/internal/repository"
 	"github.com/sn0w/panda2/internal/store"
 )
 
@@ -27,12 +34,42 @@ type Server struct {
 	cfg            config.Config
 	store          *store.Store
 	discordWebhook DiscordWebhookHandler
+	install        InstallHandler
 	billing        *billing.Service
 	paymentLimiter *ratelimit.Limiter
+	adminAuth      adminAuthStore
 }
+
+type adminAuthStore struct {
+	mu         sync.Mutex
+	challenges map[string]adminChallenge
+	sessions   map[string]adminSession
+}
+
+type adminChallenge struct {
+	ID        string
+	Wallet    string
+	Message   string
+	ExpiresAt time.Time
+}
+
+type adminSession struct {
+	Wallet    string
+	ExpiresAt time.Time
+}
+
+const (
+	adminChallengeTTL = 5 * time.Minute
+	adminSessionTTL   = 12 * time.Hour
+)
 
 type DiscordWebhookHandler interface {
 	HandleWebhookEvent(ctx context.Context, event discordbot.WebhookEvent) error
+}
+
+type InstallHandler interface {
+	CreateInstallIntent(ctx context.Context, request discordbot.CreateInstallIntentRequest) (discordbot.CreateInstallIntentResult, error)
+	HandleOAuthCallback(ctx context.Context, request discordbot.InstallCallbackRequest) (discordbot.InstallCallbackResult, error)
 }
 
 type healthResponse struct {
@@ -55,6 +92,10 @@ func New(cfg config.Config, store *store.Store) *Server {
 		cfg:            cfg,
 		store:          store,
 		paymentLimiter: ratelimit.New(cfg.UserRateLimit, cfg.UserRateLimitWindow),
+		adminAuth: adminAuthStore{
+			challenges: make(map[string]adminChallenge),
+			sessions:   make(map[string]adminSession),
+		},
 	}
 	server.routes()
 	return server
@@ -62,6 +103,11 @@ func New(cfg config.Config, store *store.Store) *Server {
 
 func (s *Server) WithDiscordWebhookHandler(handler DiscordWebhookHandler) *Server {
 	s.discordWebhook = handler
+	return s
+}
+
+func (s *Server) WithInstallHandler(handler InstallHandler) *Server {
+	s.install = handler
 	return s
 }
 
@@ -84,7 +130,32 @@ func (s *Server) Test(req *stdhttp.Request, timeout ...int) (*stdhttp.Response, 
 
 func (s *Server) routes() {
 	if origins := s.cfg.PaymentAllowedOrigins(); len(origins) > 0 {
-		s.app.Use("/billing/sol", cors.New(cors.Config{
+		s.app.Use("/billing", cors.New(cors.Config{
+			AllowOrigins: strings.Join(origins, ","),
+			AllowMethods: strings.Join([]string{
+				fiber.MethodGet,
+				fiber.MethodPost,
+				fiber.MethodOptions,
+			}, ","),
+			AllowHeaders: fiber.HeaderContentType,
+			MaxAge:       300,
+		}))
+		s.app.Use("/admin", cors.New(cors.Config{
+			AllowOrigins: strings.Join(origins, ","),
+			AllowMethods: strings.Join([]string{
+				fiber.MethodGet,
+				fiber.MethodPost,
+				fiber.MethodOptions,
+			}, ","),
+			AllowHeaders: strings.Join([]string{
+				fiber.HeaderAuthorization,
+				fiber.HeaderContentType,
+			}, ","),
+			MaxAge: 300,
+		}))
+	}
+	if origins := s.cfg.InstallAllowedOrigins(); len(origins) > 0 {
+		s.app.Use("/install", cors.New(cors.Config{
 			AllowOrigins: strings.Join(origins, ","),
 			AllowMethods: strings.Join([]string{
 				fiber.MethodGet,
@@ -106,12 +177,197 @@ func (s *Server) routes() {
 		return c.SendString(s.metrics(c.Context()))
 	})
 	s.app.Post("/discord/webhook-events", s.discordWebhookEvents)
+	s.app.Get("/install/features", s.installFeatures)
+	s.app.Post("/install/intents", s.createInstallIntent)
+	s.app.Get("/discord/install/callback", s.discordInstallCallback)
+	s.app.Post("/admin/auth/challenge", s.createAdminAuthChallenge)
+	s.app.Post("/admin/auth/sessions", s.createAdminSession)
+	s.app.Get("/admin/coupons", s.listAdminCoupons)
+	s.app.Post("/admin/coupons", s.createAdminCoupon)
+	s.app.Post("/admin/coupons/:coupon/revoke", s.revokeAdminCoupon)
+	s.app.Get("/billing/entitlements/:guild_id", s.getBillingEntitlement)
 	s.app.Post("/billing/sol/orders", s.createSolPaymentOrder)
 	s.app.Get("/billing/sol/orders/:order_id", s.getSolPaymentOrder)
 	s.app.Post("/billing/sol/orders/:order_id/transaction", s.prepareSolPaymentTransaction)
 	s.app.Post("/billing/sol/orders/:order_id/submit", s.submitSolPaymentTransaction)
 	s.app.Post("/billing/sol/orders/:order_id/verify", s.verifySolPaymentOrder)
 	s.app.Post("/billing/sol/orders/:order_id/activation-key", s.revealSolActivationKey)
+}
+
+type createInstallIntentRequest struct {
+	FeatureIDs  []string       `json:"feature_ids"`
+	Source      string         `json:"source"`
+	DesiredPlan string         `json:"desired_plan"`
+	Referrer    string         `json:"referrer"`
+	Campaign    string         `json:"campaign"`
+	Metadata    map[string]any `json:"metadata"`
+}
+
+func (s *Server) installFeatures(c *fiber.Ctx) error {
+	defaultSelection, err := features.Calculate(features.DefaultInstallPreset(), true)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(map[string]string{"error": "feature_catalog_invalid"})
+	}
+	return c.JSON(map[string]any{
+		"features":               features.PublicCatalog(),
+		"default_feature_ids":    features.DefaultInstallPreset(),
+		"default_selection":      defaultSelection,
+		"default_install_scopes": features.DefaultInstallScopes(),
+	})
+}
+
+func (s *Server) createInstallIntent(c *fiber.Ctx) error {
+	if s.install == nil {
+		return c.SendStatus(fiber.StatusServiceUnavailable)
+	}
+	var request createInstallIntentRequest
+	if err := c.BodyParser(&request); err != nil {
+		return c.SendStatus(fiber.StatusBadRequest)
+	}
+	result, err := s.install.CreateInstallIntent(c.Context(), discordbot.CreateInstallIntentRequest{
+		FeatureIDs:  request.FeatureIDs,
+		Source:      request.Source,
+		DesiredPlan: request.DesiredPlan,
+		Referrer:    request.Referrer,
+		Campaign:    request.Campaign,
+		Metadata:    request.Metadata,
+	})
+	if err != nil {
+		return writeInstallError(c, err)
+	}
+	return c.Status(fiber.StatusCreated).JSON(map[string]any{
+		"intent_id":                   result.IntentID,
+		"authorize_url":               result.AuthorizeURL,
+		"expires_at":                  result.ExpiresAt.UTC().Format(time.RFC3339),
+		"selected_feature_ids":        result.Selection.SelectedFeatureIDs,
+		"expanded_feature_ids":        result.Selection.ExpandedFeatureIDs,
+		"discord_permission_names":    result.Selection.DiscordPermissionNames,
+		"discord_permission_bitfield": result.Selection.DiscordPermissionBitfield,
+		"scopes":                      result.Selection.Scopes,
+	})
+}
+
+func (s *Server) discordInstallCallback(c *fiber.Ctx) error {
+	if s.install == nil {
+		return c.SendStatus(fiber.StatusServiceUnavailable)
+	}
+	result, err := s.install.HandleOAuthCallback(c.Context(), discordbot.InstallCallbackRequest{
+		State:              c.Query("state"),
+		Code:               c.Query("code"),
+		GuildID:            c.Query("guild_id"),
+		PermissionBitfield: c.Query("permissions"),
+	})
+	if err != nil {
+		if redirectURL := installLocalDevelopmentSuccessRedirect(s.cfg.PublicAppURL, s.cfg.Environment, c.Query("guild_id")); redirectURL != "" {
+			return c.Redirect(redirectURL, fiber.StatusFound)
+		}
+		if redirectURL := installFailureRedirect(s.cfg.PublicAppURL, err); redirectURL != "" {
+			return c.Redirect(redirectURL, fiber.StatusFound)
+		}
+		return writeInstallError(c, err)
+	}
+	if result.RedirectURL != "" {
+		return c.Redirect(result.RedirectURL, fiber.StatusFound)
+	}
+	return c.JSON(map[string]any{
+		"status":            "success",
+		"guild_id":          result.GuildID,
+		"installer_user_id": result.InstallerUserID,
+		"intent_id":         result.IntentID,
+		"feature_ids":       result.FeatureIDs,
+	})
+}
+
+func installLocalDevelopmentSuccessRedirect(publicURL, environment, guildID string) string {
+	if strings.EqualFold(strings.TrimSpace(environment), "production") || !isLocalAppURL(publicURL) {
+		return ""
+	}
+	return installSuccessRedirect(publicURL, guildID)
+}
+
+func isLocalAppURL(value string) bool {
+	u, err := stdhttp.NewRequest(stdhttp.MethodGet, strings.TrimSpace(value), nil)
+	if err != nil {
+		return false
+	}
+	host := strings.ToLower(u.URL.Hostname())
+	return host == "localhost" || host == "127.0.0.1" || host == "::1"
+}
+
+func installSuccessRedirect(publicURL, guildID string) string {
+	publicURL = strings.TrimSpace(publicURL)
+	if publicURL == "" {
+		return ""
+	}
+	u, parseErr := stdhttp.NewRequest(stdhttp.MethodGet, strings.TrimRight(publicURL, "/")+"/install/success", nil)
+	if parseErr != nil {
+		return ""
+	}
+	q := u.URL.Query()
+	q.Set("status", "success")
+	if guildID = strings.TrimSpace(guildID); guildID != "" {
+		q.Set("guild_id", guildID)
+	}
+	u.URL.RawQuery = q.Encode()
+	return u.URL.String()
+}
+
+func installFailureRedirect(publicURL string, err error) string {
+	publicURL = strings.TrimSpace(publicURL)
+	if publicURL == "" {
+		return ""
+	}
+	u, parseErr := stdhttp.NewRequest(stdhttp.MethodGet, strings.TrimRight(publicURL, "/")+"/install/failed", nil)
+	if parseErr != nil {
+		return ""
+	}
+	q := u.URL.Query()
+	q.Set("status", "failed")
+	q.Set("error", installErrorCode(err))
+	u.URL.RawQuery = q.Encode()
+	return u.URL.String()
+}
+
+func writeInstallError(c *fiber.Ctx, err error) error {
+	code := installErrorCode(err)
+	status := fiber.StatusBadRequest
+	switch code {
+	case "install_service_unavailable", "feature_store_unavailable":
+		status = fiber.StatusServiceUnavailable
+	case "install_intent_not_found":
+		status = fiber.StatusNotFound
+	case "install_intent_expired":
+		status = fiber.StatusGone
+	case "install_intent_unavailable":
+		status = fiber.StatusConflict
+	}
+	return c.Status(status).JSON(map[string]string{"error": code})
+}
+
+func installErrorCode(err error) string {
+	switch {
+	case err == nil:
+		return ""
+	case errors.Is(err, features.ErrUnknownFeature):
+		return "unknown_feature"
+	case errors.Is(err, features.ErrInternalFeature):
+		return "internal_feature"
+	case errors.Is(err, repository.ErrNotFound):
+		return "install_intent_not_found"
+	case errors.Is(err, repository.ErrInstallIntentExpired):
+		return "install_intent_expired"
+	case errors.Is(err, repository.ErrInstallIntentUnavailable):
+		return "install_intent_unavailable"
+	default:
+		message := strings.ToLower(err.Error())
+		if strings.Contains(message, "feature repository") || strings.Contains(message, "feature store") {
+			return "feature_store_unavailable"
+		}
+		if strings.Contains(message, "oauth client") || strings.Contains(message, "not configured") {
+			return "install_service_unavailable"
+		}
+		return "install_failed"
+	}
 }
 
 func (s *Server) health(c *fiber.Ctx) error {
@@ -299,6 +555,467 @@ type submitSolPaymentTransactionRequest struct {
 	SignedTransaction string `json:"signed_transaction"`
 }
 
+type adminAuthChallengeRequest struct {
+	Wallet string `json:"wallet"`
+}
+
+type adminAuthChallengeResponse struct {
+	ChallengeID    string    `json:"challenge_id"`
+	Message        string    `json:"message"`
+	ExpiresAt      time.Time `json:"expires_at"`
+	TreasuryWallet string    `json:"treasury_wallet"`
+}
+
+type adminSessionRequest struct {
+	ChallengeID   string `json:"challenge_id"`
+	Wallet        string `json:"wallet"`
+	Signature     string `json:"signature"`
+	SignedMessage string `json:"signed_message"`
+}
+
+type adminSessionResponse struct {
+	SessionToken string    `json:"session_token"`
+	Wallet       string    `json:"wallet"`
+	ExpiresAt    time.Time `json:"expires_at"`
+}
+
+type createAdminCouponRequest struct {
+	Plan             string `json:"plan"`
+	DiscountLamports int64  `json:"discount_lamports"`
+	CouponCode       string `json:"coupon_code"`
+	MaxRedemptions   int    `json:"max_redemptions"`
+	ExpiresAt        string `json:"expires_at"`
+	Note             string `json:"note"`
+}
+
+type adminCouponListResponse struct {
+	Coupons      []billing.CouponView `json:"coupons"`
+	PlanLamports map[string]int64     `json:"plan_lamports"`
+}
+
+type adminCouponCreateResponse struct {
+	Coupon billing.CouponView `json:"coupon"`
+	Code   string             `json:"code"`
+}
+
+func (s *Server) createAdminAuthChallenge(c *fiber.Ctx) error {
+	treasuryWallet := strings.TrimSpace(s.cfg.SolanaTreasuryWallet)
+	if treasuryWallet == "" {
+		return c.Status(fiber.StatusServiceUnavailable).JSON(map[string]string{"error": "admin_wallet_not_configured"})
+	}
+	var request adminAuthChallengeRequest
+	if err := c.BodyParser(&request); err != nil {
+		return c.SendStatus(fiber.StatusBadRequest)
+	}
+	wallet := strings.TrimSpace(request.Wallet)
+	if wallet == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(map[string]string{"error": "wallet_required"})
+	}
+	if wallet != treasuryWallet {
+		return c.Status(fiber.StatusForbidden).JSON(map[string]string{"error": "admin_wallet_forbidden"})
+	}
+	if _, err := decodeSolanaPublicKey(wallet); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(map[string]string{"error": "invalid_wallet"})
+	}
+	challengeID, err := randomAdminToken()
+	if err != nil {
+		return c.SendStatus(fiber.StatusInternalServerError)
+	}
+	expiresAt := time.Now().UTC().Add(adminChallengeTTL)
+	message := adminAuthMessage(wallet, challengeID, expiresAt)
+
+	s.adminAuth.mu.Lock()
+	s.pruneAdminAuthLocked(time.Now().UTC())
+	s.adminAuth.challenges[challengeID] = adminChallenge{
+		ID:        challengeID,
+		Wallet:    wallet,
+		Message:   message,
+		ExpiresAt: expiresAt,
+	}
+	s.adminAuth.mu.Unlock()
+
+	return c.Status(fiber.StatusCreated).JSON(adminAuthChallengeResponse{
+		ChallengeID:    challengeID,
+		Message:        message,
+		ExpiresAt:      expiresAt,
+		TreasuryWallet: treasuryWallet,
+	})
+}
+
+func (s *Server) createAdminSession(c *fiber.Ctx) error {
+	treasuryWallet := strings.TrimSpace(s.cfg.SolanaTreasuryWallet)
+	if treasuryWallet == "" {
+		return c.Status(fiber.StatusServiceUnavailable).JSON(map[string]string{"error": "admin_wallet_not_configured"})
+	}
+	var request adminSessionRequest
+	if err := c.BodyParser(&request); err != nil {
+		return c.SendStatus(fiber.StatusBadRequest)
+	}
+	wallet := strings.TrimSpace(request.Wallet)
+	if wallet == "" || strings.TrimSpace(request.ChallengeID) == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(map[string]string{"error": "admin_challenge_required"})
+	}
+	if wallet != treasuryWallet {
+		return c.Status(fiber.StatusForbidden).JSON(map[string]string{"error": "admin_wallet_forbidden"})
+	}
+	publicKey, err := decodeSolanaPublicKey(wallet)
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(map[string]string{"error": "invalid_wallet"})
+	}
+	signature, err := base64.StdEncoding.DecodeString(strings.TrimSpace(request.Signature))
+	if err != nil || len(signature) != ed25519.SignatureSize {
+		return c.Status(fiber.StatusBadRequest).JSON(map[string]string{"error": "invalid_signature"})
+	}
+	signedMessage, err := base64.StdEncoding.DecodeString(strings.TrimSpace(request.SignedMessage))
+	if err != nil || len(signedMessage) == 0 {
+		return c.Status(fiber.StatusBadRequest).JSON(map[string]string{"error": "invalid_signed_message"})
+	}
+
+	now := time.Now().UTC()
+	challengeID := strings.TrimSpace(request.ChallengeID)
+	s.adminAuth.mu.Lock()
+	s.pruneAdminAuthLocked(now)
+	challenge, ok := s.adminAuth.challenges[challengeID]
+	if ok {
+		delete(s.adminAuth.challenges, challengeID)
+	}
+	s.adminAuth.mu.Unlock()
+	if !ok || challenge.Wallet != wallet || now.After(challenge.ExpiresAt) {
+		return c.Status(fiber.StatusUnauthorized).JSON(map[string]string{"error": "admin_challenge_invalid"})
+	}
+	if string(signedMessage) != challenge.Message {
+		return c.Status(fiber.StatusBadRequest).JSON(map[string]string{"error": "admin_signed_message_mismatch"})
+	}
+	if !ed25519.Verify(publicKey, signedMessage, signature) {
+		return c.Status(fiber.StatusUnauthorized).JSON(map[string]string{"error": "admin_signature_invalid"})
+	}
+
+	sessionToken, err := randomAdminToken()
+	if err != nil {
+		return c.SendStatus(fiber.StatusInternalServerError)
+	}
+	expiresAt := now.Add(adminSessionTTL)
+	s.adminAuth.mu.Lock()
+	s.pruneAdminAuthLocked(now)
+	s.adminAuth.sessions[adminSessionKey(sessionToken)] = adminSession{
+		Wallet:    wallet,
+		ExpiresAt: expiresAt,
+	}
+	s.adminAuth.mu.Unlock()
+
+	return c.JSON(adminSessionResponse{
+		SessionToken: sessionToken,
+		Wallet:       wallet,
+		ExpiresAt:    expiresAt,
+	})
+}
+
+func (s *Server) listAdminCoupons(c *fiber.Ctx) error {
+	session, denied := s.requireAdmin(c)
+	if denied != nil {
+		return denied
+	}
+	if s.billing == nil {
+		return c.SendStatus(fiber.StatusServiceUnavailable)
+	}
+	coupons, err := s.billing.ListCoupons(c.Context(), billing.ListCouponsRequest{
+		ActorUserID:  "treasury_wallet:" + session.Wallet,
+		ActorIsOwner: true,
+	})
+	if err != nil {
+		return writeAdminCouponError(c, err)
+	}
+	return c.JSON(adminCouponListResponse{
+		Coupons:      coupons,
+		PlanLamports: cloneLamports(s.cfg.SolanaPlanLamports),
+	})
+}
+
+func (s *Server) createAdminCoupon(c *fiber.Ctx) error {
+	session, denied := s.requireAdmin(c)
+	if denied != nil {
+		return denied
+	}
+	if s.billing == nil {
+		return c.SendStatus(fiber.StatusServiceUnavailable)
+	}
+	var request createAdminCouponRequest
+	if err := c.BodyParser(&request); err != nil {
+		return c.SendStatus(fiber.StatusBadRequest)
+	}
+	expiresAt, err := parseAdminCouponExpiry(request.ExpiresAt)
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(map[string]string{"error": "invalid_expiration"})
+	}
+	result, err := s.billing.CreateCoupon(c.Context(), billing.CreateCouponRequest{
+		ActorUserID:      "treasury_wallet:" + session.Wallet,
+		ActorIsOwner:     true,
+		Plan:             request.Plan,
+		DiscountLamports: request.DiscountLamports,
+		Code:             request.CouponCode,
+		MaxRedemptions:   request.MaxRedemptions,
+		ExpiresAt:        expiresAt,
+		Note:             request.Note,
+	})
+	if err != nil {
+		return writeAdminCouponError(c, err)
+	}
+	return c.Status(fiber.StatusCreated).JSON(adminCouponCreateResponse{
+		Coupon: result.Coupon,
+		Code:   result.Code,
+	})
+}
+
+func (s *Server) revokeAdminCoupon(c *fiber.Ctx) error {
+	session, denied := s.requireAdmin(c)
+	if denied != nil {
+		return denied
+	}
+	if s.billing == nil {
+		return c.SendStatus(fiber.StatusServiceUnavailable)
+	}
+	identifier := strings.TrimSpace(c.Params("coupon"))
+	request := billing.RevokeCouponRequest{
+		ActorUserID:  "treasury_wallet:" + session.Wallet,
+		ActorIsOwner: true,
+	}
+	if strings.HasPrefix(identifier, "cpn_") {
+		request.CouponID = identifier
+	} else {
+		request.Prefix = identifier
+	}
+	coupon, err := s.billing.RevokeCoupon(c.Context(), request)
+	if err != nil {
+		return writeAdminCouponError(c, err)
+	}
+	return c.JSON(coupon)
+}
+
+func (s *Server) requireAdmin(c *fiber.Ctx) (adminSession, error) {
+	token := bearerToken(c)
+	if token == "" {
+		return adminSession{}, c.Status(fiber.StatusUnauthorized).JSON(map[string]string{"error": "admin_unauthorized"})
+	}
+	now := time.Now().UTC()
+	key := adminSessionKey(token)
+	s.adminAuth.mu.Lock()
+	s.pruneAdminAuthLocked(now)
+	session, ok := s.adminAuth.sessions[key]
+	s.adminAuth.mu.Unlock()
+	if !ok || now.After(session.ExpiresAt) {
+		return adminSession{}, c.Status(fiber.StatusUnauthorized).JSON(map[string]string{"error": "admin_unauthorized"})
+	}
+	return session, nil
+}
+
+func bearerToken(c *fiber.Ctx) string {
+	auth := strings.TrimSpace(c.Get(fiber.HeaderAuthorization))
+	if len(auth) < 7 || !strings.EqualFold(auth[:7], "Bearer ") {
+		return ""
+	}
+	return strings.TrimSpace(auth[7:])
+}
+
+func adminAuthMessage(wallet, challengeID string, expiresAt time.Time) string {
+	return strings.Join([]string{
+		"Panda admin login",
+		"",
+		"Sign this message to manage Panda billing coupons.",
+		"Wallet: " + wallet,
+		"Challenge: " + challengeID,
+		"Expires: " + expiresAt.UTC().Format(time.RFC3339),
+	}, "\n")
+}
+
+func randomAdminToken() (string, error) {
+	var token [32]byte
+	if _, err := rand.Read(token[:]); err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(token[:]), nil
+}
+
+func adminSessionKey(token string) string {
+	sum := sha256.Sum256([]byte(token))
+	return hex.EncodeToString(sum[:])
+}
+
+func (s *Server) pruneAdminAuthLocked(now time.Time) {
+	for id, challenge := range s.adminAuth.challenges {
+		if now.After(challenge.ExpiresAt) {
+			delete(s.adminAuth.challenges, id)
+		}
+	}
+	for key, session := range s.adminAuth.sessions {
+		if now.After(session.ExpiresAt) {
+			delete(s.adminAuth.sessions, key)
+		}
+	}
+}
+
+func decodeSolanaPublicKey(value string) (ed25519.PublicKey, error) {
+	decoded, err := decodeBase58Fixed(strings.TrimSpace(value), ed25519.PublicKeySize)
+	if err != nil {
+		return nil, err
+	}
+	return ed25519.PublicKey(decoded), nil
+}
+
+func decodeBase58Fixed(value string, size int) ([]byte, error) {
+	decoded, err := decodeBase58(value)
+	if err != nil {
+		return nil, err
+	}
+	if len(decoded) != size {
+		return nil, fmt.Errorf("expected %d decoded bytes, got %d", size, len(decoded))
+	}
+	return decoded, nil
+}
+
+func decodeBase58(value string) ([]byte, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil, fmt.Errorf("empty base58 value")
+	}
+	const alphabet = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+	base := big.NewInt(58)
+	decoded := big.NewInt(0)
+	for _, char := range value {
+		index := strings.IndexRune(alphabet, char)
+		if index < 0 {
+			return nil, fmt.Errorf("invalid base58 character %q", char)
+		}
+		decoded.Mul(decoded, base)
+		decoded.Add(decoded, big.NewInt(int64(index)))
+	}
+	leadingZeroes := 0
+	for leadingZeroes < len(value) && value[leadingZeroes] == '1' {
+		leadingZeroes++
+	}
+	result := append(make([]byte, leadingZeroes), decoded.Bytes()...)
+	if len(result) == 0 {
+		return []byte{0}, nil
+	}
+	return result, nil
+}
+
+func parseAdminCouponExpiry(value string) (*time.Time, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil, nil
+	}
+	if parsed, err := time.Parse(time.RFC3339, value); err == nil {
+		parsed = parsed.UTC()
+		return &parsed, nil
+	}
+	parsed, err := time.Parse("2006-01-02", value)
+	if err != nil {
+		return nil, err
+	}
+	parsed = parsed.UTC()
+	return &parsed, nil
+}
+
+func cloneLamports(values map[string]int64) map[string]int64 {
+	clone := make(map[string]int64, len(values))
+	for key, value := range values {
+		clone[key] = value
+	}
+	return clone
+}
+
+type billingEntitlementResponse struct {
+	GuildID            string                                   `json:"guild_id"`
+	Plan               string                                   `json:"plan"`
+	DisplayName        string                                   `json:"display_name"`
+	Status             string                                   `json:"status"`
+	GraceState         string                                   `json:"grace_state"`
+	PaymentProvider    string                                   `json:"payment_provider"`
+	PeriodStart        time.Time                                `json:"period_start"`
+	PeriodEnd          time.Time                                `json:"period_end"`
+	TrialEndsAt        *time.Time                               `json:"trial_ends_at,omitempty"`
+	CanUsePaidFeatures bool                                     `json:"can_use_paid_features"`
+	ReadOnly           bool                                     `json:"read_only"`
+	Usage              map[string]billingEntitlementUsageMetric `json:"usage"`
+}
+
+type billingEntitlementUsageMetric struct {
+	Metric    string `json:"metric"`
+	Label     string `json:"label"`
+	Used      int64  `json:"used"`
+	Reserved  int64  `json:"reserved"`
+	Limit     int64  `json:"limit"`
+	Remaining int64  `json:"remaining"`
+	Formatted string `json:"formatted"`
+}
+
+func (s *Server) getBillingEntitlement(c *fiber.Ctx) error {
+	if s.billing == nil {
+		return c.SendStatus(fiber.StatusServiceUnavailable)
+	}
+	guildID := strings.TrimSpace(c.Params("guild_id"))
+	if guildID == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(map[string]string{"error": "guild_id_required"})
+	}
+	entitlement, err := s.billing.Resolve(c.Context(), guildID)
+	if err != nil {
+		return writeBillingEntitlementError(c, err)
+	}
+	return c.JSON(entitlementResponse(entitlement))
+}
+
+func entitlementResponse(entitlement billing.Entitlement) billingEntitlementResponse {
+	return billingEntitlementResponse{
+		GuildID:            entitlement.GuildID,
+		Plan:               entitlement.Plan.Plan,
+		DisplayName:        entitlement.Plan.DisplayName,
+		Status:             entitlement.Status,
+		GraceState:         entitlement.GraceState,
+		PaymentProvider:    entitlement.PaymentProvider,
+		PeriodStart:        entitlement.PeriodStart,
+		PeriodEnd:          entitlement.PeriodEnd,
+		TrialEndsAt:        entitlement.TrialEndsAt,
+		CanUsePaidFeatures: entitlement.CanUsePaidFeatures,
+		ReadOnly:           entitlement.ReadOnly,
+		Usage: map[string]billingEntitlementUsageMetric{
+			"ai_responses": billingUsageMetric(
+				billing.MetricAIResponse,
+				entitlement.Usage.AIResponsesConsumed,
+				entitlement.Usage.AIResponsesReserved,
+				billing.IncludedLimit(entitlement.Plan, billing.MetricAIResponse),
+			),
+			"web_searches": billingUsageMetric(
+				billing.MetricWebSearch,
+				entitlement.Usage.WebSearchesConsumed,
+				entitlement.Usage.WebSearchesReserved,
+				billing.IncludedLimit(entitlement.Plan, billing.MetricWebSearch),
+			),
+			"knowledge_storage": billingUsageMetric(
+				billing.MetricKnowledgeStorageByte,
+				entitlement.Usage.KnowledgeStorageBytesConsumed,
+				entitlement.Usage.KnowledgeStorageBytesReserved,
+				billing.IncludedLimit(entitlement.Plan, billing.MetricKnowledgeStorageByte),
+			),
+		},
+	}
+}
+
+func billingUsageMetric(metric string, used, reserved, limit int64) billingEntitlementUsageMetric {
+	remaining := limit - used - reserved
+	if remaining < 0 {
+		remaining = 0
+	}
+	return billingEntitlementUsageMetric{
+		Metric:    metric,
+		Label:     billing.MetricLabel(metric),
+		Used:      used,
+		Reserved:  reserved,
+		Limit:     limit,
+		Remaining: remaining,
+		Formatted: billing.FormatUsage(used+reserved, limit, metric),
+	}
+}
+
 func (s *Server) createSolPaymentOrder(c *fiber.Ctx) error {
 	if denied := s.allowPaymentWrite(c); denied != nil {
 		return denied
@@ -473,6 +1190,38 @@ func writeSolBillingError(c *fiber.Ctx, err error) error {
 		return c.Status(fiber.StatusConflict).JSON(map[string]string{"error": "order_already_ready"})
 	case errors.Is(err, billing.ErrActivationKeyAlreadyRevealed):
 		return c.Status(fiber.StatusConflict).JSON(map[string]string{"error": "activation_key_already_revealed"})
+	default:
+		return c.Status(fiber.StatusBadRequest).JSON(map[string]string{"error": "bad_request"})
+	}
+}
+
+func writeBillingEntitlementError(c *fiber.Ctx, err error) error {
+	switch {
+	case errors.Is(err, billing.ErrNoSubscription):
+		return c.Status(fiber.StatusNotFound).JSON(map[string]string{"error": "subscription_not_found"})
+	case errors.Is(err, billing.ErrUnknownPlan):
+		return c.Status(fiber.StatusBadRequest).JSON(map[string]string{"error": "unknown_plan"})
+	default:
+		return c.Status(fiber.StatusBadRequest).JSON(map[string]string{"error": "bad_request"})
+	}
+}
+
+func writeAdminCouponError(c *fiber.Ctx, err error) error {
+	switch {
+	case errors.Is(err, billing.ErrBillingAccess):
+		return c.Status(fiber.StatusUnauthorized).JSON(map[string]string{"error": "admin_unauthorized"})
+	case errors.Is(err, billing.ErrUnknownPlan):
+		return c.Status(fiber.StatusBadRequest).JSON(map[string]string{"error": "unknown_plan"})
+	case errors.Is(err, billing.ErrCouponDuplicate):
+		return c.Status(fiber.StatusConflict).JSON(map[string]string{"error": "coupon_duplicate"})
+	case errors.Is(err, billing.ErrCouponExpired):
+		return c.Status(fiber.StatusGone).JSON(map[string]string{"error": "coupon_expired"})
+	case errors.Is(err, billing.ErrCouponRevoked):
+		return c.Status(fiber.StatusGone).JSON(map[string]string{"error": "coupon_revoked"})
+	case errors.Is(err, billing.ErrCouponNotFound):
+		return c.Status(fiber.StatusNotFound).JSON(map[string]string{"error": "coupon_not_found"})
+	case errors.Is(err, billing.ErrCouponAmbiguous):
+		return c.Status(fiber.StatusConflict).JSON(map[string]string{"error": "coupon_ambiguous"})
 	default:
 		return c.Status(fiber.StatusBadRequest).JSON(map[string]string{"error": "bad_request"})
 	}

@@ -1,0 +1,12 @@
+{
+  "name": "panda2",
+  "private": true,
+  "scripts": {
+    "start": "concurrently -k --names landing,panda --prefix-colors cyan,green \"npm run start:landing\" \"npm run start:bot\"",
+    "start:landing": "npm --prefix landing run dev",
+    "start:bot": "PANDA_ENV_FILE=.env.dev go run ./cmd/bot"
+  },
+  "devDependencies": {
+    "concurrently": "9.2.3"
+  }
+}

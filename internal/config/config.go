@@ -34,6 +34,8 @@ type Config struct {
 	DiscordApplicationID                     string
 	DiscordGuildID                           string
 	DiscordPublicKey                         string
+	DiscordClientSecret                      string
+	DiscordInstallRedirectURI                string
 	OpenRouterAPIKey                         string
 	OpenRouterBaseURL                        string
 	OpenRouterModel                          string
@@ -79,10 +81,12 @@ type fileConfig struct {
 }
 
 type fileDiscordConfig struct {
-	ApplicationID string   `json:"application_id"`
-	GuildID       string   `json:"guild_id"`
-	PublicKey     string   `json:"public_key"`
-	OwnerUserIDs  []string `json:"owner_user_ids"`
+	ApplicationID      string   `json:"application_id"`
+	GuildID            string   `json:"guild_id"`
+	PublicKey          string   `json:"public_key"`
+	ClientSecret       string   `json:"client_secret"`
+	InstallRedirectURI string   `json:"install_redirect_uri"`
+	OwnerUserIDs       []string `json:"owner_user_ids"`
 }
 
 type fileOpenRouterConfig struct {
@@ -222,6 +226,12 @@ func (c Config) Validate() ([]string, error) {
 	if c.DiscordPublicKey != "" && c.DiscordBotToken == "" {
 		warnings = append(warnings, "DISCORD_PUBLIC_KEY is configured but DISCORD_BOT_TOKEN is missing; denied installs cannot be removed from guilds")
 	}
+	if c.DiscordApplicationID != "" && c.DiscordClientSecret == "" {
+		warnings = append(warnings, "DISCORD_CLIENT_SECRET is not configured; feature-based install OAuth callbacks are disabled")
+	}
+	if c.DiscordApplicationID != "" && c.DiscordInstallRedirectURI == "" {
+		warnings = append(warnings, "DISCORD_INSTALL_REDIRECT_URI is not configured; feature-based install OAuth callbacks are disabled")
+	}
 	if !c.OpenRouterConfigured() {
 		warnings = append(warnings, "OPENROUTER_API_KEY is not configured; natural-language assistant responses are disabled")
 	}
@@ -238,6 +248,12 @@ func (c Config) Validate() ([]string, error) {
 	if strings.EqualFold(c.Environment, "production") {
 		if !c.DiscordConfigured() {
 			return warnings, errors.New("production requires DISCORD_BOT_TOKEN and a Discord application ID")
+		}
+		if c.DiscordClientSecret == "" {
+			return warnings, errors.New("production requires DISCORD_CLIENT_SECRET for feature-based installs")
+		}
+		if c.DiscordInstallRedirectURI == "" {
+			return warnings, errors.New("production requires DISCORD_INSTALL_REDIRECT_URI for feature-based installs")
 		}
 		if !c.OpenRouterConfigured() {
 			return warnings, errors.New("production requires OPENROUTER_API_KEY")
@@ -286,7 +302,20 @@ func (c Config) PaymentAllowedOrigins() []string {
 	if strings.TrimSpace(c.PublicAppURL) != "" {
 		origins = append(origins, c.PublicAppURL)
 	}
+	if !strings.EqualFold(strings.TrimSpace(c.Environment), "production") {
+		origins = append(origins, localLandingOrigins()...)
+	}
 	return normalizeList(origins)
+}
+
+func (c Config) InstallAllowedOrigins() []string {
+	origins := append([]string(nil), c.PaymentAllowedOrigins()...)
+	origins = append(origins, localLandingOrigins()...)
+	return normalizeList(origins)
+}
+
+func localLandingOrigins() []string {
+	return []string{"http://localhost:4321", "http://127.0.0.1:4321"}
 }
 
 func (c Config) IsOwner(userID string) bool {
@@ -546,6 +575,12 @@ func applyFileConfig(cfg *Config, file fileConfig) error {
 	if value := strings.TrimSpace(file.Discord.PublicKey); value != "" {
 		cfg.DiscordPublicKey = value
 	}
+	if value := strings.TrimSpace(file.Discord.ClientSecret); value != "" {
+		cfg.DiscordClientSecret = value
+	}
+	if value := strings.TrimSpace(file.Discord.InstallRedirectURI); value != "" {
+		cfg.DiscordInstallRedirectURI = value
+	}
 	if file.Discord.OwnerUserIDs != nil {
 		cfg.OwnerUserIDs = listToSet(file.Discord.OwnerUserIDs)
 	}
@@ -669,6 +704,8 @@ func applyEnvValues(cfg *Config, lookup func(string) (string, bool)) {
 	cfg.DiscordApplicationID = nonEmptyStringFromLookup(lookup, "DISCORD_APPLICATION_ID", cfg.DiscordApplicationID)
 	cfg.DiscordGuildID = nonEmptyStringFromLookup(lookup, "DISCORD_GUILD_ID", cfg.DiscordGuildID)
 	cfg.DiscordPublicKey = nonEmptyStringFromLookup(lookup, "DISCORD_PUBLIC_KEY", cfg.DiscordPublicKey)
+	cfg.DiscordClientSecret = stringFromLookup(lookup, "DISCORD_CLIENT_SECRET", cfg.DiscordClientSecret)
+	cfg.DiscordInstallRedirectURI = nonEmptyStringFromLookup(lookup, "DISCORD_INSTALL_REDIRECT_URI", cfg.DiscordInstallRedirectURI)
 	cfg.OpenRouterAPIKey = stringFromLookup(lookup, "OPENROUTER_API_KEY", cfg.OpenRouterAPIKey)
 	cfg.OpenRouterBaseURL = nonEmptyStringFromLookup(lookup, "OPENROUTER_BASE_URL", cfg.OpenRouterBaseURL)
 	cfg.OpenRouterModel = nonEmptyStringFromLookup(lookup, "OPENROUTER_DEFAULT_MODEL", cfg.OpenRouterModel)

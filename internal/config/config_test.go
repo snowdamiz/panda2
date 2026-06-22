@@ -44,6 +44,8 @@ func TestDefaultSQLitePathUsesFlyDataDirInProduction(t *testing.T) {
 	t.Setenv("ENVIRONMENT", "production")
 	t.Setenv("DISCORD_BOT_TOKEN", "token")
 	t.Setenv("DISCORD_APPLICATION_ID", "123")
+	t.Setenv("DISCORD_CLIENT_SECRET", "secret")
+	t.Setenv("DISCORD_INSTALL_REDIRECT_URI", "https://api.panda.example/discord/install/callback")
 	t.Setenv("OPENROUTER_API_KEY", "key")
 	t.Setenv("PUBLIC_APP_URL", "https://panda.example")
 	t.Setenv("SOLANA_RPC_URL", "https://api.devnet.solana.com")
@@ -374,8 +376,11 @@ func TestLoadBillingPurchaseEnvOverrides(t *testing.T) {
 	if cfg.SolanaConfirmation != "confirmed" || cfg.SolanaOrderExpiration.String() != "45m0s" || cfg.SolanaActivationKeyTTL.String() != "24h0m0s" {
 		t.Fatalf("unexpected Solana timing config: confirmation=%q order=%s key=%s", cfg.SolanaConfirmation, cfg.SolanaOrderExpiration, cfg.SolanaActivationKeyTTL)
 	}
-	if origins := cfg.PaymentAllowedOrigins(); len(origins) != 2 || origins[0] != "https://panda.example" || origins[1] != "https://panda2-landing.fly.dev" {
+	if origins := cfg.PaymentAllowedOrigins(); len(origins) != 4 || origins[0] != "https://panda.example" || origins[1] != "https://panda2-landing.fly.dev" || origins[2] != "http://localhost:4321" || origins[3] != "http://127.0.0.1:4321" {
 		t.Fatalf("unexpected billing allowed origins: %#v", origins)
+	}
+	if origins := cfg.InstallAllowedOrigins(); len(origins) != 4 || origins[0] != "https://panda.example" || origins[1] != "https://panda2-landing.fly.dev" || origins[2] != "http://localhost:4321" || origins[3] != "http://127.0.0.1:4321" {
+		t.Fatalf("unexpected install allowed origins: %#v", origins)
 	}
 	if cfg.SolanaPlanLamports["starter"] != 19_000_000 || cfg.SolanaPlanLamports["plus"] != 49_000_000 || cfg.SolanaPlanLamports["pro"] != 99_000_000 || cfg.SolanaPlanLamports["business"] != 249_000_000 {
 		t.Fatalf("unexpected SOL lamport map: %#v", cfg.SolanaPlanLamports)

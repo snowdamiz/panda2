@@ -23,30 +23,28 @@ func TestDefaultRegistryDefinitionsAreValid(t *testing.T) {
 		t.Fatalf("NewDefaultRegistry: %v", err)
 	}
 	definitions := registry.Definitions()
-	if len(definitions) != 28 {
-		t.Fatalf("expected trimmed non-admin tool surface, got %d", len(definitions))
+	if len(definitions) < 80 {
+		t.Fatalf("expected restored feature-gated tool surface, got %d", len(definitions))
 	}
-	removed := map[string]struct{}{
-		"discord.create_role":          {},
-		"discord.add_reaction":         {},
-		"discord.send_message":         {},
-		"discord.add_member_role":      {},
-		"discord.remove_member_role":   {},
-		"discord.timeout_member":       {},
-		"discord.get_audit_logs":       {},
-		"panda.manage_role_permission": {},
-		"panda.manage_member_role":     {},
-		"panda.manage_discord_role":    {},
-		"panda.manage_tool_access":     {},
-		"panda.manage_composed_tool":   {},
-		"panda.manage_schedule":        {},
-		"read_config":                  {},
-		"draft_moderator_note":         {},
+	restored := map[string]bool{
+		"discord.create_role":          true,
+		"discord.add_reaction":         true,
+		"discord.send_message":         true,
+		"discord.add_member_role":      true,
+		"discord.remove_member_role":   true,
+		"discord.timeout_member":       true,
+		"discord.get_audit_logs":       true,
+		"panda.manage_role_permission": true,
+		"panda.manage_member_role":     true,
+		"panda.manage_discord_role":    true,
+		"panda.manage_tool_access":     true,
+		"panda.manage_composed_tool":   true,
+		"panda.manage_schedule":        true,
+		"read_config":                  true,
+		"draft_moderator_note":         true,
 	}
 	for _, definition := range definitions {
-		if _, ok := removed[definition.Name]; ok {
-			t.Fatalf("admin tool %s should not be registered", definition.Name)
-		}
+		delete(restored, definition.Name)
 		if definition.Timeout <= 0 {
 			t.Fatalf("tool %s missing timeout", definition.Name)
 		}
@@ -58,6 +56,9 @@ func TestDefaultRegistryDefinitionsAreValid(t *testing.T) {
 		}
 		assertSchemaRequiredIsArray(t, definition.Name, "input", definition.InputSchema)
 		assertSchemaRequiredIsArray(t, definition.Name, "output", definition.OutputSchema)
+	}
+	for name := range restored {
+		t.Fatalf("expected restored tool %s to be registered", name)
 	}
 }
 
@@ -117,10 +118,13 @@ func TestOpenRouterToolsFiltersByPermission(t *testing.T) {
 		Permissions: map[string]struct{}{admin.PermissionAssistantUse: {}},
 	})
 	writeNames := toolNames(writeTools)
-	for _, removed := range []string{"discord_send_message", "discord_create_poll", "discord_add_reaction", "discord_create_thread"} {
-		if writeNames[removed] {
-			t.Fatalf("write/admin tool %s should not be exposed, got %+v", removed, writeNames)
+	for _, want := range []string{"discord_send_message", "discord_create_poll", "discord_add_reaction"} {
+		if !writeNames[want] {
+			t.Fatalf("write tool %s should be exposed behind write_confirmed policy, got %+v", want, writeNames)
 		}
+	}
+	if writeNames["discord_create_thread"] {
+		t.Fatalf("thread creation should require thread permission, got %+v", writeNames)
 	}
 	threadTools := registry.OpenRouterToolsForAccess(ToolAccess{
 		Policy: ToolPolicyWriteConfirmed,
@@ -130,8 +134,8 @@ func TestOpenRouterToolsFiltersByPermission(t *testing.T) {
 		},
 	})
 	threadNames := toolNames(threadTools)
-	if threadNames["discord_create_thread"] {
-		t.Fatalf("thread creation should stay disabled, got %+v", threadNames)
+	if !threadNames["discord_create_thread"] {
+		t.Fatalf("thread creation should be exposed with thread permission, got %+v", threadNames)
 	}
 	for _, tool := range tools {
 		if tool.Type != "function" || tool.Function.Name == "" || len(tool.Function.Parameters) == 0 {
@@ -185,11 +189,12 @@ func TestOpenRouterToolsAdminOnlyGatesRegularUsers(t *testing.T) {
 			admin.PermissionAssistantUse:       {},
 			admin.PermissionAssistantWebSearch: {},
 			admin.PermissionAdminConfigRead:    {},
+			admin.PermissionAdminConfigWrite:   {},
 		},
 	})
 	adminNames := toolNames(adminTools)
-	if !adminNames["web_search"] || adminNames["read_config"] || adminNames["panda_manage_tool_access"] {
-		t.Fatalf("admin_only should not expose admin-scoped tool access, got %+v", adminNames)
+	if !adminNames["web_search"] || !adminNames["read_config"] || !adminNames["panda_manage_tool_access"] {
+		t.Fatalf("admin_only should expose admin-scoped tool access to admins, got %+v", adminNames)
 	}
 }
 
@@ -202,8 +207,8 @@ func TestOpenRouterToolsHonorsIncludeInModelContext(t *testing.T) {
 		Policy:      ToolPolicyModerator,
 		Permissions: map[string]struct{}{admin.PermissionModerationUse: {}},
 	})
-	if toolNames(tools)["draft_moderator_note"] {
-		t.Fatalf("draft_moderator_note should not be exposed to the model tool list")
+	if !toolNames(tools)["draft_moderator_note"] {
+		t.Fatalf("draft_moderator_note should be exposed for moderation access")
 	}
 }
 
@@ -287,12 +292,11 @@ func TestMustGetUnknownTool(t *testing.T) {
 	}
 }
 
-func TestRemovedAdminToolsAreUnknown(t *testing.T) {
+func TestRestoredAdminToolsAreKnown(t *testing.T) {
 	registry, err := NewDefaultRegistry()
 	if err != nil {
 		t.Fatalf("NewDefaultRegistry: %v", err)
 	}
-	executor := NewExecutor(registry, nil, fakeConfigReader{})
 	for _, name := range []string{
 		"read_config",
 		"discord_create_role",
@@ -306,21 +310,8 @@ func TestRemovedAdminToolsAreUnknown(t *testing.T) {
 		"panda_manage_schedule",
 		"draft_moderator_note",
 	} {
-		_, err := executor.Execute(context.Background(), ExecutionRequest{
-			GuildID: "guild-1",
-			ActorID: "admin",
-			Access:  testAccess(ToolPolicyOwnerOps, admin.PermissionAssistantUse, admin.PermissionAdminConfigRead, admin.PermissionAdminConfigWrite, admin.PermissionOwnerOps),
-			Call: llm.ToolCall{
-				ID:   "call-" + name,
-				Type: "function",
-				Function: llm.ToolCallFunction{
-					Name:      name,
-					Arguments: `{}`,
-				},
-			},
-		})
-		if !errors.Is(err, ErrUnknownTool) {
-			t.Fatalf("expected %s to be unknown, got %v", name, err)
+		if _, err := registry.MustGet(name); err != nil {
+			t.Fatalf("expected restored tool %s to be registered, got %v", name, err)
 		}
 	}
 }
@@ -584,7 +575,6 @@ func (f *fakeAuditRecorder) Record(_ context.Context, event store.AuditEvent) er
 }
 
 func TestExecutorRunsComposedToolManager(t *testing.T) {
-	t.Skip("admin and Discord write tools are disabled in this build")
 	registry, err := NewDefaultRegistry()
 	if err != nil {
 		t.Fatalf("NewDefaultRegistry: %v", err)
@@ -620,7 +610,6 @@ func TestExecutorRunsComposedToolManager(t *testing.T) {
 }
 
 func TestExecutorRunsScheduleManager(t *testing.T) {
-	t.Skip("admin and Discord write tools are disabled in this build")
 	registry, err := NewDefaultRegistry()
 	if err != nil {
 		t.Fatalf("NewDefaultRegistry: %v", err)
@@ -660,7 +649,6 @@ func TestExecutorRunsScheduleManager(t *testing.T) {
 }
 
 func TestExecutorExposesScheduleManagerToInvokeAccess(t *testing.T) {
-	t.Skip("admin and Discord write tools are disabled in this build")
 	registry, err := NewDefaultRegistry()
 	if err != nil {
 		t.Fatalf("NewDefaultRegistry: %v", err)
@@ -823,7 +811,6 @@ func TestExecutorRedactsDynamicToolResults(t *testing.T) {
 }
 
 func TestExecutorComposedManagerChecksActionPermission(t *testing.T) {
-	t.Skip("admin and Discord write tools are disabled in this build")
 	registry, err := NewDefaultRegistry()
 	if err != nil {
 		t.Fatalf("NewDefaultRegistry: %v", err)
@@ -861,8 +848,8 @@ func TestExecutorHidesComposedManagerFromInvokeOnlyAccess(t *testing.T) {
 	}
 	executor := NewExecutor(registry, nil, nil).WithComposedToolManager(&fakeComposedManager{})
 	tools := executor.OpenRouterTools(testAccess(ToolPolicyWriteConfirmed, admin.PermissionToolComposeInvoke))
-	if toolNames(tools)["panda_manage_composed_tool"] {
-		t.Fatalf("invoke-only access should use approved composed tools directly, got %+v", toolNames(tools))
+	if !toolNames(tools)["panda_manage_composed_tool"] {
+		t.Fatalf("invoke-only access should expose composed tool runner, got %+v", toolNames(tools))
 	}
 }
 
@@ -1019,7 +1006,6 @@ func TestExecutorRunsAttachmentSummaryTool(t *testing.T) {
 }
 
 func TestExecutorWriteToolRequiresDryRunOrConfirmation(t *testing.T) {
-	t.Skip("admin and Discord write tools are disabled in this build")
 	registry, err := NewDefaultRegistry()
 	if err != nil {
 		t.Fatalf("NewDefaultRegistry: %v", err)
@@ -1069,7 +1055,6 @@ func TestExecutorWriteToolRequiresDryRunOrConfirmation(t *testing.T) {
 }
 
 func TestExecutorRawCreateRoleRendersConfirmationArtifact(t *testing.T) {
-	t.Skip("admin and Discord write tools are disabled in this build")
 	registry, err := NewDefaultRegistry()
 	if err != nil {
 		t.Fatalf("NewDefaultRegistry: %v", err)
@@ -1100,7 +1085,6 @@ func TestExecutorRawCreateRoleRendersConfirmationArtifact(t *testing.T) {
 }
 
 func TestExecutorCreatePollRendersConfirmationArtifact(t *testing.T) {
-	t.Skip("admin and Discord write tools are disabled in this build")
 	registry, err := NewDefaultRegistry()
 	if err != nil {
 		t.Fatalf("NewDefaultRegistry: %v", err)
@@ -1134,7 +1118,6 @@ func TestExecutorCreatePollRendersConfirmationArtifact(t *testing.T) {
 }
 
 func TestExecutorCreatePrivateThreadUsesPrivateThreadPermission(t *testing.T) {
-	t.Skip("admin and Discord write tools are disabled in this build")
 	registry, err := NewDefaultRegistry()
 	if err != nil {
 		t.Fatalf("NewDefaultRegistry: %v", err)
@@ -1181,13 +1164,13 @@ func TestExecutorCreatePrivateThreadUsesPrivateThreadPermission(t *testing.T) {
 	if provider.calls != 1 || len(provider.requests) != 1 {
 		t.Fatalf("expected one provider call, calls=%d requests=%d", provider.calls, len(provider.requests))
 	}
-	if strings.Join(provider.requests[0].Permissions, ",") != "CREATE_PRIVATE_THREADS" {
+	confirmedPermissions := strings.Join(provider.requests[0].Permissions, ",")
+	if !strings.Contains(confirmedPermissions, "CREATE_PRIVATE_THREADS") || strings.Contains(confirmedPermissions, "CREATE_PUBLIC_THREADS") {
 		t.Fatalf("confirmed private thread should use private permission, got %+v", provider.requests[0].Permissions)
 	}
 }
 
 func TestExecutorRunsAdminServiceTools(t *testing.T) {
-	t.Skip("admin and Discord write tools are disabled in this build")
 	registry, err := NewDefaultRegistry()
 	if err != nil {
 		t.Fatalf("NewDefaultRegistry: %v", err)
@@ -1300,7 +1283,6 @@ func TestExecutorRunsAdminServiceTools(t *testing.T) {
 }
 
 func TestExecutorRoleProfileAndMemberRoleToolsRequireConfirmation(t *testing.T) {
-	t.Skip("admin and Discord write tools are disabled in this build")
 	registry, err := NewDefaultRegistry()
 	if err != nil {
 		t.Fatalf("NewDefaultRegistry: %v", err)
@@ -1316,7 +1298,7 @@ func TestExecutorRoleProfileAndMemberRoleToolsRequireConfirmation(t *testing.T) 
 	profile, err := executor.Execute(context.Background(), ExecutionRequest{
 		GuildID: "guild-1",
 		ActorID: "admin",
-		Access:  testAccess(ToolPolicyOff, admin.PermissionAdminConfigWrite),
+		Access:  testAccess(ToolPolicyWriteConfirmed, admin.PermissionAdminConfigWrite),
 		Call: llm.ToolCall{
 			ID:   "call-profile",
 			Type: "function",
@@ -1336,7 +1318,7 @@ func TestExecutorRoleProfileAndMemberRoleToolsRequireConfirmation(t *testing.T) 
 	memberRole, err := executor.Execute(context.Background(), ExecutionRequest{
 		GuildID: "guild-1",
 		ActorID: "admin",
-		Access:  testAccess(ToolPolicyOff, admin.PermissionAdminConfigWrite),
+		Access:  testAccess(ToolPolicyWriteConfirmed, admin.PermissionAdminConfigWrite),
 		Call: llm.ToolCall{
 			ID:   "call-member-role",
 			Type: "function",
@@ -1357,7 +1339,7 @@ func TestExecutorRoleProfileAndMemberRoleToolsRequireConfirmation(t *testing.T) 
 	discordRole, err := executor.Execute(context.Background(), ExecutionRequest{
 		GuildID: "guild-1",
 		ActorID: "admin",
-		Access:  testAccess(ToolPolicyOff, admin.PermissionAdminConfigWrite),
+		Access:  testAccess(ToolPolicyWriteConfirmed, admin.PermissionAdminConfigWrite),
 		Call: llm.ToolCall{
 			ID:   "call-discord-role",
 			Type: "function",
@@ -1379,7 +1361,6 @@ func TestExecutorRoleProfileAndMemberRoleToolsRequireConfirmation(t *testing.T) 
 }
 
 func TestExecutorAdminRemovalToolsRequireConfirmation(t *testing.T) {
-	t.Skip("admin and Discord write tools are disabled in this build")
 	const channelID = "100000000000000123"
 	registry, err := NewDefaultRegistry()
 	if err != nil {
@@ -1412,7 +1393,6 @@ func TestExecutorAdminRemovalToolsRequireConfirmation(t *testing.T) {
 }
 
 func TestExecutorChannelRuleResolvesChannelName(t *testing.T) {
-	t.Skip("admin and Discord write tools are disabled in this build")
 	registry, err := NewDefaultRegistry()
 	if err != nil {
 		t.Fatalf("NewDefaultRegistry: %v", err)
@@ -1450,7 +1430,6 @@ func TestExecutorChannelRuleResolvesChannelName(t *testing.T) {
 }
 
 func TestExecutorAdminMutationToolsRequireConfirmation(t *testing.T) {
-	t.Skip("admin and Discord write tools are disabled in this build")
 	registry, err := NewDefaultRegistry()
 	if err != nil {
 		t.Fatalf("NewDefaultRegistry: %v", err)
@@ -1537,7 +1516,6 @@ func TestExecutorRunsWorkflowJSONTool(t *testing.T) {
 }
 
 func TestExecutorRunsModeratorNoteTool(t *testing.T) {
-	t.Skip("admin and Discord write tools are disabled in this build")
 	registry, err := NewDefaultRegistry()
 	if err != nil {
 		t.Fatalf("NewDefaultRegistry: %v", err)
@@ -1639,7 +1617,7 @@ func TestExecutorListToolsHidesAdminToolsFromNormalUsers(t *testing.T) {
 			t.Fatalf("expected normal user tool listing to contain %s, got %s", want, content)
 		}
 	}
-	for _, hidden := range []string{"discord_fetch_message", "native_name", "input_schema", "read_config", "panda_manage_tool_access", "discord_modify_channel_permissions", "admin_tools_hidden", "admin.config.write", "admin_read", "admin_write"} {
+	for _, hidden := range []string{"discord_fetch_message", "native_name", "input_schema", "read_config", "panda_manage_tool_access", "discord_modify_channel_permissions", "admin.config.write", "admin_read", "admin_write"} {
 		if strings.Contains(content, hidden) {
 			t.Fatalf("normal user tool listing leaked admin detail %q: %s", hidden, content)
 		}
@@ -1678,14 +1656,14 @@ func TestExecutorListToolsShowsAdminToolsToAdmins(t *testing.T) {
 		t.Fatalf("Execute: %v", err)
 	}
 	content := result.Message.Content
-	for _, want := range []string{`"name":"panda_list_tools"`, `"name":"discord_fetch_message"`} {
+	for _, want := range []string{`"name":"panda_list_tools"`, `"name":"discord_fetch_message"`, `"name":"read_config"`, `"name":"panda_manage_tool_access"`} {
 		if !strings.Contains(content, want) {
-			t.Fatalf("expected trimmed admin tool listing to contain %s, got %s", want, content)
+			t.Fatalf("expected admin tool listing to contain %s, got %s", want, content)
 		}
 	}
-	for _, hidden := range []string{`"name":"read_config"`, `"name":"panda_manage_tool_access"`, `"tool_class":"admin_write"`, "admin_tools_hidden", "super secret admin tools"} {
+	for _, hidden := range []string{"admin_tools_hidden", "super secret admin tools"} {
 		if strings.Contains(content, hidden) {
-			t.Fatalf("admin tool listing should not include disabled admin detail %q: %s", hidden, content)
+			t.Fatalf("admin tool listing should not include hidden-admin marker %q: %s", hidden, content)
 		}
 	}
 }
@@ -1701,7 +1679,7 @@ func TestExecutorFiltersExecutableToolsByPermission(t *testing.T) {
 	for _, tool := range available {
 		names[tool.Function.Name] = true
 	}
-	if !names["search_knowledge"] || names["read_config"] || names["discord_fetch_message"] {
+	if !names["search_knowledge"] || !names["read_config"] || names["discord_fetch_message"] {
 		t.Fatalf("unexpected executable tools: %+v", names)
 	}
 

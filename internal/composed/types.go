@@ -224,6 +224,8 @@ type RunRequest struct {
 	Input             map[string]any
 	NestedDepth       int
 	DryRun            bool
+	EnabledFeatures   map[string]struct{}
+	FeatureGateActive bool
 }
 
 type RunResult struct {

@@ -21,8 +21,7 @@ const planRows = [
   },
 ];
 
-const paymentApiBase = import.meta.env.PUBLIC_PANDA_API_BASE_URL || 'https://panda-assistant.fly.dev';
-const defaultPlan = planOptions.find((plan) => plan.featured) ?? planOptions[0];
+const planCheckoutUrl = (slug: string) => `${siteMeta.billingUrl}?plan=${slug}`;
 ---
 
 <section class="section pricing-section" id="pricing">
@@ -30,14 +29,17 @@ const defaultPlan = planOptions.find((plan) => plan.featured) ?? planOptions[0];
     <div class="pricing-top reveal">
       <div>
         <Kicker tone="paper">Plans by server</Kicker>
-        <h2>Choose the server plan and pay in SOL.</h2>
+        <h2>Choose the server plan before checkout.</h2>
       </div>
       <div class="pricing-summary">
         <p>
-          Monthly per-server pricing, readable before anyone buys. Install starts a
-          14-day trial, then paid access activates from a verified billing order.
+          Monthly per-server pricing stays public and readable. Wallet account,
+          purchase, activation, and order recovery live in the billing workspace.
         </p>
-        <a class="pricing-start" href={siteMeta.installUrl} target="_blank" rel="noreferrer">Start trial <span>↗</span></a>
+        <div class="pricing-summary-actions">
+          <a class="pricing-start" href={siteMeta.accountUrl}>Create account <span>↗</span></a>
+          <a class="pricing-start secondary" href={siteMeta.installUrl}>Start trial <span>↗</span></a>
+        </div>
       </div>
     </div>
 
@@ -65,6 +67,7 @@ const defaultPlan = planOptions.find((plan) => plan.featured) ?? planOptions[0];
                     <span>{plan.badge}</span>
                     <strong>{plan.label}</strong>
                     <em>{plan.price} {plan.cadence}</em>
+                    <a class="plan-buy" href={planCheckoutUrl(plan.slug)}>Buy {plan.label}</a>
                   </th>
                 ))
               }
@@ -87,136 +90,10 @@ const defaultPlan = planOptions.find((plan) => plan.featured) ?? planOptions[0];
         </table>
       </div>
 
-      <div
-        class="sol-pay-console"
-        data-sol-pay
-        data-api-base={paymentApiBase}
-      >
-        <div class="sol-pay-heading">
-          <div>
-            <span>Plan payment</span>
-            <strong>Server-created billing order</strong>
-          </div>
-          <p>Apply an optional coupon, pay any remaining SOL due, then reveal one activation key for Discord.</p>
-        </div>
-
-        <div class="sol-pay-grid">
-          <form class="sol-pay-form" data-sol-form>
-            <fieldset>
-              <legend>Plan</legend>
-              <div class="plan-picker" role="group" aria-label="Plan">
-                {
-                  planOptions.map((plan) => (
-                    <button
-                      type="button"
-                      class:list={['plan-choice', plan.slug === defaultPlan.slug && 'active']}
-                      data-sol-plan={plan.slug}
-                      aria-pressed={plan.slug === defaultPlan.slug ? 'true' : 'false'}
-                    >
-                      <span>{plan.label}</span>
-                      <b>{plan.price}</b>
-                    </button>
-                  ))
-                }
-              </div>
-            </fieldset>
-
-            <label>
-              <span>Coupon code</span>
-              <input data-sol-coupon name="coupon_code" autocomplete="off" spellcheck="false" />
-            </label>
-
-            <label>
-              <span>Discord server ID</span>
-              <input data-sol-guild name="guild_id" inputmode="numeric" autocomplete="off" required />
-            </label>
-
-            <label>
-              <span>Billing owner ID</span>
-              <input data-sol-owner name="billing_owner_user_id" inputmode="numeric" autocomplete="off" />
-            </label>
-
-            <label>
-              <span>Support email</span>
-              <input data-sol-email name="support_email" type="email" autocomplete="email" />
-            </label>
-
-            <button class="sol-primary" type="submit" data-sol-create>Prepare payment</button>
-          </form>
-
-          <div class="sol-pay-panel">
-            <div class="wallet-strip">
-              <select data-sol-wallet-select aria-label="Wallet">
-                <option value="">Detecting wallets</option>
-              </select>
-              <button type="button" data-sol-connect>Connect wallet</button>
-            </div>
-
-            <dl class="sol-order-detail">
-              <div>
-                <dt>Plan</dt>
-                <dd data-sol-order-plan>--</dd>
-              </div>
-              <div>
-                <dt>List price</dt>
-                <dd data-sol-order-list>--</dd>
-              </div>
-              <div>
-                <dt>Discount</dt>
-                <dd data-sol-order-discount>--</dd>
-              </div>
-              <div>
-                <dt>Amount due</dt>
-                <dd data-sol-order-amount>--</dd>
-              </div>
-              <div>
-                <dt>Destination</dt>
-                <dd data-sol-order-destination>--</dd>
-              </div>
-              <div>
-                <dt>Reference</dt>
-                <dd data-sol-order-reference>--</dd>
-              </div>
-              <div>
-                <dt>Expires</dt>
-                <dd data-sol-order-expires>--</dd>
-              </div>
-            </dl>
-
-            <div data-sol-paid-controls>
-              <div class="sol-actions">
-                <button type="button" data-sol-send disabled>Sign and submit</button>
-              </div>
-
-              <label class="signature-field">
-                <span>Transaction signature</span>
-                <input data-sol-signature autocomplete="off" spellcheck="false" readonly />
-              </label>
-
-              <div class="sol-actions secondary">
-                <button type="button" data-sol-verify disabled>Verify signature</button>
-              </div>
-            </div>
-
-            <div class="sol-actions secondary">
-              <button type="button" data-sol-reveal disabled>Reveal activation key</button>
-            </div>
-
-            <div class="activation-key" data-sol-key-box hidden>
-              <span>Activation key</span>
-              <code data-sol-key></code>
-              <button type="button" data-sol-copy>Copy key</button>
-            </div>
-
-            <p class="sol-status" data-sol-status aria-live="polite">Prepare a payment order to begin.</p>
-          </div>
-        </div>
-      </div>
-
       <div class="pricing-footer">
-        <p>Paid SOL orders are verified against the configured Solana RPC before any server entitlement changes.</p>
-        <a class="text-link" href={siteMeta.termsUrl}>
-          Review terms <span>↗</span>
+        <p>Checkout requires a wallet account. Paid SOL orders are verified before any server entitlement changes.</p>
+        <a class="text-link" href={siteMeta.billingUrl}>
+          Open billing <span>↗</span>
         </a>
       </div>
     </div>

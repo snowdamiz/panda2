@@ -1,0 +1,77 @@
+---
+import Footer from '../../components/Footer.astro';
+import Header from '../../components/Header.astro';
+import { siteMeta } from '../../data/landing';
+import BaseLayout from '../../layouts/BaseLayout.astro';
+
+const setupSteps = [
+  {
+    number: '01',
+    title: 'Open the server',
+    body: 'Confirm Panda is visible in the member list, then choose the channel where you want the first setup check to happen.',
+  },
+  {
+    number: '02',
+    title: 'Run `/admin setup`',
+    body: 'Set the admin role, moderator role, and setup channel in one pass. Panda will report any missing Discord permissions there.',
+  },
+  {
+    number: '03',
+    title: 'Check `/billing`',
+    body: 'Review the trial, quotas, and activation status for this server before inviting members to rely on Panda.',
+  },
+] as const;
+---
+
+<BaseLayout title="Panda is installed" description="Panda has been installed. Finish setup from your Discord server.">
+  <Header solid />
+  <main id="main" class="install-result-page">
+    <section class="shell install-result install-result-complete">
+      <div class="install-result-copy">
+        <span>INSTALL DETECTED</span>
+        <h1>Panda is installed.</h1>
+        <p>Open Discord to finish setup with roles, channels, permissions, billing, and the first admin check.</p>
+        <div class="install-result-actions">
+          <a href="https://discord.com/channels/@me" data-discord-server-link>Open Discord</a>
+          <a href={siteMeta.accountUrl}>Account</a>
+          <a href={siteMeta.supportUrl}>Support</a>
+        </div>
+      </div>
+      <div class="install-next-steps" aria-label="Discord setup steps">
+        {setupSteps.map((step) => (
+          <article class="install-step">
+            <span>{step.number}</span>
+            <div>
+              <h2>{step.title}</h2>
+              <p>{step.body}</p>
+            </div>
+          </article>
+        ))}
+        <div class="install-command-strip" aria-label="Suggested command order">
+          <span>/admin setup</span>
+          <span>/admin status</span>
+          <span>/billing</span>
+        </div>
+      </div>
+    </section>
+  </main>
+  <Footer />
+  <script>
+    const params = new URLSearchParams(window.location.search);
+    const guildID = params.get('guild_id')?.trim();
+    if (guildID) {
+      try {
+        window.localStorage.setItem('panda.guildAccount.v1', JSON.stringify({
+          guildID,
+          updatedAt: new Date().toISOString(),
+        }));
+      } catch {
+        // Account can still be opened manually with ?guild_id=...
+      }
+      const discordServerLink = document.querySelector<HTMLAnchorElement>('[data-discord-server-link]');
+      if (discordServerLink) {
+        discordServerLink.href = `https://discord.com/channels/${encodeURIComponent(guildID)}`;
+      }
+    }
+  </script>
+</BaseLayout>

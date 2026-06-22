@@ -66,7 +66,6 @@ func TestSolPaymentOrderVerificationRevealAndActivation(t *testing.T) {
 	}
 
 	order, err := service.CreateSolPaymentOrder(ctx, CreateSolPaymentOrderRequest{
-		GuildID:            "guild-1",
 		BillingOwnerUserID: "owner-1",
 		Plan:               PlanPlus,
 		SupportEmail:       "owner@example.com",
@@ -76,6 +75,9 @@ func TestSolPaymentOrderVerificationRevealAndActivation(t *testing.T) {
 	}
 	if order.ExpectedLamports != 49_000_000 || order.DestinationWallet != "treasury-wallet" || order.Reference == "" || order.PaymentURL != "" {
 		t.Fatalf("unexpected order view: %+v", order)
+	}
+	if order.GuildID != "" {
+		t.Fatalf("account-level payment order should not be guild-bound before activation: %+v", order)
 	}
 
 	service.WithSolanaRPCClient(fakeSolanaRPCClient{transaction: verifiedTransaction(order, "payer-wallet", 50_000_000)})
@@ -94,6 +96,9 @@ func TestSolPaymentOrderVerificationRevealAndActivation(t *testing.T) {
 	if !strings.HasPrefix(reveal.Key, "panda_act_") || reveal.Prefix == "" {
 		t.Fatalf("unexpected activation key reveal: %+v", reveal)
 	}
+	if reveal.Order.GuildID != "" {
+		t.Fatalf("activation key reveal should stay account-level until Discord activation: %+v", reveal.Order)
+	}
 	if _, err := service.RevealActivationKey(ctx, order.OrderID); !errors.Is(err, ErrActivationKeyAlreadyRevealed) {
 		t.Fatalf("expected one-time reveal error, got %v", err)
 	}
@@ -108,6 +113,13 @@ func TestSolPaymentOrderVerificationRevealAndActivation(t *testing.T) {
 	}
 	if activated.Entitlement.Plan.Plan != PlanPlus || activated.Entitlement.PaymentProvider != ProviderSol || !activated.Entitlement.CanUsePaidFeatures {
 		t.Fatalf("unexpected activated entitlement: %+v", activated.Entitlement)
+	}
+	activatedOrder, ok, err := repository.NewBillingRepository(database.DB).GetBillingOrder(ctx, order.OrderID)
+	if err != nil || !ok {
+		t.Fatalf("load activated order: ok=%v err=%v", ok, err)
+	}
+	if activatedOrder.GuildID != "guild-1" || activatedOrder.Status != SolOrderStatusActivated {
+		t.Fatalf("activation should bind order to guild: %+v", activatedOrder)
 	}
 	if _, err := service.ActivateWithAPIKey(ctx, ActivateAPIKeyRequest{GuildID: "guild-1", ActorUserID: "owner-1", APIKey: reveal.Key}); !errors.Is(err, ErrActivationKeyConsumed) {
 		t.Fatalf("expected consumed key error, got %v", err)
@@ -457,7 +469,6 @@ func TestFreeCouponOrderRevealsAndActivatesWithoutSolana(t *testing.T) {
 		t.Fatalf("CreateCoupon: %v", err)
 	}
 	order, err := service.CreateSolPaymentOrder(ctx, CreateSolPaymentOrderRequest{
-		GuildID:            "guild-1",
 		BillingOwnerUserID: "owner-1",
 		Plan:               PlanBusiness,
 		CouponCode:         coupon.Code,

@@ -14,6 +14,7 @@ import (
 	"github.com/sn0w/panda2/internal/composed"
 	"github.com/sn0w/panda2/internal/config"
 	contextsvc "github.com/sn0w/panda2/internal/context"
+	"github.com/sn0w/panda2/internal/features"
 	"github.com/sn0w/panda2/internal/llm"
 	"github.com/sn0w/panda2/internal/memory"
 	"github.com/sn0w/panda2/internal/ops"
@@ -56,6 +57,12 @@ type fakeDiscordRoleManager struct {
 
 type fakeToolMusicManager struct {
 	requests []tools.MusicManagementRequest
+}
+
+type fakeFeatureInstallCreator struct {
+	requests []FeatureInstallIntentRequest
+	result   FeatureInstallIntentResult
+	err      error
 }
 
 type fakeCommandDiscordProvider struct {
@@ -118,6 +125,26 @@ func (f *fakeToolMusicManager) ManageMusic(_ context.Context, request tools.Musi
 			{"label": "Open track", "url": "https://example.com/track"},
 		},
 	}}, nil
+}
+
+func (f *fakeFeatureInstallCreator) CreateFeatureInstallIntent(_ context.Context, request FeatureInstallIntentRequest) (FeatureInstallIntentResult, error) {
+	f.requests = append(f.requests, request)
+	if f.err != nil {
+		return FeatureInstallIntentResult{}, f.err
+	}
+	if f.result.AuthorizeURL != "" {
+		return f.result, nil
+	}
+	return FeatureInstallIntentResult{
+		AuthorizeURL: "https://discord.com/oauth2/authorize?state=test",
+		ExpiresAt:    time.Now().UTC().Add(30 * time.Minute),
+		Selection: features.Selection{
+			ExpandedFeatureIDs:          append([]string(nil), request.FeatureIDs...),
+			DiscordPermissionNames:      []string{"VIEW_CHANNEL"},
+			DiscordPermissionBitfield:   "1024",
+			DiscordPermissionBitfield64: 1024,
+		},
+	}, nil
 }
 
 func (f *fakeCommandDiscordProvider) ExecuteDiscordTool(_ context.Context, request tools.DiscordToolRequest) (any, error) {
@@ -233,6 +260,29 @@ func newTestRouter(t *testing.T, client *fakeLLM, limit int, configureExecutor .
 		opsService,
 		ratelimit.New(limit, time.Minute),
 	).WithComposedService(composedService).WithScheduler(schedulerService).WithDataRepository(repository.NewGuildDataRepository(db.DB)).WithToolExecutor(toolExecutor)
+}
+
+func attachFeatureService(t *testing.T, router *Router) *repository.FeatureRepository {
+	t.Helper()
+	ctx := context.Background()
+	dsn := "file:" + strings.NewReplacer("/", "_", " ", "_").Replace(t.Name()) + "?mode=memory&cache=shared"
+	db, err := store.Open(ctx, dsn)
+	if err != nil {
+		t.Fatalf("open feature store: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	repo := repository.NewFeatureRepository(db.DB)
+	router.WithFeatureService(features.NewService(repo))
+	return repo
+}
+
+func containsString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
 }
 
 func seedScheduledComposedTool(t *testing.T, router *Router, guildID, actorID, name string) {
@@ -365,9 +415,9 @@ func TestRouterHelpShowsAdminGuidanceToGuildAdmins(t *testing.T) {
 	if !response.Ephemeral {
 		t.Fatalf("expected help response to be ephemeral: %+v", response)
 	}
-	for _, hidden := range []string{"**Admin commands**", "**Moderator tools**", "**Composed tools**", "`/admin", "tool_policy", "Role/channel access"} {
-		if strings.Contains(response.Content, hidden) {
-			t.Fatalf("admin help should not include disabled guidance %q:\n%s", hidden, response.Content)
+	for _, want := range []string{"**Admin commands**", "**Moderator tools**", "**Composed tools**", "`/admin", "tool_policy", "Role/channel access"} {
+		if !strings.Contains(response.Content, want) {
+			t.Fatalf("admin help should include %q:\n%s", want, response.Content)
 		}
 	}
 	if len(response.Content) > discordMessageContentLimit {
@@ -386,9 +436,12 @@ func TestRouterHelpShowsOnlyAllowedElevatedGuidanceToModerators(t *testing.T) {
 	if !response.Ephemeral {
 		t.Fatalf("expected help response to be ephemeral: %+v", response)
 	}
+	for _, want := range []string{"**Moderator tools**", "Moderation guidance"} {
+		if !strings.Contains(response.Content, want) {
+			t.Fatalf("moderator help should include %q:\n%s", want, response.Content)
+		}
+	}
 	for _, hidden := range []string{
-		"**Moderator tools**",
-		"Moderation guidance",
 		"`/admin role`",
 		"`/admin behavior`",
 		"`/admin soul`",
@@ -413,9 +466,12 @@ func TestRouterHelpShowsOnlyAllowedComposedToolGuidance(t *testing.T) {
 	if !response.Ephemeral {
 		t.Fatalf("expected help response to be ephemeral: %+v", response)
 	}
+	for _, want := range []string{"**Composed tools**", "run/simulate/schedule/list/cancel approved tools"} {
+		if !strings.Contains(response.Content, want) {
+			t.Fatalf("invoke-only help should include %q:\n%s", want, response.Content)
+		}
+	}
 	for _, hidden := range []string{
-		"**Composed tools**",
-		"schedule/list/cancel approved tools",
 		"draft or preview",
 		"approve, pause, resume",
 		"export the approved spec",
@@ -491,8 +547,17 @@ func TestDataExportAndConfirmedDelete(t *testing.T) {
 		IsGuildAdmin: true,
 		Options:      map[string]string{"scope": "knowledge"},
 	})
-	if !pending.Ephemeral || !strings.Contains(pending.Content, "admin and moderation controls are disabled") || pending.Confirmation != nil {
-		t.Fatalf("expected data deletion to be disabled, got %+v", pending)
+	confirmationID := requireConfirmation(t, pending)
+	confirmedDelete := router.Handle(ctx, Request{
+		Command:      "data",
+		Subcommand:   "delete",
+		GuildID:      "guild-1",
+		UserID:       "admin",
+		IsGuildAdmin: true,
+		Options:      map[string]string{"scope": "knowledge", "confirm": confirmationID},
+	})
+	if !confirmedDelete.Ephemeral || !strings.Contains(confirmedDelete.Content, "Deleted Panda data rows") || confirmedDelete.Confirmation != nil {
+		t.Fatalf("expected confirmed data deletion, got %+v", confirmedDelete)
 	}
 
 	after := router.Handle(ctx, Request{
@@ -502,28 +567,45 @@ func TestDataExportAndConfirmedDelete(t *testing.T) {
 		UserID:       "admin",
 		IsGuildAdmin: true,
 	})
-	if !strings.Contains(after.Content, "1 document") {
-		t.Fatalf("expected knowledge export to remain after disabled deletion:\n%s", after.Content)
+	if !strings.Contains(after.Content, "0 document") {
+		t.Fatalf("expected knowledge export to be empty after confirmed deletion:\n%s", after.Content)
 	}
 }
 
-func TestAdminOpsAndScheduleCommandsAreDisabled(t *testing.T) {
+func TestRestoredAdminOpsAndScheduleCommandsUseTheirRuntimeGates(t *testing.T) {
 	router := newTestRouter(t, &fakeLLM{}, 5)
-	for _, command := range []string{"admin", "ops", "schedule", "schedules"} {
-		response := router.Handle(context.Background(), Request{
-			Command:      command,
-			GuildID:      "guild-1",
-			UserID:       "admin",
-			IsGuildAdmin: true,
-		})
-		if !response.Ephemeral || !strings.Contains(response.Content, "admin and moderation controls are disabled") {
-			t.Fatalf("expected %s to be disabled, got %+v", command, response)
-		}
+	adminStatus := router.Handle(context.Background(), Request{
+		Command:      "admin",
+		GuildID:      "guild-1",
+		UserID:       "admin",
+		IsGuildAdmin: true,
+	})
+	if !adminStatus.Ephemeral || !strings.Contains(adminStatus.Content, "Admin status") {
+		t.Fatalf("expected restored admin status, got %+v", adminStatus)
+	}
+
+	opsDenied := router.Handle(context.Background(), Request{
+		Command:      "ops",
+		GuildID:      "guild-1",
+		UserID:       "admin",
+		IsGuildAdmin: true,
+	})
+	if !opsDenied.Ephemeral || !strings.Contains(opsDenied.Content, "Only a bot owner") {
+		t.Fatalf("expected owner gate for ops, got %+v", opsDenied)
+	}
+
+	schedule := router.Handle(context.Background(), Request{
+		Command:      "schedule",
+		GuildID:      "guild-1",
+		UserID:       "admin",
+		IsGuildAdmin: true,
+	})
+	if !schedule.Ephemeral || strings.Contains(schedule.Content, "disabled") {
+		t.Fatalf("expected schedule command to be restored behind normal validation, got %+v", schedule)
 	}
 }
 
 func TestAdminRoleProfileRequiresGuildControl(t *testing.T) {
-	t.Skip("admin, ops, composed, and Discord write controls are disabled in this build")
 	router := newTestRouter(t, &fakeLLM{}, 5)
 	response := router.Handle(context.Background(), Request{
 		Command:    "admin",
@@ -538,7 +620,6 @@ func TestAdminRoleProfileRequiresGuildControl(t *testing.T) {
 }
 
 func TestAdminRoleProfileConfiguresDelegatedAdminRole(t *testing.T) {
-	t.Skip("admin, ops, composed, and Discord write controls are disabled in this build")
 	ctx := context.Background()
 	router := newTestRouter(t, &fakeLLM{response: llm.ChatResponse{Content: "ok"}}, 5)
 	profile := router.Handle(ctx, Request{
@@ -579,7 +660,6 @@ func TestAdminRoleProfileConfiguresDelegatedAdminRole(t *testing.T) {
 }
 
 func TestAdminChannelAccessAllowListsAssistantUse(t *testing.T) {
-	t.Skip("admin, ops, composed, and Discord write controls are disabled in this build")
 	ctx := context.Background()
 	router := newTestRouter(t, &fakeLLM{response: llm.ChatResponse{Content: "ok"}}, 5)
 
@@ -659,7 +739,6 @@ func TestAdminChannelAccessAllowListsAssistantUse(t *testing.T) {
 }
 
 func TestAdminRoleProfileConfiguresModeratorRole(t *testing.T) {
-	t.Skip("admin, ops, composed, and Discord write controls are disabled in this build")
 	ctx := context.Background()
 	router := newTestRouter(t, &fakeLLM{}, 5)
 	response := router.Handle(ctx, Request{
@@ -689,7 +768,6 @@ func TestAdminRoleProfileConfiguresModeratorRole(t *testing.T) {
 }
 
 func TestAdminRoleProfileCanReuseSameRoleForAdminAndModerator(t *testing.T) {
-	t.Skip("admin, ops, composed, and Discord write controls are disabled in this build")
 	ctx := context.Background()
 	router := newTestRouter(t, &fakeLLM{}, 5)
 	ownerRequest := Request{
@@ -751,7 +829,6 @@ func TestAdminRoleProfileCanReuseSameRoleForAdminAndModerator(t *testing.T) {
 }
 
 func TestAdminMemberRoleAssignsDiscordRole(t *testing.T) {
-	t.Skip("admin, ops, composed, and Discord write controls are disabled in this build")
 	ctx := context.Background()
 	manager := &fakeMemberRoleManager{}
 	router := newTestRouter(t, &fakeLLM{}, 5).WithMemberRoleManager(manager)
@@ -779,7 +856,6 @@ func TestAdminMemberRoleAssignsDiscordRole(t *testing.T) {
 }
 
 func TestAdminToolConfiguresRoleToolAccess(t *testing.T) {
-	t.Skip("admin, ops, composed, and Discord write controls are disabled in this build")
 	ctx := context.Background()
 	router := newTestRouter(t, &fakeLLM{}, 5)
 
@@ -869,7 +945,6 @@ func TestAskRateLimit(t *testing.T) {
 }
 
 func TestAdminModelCommandIsLegacyAndDoesNotAffectAsk(t *testing.T) {
-	t.Skip("admin, ops, composed, and Discord write controls are disabled in this build")
 	client := &fakeLLM{response: llm.ChatResponse{Content: "ok"}}
 	router := newTestRouter(t, client, 5)
 
@@ -901,7 +976,6 @@ func TestAdminModelCommandIsLegacyAndDoesNotAffectAsk(t *testing.T) {
 }
 
 func TestAdminBehaviorSetsRuntimeOptions(t *testing.T) {
-	t.Skip("admin, ops, composed, and Discord write controls are disabled in this build")
 	client := &fakeLLM{response: llm.ChatResponse{Content: "ok"}}
 	router := newTestRouter(t, client, 5)
 
@@ -941,7 +1015,6 @@ func TestAdminBehaviorSetsRuntimeOptions(t *testing.T) {
 }
 
 func TestAdminDisableRequiresConfirmation(t *testing.T) {
-	t.Skip("admin, ops, composed, and Discord write controls are disabled in this build")
 	router := newTestRouter(t, &fakeLLM{response: llm.ChatResponse{Content: "ok"}}, 20)
 
 	request := Request{Command: "admin", Subcommand: "disable", GuildID: "guild-1", UserID: "admin", IsGuildAdmin: true}
@@ -975,8 +1048,107 @@ func TestAdminDisableRequiresConfirmation(t *testing.T) {
 	}
 }
 
+func TestAdminFeatureEnableWithoutNewDiscordPermissionsActivatesImmediately(t *testing.T) {
+	ctx := context.Background()
+	router := newTestRouter(t, &fakeLLM{response: llm.ChatResponse{Content: "ok"}}, 20)
+	repo := attachFeatureService(t, router)
+	if err := repo.SetGuildFeatures(ctx, "guild-1", []string{features.AssistantChat}, "test", "admin", time.Now().UTC()); err != nil {
+		t.Fatalf("SetGuildFeatures: %v", err)
+	}
+
+	response := router.Handle(ctx, Request{
+		Command:      "admin",
+		Subcommand:   "feature",
+		GuildID:      "guild-1",
+		UserID:       "admin",
+		IsGuildAdmin: true,
+		Options:      map[string]string{"action": "enable", "feature_id": features.WebSearch},
+	})
+	if !strings.Contains(response.Content, "Enabled features") || len(response.Actions) != 0 {
+		t.Fatalf("expected immediate feature enable, got %+v", response)
+	}
+	enabled, err := repo.EnabledFeatureSet(ctx, "guild-1")
+	if err != nil {
+		t.Fatalf("EnabledFeatureSet: %v", err)
+	}
+	if !features.Has(enabled, features.WebSearch) || !features.Has(enabled, features.AssistantChat) {
+		t.Fatalf("expected assistant and web search features enabled, got %+v", enabled)
+	}
+}
+
+func TestAdminFeatureEnableWithNewDiscordPermissionsCreatesReauthorizationIntent(t *testing.T) {
+	ctx := context.Background()
+	router := newTestRouter(t, &fakeLLM{response: llm.ChatResponse{Content: "ok"}}, 20)
+	repo := attachFeatureService(t, router)
+	if err := repo.SetGuildFeatures(ctx, "guild-1", []string{features.AdminSetup}, "test", "admin", time.Now().UTC()); err != nil {
+		t.Fatalf("SetGuildFeatures: %v", err)
+	}
+	creator := &fakeFeatureInstallCreator{result: FeatureInstallIntentResult{
+		AuthorizeURL: "https://discord.com/oauth2/authorize?state=reauth",
+		ExpiresAt:    time.Now().UTC().Add(30 * time.Minute),
+		Selection: features.Selection{
+			ExpandedFeatureIDs:        []string{features.AdminSetup, features.DiscordRoleManagement},
+			DiscordPermissionNames:    []string{"MANAGE_ROLES", "MANAGE_NICKNAMES", "VIEW_CHANNEL"},
+			DiscordPermissionBitfield: "123",
+		},
+	}}
+	router.WithFeatureInstallIntents(creator)
+
+	response := router.Handle(ctx, Request{
+		Command:      "admin",
+		Subcommand:   "feature",
+		GuildID:      "guild-1",
+		UserID:       "admin",
+		IsGuildAdmin: true,
+		Options:      map[string]string{"action": "enable", "feature_id": features.DiscordRoleManagement},
+	})
+	if !strings.Contains(response.Content, "Reauthorization is required") || len(response.Actions) != 1 {
+		t.Fatalf("expected reauthorization response, got %+v", response)
+	}
+	if len(creator.requests) != 1 {
+		t.Fatalf("expected one install intent request, got %d", len(creator.requests))
+	}
+	if !containsString(creator.requests[0].FeatureIDs, features.AdminSetup) || !containsString(creator.requests[0].FeatureIDs, features.DiscordRoleManagement) {
+		t.Fatalf("reauthorization should include current and requested features, got %+v", creator.requests[0].FeatureIDs)
+	}
+	enabled, err := repo.EnabledFeatureSet(ctx, "guild-1")
+	if err != nil {
+		t.Fatalf("EnabledFeatureSet: %v", err)
+	}
+	if features.Has(enabled, features.DiscordRoleManagement) {
+		t.Fatalf("feature requiring new Discord permissions should not activate before callback, got %+v", enabled)
+	}
+}
+
+func TestAdminFeatureDisableRemovesDependentFeatures(t *testing.T) {
+	ctx := context.Background()
+	router := newTestRouter(t, &fakeLLM{response: llm.ChatResponse{Content: "ok"}}, 20)
+	repo := attachFeatureService(t, router)
+	if err := repo.SetGuildFeatures(ctx, "guild-1", []string{features.AssistantChat, features.Polls, features.Reminders}, "test", "admin", time.Now().UTC()); err != nil {
+		t.Fatalf("SetGuildFeatures: %v", err)
+	}
+
+	response := router.Handle(ctx, Request{
+		Command:      "admin",
+		Subcommand:   "feature",
+		GuildID:      "guild-1",
+		UserID:       "admin",
+		IsGuildAdmin: true,
+		Options:      map[string]string{"action": "disable", "feature_id": features.AssistantChat},
+	})
+	if !strings.Contains(response.Content, "Disabled") {
+		t.Fatalf("expected disable response, got %+v", response)
+	}
+	enabled, err := repo.EnabledFeatureSet(ctx, "guild-1")
+	if err != nil {
+		t.Fatalf("EnabledFeatureSet: %v", err)
+	}
+	if len(enabled) != 0 {
+		t.Fatalf("disabling assistant_chat should remove dependent features, got %+v", enabled)
+	}
+}
+
 func TestAdminDryRunDoesNotMutateState(t *testing.T) {
-	t.Skip("admin, ops, composed, and Discord write controls are disabled in this build")
 	client := &fakeLLM{response: llm.ChatResponse{Content: "ok"}}
 	router := newTestRouter(t, client, 20)
 
@@ -1027,7 +1199,6 @@ func TestAdminDryRunDoesNotMutateState(t *testing.T) {
 }
 
 func TestAdminPromptWithoutTextUsesModal(t *testing.T) {
-	t.Skip("admin, ops, composed, and Discord write controls are disabled in this build")
 	router := newTestRouter(t, &fakeLLM{}, 20)
 
 	prompt := router.Handle(context.Background(), Request{
@@ -1067,7 +1238,6 @@ func TestAdminPromptWithoutTextUsesModal(t *testing.T) {
 }
 
 func TestAdminSoulUpdatesSystemPrompt(t *testing.T) {
-	t.Skip("admin, ops, composed, and Discord write controls are disabled in this build")
 	client := &fakeLLM{response: llm.ChatResponse{Content: "ok"}}
 	router := newTestRouter(t, client, 20)
 
@@ -1099,7 +1269,6 @@ func TestAdminSoulUpdatesSystemPrompt(t *testing.T) {
 }
 
 func TestAdminSoulWithoutTextUsesModal(t *testing.T) {
-	t.Skip("admin, ops, composed, and Discord write controls are disabled in this build")
 	router := newTestRouter(t, &fakeLLM{}, 20)
 
 	soul := router.Handle(context.Background(), Request{
@@ -1229,7 +1398,6 @@ func TestToolConfirmationIDRestoresScopedRequest(t *testing.T) {
 }
 
 func TestHandleToolConfirmationRemovesChannelRule(t *testing.T) {
-	t.Skip("admin, ops, composed, and Discord write controls are disabled in this build")
 	router := newTestRouter(t, &fakeLLM{}, 20)
 	if _, err := router.admin.SetChannelRule(context.Background(), "guild-1", "admin", "channel-1", "deny"); err != nil {
 		t.Fatalf("seed channel rule: %v", err)
@@ -1258,7 +1426,6 @@ func TestHandleToolConfirmationRemovesChannelRule(t *testing.T) {
 }
 
 func TestHandleToolConfirmationSetsChannelRule(t *testing.T) {
-	t.Skip("admin, ops, composed, and Discord write controls are disabled in this build")
 	router := newTestRouter(t, &fakeLLM{}, 20)
 
 	response := router.HandleToolConfirmation(context.Background(), ToolConfirmationRequest{
@@ -1284,7 +1451,6 @@ func TestHandleToolConfirmationSetsChannelRule(t *testing.T) {
 }
 
 func TestHandleToolConfirmationAppliesRoleProfile(t *testing.T) {
-	t.Skip("admin, ops, composed, and Discord write controls are disabled in this build")
 	router := newTestRouter(t, &fakeLLM{}, 20)
 
 	response := router.HandleToolConfirmation(context.Background(), ToolConfirmationRequest{
@@ -1306,7 +1472,6 @@ func TestHandleToolConfirmationAppliesRoleProfile(t *testing.T) {
 }
 
 func TestHandleToolConfirmationAssignsMemberRole(t *testing.T) {
-	t.Skip("admin, ops, composed, and Discord write controls are disabled in this build")
 	manager := &fakeMemberRoleManager{}
 	router := newTestRouter(t, &fakeLLM{}, 20).WithMemberRoleManager(manager)
 
@@ -1328,7 +1493,6 @@ func TestHandleToolConfirmationAssignsMemberRole(t *testing.T) {
 }
 
 func TestNaturalDiscordRoleCreateRendersConfirmationThroughAgentTool(t *testing.T) {
-	t.Skip("admin, ops, composed, and Discord write controls are disabled in this build")
 	client := &fakeLLM{responses: []llm.ChatResponse{
 		{Content: `{"respond":true,"prompt":"create a new role called test"}`},
 		{ToolCalls: []llm.ToolCall{{
@@ -1366,7 +1530,6 @@ func TestNaturalDiscordRoleCreateRendersConfirmationThroughAgentTool(t *testing.
 }
 
 func TestNaturalComposedScheduleCreatesThroughAgentTool(t *testing.T) {
-	t.Skip("admin, ops, composed, and Discord write controls are disabled in this build")
 	client := &fakeLLM{responses: []llm.ChatResponse{
 		{Content: `{"respond":true,"prompt":"schedule welcome_builder in 10 minutes with input topic standup"}`},
 		{ToolCalls: []llm.ToolCall{{
@@ -1421,7 +1584,6 @@ func TestNaturalComposedScheduleCreatesThroughAgentTool(t *testing.T) {
 }
 
 func TestNaturalComposedScheduleListsAndCancelsThroughAgentTool(t *testing.T) {
-	t.Skip("admin, ops, composed, and Discord write controls are disabled in this build")
 	client := &fakeLLM{responses: []llm.ChatResponse{
 		{Content: `{"respond":true,"prompt":"list composed schedules for welcome_builder"}`},
 		{ToolCalls: []llm.ToolCall{{
@@ -1509,7 +1671,6 @@ func createdIDString(id uint) string {
 }
 
 func TestHandleToolConfirmationCreatesDiscordRole(t *testing.T) {
-	t.Skip("admin, ops, composed, and Discord write controls are disabled in this build")
 	manager := &fakeDiscordRoleManager{role: DiscordRole{ID: "role-test", Name: "test"}}
 	router := newTestRouter(t, &fakeLLM{}, 20).WithDiscordRoleManager(manager)
 
@@ -1531,7 +1692,6 @@ func TestHandleToolConfirmationCreatesDiscordRole(t *testing.T) {
 }
 
 func TestHandleToolConfirmationExplainsDiscordRoleSetupFailure(t *testing.T) {
-	t.Skip("admin, ops, composed, and Discord write controls are disabled in this build")
 	manager := &fakeDiscordRoleManager{err: ErrDiscordRoleSetup}
 	router := newTestRouter(t, &fakeLLM{}, 20).WithDiscordRoleManager(manager)
 
@@ -1550,7 +1710,6 @@ func TestHandleToolConfirmationExplainsDiscordRoleSetupFailure(t *testing.T) {
 }
 
 func TestLLMToolConfirmationRendersButton(t *testing.T) {
-	t.Skip("admin, ops, composed, and Discord write controls are disabled in this build")
 	const channelID = "100000000000000123"
 	client := &fakeLLM{responses: []llm.ChatResponse{
 		{
@@ -1753,7 +1912,6 @@ func TestNaturalMessageUsesInlineChat(t *testing.T) {
 }
 
 func TestNaturalMessageSetsSoulThroughAgentTool(t *testing.T) {
-	t.Skip("admin, ops, composed, and Discord write controls are disabled in this build")
 	client := &fakeLLM{responses: []llm.ChatResponse{
 		{Content: `{"respond":true,"prompt":"set your soul to Be crystalline and kind."}`},
 		{ToolCalls: []llm.ToolCall{{
@@ -1804,7 +1962,6 @@ func TestNaturalMessageSetsSoulThroughAgentTool(t *testing.T) {
 }
 
 func TestNaturalMessageDraftsEventAutomationThroughAgentTool(t *testing.T) {
-	t.Skip("admin, ops, composed, and Discord write controls are disabled in this build")
 	const channelID = "100000000000000123"
 	client := &fakeLLM{responses: []llm.ChatResponse{
 		{Content: `{"respond":true,"prompt":"draft an automation for new role announcements"}`},
@@ -1876,7 +2033,6 @@ func TestNaturalMessageDraftsEventAutomationThroughAgentTool(t *testing.T) {
 }
 
 func TestNaturalMessageDraftsEveryTimeEventAutomationThroughAgentTool(t *testing.T) {
-	t.Skip("admin, ops, composed, and Discord write controls are disabled in this build")
 	client := &fakeLLM{responses: []llm.ChatResponse{
 		{Content: `{"respond":true,"prompt":"draft a member welcome automation"}`},
 		{ToolCalls: []llm.ToolCall{{
@@ -1920,7 +2076,6 @@ func TestNaturalMessageDraftsEveryTimeEventAutomationThroughAgentTool(t *testing
 }
 
 func TestNaturalMessageExecutesTextToolCallFallbackForComposedTool(t *testing.T) {
-	t.Skip("admin, ops, composed, and Discord write controls are disabled in this build")
 	client := &fakeLLM{responses: []llm.ChatResponse{
 		{Content: `{"respond":true,"prompt":"please draft the requested composed automation"}`},
 		{Content: `<tool_call>panda_manage_composed_tool
@@ -1972,7 +2127,6 @@ func TestNaturalMessageExecutesTextToolCallFallbackForComposedTool(t *testing.T)
 }
 
 func TestNaturalMessageCreatesNativePollThroughAgentTool(t *testing.T) {
-	t.Skip("admin, ops, composed, and Discord write controls are disabled in this build")
 	discordProvider := &fakeCommandDiscordProvider{}
 	client := &fakeLLM{responses: []llm.ChatResponse{
 		{Content: `{"respond":true,"prompt":"make a poll about fable 5 versus gpt 5.6"}`},
@@ -2160,7 +2314,6 @@ func TestNaturalMessageExposesMusicWhenToolPolicyOff(t *testing.T) {
 }
 
 func TestNaturalMessageSoulWriterCanBrainstormWithoutAssistantUse(t *testing.T) {
-	t.Skip("admin, ops, composed, and Discord write controls are disabled in this build")
 	ctx := context.Background()
 	client := &fakeLLM{responses: []llm.ChatResponse{
 		{Content: `{"respond":true,"prompt":"let's brainstorm your soul before setting it"}`},
@@ -2228,7 +2381,6 @@ func TestNaturalMessagePassesReplyContextToChat(t *testing.T) {
 }
 
 func TestNaturalMessageAdminGetsManagementToolsWhenPolicyOff(t *testing.T) {
-	t.Skip("admin, ops, composed, and Discord write controls are disabled in this build")
 	client := &fakeLLM{responses: []llm.ChatResponse{
 		{Content: `{"respond":true,"prompt":"what can you do"}`},
 		{Content: "chat fixture"},
@@ -2284,7 +2436,6 @@ func TestNaturalMessageClassifiesTrailingPandaMention(t *testing.T) {
 }
 
 func TestGuildControlDoesNotGrantOwnerOpsTools(t *testing.T) {
-	t.Skip("admin, ops, composed, and Discord write controls are disabled in this build")
 	router := newTestRouter(t, &fakeLLM{}, 5)
 
 	adminPermissions := router.allowedToolPermissions(context.Background(), Request{
@@ -2683,7 +2834,6 @@ func TestChannelDenyGatesAssistantUse(t *testing.T) {
 }
 
 func TestOpsHealthRequiresOwner(t *testing.T) {
-	t.Skip("admin, ops, composed, and Discord write controls are disabled in this build")
 	router := newTestRouter(t, &fakeLLM{}, 5)
 	denied := router.Handle(context.Background(), Request{Command: "ops", Subcommand: "health", UserID: "user-1"})
 	if !denied.Ephemeral || !strings.Contains(denied.Content, "owner") {
@@ -2697,7 +2847,6 @@ func TestOpsHealthRequiresOwner(t *testing.T) {
 }
 
 func TestOpsDrainAndIncident(t *testing.T) {
-	t.Skip("admin, ops, composed, and Discord write controls are disabled in this build")
 	router := newTestRouter(t, &fakeLLM{}, 5)
 	drain := router.Handle(context.Background(), Request{Command: "ops", Subcommand: "drain", UserID: "owner", IsOwner: true})
 	if !strings.Contains(drain.Content, "draining") {

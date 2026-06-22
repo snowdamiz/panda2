@@ -1,0 +1,22 @@
+---
+import Footer from '../../components/Footer.astro';
+import Header from '../../components/Header.astro';
+import { siteMeta } from '../../data/landing';
+import BaseLayout from '../../layouts/BaseLayout.astro';
+---
+
+<BaseLayout title="Panda install needs attention" description="Panda could not complete the Discord install callback.">
+  <Header />
+  <main id="main" class="install-result-page">
+    <section class="shell install-result">
+      <span>INSTALL NOT COMPLETED</span>
+      <h1>The Discord install did not finish.</h1>
+      <p>The install link may have expired or Discord may not have returned the expected authorization. Start a fresh install link from the feature picker.</p>
+      <div class="install-result-actions">
+        <a href={siteMeta.installUrl}>Start again</a>
+        <a href={siteMeta.supportUrl}>Support</a>
+      </div>
+    </section>
+  </main>
+  <Footer />
+</BaseLayout>

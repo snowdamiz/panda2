@@ -1,0 +1,120 @@
+---
+import Footer from '../components/Footer.astro';
+import Header from '../components/Header.astro';
+import Kicker from '../components/ui/Kicker.astro';
+import { siteMeta } from '../data/landing';
+import BaseLayout from '../layouts/BaseLayout.astro';
+
+const billingApiBase = import.meta.env.PUBLIC_PANDA_API_BASE_URL || (import.meta.env.DEV ? 'http://localhost:8080' : 'https://panda-assistant.fly.dev');
+---
+
+<BaseLayout
+  title="Panda account - Billing and wallet"
+  description="Manage your Panda wallet account, payment status, and billing actions."
+>
+  <Header />
+  <main id="main" class="app-page account-page">
+    <section class="shell account-shell" data-wallet-account data-api-base={billingApiBase}>
+      <div class="app-page-heading account-heading reveal">
+        <div>
+          <Kicker tone="paper">Wallet login</Kicker>
+          <h1 data-account-heading-title>Sign in to checkout.</h1>
+        </div>
+        <p data-account-heading-copy>
+          Connect the Solana wallet you will use for payment. Panda attaches
+          the purchased plan to Discord later through the activation key.
+        </p>
+      </div>
+
+      <div class="account-login-card reveal" data-account-login-view>
+        <div class="account-panel-head">
+          <span>Checkout access</span>
+          <strong data-account-title>Wallet sign in</strong>
+        </div>
+
+        <div class="account-login-body">
+          <button class="app-primary account-login-button" type="button" data-account-connect>Sign in with wallet</button>
+        </div>
+      </div>
+
+      <div class="account-dashboard reveal" data-account-dashboard hidden>
+        <div class="account-summary-grid" aria-label="Account summary">
+          <article class="account-metric-panel">
+            <div class="account-panel-head account-payment-head">
+              <span>Payment status</span>
+              <strong data-account-payment-status>No payment yet</strong>
+            </div>
+
+            <dl class="account-detail-list">
+              <div>
+                <dt>Plan</dt>
+                <dd data-account-payment-plan>--</dd>
+              </div>
+              <div>
+                <dt>Amount</dt>
+                <dd data-account-payment-amount>--</dd>
+              </div>
+              <div>
+                <dt>Expires</dt>
+                <dd data-account-payment-expires>--</dd>
+              </div>
+            </dl>
+          </article>
+
+          <article class="account-metric-panel">
+            <div class="account-panel-head account-trial-head">
+              <span>Free trial</span>
+              <strong data-account-trial-status>No server connected</strong>
+            </div>
+
+            <dl class="account-detail-list">
+              <div>
+                <dt>Time left</dt>
+                <dd data-account-trial-time>--</dd>
+              </div>
+              <div>
+                <dt>AI credits</dt>
+                <dd data-account-trial-ai>--</dd>
+              </div>
+              <div>
+                <dt>Search</dt>
+                <dd data-account-trial-search>--</dd>
+              </div>
+              <div>
+                <dt>Storage</dt>
+                <dd data-account-trial-storage>--</dd>
+              </div>
+            </dl>
+          </article>
+        </div>
+
+        <div class="account-action-bar">
+          <a class="app-primary account-dashboard-primary" href={siteMeta.billingUrl} data-account-billing-link>Open billing</a>
+          <button class="account-secondary-button" type="button" data-account-logout>Log out</button>
+        </div>
+
+        <div class="account-danger-zone">
+          <button class="account-danger-button" type="button" data-account-delete>Delete account</button>
+        </div>
+      </div>
+
+      <dialog class="wallet-dialog" data-account-wallet-dialog aria-labelledby="wallet-dialog-title">
+        <div class="wallet-dialog-panel">
+          <div class="wallet-dialog-head">
+            <div>
+              <span>Detected wallets</span>
+              <strong id="wallet-dialog-title">Choose wallet</strong>
+            </div>
+            <button type="button" data-account-wallet-close aria-label="Close wallet chooser">Close</button>
+          </div>
+
+          <div class="account-wallet-list" data-account-wallet-list aria-label="Detected wallets"></div>
+          <p class="account-login-note" data-account-wallet-dialog-note>Wallet extensions decide which account to approve.</p>
+        </div>
+      </dialog>
+
+      <p class="account-status-live" role="status" aria-live="polite" data-account-status></p>
+    </section>
+  </main>
+  <Footer />
+</BaseLayout>

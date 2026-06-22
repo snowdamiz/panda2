@@ -475,9 +475,6 @@ func (s *Service) CreateSolPaymentOrder(ctx context.Context, request CreateSolPa
 		return SolPaymentOrderView{}, ErrNoSubscription
 	}
 	guildID := strings.TrimSpace(request.GuildID)
-	if guildID == "" {
-		return SolPaymentOrderView{}, fmt.Errorf("guild_id is required")
-	}
 	plan, ok := NormalizePlan(request.Plan)
 	if !ok || plan == PlanTrial {
 		return SolPaymentOrderView{}, ErrUnknownPlan
@@ -1141,7 +1138,7 @@ func (s *Service) ActivateWithAPIKey(ctx context.Context, request ActivateAPIKey
 			return ErrActivationKeyInvalid
 		}
 		now := s.currentTime()
-		if key.GuildID != request.GuildID {
+		if key.GuildID != "" && key.GuildID != request.GuildID {
 			return ErrActivationKeyInvalid
 		}
 		switch key.Status {
@@ -1178,7 +1175,10 @@ func (s *Service) ActivateWithAPIKey(ctx context.Context, request ActivateAPIKey
 		if !ok || order.Status != SolOrderStatusVerified {
 			return ErrSolPaymentOrderNotVerified
 		}
-		if order.GuildID != request.GuildID || order.Plan != key.Plan {
+		if order.GuildID != "" && order.GuildID != request.GuildID {
+			return ErrActivationKeyInvalid
+		}
+		if order.Plan != key.Plan {
 			return ErrActivationKeyInvalid
 		}
 		limits, ok := LimitsForPlan(order.Plan)
@@ -1255,22 +1255,26 @@ func (s *Service) ActivateWithAPIKey(ctx context.Context, request ActivateAPIKey
 		consumedAt := now
 		if err := repo.UpdateActivationAPIKey(ctx, key.KeyID, map[string]any{
 			"status":                      ActivationKeyStatusConsumed,
+			"guild_id":                    request.GuildID,
 			"consumed_at":                 &consumedAt,
 			"consumed_by_discord_user_id": request.ActorUserID,
 		}); err != nil {
 			return err
 		}
 		consumedKey = key
+		consumedKey.GuildID = request.GuildID
 		consumedKey.Status = ActivationKeyStatusConsumed
 		consumedKey.ConsumedAt = &consumedAt
 		consumedKey.ConsumedByDiscordUserID = request.ActorUserID
 		consumedOrder = order
 		if err := repo.UpdateBillingOrder(ctx, order.OrderID, map[string]any{
+			"guild_id":     request.GuildID,
 			"status":       SolOrderStatusActivated,
 			"activated_at": &consumedAt,
 		}); err != nil {
 			return err
 		}
+		consumedOrder.GuildID = request.GuildID
 		consumedOrder.Status = SolOrderStatusActivated
 		consumedOrder.ActivatedAt = &consumedAt
 		return nil

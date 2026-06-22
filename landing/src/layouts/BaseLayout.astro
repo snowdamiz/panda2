@@ -16,6 +16,8 @@ const {
 const siteUrl = Astro.site ?? new URL(siteMeta.siteUrl);
 const canonicalUrl = new URL(Astro.url.pathname, siteUrl).toString();
 const imageUrl = new URL(siteMeta.ogImagePath, siteUrl).toString();
+const socialTitle = title === siteMeta.title ? siteMeta.ogTitle : title;
+const socialDescription = description === siteMeta.description ? siteMeta.ogDescription : description;
 const structuredData = [
   {
     '@context': 'https://schema.org',
@@ -63,8 +65,8 @@ const structuredData = [
     <meta name="application-name" content={siteMeta.name} />
     <meta name="keywords" content={siteMeta.keywords.join(', ')} />
     <link rel="canonical" href={canonicalUrl} />
-    <meta property="og:title" content={siteMeta.ogTitle} />
-    <meta property="og:description" content={siteMeta.ogDescription} />
+    <meta property="og:title" content={socialTitle} />
+    <meta property="og:description" content={socialDescription} />
     <meta property="og:type" content="website" />
     <meta property="og:site_name" content={siteMeta.name} />
     <meta property="og:locale" content={siteMeta.locale} />
@@ -76,8 +78,8 @@ const structuredData = [
     <meta property="og:image:height" content="630" />
     <meta property="og:image:alt" content="Panda Discord intelligence landing page preview" />
     <meta name="twitter:card" content="summary_large_image" />
-    <meta name="twitter:title" content={siteMeta.ogTitle} />
-    <meta name="twitter:description" content={siteMeta.ogDescription} />
+    <meta name="twitter:title" content={socialTitle} />
+    <meta name="twitter:description" content={socialDescription} />
     <meta name="twitter:image" content={imageUrl} />
     <meta name="twitter:image:alt" content="Panda Discord intelligence landing page preview" />
     <title>{title}</title>
