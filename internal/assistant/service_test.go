@@ -1255,6 +1255,10 @@ func TestAskDoesNotFallbackOnNonRetryableFailure(t *testing.T) {
 	if len(client.requests) != 1 || client.requests[0].Model != "provider/primary" {
 		t.Fatalf("fallback should not have been used: %+v", client.requests)
 	}
+	model, task, ok := FailedModel(err)
+	if !ok || model != "provider/primary" || task != string(modelTaskResponse) {
+		t.Fatalf("expected failed model details, model=%q task=%q ok=%t err=%v", model, task, ok, err)
+	}
 }
 
 func TestAskExecutesKnowledgeSearchTool(t *testing.T) {

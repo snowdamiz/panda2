@@ -40,6 +40,34 @@ type Service struct {
 	defaultFallbackModels  []string
 }
 
+type ModelRequestError struct {
+	Task  string
+	Model string
+	Err   error
+}
+
+func (e *ModelRequestError) Error() string {
+	if e == nil || e.Err == nil {
+		return ""
+	}
+	return e.Err.Error()
+}
+
+func (e *ModelRequestError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Err
+}
+
+func FailedModel(err error) (string, string, bool) {
+	var modelErr *ModelRequestError
+	if !errors.As(err, &modelErr) || modelErr == nil {
+		return "", "", false
+	}
+	return modelErr.Model, modelErr.Task, true
+}
+
 type AskRequest struct {
 	RequestID                    string
 	GuildID                      string
@@ -1323,9 +1351,10 @@ func (s *Service) chatWithFallback(ctx context.Context, config store.GuildConfig
 		if err == nil {
 			return response, nil
 		}
-		lastErr = err
+		modelErr := &ModelRequestError{Task: string(task), Model: model, Err: err}
+		lastErr = modelErr
 		if index == len(models)-1 || !llm.IsRetryable(err) {
-			return llm.ChatResponse{}, err
+			return llm.ChatResponse{}, modelErr
 		}
 	}
 	return llm.ChatResponse{}, lastErr

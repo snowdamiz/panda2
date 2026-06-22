@@ -2294,7 +2294,11 @@ func assistantError(err error) Response {
 	case errors.Is(err, assistant.ErrAssistantDisabled):
 		return Response{Content: "Assistant responses are disabled for this server.", Ephemeral: true, Presentation: Presentation{Title: "Assistant disabled", Accent: AccentWarning}}
 	default:
-		slog.Warn("assistant request failed", slog.Any("err", err))
+		if model, task, ok := assistant.FailedModel(err); ok {
+			slog.Warn("assistant request failed", slog.String("model", model), slog.String("task", task), slog.Any("err", err))
+		} else {
+			slog.Warn("assistant request failed", slog.Any("err", err))
+		}
 		return Response{Content: "Panda is having trouble with AI responses right now. Please try again later.", Ephemeral: true, Presentation: Presentation{Title: "AI response failed", Accent: AccentDanger}}
 	}
 }

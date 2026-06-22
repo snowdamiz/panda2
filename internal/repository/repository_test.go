@@ -41,6 +41,38 @@ func TestGuildConfigEnsureDefaultIsIdempotent(t *testing.T) {
 	}
 }
 
+func TestGuildConfigMissingReadDoesNotLogRecordNotFound(t *testing.T) {
+	ctx := context.Background()
+	db, logs, cleanup := newRepositoryGormWithLogBuffer(t)
+	defer cleanup()
+
+	repo := NewGuildConfigRepository(db)
+	if _, ok, err := repo.Get(ctx, "guild-1"); err != nil || ok {
+		t.Fatalf("expected missing guild config without error, ok=%t err=%v", ok, err)
+	}
+	if strings.Contains(logs.String(), "record not found") {
+		t.Fatalf("missing guild config should not be logged as record not found:\n%s", logs.String())
+	}
+}
+
+func TestGuildConfigEnsureDefaultCreatesWithoutRecordNotFoundLog(t *testing.T) {
+	ctx := context.Background()
+	db, logs, cleanup := newRepositoryGormWithLogBuffer(t)
+	defer cleanup()
+
+	repo := NewGuildConfigRepository(db)
+	config, err := repo.EnsureDefault(ctx, "guild-1")
+	if err != nil {
+		t.Fatalf("EnsureDefault: %v", err)
+	}
+	if config.GuildID != "guild-1" {
+		t.Fatalf("unexpected config: %+v", config)
+	}
+	if strings.Contains(logs.String(), "record not found") {
+		t.Fatalf("default guild config creation should not be logged as record not found:\n%s", logs.String())
+	}
+}
+
 func TestUsageRecord(t *testing.T) {
 	ctx := context.Background()
 	db, err := store.Open(ctx, "file::memory:?cache=shared")
@@ -111,6 +143,12 @@ func TestBillingUsageReservationCreatesInitialPeriodWithoutRecordNotFoundLog(t *
 
 func newBillingRepositoryWithLogBuffer(t *testing.T) (*BillingRepository, *bytes.Buffer, func()) {
 	t.Helper()
+	db, logs, cleanup := newRepositoryGormWithLogBuffer(t)
+	return NewBillingRepository(db), logs, cleanup
+}
+
+func newRepositoryGormWithLogBuffer(t *testing.T) (*gorm.DB, *bytes.Buffer, func()) {
+	t.Helper()
 	var logs bytes.Buffer
 	db, err := gorm.Open(sqlite.Open(t.TempDir()+"/billing-log.db"), &gorm.Config{
 		Logger: logger.New(log.New(&logs, "", 0), logger.Config{LogLevel: logger.Warn}),
@@ -126,7 +164,7 @@ func newBillingRepositoryWithLogBuffer(t *testing.T) (*BillingRepository, *bytes
 		_ = sqlDB.Close()
 		t.Fatalf("run migrations: %v", err)
 	}
-	return NewBillingRepository(db), &logs, func() {
+	return db, &logs, func() {
 		_ = sqlDB.Close()
 	}
 }
