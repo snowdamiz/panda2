@@ -217,7 +217,7 @@ func TestDiscordInstallCallbackKeepsFailureRedirectInProduction(t *testing.T) {
 	if resp.StatusCode != stdhttp.StatusFound {
 		t.Fatalf("expected 302, got %d", resp.StatusCode)
 	}
-	if location := resp.Header.Get("Location"); location != "/install/failed?error=install_failed&status=failed" {
+	if location := resp.Header.Get("Location"); location != "https://landing.example.test/install/failed?error=install_failed&status=failed" {
 		t.Fatalf("unexpected redirect location: %q", location)
 	}
 }
@@ -283,43 +283,8 @@ func TestDiscordInstallCallbackKeepsFailureRedirectForRemoteDevelopmentURL(t *te
 	if resp.StatusCode != stdhttp.StatusFound {
 		t.Fatalf("expected 302, got %d", resp.StatusCode)
 	}
-	if location := resp.Header.Get("Location"); location != "/install/failed?error=install_failed&status=failed" {
+	if location := resp.Header.Get("Location"); location != "https://landing.example.test/install/failed?error=install_failed&status=failed" {
 		t.Fatalf("unexpected redirect location: %q", location)
-	}
-}
-
-func TestInstallSuccessResultServedByAPI(t *testing.T) {
-	db, err := store.Open(t.Context(), "file::memory:?cache=shared")
-	if err != nil {
-		t.Fatalf("open store: %v", err)
-	}
-	defer db.Close()
-
-	server := New(config.Config{
-		SQLitePath:          ":memory:",
-		DataDir:             t.TempDir(),
-		OpenRouterBaseURL:   "https://openrouter.ai/api/v1",
-		OpenRouterModel:     "openrouter/auto",
-		Port:                "8080",
-		UserRateLimit:       5,
-		UserRateLimitWindow: time.Minute,
-	}, db)
-
-	req, _ := stdhttp.NewRequest(stdhttp.MethodGet, "/install/success?guild_id=guild-1&status=success", nil)
-	resp, err := server.Test(req)
-	if err != nil {
-		t.Fatalf("install success page failed: %v", err)
-	}
-	if resp.StatusCode != stdhttp.StatusOK {
-		t.Fatalf("expected 200, got %d", resp.StatusCode)
-	}
-	data, err := io.ReadAll(resp.Body)
-	if err != nil {
-		t.Fatalf("read body: %v", err)
-	}
-	body := string(data)
-	if !strings.Contains(body, "Panda is installed.") || !strings.Contains(body, "https://discord.com/channels/guild-1") {
-		t.Fatalf("unexpected success page body: %s", body)
 	}
 }
 
