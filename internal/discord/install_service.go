@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -620,6 +621,7 @@ func (s *InstallService) callbackRedirectURL(success bool, guildID string) strin
 	if err != nil {
 		return base
 	}
+	stripNonLocalPort(u)
 	q := u.Query()
 	q.Set("status", status)
 	if guildID = strings.TrimSpace(guildID); guildID != "" {
@@ -627,6 +629,22 @@ func (s *InstallService) callbackRedirectURL(success bool, guildID string) strin
 	}
 	u.RawQuery = q.Encode()
 	return u.String()
+}
+
+func stripNonLocalPort(u *url.URL) {
+	if u == nil || u.Port() == "" {
+		return
+	}
+	host := strings.ToLower(strings.TrimSpace(u.Hostname()))
+	if host == "localhost" || host == "127.0.0.1" || host == "::1" {
+		return
+	}
+	if strings.Contains(host, ":") {
+		u.Host = net.JoinHostPort(host, "")
+		u.Host = strings.TrimSuffix(u.Host, ":")
+		return
+	}
+	u.Host = host
 }
 
 func isGuildInstall(data applicationAuthorizedData) bool {

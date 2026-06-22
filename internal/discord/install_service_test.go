@@ -39,6 +39,30 @@ func (f *fakeGuildInstallVerifier) VerifyGuildInstall(_ context.Context, request
 	return f.install, f.ok, f.err
 }
 
+func TestCallbackRedirectURLStripsNonLocalRuntimePort(t *testing.T) {
+	service := NewInstallService(nil, nil).WithInstallConfig(InstallConfig{
+		SuccessRedirect: "https://pandaclanker.xyz:8080/install/success/",
+		FailureRedirect: "https://pandaclanker.xyz:8080/install/failed/",
+	})
+
+	if got := service.callbackRedirectURL(true, "guild-1"); got != "https://pandaclanker.xyz/install/success/?guild_id=guild-1&status=success" {
+		t.Fatalf("unexpected success redirect: %q", got)
+	}
+	if got := service.callbackRedirectURL(false, ""); got != "https://pandaclanker.xyz/install/failed/?status=failed" {
+		t.Fatalf("unexpected failure redirect: %q", got)
+	}
+}
+
+func TestCallbackRedirectURLKeepsLocalDevelopmentPort(t *testing.T) {
+	service := NewInstallService(nil, nil).WithInstallConfig(InstallConfig{
+		SuccessRedirect: "http://localhost:4321/install/success",
+	})
+
+	if got := service.callbackRedirectURL(true, "guild-1"); got != "http://localhost:4321/install/success?guild_id=guild-1&status=success" {
+		t.Fatalf("unexpected local redirect: %q", got)
+	}
+}
+
 func TestInstallServiceAcceptsServerOwnerInstall(t *testing.T) {
 	ctx := context.Background()
 	db, err := store.Open(ctx, "file::memory:?cache=shared")
