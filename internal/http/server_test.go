@@ -189,6 +189,45 @@ func TestDiscordInstallCallbackPassesDiscordInstallHints(t *testing.T) {
 	}
 }
 
+func TestDiscordInstallCallbackStripsPortFromInstallResultRedirect(t *testing.T) {
+	db, err := store.Open(t.Context(), "file::memory:?cache=shared")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer db.Close()
+
+	handler := &fakeInstallHandler{
+		callbackResult: discordbot.InstallCallbackResult{
+			GuildID:     "guild-1",
+			IntentID:    "intent-1",
+			RedirectURL: "https://pandaclanker.xyz:8080/install/success/?guild_id=guild-1&status=success",
+		},
+	}
+	server := New(config.Config{
+		Environment:         "production",
+		PublicAppURL:        "https://pandaclanker.xyz",
+		SQLitePath:          ":memory:",
+		DataDir:             t.TempDir(),
+		OpenRouterBaseURL:   "https://openrouter.ai/api/v1",
+		OpenRouterModel:     "openrouter/auto",
+		Port:                "8080",
+		UserRateLimit:       5,
+		UserRateLimitWindow: time.Minute,
+	}, db).WithInstallHandler(handler)
+
+	req, _ := stdhttp.NewRequest(stdhttp.MethodGet, "/discord/install/callback?state=st_1&code=code_1&guild_id=guild-1&permissions=1024", nil)
+	resp, err := server.Test(req)
+	if err != nil {
+		t.Fatalf("install callback failed: %v", err)
+	}
+	if resp.StatusCode != stdhttp.StatusFound {
+		t.Fatalf("expected 302, got %d", resp.StatusCode)
+	}
+	if location := resp.Header.Get("Location"); location != "https://pandaclanker.xyz/install/success/?guild_id=guild-1&status=success" {
+		t.Fatalf("unexpected redirect location: %q", location)
+	}
+}
+
 func TestDiscordInstallCallbackKeepsFailureRedirectInProduction(t *testing.T) {
 	db, err := store.Open(t.Context(), "file::memory:?cache=shared")
 	if err != nil {
@@ -219,6 +258,12 @@ func TestDiscordInstallCallbackKeepsFailureRedirectInProduction(t *testing.T) {
 	}
 	if location := resp.Header.Get("Location"); location != "https://landing.example.test/install/failed?error=install_failed&status=failed" {
 		t.Fatalf("unexpected redirect location: %q", location)
+	}
+}
+
+func TestInstallFailureRedirectStripsNonLocalPort(t *testing.T) {
+	if got := installFailureRedirect("https://pandaclanker.xyz:8080", errors.New("install failed")); got != "https://pandaclanker.xyz/install/failed?error=install_failed&status=failed" {
+		t.Fatalf("unexpected failure redirect: %q", got)
 	}
 }
 

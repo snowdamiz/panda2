@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"math/big"
 	stdhttp "net/http"
 	stdurl "net/url"
@@ -28,6 +29,7 @@ import (
 	"github.com/sn0w/panda2/internal/ratelimit"
 	"github.com/sn0w/panda2/internal/repository"
 	"github.com/sn0w/panda2/internal/store"
+	"github.com/sn0w/panda2/internal/urlutil"
 )
 
 type Server struct {
@@ -260,9 +262,13 @@ func (s *Server) discordInstallCallback(c *fiber.Ctx) error {
 	})
 	if err != nil {
 		if redirectURL := installLocalDevelopmentSuccessRedirect(s.cfg.PublicAppURL, s.cfg.Environment, c.Query("guild_id")); redirectURL != "" {
+			redirectURL = installRedirectLocation(redirectURL)
+			slog.Warn("discord install callback redirect", "status", "local_development_success", "redirect_url", redirectURL, "guild_id", c.Query("guild_id"), "error_code", installErrorCode(err))
 			return c.Redirect(redirectURL, fiber.StatusFound)
 		}
 		if redirectURL := installFailureRedirect(s.cfg.PublicAppURL, err); redirectURL != "" {
+			redirectURL = installRedirectLocation(redirectURL)
+			slog.Warn("discord install callback redirect", "status", "failed", "redirect_url", redirectURL, "guild_id", c.Query("guild_id"), "error_code", installErrorCode(err))
 			return c.Redirect(redirectURL, fiber.StatusFound)
 		}
 		return c.JSON(map[string]any{
@@ -271,7 +277,9 @@ func (s *Server) discordInstallCallback(c *fiber.Ctx) error {
 		})
 	}
 	if result.RedirectURL != "" {
-		return c.Redirect(result.RedirectURL, fiber.StatusFound)
+		redirectURL := installRedirectLocation(result.RedirectURL)
+		slog.Info("discord install callback redirect", "status", "success", "redirect_url", redirectURL, "guild_id", result.GuildID, "intent_id", result.IntentID)
+		return c.Redirect(redirectURL, fiber.StatusFound)
 	}
 	return c.JSON(map[string]any{
 		"status":            "success",
@@ -331,7 +339,12 @@ func installResultRedirect(publicURL, path string, values map[string]string) str
 		}
 	}
 	u.RawQuery = q.Encode()
+	urlutil.StripNonLocalPort(u)
 	return u.String()
+}
+
+func installRedirectLocation(raw string) string {
+	return urlutil.WithNonLocalPortStripped(raw)
 }
 
 func writeInstallError(c *fiber.Ctx, err error) error {
