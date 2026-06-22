@@ -12,7 +12,7 @@ import (
 )
 
 func TestInstallResultURLBuildsLandingRoute(t *testing.T) {
-	if got := installResultURL("https://pandaclanker.xyz/", "install/success"); got != "https://pandaclanker.xyz/install/success" {
+	if got := installResultURL("https://pandaclanker.xyz/", "install/success/"); got != "https://pandaclanker.xyz/install/success/" {
 		t.Fatalf("unexpected install result URL: %q", got)
 	}
 }

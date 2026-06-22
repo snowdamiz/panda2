@@ -628,15 +628,12 @@ func (r *BillingRepository) UpdateActivationAPIKey(ctx context.Context, keyID st
 }
 
 func (r *BillingRepository) UsageTotals(ctx context.Context, guildID string, periodStart, periodEnd time.Time) (BillingUsageTotals, error) {
-	var period store.UsagePeriod
-	err := r.db.WithContext(ctx).
-		Where("guild_id = ? AND period_start = ? AND period_end = ?", strings.TrimSpace(guildID), periodStart, periodEnd).
-		First(&period).Error
-	if errors.Is(err, gorm.ErrRecordNotFound) {
-		return BillingUsageTotals{}, nil
-	}
+	period, ok, err := findUsagePeriodByWindow(r.db.WithContext(ctx), strings.TrimSpace(guildID), periodStart, periodEnd, false)
 	if err != nil {
 		return BillingUsageTotals{}, err
+	}
+	if !ok {
+		return BillingUsageTotals{}, nil
 	}
 	return totalsFromPeriod(period), nil
 }
@@ -804,17 +801,14 @@ func (r *BillingRepository) RecordCostLedgerEvent(ctx context.Context, event sto
 }
 
 func ensureUsagePeriodTx(tx *gorm.DB, subscription store.GuildSubscription, now time.Time) (store.UsagePeriod, error) {
-	var period store.UsagePeriod
 	periodStart := subscription.CurrentPeriodStart.UTC()
 	periodEnd := subscription.CurrentPeriodEnd.UTC()
-	err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
-		Where("guild_id = ? AND period_start = ? AND period_end = ?", subscription.GuildID, periodStart, periodEnd).
-		First(&period).Error
-	if err == nil {
-		return period, nil
-	}
-	if !errors.Is(err, gorm.ErrRecordNotFound) {
+	period, ok, err := findUsagePeriodByWindow(tx, subscription.GuildID, periodStart, periodEnd, true)
+	if err != nil {
 		return store.UsagePeriod{}, err
+	}
+	if ok {
+		return period, nil
 	}
 	period = store.UsagePeriod{
 		GuildID:        subscription.GuildID,
@@ -829,6 +823,24 @@ func ensureUsagePeriodTx(tx *gorm.DB, subscription store.GuildSubscription, now 
 		return store.UsagePeriod{}, err
 	}
 	return period, nil
+}
+
+func findUsagePeriodByWindow(tx *gorm.DB, guildID string, periodStart, periodEnd time.Time, forUpdate bool) (store.UsagePeriod, bool, error) {
+	var period store.UsagePeriod
+	query := tx.
+		Where("guild_id = ? AND period_start = ? AND period_end = ?", strings.TrimSpace(guildID), periodStart.UTC(), periodEnd.UTC()).
+		Limit(1)
+	if forUpdate {
+		query = query.Clauses(clause.Locking{Strength: "UPDATE"})
+	}
+	result := query.Find(&period)
+	if result.Error != nil {
+		return store.UsagePeriod{}, false, result.Error
+	}
+	if result.RowsAffected == 0 {
+		return store.UsagePeriod{}, false, nil
+	}
+	return period, true, nil
 }
 
 func incrementReserved(tx *gorm.DB, periodID uint, metric string, units int64) error {

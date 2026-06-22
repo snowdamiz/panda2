@@ -32,3 +32,16 @@ func StripNonLocalPort(u *url.URL) {
 	}
 	u.Host = host
 }
+
+func EnsurePathTrailingSlash(u *url.URL, paths ...string) {
+	if u == nil {
+		return
+	}
+	current := strings.TrimRight(u.Path, "/")
+	for _, path := range paths {
+		if current == strings.TrimRight(path, "/") {
+			u.Path = current + "/"
+			return
+		}
+	}
+}

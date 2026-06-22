@@ -1,13 +1,18 @@
 package repository
 
 import (
+	"bytes"
 	"context"
+	"log"
 	"strings"
 	"testing"
 	"time"
 	"unicode/utf8"
 
 	"github.com/sn0w/panda2/internal/store"
+	"gorm.io/driver/sqlite"
+	"gorm.io/gorm"
+	"gorm.io/gorm/logger"
 )
 
 func TestGuildConfigEnsureDefaultIsIdempotent(t *testing.T) {
@@ -54,6 +59,75 @@ func TestUsageRecord(t *testing.T) {
 	}
 	if count != 1 {
 		t.Fatalf("expected one usage event, got %d", count)
+	}
+}
+
+func TestBillingUsageTotalsMissingPeriodDoesNotLogRecordNotFound(t *testing.T) {
+	ctx := context.Background()
+	repo, logs, cleanup := newBillingRepositoryWithLogBuffer(t)
+	defer cleanup()
+
+	start := time.Date(2026, 6, 22, 21, 9, 13, 498000000, time.UTC)
+	end := start.Add(14 * 24 * time.Hour)
+	totals, err := repo.UsageTotals(ctx, "guild-1", start, end)
+	if err != nil {
+		t.Fatalf("UsageTotals: %v", err)
+	}
+	if totals != (BillingUsageTotals{}) {
+		t.Fatalf("expected zero totals for missing period, got %+v", totals)
+	}
+	if strings.Contains(logs.String(), "record not found") {
+		t.Fatalf("missing usage period should not be logged as record not found:\n%s", logs.String())
+	}
+}
+
+func TestBillingUsageReservationCreatesInitialPeriodWithoutRecordNotFoundLog(t *testing.T) {
+	ctx := context.Background()
+	repo, logs, cleanup := newBillingRepositoryWithLogBuffer(t)
+	defer cleanup()
+
+	now := time.Date(2026, 6, 22, 22, 43, 8, 0, time.UTC)
+	subscription := store.GuildSubscription{
+		ID:                 1,
+		GuildID:            "guild-1",
+		Plan:               "starter",
+		CurrentPeriodStart: now.Add(-time.Hour),
+		CurrentPeriodEnd:   now.Add(14 * 24 * time.Hour),
+	}
+	reservation, totals, denied, err := repo.BeginUsageReservation(ctx, subscription, "ai_response", 1, 10, now)
+	if err != nil {
+		t.Fatalf("BeginUsageReservation: %v", err)
+	}
+	if denied {
+		t.Fatal("expected initial reservation to be allowed")
+	}
+	if reservation.UsagePeriodID == 0 || totals.AIResponsesReserved != 1 {
+		t.Fatalf("expected reservation to create and reserve initial period, reservation=%+v totals=%+v", reservation, totals)
+	}
+	if strings.Contains(logs.String(), "record not found") {
+		t.Fatalf("initial usage period creation should not be logged as record not found:\n%s", logs.String())
+	}
+}
+
+func newBillingRepositoryWithLogBuffer(t *testing.T) (*BillingRepository, *bytes.Buffer, func()) {
+	t.Helper()
+	var logs bytes.Buffer
+	db, err := gorm.Open(sqlite.Open(t.TempDir()+"/billing-log.db"), &gorm.Config{
+		Logger: logger.New(log.New(&logs, "", 0), logger.Config{LogLevel: logger.Warn}),
+	})
+	if err != nil {
+		t.Fatalf("open gorm db: %v", err)
+	}
+	sqlDB, err := db.DB()
+	if err != nil {
+		t.Fatalf("unwrap sql db: %v", err)
+	}
+	if err := store.RunMigrations(db); err != nil {
+		_ = sqlDB.Close()
+		t.Fatalf("run migrations: %v", err)
+	}
+	return NewBillingRepository(db), &logs, func() {
+		_ = sqlDB.Close()
 	}
 }
 
