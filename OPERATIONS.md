@@ -24,10 +24,11 @@ The default test run covers the SQLite fallback search path. The tagged run cove
    - `SOLANA_RPC_URL`
    - `SOLANA_TREASURY_WALLET`
    - `SOLANA_STARTER_LAMPORTS`, `SOLANA_PLUS_LAMPORTS`, `SOLANA_PRO_LAMPORTS`, and `SOLANA_BUSINESS_LAMPORTS`
-5. Deploy with `fly deploy`.
-6. In the Discord Developer Portal Webhooks page, set the endpoint to `https://<app-host>/discord/webhook-events`, enable events, and subscribe to `APPLICATION_AUTHORIZED`.
-7. Confirm the landing build args point at the API origin with `PUBLIC_PANDA_API_BASE_URL`. Do not expose Solana RPC endpoints to the static landing app.
-8. Check rollout with `fly status`, `fly releases`, `fly logs`, `/readyz`, `/metrics`, and owner-ops health through Panda chat.
+5. Store a GitHub Actions secret named `FLY_API_TOKEN` with permission to deploy both `panda-assistant` and `panda2-landing`.
+6. Deploy by merging to the `release` branch. The `CI` GitHub Actions workflow deploys both Fly apps with `flyctl deploy --remote-only`.
+7. In the Discord Developer Portal Webhooks page, set the endpoint to `https://<app-host>/discord/webhook-events`, enable events, and subscribe to `APPLICATION_AUTHORIZED`.
+8. Confirm the landing build args point at the API origin with `PUBLIC_PANDA_API_BASE_URL`. Do not expose Solana RPC endpoints to the static landing app.
+9. Check rollout with `fly status`, `fly releases`, `fly logs`, `/readyz`, `/metrics`, and owner-ops health through Panda chat.
 
 Production validation fails when Discord credentials, the managed AI service key, public app URL, SOL RPC URL, treasury wallet, or paid-plan lamport mappings are missing.
 

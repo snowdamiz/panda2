@@ -2,38 +2,39 @@ name: CI
 
 on:
   push:
-  pull_request:
+    branches:
+      - release
 
 permissions:
   contents: read
 
+concurrency:
+  group: fly-deploy-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
-  go:
-    name: Go
+  deploy:
+    name: Deploy ${{ matrix.app.name }}
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        app:
+          - name: panda-assistant
+            directory: .
+          - name: panda2-landing
+            directory: landing
+    defaults:
+      run:
+        working-directory: ${{ matrix.app.directory }}
     steps:
       - name: Check out repository
         uses: actions/checkout@v6
 
-      - name: Set up Go
-        uses: actions/setup-go@v6
-        with:
-          go-version-file: go.mod
-          cache: true
+      - name: Set up flyctl
+        uses: superfly/flyctl-actions/setup-flyctl@master
 
-      - name: Check formatting
-        run: test -z "$(gofmt -l .)"
-
-      - name: Vet
-        run: go vet ./...
-
-      - name: Test
-        run: go test ./...
-
-      - name: Test with SQLite FTS5
-        run: go test -tags sqlite_fts5 ./...
-
-      - name: Vulnerability scan
-        run: |
-          go install golang.org/x/vuln/cmd/govulncheck@latest
-          "$(go env GOPATH)/bin/govulncheck" ./...
+      - name: Deploy
+        run: flyctl deploy --remote-only --app "${{ matrix.app.name }}"
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
