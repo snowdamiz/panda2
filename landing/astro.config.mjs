@@ -1,7 +1,7 @@
 import { defineConfig } from 'astro/config';
 import tailwindcss from '@tailwindcss/vite';
 
-const site = process.env.PUBLIC_SITE_URL || 'https://panda2-landing.fly.dev';
+const site = process.env.PUBLIC_SITE_URL || 'https://pandaclanker.xyz';
 
 export default defineConfig({
   site,

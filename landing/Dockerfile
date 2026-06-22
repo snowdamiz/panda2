@@ -7,7 +7,7 @@ RUN npm ci
 
 COPY . .
 
-ARG PUBLIC_SITE_URL=https://panda2-landing.fly.dev
+ARG PUBLIC_SITE_URL=https://pandaclanker.xyz
 ARG PUBLIC_PANDA_API_BASE_URL=https://panda-assistant.fly.dev
 ENV PUBLIC_SITE_URL=$PUBLIC_SITE_URL
 ENV PUBLIC_PANDA_API_BASE_URL=$PUBLIC_PANDA_API_BASE_URL

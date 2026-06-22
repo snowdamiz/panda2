@@ -5,7 +5,7 @@ primary_region = "sjc"
   dockerfile = "Dockerfile"
 
   [build.args]
-    PUBLIC_SITE_URL = "https://panda2-landing.fly.dev"
+    PUBLIC_SITE_URL = "https://pandaclanker.xyz"
     PUBLIC_PANDA_API_BASE_URL = "https://panda-assistant.fly.dev"
 
 [http_service]
