@@ -487,7 +487,7 @@ func DefaultDefinitions() []Definition {
 		knowledgeAdminWrite("panda.manage_knowledge", "List, add, search, or delete server knowledge documents.", []string{"action"}),
 		rolePermissionManagementTool(),
 		adminDiscordWrite(features.DiscordRoleManagement, "panda.manage_member_role", "Prepare confirmed Discord member role assignment changes.", []string{"action"}, "MANAGE_ROLES"),
-		adminDiscordWrite(features.DiscordRoleManagement, "panda.manage_discord_role", "Prepare confirmed Discord role creation with safe defaults.", []string{"action"}, "MANAGE_ROLES"),
+		adminDiscordWrite(features.DiscordRoleManagement, "panda.manage_discord_role", "Prepare confirmed creation of a brand-new Discord server role with no elevated permissions.", []string{"action"}, "MANAGE_ROLES"),
 		toolAccessManagementTool(),
 		channelRuleManagementTool(),
 		{
@@ -628,7 +628,7 @@ func ownerOpsTool() Definition {
 }
 
 func rolePermissionManagementTool() Definition {
-	definition := adminWrite("panda.manage_role_permission", "Grant, remove, or list Panda permission names and role profiles for Discord roles.", []string{"action"})
+	definition := adminWrite("panda.manage_role_permission", "Grant, remove, or list Panda permission names and role profiles for existing Discord roles. Do not use this to create new Discord roles.", []string{"action"})
 	definition.InputSchema = rolePermissionManagementSchema()
 	return definition
 }
@@ -684,8 +684,8 @@ func rolePermissionManagementSchema() json.RawMessage {
 		"profile":    map[string]string{"type": "string", "description": "Panda role profile: admin or moderator."},
 		"permission": map[string]string{"type": "string", "description": "Specific Panda permission name when not using a profile."},
 		"role_id":    map[string]string{"type": "string", "description": "Discord role ID or role mention."},
-		"role":       map[string]string{"type": "string", "description": "Discord role ID, mention, or name."},
-		"role_name":  map[string]string{"type": "string", "description": "Discord role name to resolve."},
+		"role":       map[string]string{"type": "string", "description": "Existing Discord role ID, mention, or name."},
+		"role_name":  map[string]string{"type": "string", "description": "Existing Discord role name to resolve."},
 		"dry_run":    map[string]string{"type": "boolean"},
 	})
 }

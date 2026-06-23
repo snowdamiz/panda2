@@ -1616,7 +1616,7 @@ func TestHandleToolConfirmationAssignsMemberRole(t *testing.T) {
 
 func TestNaturalDiscordRoleCreateRendersConfirmationThroughAgentTool(t *testing.T) {
 	client := &fakeLLM{responses: []llm.ChatResponse{
-		{Content: `{"respond":true,"prompt":"create a new role called test"}`},
+		{Content: `{"respond":true,"prompt":"create a new role called test","tool_name":"panda_manage_discord_role"}`},
 		{ToolCalls: []llm.ToolCall{{
 			ID:   "call-role-create",
 			Type: "function",
@@ -1649,11 +1649,54 @@ func TestNaturalDiscordRoleCreateRendersConfirmationThroughAgentTool(t *testing.
 	if !requestToolNames(client.requests[1])["panda_manage_discord_role"] {
 		t.Fatalf("expected Discord role manager tool for natural role request, got %+v", requestToolNames(client.requests[1]))
 	}
+	if len(client.requests[1].Tools) != 1 {
+		t.Fatalf("expected preferred role creation workflow to be the only exposed tool, got %+v", requestToolNames(client.requests[1]))
+	}
+}
+
+func TestNaturalMemberRoleAssignmentRendersConfirmationThroughAgentTool(t *testing.T) {
+	manager := &fakeMemberRoleManager{}
+	client := &fakeLLM{responses: []llm.ChatResponse{
+		{Content: `{"respond":true,"prompt":"assign role role-pickle to user user-target","tool_name":"panda_manage_member_role"}`},
+		{ToolCalls: []llm.ToolCall{{
+			ID:   "call-member-role",
+			Type: "function",
+			Function: llm.ToolCallFunction{
+				Name:      "panda_manage_member_role",
+				Arguments: `{"action":"add","user_id":"user-target","role_id":"role-pickle"}`,
+			},
+		}}},
+		{Content: "Prepared role assignment."},
+	}}
+	router := newTestRouter(t, client, 20, func(executor *tools.Executor) {
+		executor.WithDiscordToolProvider(&fakeCommandDiscordProvider{})
+	}).WithMemberRoleManager(manager)
+
+	response := router.HandleNaturalMessage(context.Background(), Request{
+		GuildID:      "guild-1",
+		ChannelID:    "channel-1",
+		UserID:       "admin",
+		IsGuildAdmin: true,
+		Options:      map[string]string{"message": "panda assign role role-pickle to user user-target", "bot_mentioned": "true"},
+	})
+	if response.Confirmation == nil || response.Confirmation.ConfirmLabel != "Assign role" {
+		t.Fatalf("expected member role confirmation, got %+v", response)
+	}
+	confirmationRequest, ok := RequestFromToolConfirmationID(response.Confirmation.ID, Request{UserID: "admin"})
+	if !ok || confirmationRequest.Action != toolActionMemberRoleAdd || confirmationRequest.Options["user_id"] != "user-target" || confirmationRequest.Options["role_id"] != "role-pickle" {
+		t.Fatalf("unexpected member role confirmation id: request=%+v ok=%t", confirmationRequest, ok)
+	}
+	if len(client.requests) != 3 {
+		t.Fatalf("expected classifier, member-role tool call, and final response, got %d request(s)", len(client.requests))
+	}
+	if names := requestToolNames(client.requests[1]); len(names) != 1 || !names["panda_manage_member_role"] {
+		t.Fatalf("expected preferred member-role workflow to be the only exposed tool, got %+v", names)
+	}
 }
 
 func TestNaturalComposedScheduleCreatesThroughAgentTool(t *testing.T) {
 	client := &fakeLLM{responses: []llm.ChatResponse{
-		{Content: `{"respond":true,"prompt":"schedule welcome_builder in 10 minutes with input topic standup"}`},
+		{Content: `{"respond":true,"prompt":"schedule welcome_builder in 10 minutes with input topic standup","tool_name":"panda_manage_schedule"}`},
 		{ToolCalls: []llm.ToolCall{{
 			ID:   "call-schedule-create",
 			Type: "function",
@@ -1686,6 +1729,9 @@ func TestNaturalComposedScheduleCreatesThroughAgentTool(t *testing.T) {
 	if !requestToolNames(client.requests[1])["panda_manage_schedule"] {
 		t.Fatalf("expected schedule manager tool to be available to admin natural chat, got %+v", requestToolNames(client.requests[1]))
 	}
+	if len(client.requests[1].Tools) != 1 {
+		t.Fatalf("expected preferred schedule workflow to be the only exposed tool, got %+v", requestToolNames(client.requests[1]))
+	}
 	schedules, err := router.scheduler.List(context.Background(), "guild-1", "", scheduler.KindComposed, false, 25)
 	if err != nil {
 		t.Fatalf("list schedules: %v", err)
@@ -1707,7 +1753,7 @@ func TestNaturalComposedScheduleCreatesThroughAgentTool(t *testing.T) {
 
 func TestNaturalComposedScheduleListsAndCancelsThroughAgentTool(t *testing.T) {
 	client := &fakeLLM{responses: []llm.ChatResponse{
-		{Content: `{"respond":true,"prompt":"list composed schedules for welcome_builder"}`},
+		{Content: `{"respond":true,"prompt":"list composed schedules for welcome_builder","tool_name":"panda_manage_schedule"}`},
 		{ToolCalls: []llm.ToolCall{{
 			ID:   "call-schedule-list",
 			Type: "function",
@@ -1717,7 +1763,7 @@ func TestNaturalComposedScheduleListsAndCancelsThroughAgentTool(t *testing.T) {
 			},
 		}}},
 		{Content: "There is one scheduled `welcome_builder` run."},
-		{Content: `{"respond":true,"prompt":"cancel scheduled composed tool welcome_builder"}`},
+		{Content: `{"respond":true,"prompt":"cancel scheduled composed tool welcome_builder","tool_name":"panda_manage_schedule"}`},
 		{ToolCalls: []llm.ToolCall{{
 			ID:   "call-schedule-cancel",
 			Type: "function",
@@ -1754,6 +1800,9 @@ func TestNaturalComposedScheduleListsAndCancelsThroughAgentTool(t *testing.T) {
 	if !requestToolNames(client.requests[1])["panda_manage_schedule"] {
 		t.Fatalf("expected schedule manager tool for list request, got %+v", requestToolNames(client.requests[1]))
 	}
+	if len(client.requests[1].Tools) != 1 {
+		t.Fatalf("expected preferred schedule list workflow to be the only exposed tool, got %+v", requestToolNames(client.requests[1]))
+	}
 	listMessages := joinRequestMessages(client.requests[2])
 	if !strings.Contains(listMessages, `"count":1`) || !strings.Contains(listMessages, `"welcome_builder"`) {
 		t.Fatalf("expected schedule list tool result in final chat request, got:\n%s", listMessages)
@@ -1771,6 +1820,9 @@ func TestNaturalComposedScheduleListsAndCancelsThroughAgentTool(t *testing.T) {
 	}
 	if !requestToolNames(client.requests[4])["panda_manage_schedule"] {
 		t.Fatalf("expected schedule manager tool for cancel request, got %+v", requestToolNames(client.requests[4]))
+	}
+	if len(client.requests[4].Tools) != 1 {
+		t.Fatalf("expected preferred schedule cancel workflow to be the only exposed tool, got %+v", requestToolNames(client.requests[4]))
 	}
 	cancelMessages := joinRequestMessages(client.requests[5])
 	if !strings.Contains(cancelMessages, `"action":"cancel"`) || !strings.Contains(cancelMessages, `"schedule_id":`+createdIDString(created.ID)) {
@@ -2438,7 +2490,7 @@ func TestNaturalMessageExecutesTextToolCallFallbackForComposedTool(t *testing.T)
 func TestNaturalMessageCreatesNativePollThroughAgentTool(t *testing.T) {
 	discordProvider := &fakeCommandDiscordProvider{}
 	client := &fakeLLM{responses: []llm.ChatResponse{
-		{Content: `{"respond":true,"prompt":"make a poll about fable 5 versus gpt 5.6"}`},
+		{Content: `{"respond":true,"prompt":"make a poll about fable 5 versus gpt 5.6","tool_name":"discord_create_poll"}`},
 		{ToolCalls: []llm.ToolCall{{
 			ID:   "call-poll-create",
 			Type: "function",
@@ -2475,6 +2527,9 @@ func TestNaturalMessageCreatesNativePollThroughAgentTool(t *testing.T) {
 	if !requestToolNames(client.requests[1])["discord_create_poll"] {
 		t.Fatalf("expected Discord poll tool for natural poll request, got %+v", requestToolNames(client.requests[1]))
 	}
+	if len(client.requests[1].Tools) != 1 {
+		t.Fatalf("expected preferred poll workflow to be the only exposed tool, got %+v", requestToolNames(client.requests[1]))
+	}
 	if !strings.Contains(joinRequestMessages(client.requests[2]), "What will be better") {
 		t.Fatalf("expected poll tool result in final chat request, got:\n%s", joinRequestMessages(client.requests[2]))
 	}
@@ -2503,7 +2558,7 @@ func TestNaturalMessageCreatesNativePollThroughAgentTool(t *testing.T) {
 
 func TestNaturalMessageCreatesReminderThroughAgentTool(t *testing.T) {
 	client := &fakeLLM{responses: []llm.ChatResponse{
-		{Content: `{"respond":true,"prompt":"remind me in 10 minutes to stand up"}`},
+		{Content: `{"respond":true,"prompt":"remind me in 10 minutes to stand up","tool_name":"panda_manage_reminder"}`},
 		{ToolCalls: []llm.ToolCall{{
 			ID:   "call-reminder-create",
 			Type: "function",
@@ -2533,6 +2588,9 @@ func TestNaturalMessageCreatesReminderThroughAgentTool(t *testing.T) {
 	}
 	if !requestToolNames(client.requests[1])["panda_manage_reminder"] {
 		t.Fatalf("expected reminder tool for natural reminder request, got %+v", requestToolNames(client.requests[1]))
+	}
+	if len(client.requests[1].Tools) != 1 {
+		t.Fatalf("expected preferred reminder workflow to be the only exposed tool, got %+v", requestToolNames(client.requests[1]))
 	}
 	schedules, err := router.scheduler.List(context.Background(), "guild-1", "user-1", scheduler.KindReminder, false, 25)
 	if err != nil {

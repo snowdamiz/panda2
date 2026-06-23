@@ -352,7 +352,13 @@ func TestNaturalTriggerPromptCoversDirectCapabilityQuestionWithoutMention(t *tes
 		"word Panda appears anywhere",
 		"asks to set up or configure Panda",
 		"panda_manage_music",
+		"panda_manage_reminder",
+		"discord_create_poll",
+		"panda_manage_schedule",
+		"panda_manage_discord_role",
+		"panda_manage_member_role",
 		"panda_manage_role_permission",
+		"existing Discord role",
 		"panda_manage_composed_tool",
 		"event-triggered requests",
 		"Do not use this just because a request mentions a target channel",
@@ -364,6 +370,32 @@ func TestNaturalTriggerPromptCoversDirectCapabilityQuestionWithoutMention(t *tes
 	user := messages[1].Content
 	if !strings.Contains(user, "Bot mentioned: false") || !strings.Contains(user, "what can you do panda") {
 		t.Fatalf("natural trigger input missing direct-address evidence:\n%s", user)
+	}
+}
+
+func TestNaturalPreferredToolChoicesCoverSingleWorkflowTools(t *testing.T) {
+	names := map[string]struct{}{}
+	for _, name := range naturalPreferredToolChoiceNames() {
+		names[name] = struct{}{}
+	}
+	for _, want := range []string{
+		"panda_manage_music",
+		"panda_manage_reminder",
+		"discord_create_poll",
+		"panda_manage_schedule",
+		"panda_manage_discord_role",
+		"panda_manage_member_role",
+		"panda_manage_role_permission",
+		"panda_manage_channel_rule",
+		"panda_manage_tool_access",
+		"panda_manage_composed_tool",
+		"panda_manage_soul",
+		"panda_manage_prompt",
+		"panda_manage_ops",
+	} {
+		if _, ok := names[want]; !ok {
+			t.Fatalf("preferred tool choices missing %q: %+v", want, naturalPreferredToolChoiceNames())
+		}
 	}
 }
 
@@ -469,6 +501,12 @@ func TestNaturalPreferredToolChoicesStayInSync(t *testing.T) {
 		}
 		if strings.HasPrefix(name, "panda_") {
 			alias := strings.Replace(name, "panda_", "panda.", 1)
+			if got := normalizeNaturalToolChoice(alias); got != name {
+				t.Fatalf("preferred tool alias %q normalizes to %q, want %q", alias, got, name)
+			}
+		}
+		if strings.HasPrefix(name, "discord_") {
+			alias := strings.Replace(name, "discord_", "discord.", 1)
 			if got := normalizeNaturalToolChoice(alias); got != name {
 				t.Fatalf("preferred tool alias %q normalizes to %q, want %q", alias, got, name)
 			}
