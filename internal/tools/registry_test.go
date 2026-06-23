@@ -4,11 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/sn0w/panda2/internal/admin"
+	"github.com/sn0w/panda2/internal/billing"
 	contextsvc "github.com/sn0w/panda2/internal/context"
 	"github.com/sn0w/panda2/internal/llm"
 	"github.com/sn0w/panda2/internal/memory"
@@ -786,6 +788,51 @@ func TestExecutorRunsMusicManager(t *testing.T) {
 	}
 	if !strings.Contains(result.Message.Content, `"action":"play"`) || !strings.Contains(result.Message.Content, `"query":"lofi rain"`) {
 		t.Fatalf("unexpected music manager result: %+v", result)
+	}
+}
+
+func TestExecutorAllowsTrialMusicPlayback(t *testing.T) {
+	ctx := context.Background()
+	registry, err := NewDefaultRegistry()
+	if err != nil {
+		t.Fatalf("NewDefaultRegistry: %v", err)
+	}
+	dataStore, err := store.Open(ctx, filepath.Join(t.TempDir(), "billing.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = dataStore.Close() })
+	billingService := billing.NewService(repository.NewBillingRepository(dataStore.DB), billing.Config{})
+	if _, err := billingService.EnsureTrial(ctx, billing.TrialSeed{
+		GuildID:            "guild-1",
+		BillingOwnerUserID: "owner-1",
+		AuthorizedAt:       time.Date(2026, 6, 22, 12, 0, 0, 0, time.UTC),
+	}); err != nil {
+		t.Fatalf("EnsureTrial: %v", err)
+	}
+
+	manager := &fakeMusicManager{}
+	executor := NewExecutor(registry, nil, nil).WithMusicManager(manager).WithBilling(billingService)
+	_, err = executor.Execute(ctx, ExecutionRequest{
+		GuildID:        "guild-1",
+		ChannelID:      "text-1",
+		VoiceChannelID: "voice-1",
+		ActorID:        "user-1",
+		Access:         testAccess(ToolPolicyAssistive, admin.PermissionAssistantUse),
+		Call: llm.ToolCall{
+			ID:   "call-trial-music",
+			Type: "function",
+			Function: llm.ToolCallFunction{
+				Name:      "panda_manage_music",
+				Arguments: `{"action":"play","query":"fill my pockets by mgk"}`,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("trial music playback should be allowed, got %v", err)
+	}
+	if len(manager.requests) != 1 || manager.requests[0].Action != "play" {
+		t.Fatalf("expected music manager to receive trial playback request, got %+v", manager.requests)
 	}
 }
 
