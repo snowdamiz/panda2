@@ -1289,7 +1289,7 @@ func disabledFeatureAvailabilityNotice(access tools.ToolAccess) string {
 	if len(disabled) == 0 {
 		return ""
 	}
-	return " Server feature status: these public Panda features are not enabled for this server right now: " + strings.Join(disabled, "; ") + ". If the user asks for a capability covered by one of these disabled features, explain that the feature is not enabled for this server, say no action was taken, and tell a server admin to ask Panda to enable or reauthorize that feature. If new Discord permissions are needed, Panda will provide a reauthorization link. Do not call or invent tools for disabled features."
+	return " Server feature status: these public Panda server features are not enabled right now: " + strings.Join(disabled, "; ") + ". These are Panda server feature gates, not DMs or hidden model abilities. If the user asks for a capability covered by one of these disabled features, explain that the server feature is not enabled, say no action was taken, and tell a server admin to enable or reauthorize that feature. If new Discord permissions are needed, Panda will provide a reauthorization link. Do not call or invent tools for disabled features."
 }
 
 func disabledPublicFeatureSummaries(enabled map[string]struct{}) []string {

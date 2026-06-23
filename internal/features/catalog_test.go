@@ -50,15 +50,25 @@ func TestPublicCatalogExcludesOwnerOps(t *testing.T) {
 	}
 }
 
-func TestDefaultInstallPresetIncludesAdminAndAutomationFeatures(t *testing.T) {
+func TestDefaultInstallPresetIncludesAdminAutomationAndChannelMessages(t *testing.T) {
 	defaults := FeatureSet(DefaultInstallPreset())
-	for _, want := range []string{Threads, AdminSetup, AdminAccessControl, AdminAudit, ComposedTools} {
+	for _, want := range []string{Threads, AdminSetup, AdminAccessControl, AdminAudit, ComposedTools, DiscordMessages} {
 		if !Has(defaults, want) {
 			t.Fatalf("expected default install preset to include %s, got %+v", want, DefaultInstallPreset())
 		}
 	}
-	if _, err := Calculate(DefaultInstallPreset(), true); err != nil {
+	if Has(defaults, DiscordMessageActions) {
+		t.Fatalf("default install preset should not include server message management, got %+v", DefaultInstallPreset())
+	}
+	selection, err := Calculate(DefaultInstallPreset(), true)
+	if err != nil {
 		t.Fatalf("default install preset must be public-selectable: %v", err)
+	}
+	permissions := FeatureSet(selection.DiscordPermissionNames)
+	for _, heavy := range []string{"MANAGE_MESSAGES", "PIN_MESSAGES", "ADD_REACTIONS"} {
+		if Has(permissions, heavy) {
+			t.Fatalf("default channel messages should not request %s, got %+v", heavy, selection.DiscordPermissionNames)
+		}
 	}
 }
 

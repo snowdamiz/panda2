@@ -156,6 +156,85 @@ func TestOpenRunsUsefulnessMigrationWhenLegacyVersionsExist(t *testing.T) {
 	}
 }
 
+func TestDefaultChannelMessagesMigrationOnlyBackfillsDefaultPresetGuilds(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(filepath.Join(t.TempDir(), "features.db")), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open seed db: %v", err)
+	}
+	if err := db.Exec(`CREATE TABLE schema_migrations (
+		version INTEGER PRIMARY KEY,
+		name TEXT NOT NULL,
+		applied_at DATETIME NOT NULL
+	)`).Error; err != nil {
+		t.Fatalf("create schema_migrations: %v", err)
+	}
+	for _, migration := range migrations {
+		if migration.Version >= 23 {
+			continue
+		}
+		if err := db.Exec(`INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, CURRENT_TIMESTAMP)`, migration.Version, migration.Name).Error; err != nil {
+			t.Fatalf("seed migration %d: %v", migration.Version, err)
+		}
+	}
+	if err := db.Exec(`CREATE TABLE guild_features (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		guild_id TEXT NOT NULL,
+		feature_id TEXT NOT NULL,
+		enabled INTEGER NOT NULL DEFAULT 1,
+		source_install_intent_id TEXT NOT NULL DEFAULT '',
+		enabled_by_user_id TEXT NOT NULL DEFAULT '',
+		created_at DATETIME NOT NULL,
+		updated_at DATETIME NOT NULL,
+		UNIQUE(guild_id, feature_id)
+	)`).Error; err != nil {
+		t.Fatalf("create guild_features: %v", err)
+	}
+	if err := db.Exec(`CREATE TABLE audit_events (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		guild_id TEXT NOT NULL,
+		actor_id TEXT NOT NULL,
+		action TEXT NOT NULL,
+		target_type TEXT NOT NULL,
+		target_id TEXT NOT NULL,
+		metadata TEXT NOT NULL,
+		created_at DATETIME NOT NULL
+	)`).Error; err != nil {
+		t.Fatalf("create audit_events: %v", err)
+	}
+	for _, row := range []struct {
+		guildID string
+		source  string
+		enabled int
+	}{
+		{guildID: "legacy-default", source: "migration:default_preset", enabled: 1},
+		{guildID: "custom-install", source: "install-intent-1", enabled: 1},
+		{guildID: "legacy-disabled", source: "migration:default_preset", enabled: 0},
+	} {
+		if err := db.Exec(`INSERT INTO guild_features (guild_id, feature_id, enabled, source_install_intent_id, enabled_by_user_id, created_at, updated_at)
+			VALUES (?, 'assistant_chat', ?, ?, 'installer-1', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`, row.guildID, row.enabled, row.source).Error; err != nil {
+			t.Fatalf("seed guild feature for %s: %v", row.guildID, err)
+		}
+	}
+
+	if err := RunMigrations(db); err != nil {
+		t.Fatalf("RunMigrations: %v", err)
+	}
+
+	var count int64
+	if err := db.Table("guild_features").Where("guild_id = ? AND feature_id = ? AND enabled = ?", "legacy-default", "discord_messages", true).Count(&count).Error; err != nil {
+		t.Fatalf("query default guild feature: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("expected default-preset guild to receive discord_messages, got %d", count)
+	}
+	if err := db.Table("guild_features").Where("guild_id <> ? AND feature_id = ?", "legacy-default", "discord_messages").Count(&count).Error; err != nil {
+		t.Fatalf("query non-default guild features: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("expected custom or disabled guilds to stay unchanged, got %d discord_messages rows", count)
+	}
+}
+
 func TestBackupCreatesRestorableSQLiteFile(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()

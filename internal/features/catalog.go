@@ -25,6 +25,7 @@ const (
 	AdminAudit            = "admin_audit"
 	ComposedTools         = "composed_tools"
 	DiscordMessages       = "discord_messages"
+	DiscordMessageActions = "discord_message_actions"
 	DiscordRoleManagement = "discord_role_management"
 	DiscordChannelTools   = "discord_channel_tools"
 	DiscordWebhooks       = "discord_webhooks"
@@ -37,7 +38,7 @@ var (
 	ErrUnknownFeature       = errors.New("unknown feature")
 	ErrInternalFeature      = errors.New("feature is not selectable in public install")
 	ErrUnknownPermission    = errors.New("unknown Discord permission")
-	defaultInstallPresetIDs = []string{AssistantChat, Threads, Polls, Reminders, WebSearch, Knowledge, Attachments, Music, AdminSetup, AdminAccessControl, AdminAudit, ComposedTools}
+	defaultInstallPresetIDs = []string{AssistantChat, Threads, Polls, Reminders, WebSearch, Knowledge, Attachments, Music, AdminSetup, AdminAccessControl, AdminAudit, ComposedTools, DiscordMessages}
 	defaultInstallScopes    = []string{"bot", "applications.commands", "identify", "guilds"}
 )
 
@@ -416,11 +417,22 @@ var catalog = []Feature{
 	},
 	{
 		ID:                   DiscordMessages,
-		Label:                "Discord message writes",
-		Description:          "Confirmed sends, replies, edits, deletion, pins, reactions, and slowmode-adjacent message operations.",
-		DiscordPermissions:   []string{"VIEW_CHANNEL", "SEND_MESSAGES", "READ_MESSAGE_HISTORY", "MANAGE_MESSAGES", "PIN_MESSAGES", "ADD_REACTIONS"},
+		Label:                "Server channel messages",
+		Description:          "Send, reply, and edit Panda messages in regular server channels after confirmation. This is not for DMs.",
+		DiscordPermissions:   []string{"VIEW_CHANNEL", "SEND_MESSAGES", "READ_MESSAGE_HISTORY"},
 		PandaPermissions:     []string{admin.PermissionAssistantUse},
-		ToolNames:            []string{"discord.send_message", "discord.reply_message", "discord.edit_own_message", "discord.delete_own_message", "discord.delete_message", "discord.bulk_delete_messages", "discord.pin_message", "discord.unpin_message", "discord.add_reaction", "discord.remove_own_reaction"},
+		ToolNames:            []string{"discord.send_message", "discord.reply_message", "discord.edit_own_message"},
+		RequiresConfirmation: true,
+		Public:               true,
+		Dependencies:         []string{AssistantChat},
+	},
+	{
+		ID:                   DiscordMessageActions,
+		Label:                "Server message management",
+		Description:          "Delete Panda messages, pin or unpin messages, and manage Panda reactions in server channels after confirmation.",
+		DiscordPermissions:   []string{"VIEW_CHANNEL", "MANAGE_MESSAGES", "PIN_MESSAGES", "ADD_REACTIONS"},
+		PandaPermissions:     []string{admin.PermissionAssistantUse},
+		ToolNames:            []string{"discord.delete_own_message", "discord.pin_message", "discord.unpin_message", "discord.add_reaction", "discord.remove_own_reaction"},
 		RequiresConfirmation: true,
 		Public:               true,
 		Dependencies:         []string{AssistantChat},
