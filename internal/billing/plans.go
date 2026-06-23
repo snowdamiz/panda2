@@ -73,8 +73,8 @@ var planLimits = map[string]PlanLimits{
 		KnowledgeStorageBytes: 25 * 1024 * 1024,
 		Schedules:             3,
 		RetentionDays:         14,
-		MusicEnabled:          false,
-		PremiumToolsEnabled:   false,
+		MusicEnabled:          true,
+		PremiumToolsEnabled:   true,
 	},
 	PlanStarter: {
 		Plan:                  PlanStarter,

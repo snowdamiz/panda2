@@ -32,6 +32,9 @@ func TestEnsureTrialMetersUsageAndDeniesOverQuota(t *testing.T) {
 	if entitlement.Plan.Plan != PlanTrial || entitlement.Status != StatusTrialing || !entitlement.CanUsePaidFeatures || entitlement.ReadOnly {
 		t.Fatalf("unexpected trial entitlement: %+v", entitlement)
 	}
+	if !entitlement.Plan.MusicEnabled || !entitlement.Plan.PremiumToolsEnabled {
+		t.Fatalf("trial entitlement should include all feature privileges: %+v", entitlement.Plan)
+	}
 
 	reservation, err := service.BeginUsage(ctx, "guild-1", MetricAIResponse, int64(entitlement.Plan.AIResponses))
 	if err != nil {
