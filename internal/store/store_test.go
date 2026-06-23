@@ -169,7 +169,7 @@ func TestDefaultChannelMessagesMigrationOnlyBackfillsDefaultPresetGuilds(t *test
 		t.Fatalf("create schema_migrations: %v", err)
 	}
 	for _, migration := range migrations {
-		if migration.Version >= 23 {
+		if migration.Version == 23 {
 			continue
 		}
 		if err := db.Exec(`INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, CURRENT_TIMESTAMP)`, migration.Version, migration.Name).Error; err != nil {
@@ -232,6 +232,148 @@ func TestDefaultChannelMessagesMigrationOnlyBackfillsDefaultPresetGuilds(t *test
 	}
 	if count != 0 {
 		t.Fatalf("expected custom or disabled guilds to stay unchanged, got %d discord_messages rows", count)
+	}
+}
+
+func TestLandingDefaultChannelMessagesMigrationBackfillsOldInstallIntents(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(filepath.Join(t.TempDir(), "landing-features.db")), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open seed db: %v", err)
+	}
+	if err := db.Exec(`CREATE TABLE schema_migrations (
+		version INTEGER PRIMARY KEY,
+		name TEXT NOT NULL,
+		applied_at DATETIME NOT NULL
+	)`).Error; err != nil {
+		t.Fatalf("create schema_migrations: %v", err)
+	}
+	for _, migration := range migrations {
+		if migration.Version >= 24 {
+			continue
+		}
+		if err := db.Exec(`INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, CURRENT_TIMESTAMP)`, migration.Version, migration.Name).Error; err != nil {
+			t.Fatalf("seed migration %d: %v", migration.Version, err)
+		}
+	}
+	if err := db.Exec(`CREATE TABLE install_intents (
+		intent_id TEXT PRIMARY KEY,
+		state_hash TEXT NOT NULL,
+		selected_feature_ids TEXT NOT NULL DEFAULT '[]',
+		expanded_feature_ids TEXT NOT NULL DEFAULT '[]',
+		requested_discord_permissions TEXT NOT NULL DEFAULT '[]',
+		requested_permission_bitfield TEXT NOT NULL DEFAULT '0',
+		granted_discord_permissions TEXT NOT NULL DEFAULT '[]',
+		granted_scopes TEXT NOT NULL DEFAULT '[]',
+		source TEXT NOT NULL DEFAULT '',
+		desired_plan TEXT NOT NULL DEFAULT '',
+		referrer TEXT NOT NULL DEFAULT '',
+		campaign TEXT NOT NULL DEFAULT '',
+		installer_session_metadata TEXT NOT NULL DEFAULT '{}',
+		status TEXT NOT NULL DEFAULT 'pending',
+		guild_id TEXT NOT NULL DEFAULT '',
+		installer_user_id TEXT NOT NULL DEFAULT '',
+		expires_at DATETIME NOT NULL,
+		consumed_at DATETIME,
+		created_at DATETIME NOT NULL,
+		updated_at DATETIME NOT NULL
+	)`).Error; err != nil {
+		t.Fatalf("create install_intents: %v", err)
+	}
+	if err := db.Exec(`CREATE TABLE guild_features (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		guild_id TEXT NOT NULL,
+		feature_id TEXT NOT NULL,
+		enabled INTEGER NOT NULL DEFAULT 1,
+		source_install_intent_id TEXT NOT NULL DEFAULT '',
+		enabled_by_user_id TEXT NOT NULL DEFAULT '',
+		created_at DATETIME NOT NULL,
+		updated_at DATETIME NOT NULL,
+		UNIQUE(guild_id, feature_id)
+	)`).Error; err != nil {
+		t.Fatalf("create guild_features: %v", err)
+	}
+	if err := db.Exec(`CREATE TABLE audit_events (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		guild_id TEXT NOT NULL,
+		actor_id TEXT NOT NULL,
+		action TEXT NOT NULL,
+		target_type TEXT NOT NULL,
+		target_id TEXT NOT NULL,
+		metadata TEXT NOT NULL,
+		created_at DATETIME NOT NULL
+	)`).Error; err != nil {
+		t.Fatalf("create audit_events: %v", err)
+	}
+
+	oldLandingDefault := `["admin_access_control","admin_audit","admin_setup","assistant_chat","attachments","composed_tools","knowledge","music","polls","reminders","threads","web_search"]`
+	if err := db.Exec(`INSERT INTO install_intents (
+		intent_id, state_hash, selected_feature_ids, expanded_feature_ids, requested_discord_permissions,
+		requested_permission_bitfield, granted_discord_permissions, granted_scopes, source, status,
+		guild_id, installer_user_id, expires_at, consumed_at, created_at, updated_at
+	) VALUES (
+		'intent-old-default', 'state-old-default', ?, ?, '[]',
+		'0', '[]', '[]', 'landing', 'consumed',
+		'guild-old-default', 'installer-1', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+	)`, oldLandingDefault, oldLandingDefault).Error; err != nil {
+		t.Fatalf("seed old landing install intent: %v", err)
+	}
+	if err := db.Exec(`INSERT INTO install_intents (
+		intent_id, state_hash, selected_feature_ids, expanded_feature_ids, requested_discord_permissions,
+		requested_permission_bitfield, granted_discord_permissions, granted_scopes, source, status,
+		guild_id, installer_user_id, expires_at, consumed_at, created_at, updated_at
+	) VALUES (
+		'intent-old-default-2', 'state-old-default-2', ?, ?, '[]',
+		'0', '[]', '[]', 'landing', 'consumed',
+		'guild-old-default', 'installer-1', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+	)`, oldLandingDefault, oldLandingDefault).Error; err != nil {
+		t.Fatalf("seed duplicate old landing install intent: %v", err)
+	}
+	if err := db.Exec(`INSERT INTO install_intents (
+		intent_id, state_hash, selected_feature_ids, expanded_feature_ids, requested_discord_permissions,
+		requested_permission_bitfield, granted_discord_permissions, granted_scopes, source, status,
+		guild_id, installer_user_id, expires_at, consumed_at, created_at, updated_at
+	) VALUES (
+		'intent-custom', 'state-custom', '["assistant_chat"]', '["assistant_chat"]', '[]',
+		'0', '[]', '[]', 'landing', 'consumed',
+		'guild-custom', 'installer-2', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+	)`).Error; err != nil {
+		t.Fatalf("seed custom install intent: %v", err)
+	}
+	for _, row := range []struct {
+		guildID  string
+		intentID string
+	}{
+		{guildID: "guild-old-default", intentID: "intent-old-default"},
+		{guildID: "guild-custom", intentID: "intent-custom"},
+	} {
+		if err := db.Exec(`INSERT INTO guild_features (guild_id, feature_id, enabled, source_install_intent_id, enabled_by_user_id, created_at, updated_at)
+			VALUES (?, 'assistant_chat', 1, ?, 'installer-1', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`, row.guildID, row.intentID).Error; err != nil {
+			t.Fatalf("seed guild feature for %s: %v", row.guildID, err)
+		}
+	}
+
+	if err := RunMigrations(db); err != nil {
+		t.Fatalf("RunMigrations: %v", err)
+	}
+
+	var count int64
+	if err := db.Table("guild_features").Where("guild_id = ? AND feature_id = ? AND enabled = ?", "guild-old-default", "discord_messages", true).Count(&count).Error; err != nil {
+		t.Fatalf("query old default guild feature: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("expected old landing default guild to receive discord_messages, got %d", count)
+	}
+	if err := db.Table("guild_features").Where("guild_id = ? AND feature_id = ?", "guild-custom", "discord_messages").Count(&count).Error; err != nil {
+		t.Fatalf("query custom guild feature: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("expected custom guild to stay unchanged, got %d discord_messages rows", count)
+	}
+	if err := db.Table("audit_events").Where("guild_id = ? AND action = ?", "guild-old-default", "guild_features.default_enabled").Count(&count).Error; err != nil {
+		t.Fatalf("query audit event: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("expected one audit event for old landing default backfill, got %d", count)
 	}
 }
 

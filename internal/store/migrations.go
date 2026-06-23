@@ -1161,6 +1161,41 @@ var migrations = []Migration{
 					AND enabled = 1`,
 		},
 	},
+	{
+		Version: 24,
+		Name:    "default_server_channel_messages_for_landing_defaults",
+		SQL: []string{
+			`INSERT INTO audit_events (guild_id, actor_id, action, target_type, target_id, metadata, created_at)
+				SELECT intent.guild_id, intent.installer_user_id, 'guild_features.default_enabled', 'guild', intent.guild_id,
+					'{"source":"migration:landing_default_preset","features":["discord_messages"]}',
+					CURRENT_TIMESTAMP
+				FROM (
+					SELECT guild_id, MIN(installer_user_id) AS installer_user_id
+					FROM install_intents
+					WHERE status = 'consumed'
+						AND guild_id <> ''
+						AND expanded_feature_ids = '["admin_access_control","admin_audit","admin_setup","assistant_chat","attachments","composed_tools","knowledge","music","polls","reminders","threads","web_search"]'
+					GROUP BY guild_id
+				) intent
+				WHERE intent.guild_id <> ''
+					AND NOT EXISTS (
+						SELECT 1 FROM guild_features existing
+						WHERE existing.guild_id = intent.guild_id
+							AND existing.feature_id = 'discord_messages'
+					)`,
+			`INSERT OR IGNORE INTO guild_features (guild_id, feature_id, enabled, source_install_intent_id, enabled_by_user_id, created_at, updated_at)
+				SELECT intent.guild_id, 'discord_messages', 1, intent.intent_id, intent.installer_user_id, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+				FROM (
+					SELECT guild_id, MIN(intent_id) AS intent_id, MIN(installer_user_id) AS installer_user_id
+					FROM install_intents
+					WHERE status = 'consumed'
+						AND guild_id <> ''
+						AND expanded_feature_ids = '["admin_access_control","admin_audit","admin_setup","assistant_chat","attachments","composed_tools","knowledge","music","polls","reminders","threads","web_search"]'
+					GROUP BY guild_id
+				) intent
+				WHERE intent.guild_id <> ''`,
+		},
+	},
 }
 
 func RunMigrations(db *gorm.DB) error {
