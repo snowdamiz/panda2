@@ -2,11 +2,14 @@ package store
 
 import (
 	"context"
+	"log"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
+	"gorm.io/gorm/logger"
 )
 
 func TestOpenRunsMigrationsAndPragmas(t *testing.T) {
@@ -153,6 +156,37 @@ func TestOpenRunsUsefulnessMigrationWhenLegacyVersionsExist(t *testing.T) {
 	}
 	if count != 1 {
 		t.Fatalf("expected guild_classifier_model migration at version 16, got %d", count)
+	}
+}
+
+func TestExecMigrationStatementSkipsIdempotentColumnChangesWithoutLoggingErrors(t *testing.T) {
+	var logs strings.Builder
+	db, err := gorm.Open(sqlite.Open(filepath.Join(t.TempDir(), "columns.db")), &gorm.Config{
+		Logger: logger.New(log.New(&logs, "", 0), logger.Config{LogLevel: logger.Error}),
+	})
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	if err := db.Exec(`CREATE TABLE invoice_payment_events (
+		id INTEGER PRIMARY KEY,
+		amount_lamports INTEGER NOT NULL DEFAULT 0
+	)`).Error; err != nil {
+		t.Fatalf("create invoice_payment_events: %v", err)
+	}
+	if err := db.Exec(`CREATE TABLE customer_accounts (
+		id INTEGER PRIMARY KEY
+	)`).Error; err != nil {
+		t.Fatalf("create customer_accounts: %v", err)
+	}
+
+	if err := execMigrationStatement(db, `ALTER TABLE invoice_payment_events ADD COLUMN amount_lamports INTEGER NOT NULL DEFAULT 0`); err != nil {
+		t.Fatalf("idempotent add column: %v", err)
+	}
+	if err := execMigrationStatement(db, `ALTER TABLE customer_accounts DROP COLUMN stripe_customer_id`); err != nil {
+		t.Fatalf("idempotent drop column: %v", err)
+	}
+	if output := logs.String(); strings.Contains(output, "duplicate column name") || strings.Contains(output, "no such column") {
+		t.Fatalf("expected idempotent migration skips to avoid error logs, got:\n%s", output)
 	}
 }
 

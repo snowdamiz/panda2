@@ -1237,6 +1237,9 @@ func execMigrationStatement(tx *gorm.DB, statement string) error {
 	if isKnowledgeFTS5Statement(statement) && !sqliteSupportsFTS5(tx) {
 		return createFallbackKnowledgeSearchTable(tx)
 	}
+	if shouldSkipIdempotentColumnStatement(tx, statement) {
+		return nil
+	}
 
 	err := tx.Exec(statement).Error
 	if err == nil {
@@ -1252,6 +1255,49 @@ func execMigrationStatement(tx *gorm.DB, statement string) error {
 		return createFallbackKnowledgeSearchTable(tx)
 	}
 	return err
+}
+
+func shouldSkipIdempotentColumnStatement(tx *gorm.DB, statement string) bool {
+	table, column, operation, ok := alterTableColumnStatement(statement)
+	if !ok || !tx.Migrator().HasTable(table) {
+		return false
+	}
+	columnExists := tx.Migrator().HasColumn(table, column)
+	switch operation {
+	case "add":
+		return columnExists
+	case "drop":
+		return !columnExists
+	default:
+		return false
+	}
+}
+
+func alterTableColumnStatement(statement string) (string, string, string, bool) {
+	fields := strings.Fields(strings.TrimSpace(strings.TrimSuffix(statement, ";")))
+	if len(fields) < 6 {
+		return "", "", "", false
+	}
+	if !strings.EqualFold(fields[0], "alter") || !strings.EqualFold(fields[1], "table") {
+		return "", "", "", false
+	}
+	if !strings.EqualFold(fields[4], "column") {
+		return "", "", "", false
+	}
+	operation := strings.ToLower(fields[3])
+	if operation != "add" && operation != "drop" {
+		return "", "", "", false
+	}
+	table := trimSQLIdentifier(fields[2])
+	column := trimSQLIdentifier(fields[5])
+	if table == "" || column == "" {
+		return "", "", "", false
+	}
+	return table, column, operation, true
+}
+
+func trimSQLIdentifier(identifier string) string {
+	return strings.Trim(strings.TrimSpace(identifier), "`\"[]")
 }
 
 func isAddColumnStatement(statement string) bool {

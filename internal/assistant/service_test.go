@@ -2,7 +2,6 @@ package assistant
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -265,7 +264,7 @@ func TestAskRespectsDisabledGuild(t *testing.T) {
 
 func TestClassifyNaturalMessageUsesLLMDecision(t *testing.T) {
 	ctx := context.Background()
-	client := &fakeClient{response: llm.ChatResponse{Model: "fixture/model", Content: `{"respond":true,"prompt":"Is the deploy window Friday?"}`}}
+	client := &fakeClient{response: llm.ChatResponse{Model: "fixture/model", Content: `{"respond":true,"prompt":"Is the deploy window Friday?","tool_name":""}`}}
 	service, _ := newTestService(t, client)
 
 	decision, err := service.ClassifyNaturalMessage(ctx, NaturalMessageRequest{
@@ -298,7 +297,7 @@ func TestClassifyNaturalMessageUsesLLMDecision(t *testing.T) {
 func TestOperatorClassifierModelIsSeparateFromResponseModel(t *testing.T) {
 	ctx := context.Background()
 	client := &fakeClient{responses: []llm.ChatResponse{
-		{Content: `{"respond":true,"prompt":"answer this"}`},
+		{Content: `{"respond":true,"prompt":"answer this","tool_name":""}`},
 		{Content: "response answer"},
 	}}
 	service, db := newTestServiceWithModelConfig(t, client, "provider/response", "provider/classifier", nil)
@@ -403,7 +402,7 @@ func TestClassifyNaturalMessageRetriesInvalidJSON(t *testing.T) {
 	ctx := context.Background()
 	client := &fakeClient{responses: []llm.ChatResponse{
 		{Content: `**Decision** yes, respond`},
-		{Content: `{"respond":true,"prompt":"what can you do"}`},
+		{Content: `{"respond":true,"prompt":"what can you do","tool_name":""}`},
 	}}
 	service, _ := newTestService(t, client)
 
@@ -432,9 +431,37 @@ func TestClassifyNaturalMessageRetriesInvalidJSON(t *testing.T) {
 	}
 }
 
+func TestClassifyNaturalMessageRetriesSchemaMissingToolName(t *testing.T) {
+	ctx := context.Background()
+	client := &fakeClient{responses: []llm.ChatResponse{
+		{Content: `{"respond":true,"prompt":"what can you do"}`},
+		{Content: `{"respond":true,"prompt":"what can you do","tool_name":""}`},
+	}}
+	service, _ := newTestService(t, client)
+
+	decision, err := service.ClassifyNaturalMessage(ctx, NaturalMessageRequest{
+		GuildID:   "guild-1",
+		UserID:    "user-1",
+		ChannelID: "channel-1",
+		Content:   "what can you do panda",
+	})
+	if err != nil {
+		t.Fatalf("ClassifyNaturalMessage: %v", err)
+	}
+	if !decision.Respond || decision.Prompt != "what can you do" || decision.ToolName != "" {
+		t.Fatalf("unexpected decision: %+v", decision)
+	}
+	if len(client.requests) != 2 {
+		t.Fatalf("expected schema repair retry, got %d request(s)", len(client.requests))
+	}
+	if !strings.Contains(joinMessages(client.requests[1].Messages), "strict JSON") {
+		t.Fatalf("retry request missing repair instruction: %+v", client.requests[1])
+	}
+}
+
 func TestClassifyNaturalMessageCanDecline(t *testing.T) {
 	ctx := context.Background()
-	client := &fakeClient{response: llm.ChatResponse{Content: `{"respond":false,"prompt":""}`}}
+	client := &fakeClient{response: llm.ChatResponse{Content: `{"respond":false,"prompt":"","tool_name":""}`}}
 	service, _ := newTestService(t, client)
 
 	decision, err := service.ClassifyNaturalMessage(ctx, NaturalMessageRequest{
@@ -555,7 +582,7 @@ func TestParseNaturalMessageDecisionKeepsComposedToolHint(t *testing.T) {
 
 func TestParseNaturalMessageDecisionRedactsSecretsFromRewrittenPrompt(t *testing.T) {
 	secret := "sk-abcdefghijklmnopqrstuvwxyz123456"
-	decision, err := parseNaturalMessageDecision(`{"respond":true,"prompt":"Repeat token ` + secret + `"}`)
+	decision, err := parseNaturalMessageDecision(`{"respond":true,"prompt":"Repeat token ` + secret + `","tool_name":""}`)
 	if err != nil {
 		t.Fatalf("parseNaturalMessageDecision: %v", err)
 	}
@@ -990,14 +1017,11 @@ func TestAskCapabilityQuestionCanUseListToolsWhenDefaultAdminOnly(t *testing.T) 
 	}
 }
 
-func TestAskExecutesTextToolCallFallback(t *testing.T) {
+func TestAskRejectsTextToolCallMarkupEvenWhenToolIsAvailable(t *testing.T) {
 	ctx := context.Background()
-	client := &fakeClient{responses: []llm.ChatResponse{
-		{
-			Model:   "fixture/model",
-			Content: "<tool_call>panda_list_tools\n</tool_call>",
-		},
-		{Model: "fixture/model", Content: "I checked my available tools."},
+	client := &fakeClient{response: llm.ChatResponse{
+		Model:   "fixture/model",
+		Content: "<tool_call>panda_list_tools\n</tool_call>",
 	}}
 	service, db := newTestService(t, client)
 	configs := repository.NewGuildConfigRepository(db.DB)
@@ -1023,20 +1047,14 @@ func TestAskExecutesTextToolCallFallback(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Ask: %v", err)
 	}
-	if response.Content != "I checked my available tools." {
-		t.Fatalf("unexpected response: %q", response.Content)
+	if strings.Contains(response.Content, "<tool_call>") || strings.Contains(response.Content, "panda_list_tools") {
+		t.Fatalf("raw text tool call leaked to response: %q", response.Content)
 	}
-	if len(client.requests) != 2 {
-		t.Fatalf("expected text tool-call fallback to run the tool loop, got %d LLM requests", len(client.requests))
+	if !strings.Contains(response.Content, "not available") || !strings.Contains(response.Content, "did not take any action") {
+		t.Fatalf("expected unavailable tool message, got %q", response.Content)
 	}
-	if !toolNamePresent(client.requests[0].Tools, "panda_list_tools") {
-		t.Fatalf("expected panda_list_tools in first model request, got %+v", client.requests[0].Tools)
-	}
-	joined := joinMessages(client.requests[1].Messages)
-	for _, want := range []string{"text_tool_call_1", `"presentation":"capabilities"`, `"name":"current_capabilities"`} {
-		if !strings.Contains(joined, want) {
-			t.Fatalf("expected fallback tool execution to add %s to final request, got %s", want, joined)
-		}
+	if len(client.requests) != 1 {
+		t.Fatalf("text tool-call markup should not start a tool loop, got %d requests", len(client.requests))
 	}
 }
 
@@ -1114,7 +1132,7 @@ func TestAskContinuesSequentialToolRoundsWithinOnePrompt(t *testing.T) {
 	}
 }
 
-func TestAskSuppressesUnavailableTextToolCallFallback(t *testing.T) {
+func TestAskSuppressesUnavailableTextToolCallMarkup(t *testing.T) {
 	ctx := context.Background()
 	client := &fakeClient{response: llm.ChatResponse{
 		Model: "fixture/model",
@@ -1200,59 +1218,6 @@ func TestAskRejectsUnavailableStructuredToolCall(t *testing.T) {
 	}
 	if len(client.requests) != 1 {
 		t.Fatalf("unavailable structured tool call should not start a tool loop, got %d requests", len(client.requests))
-	}
-}
-
-func TestParseTextToolCallsParsesOpenRouterFallbackMarkup(t *testing.T) {
-	content := `<tool_call>panda_manage_composed_tool
-<arg_key>action</arg_key>
-<arg_value>draft</arg_value>
-<arg_key>request</arg_key>
-<arg_value>Every time a new user enters the discord server, mention them in a welcome message in channel 1517943356074889276 with a funny greeting</arg_value>
-</tool_call>`
-
-	calls, ok := parseTextToolCalls(content, []llm.Tool{{
-		Type: "function",
-		Function: llm.ToolFunction{
-			Name: "panda_manage_composed_tool",
-		},
-	}})
-	if !ok {
-		t.Fatalf("expected fallback markup to parse")
-	}
-	if len(calls) != 1 {
-		t.Fatalf("expected one tool call, got %d", len(calls))
-	}
-	if calls[0].ID != "text_tool_call_1" || calls[0].Type != "function" || calls[0].Function.Name != "panda_manage_composed_tool" {
-		t.Fatalf("unexpected parsed call: %+v", calls[0])
-	}
-	var args map[string]string
-	if err := json.Unmarshal([]byte(calls[0].Function.Arguments), &args); err != nil {
-		t.Fatalf("parse arguments JSON: %v", err)
-	}
-	if args["action"] != "draft" {
-		t.Fatalf("unexpected action arg: %+v", args)
-	}
-	if !strings.Contains(args["request"], "welcome message in channel 1517943356074889276") {
-		t.Fatalf("unexpected request arg: %+v", args)
-	}
-}
-
-func TestParseTextToolCallsRejectsUnavailableOrMixedContent(t *testing.T) {
-	availableTools := []llm.Tool{{
-		Type: "function",
-		Function: llm.ToolFunction{
-			Name: "panda_list_tools",
-		},
-	}}
-	if _, ok := parseTextToolCalls("<tool_call>panda_manage_composed_tool\n</tool_call>", availableTools); ok {
-		t.Fatal("expected unavailable text tool call to be rejected")
-	}
-	if _, ok := parseTextToolCalls("sure\n<tool_call>panda_list_tools\n</tool_call>", availableTools); ok {
-		t.Fatal("expected mixed prose and text tool call to be rejected")
-	}
-	if _, ok := parseTextToolCalls("<tool_call>panda_list_tools\n</tool_call>\nDone.", availableTools); ok {
-		t.Fatal("expected trailing prose after text tool call to be rejected")
 	}
 }
 

@@ -1,6 +1,7 @@
 package assistant
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -575,6 +576,24 @@ var naturalPreferredToolChoices = []naturalPreferredToolChoice{
 	{Name: "panda_manage_ops", Description: "owner operational health, guild counts, drain, resume, reload, or incident mode."},
 }
 
+var naturalPreferredToolChoiceAliases = buildNaturalPreferredToolChoiceAliases(naturalPreferredToolChoices)
+
+func buildNaturalPreferredToolChoiceAliases(choices []naturalPreferredToolChoice) map[string]string {
+	aliases := make(map[string]string, len(choices)*2)
+	for _, choice := range choices {
+		name := strings.TrimSpace(choice.Name)
+		if name == "" {
+			continue
+		}
+		normalized := strings.ToLower(name)
+		aliases[normalized] = name
+		if strings.HasPrefix(normalized, "panda_") || strings.HasPrefix(normalized, "discord_") {
+			aliases[strings.Replace(normalized, "_", ".", 1)] = name
+		}
+	}
+	return aliases
+}
+
 func naturalTriggerSystemPrompt() string {
 	return "You decide whether Panda, a Discord assistant, should respond to one Discord message. Return strict JSON only: {\"respond\":true|false,\"prompt\":\"...\",\"tool_name\":\"\"}. Set respond true when the author is intentionally addressing Panda/the bot/the assistant by name, mention, or reply and asks a question, asks for help, asks about Panda's capabilities/tools, issues a task, asks to set up or configure Panda, asks for owner operational health/drain/resume/incident controls, or continues a direct conversation with Panda. Do not require an @mention when the message naturally addresses Panda by name. If the word Panda appears anywhere in the message, consider the full sentence; do not require Panda to be at the start. Set respond false for ambient conversation, jokes, statements about pandas as a topic, or messages that do not seek a bot response. If respond is true, rewrite the user's request as the prompt Panda should answer: remove only the wake word or greeting, preserve the user's actual intent and important reply context.\n\n" +
 		"Set tool_name only when the request clearly requires one of these single workflows:\n" + naturalPreferredToolChoicePrompt() + "\n\n" +
@@ -671,7 +690,13 @@ func parseNaturalMessageDecision(content string) (NaturalMessageDecision, error)
 		Prompt   string `json:"prompt"`
 		ToolName string `json:"tool_name"`
 	}
-	if err := json.Unmarshal([]byte(extractJSONObject(content)), &payload); err != nil {
+	body := []byte(extractJSONObject(content))
+	if err := validateNaturalMessageDecisionObject(body); err != nil {
+		return NaturalMessageDecision{}, err
+	}
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&payload); err != nil {
 		return NaturalMessageDecision{}, fmt.Errorf("parse natural trigger decision: %w", err)
 	}
 	prompt := sanitizePromptInput(payload.Prompt)
@@ -681,39 +706,25 @@ func parseNaturalMessageDecision(content string) (NaturalMessageDecision, error)
 	return NaturalMessageDecision{Respond: true, Prompt: prompt, ToolName: normalizeNaturalToolChoice(payload.ToolName)}, nil
 }
 
-func normalizeNaturalToolChoice(toolName string) string {
-	switch strings.ToLower(strings.TrimSpace(toolName)) {
-	case "panda_manage_music", "panda.manage_music":
-		return "panda_manage_music"
-	case "read_config":
-		return "read_config"
-	case "panda_manage_reminder", "panda.manage_reminder":
-		return "panda_manage_reminder"
-	case "discord_create_poll", "discord.create_poll":
-		return "discord_create_poll"
-	case "panda_manage_schedule", "panda.manage_schedule":
-		return "panda_manage_schedule"
-	case "panda_manage_discord_role", "panda.manage_discord_role":
-		return "panda_manage_discord_role"
-	case "panda_manage_member_role", "panda.manage_member_role":
-		return "panda_manage_member_role"
-	case "panda_manage_role_permission", "panda.manage_role_permission":
-		return "panda_manage_role_permission"
-	case "panda_manage_channel_rule", "panda.manage_channel_rule":
-		return "panda_manage_channel_rule"
-	case "panda_manage_tool_access", "panda.manage_tool_access":
-		return "panda_manage_tool_access"
-	case "panda_manage_composed_tool", "panda.manage_composed_tool":
-		return "panda_manage_composed_tool"
-	case "panda_manage_soul", "panda.manage_soul":
-		return "panda_manage_soul"
-	case "panda_manage_prompt", "panda.manage_prompt":
-		return "panda_manage_prompt"
-	case "panda_manage_ops", "panda.manage_ops":
-		return "panda_manage_ops"
-	default:
-		return ""
+func validateNaturalMessageDecisionObject(body []byte) error {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(body, &fields); err != nil {
+		return fmt.Errorf("parse natural trigger decision: %w", err)
 	}
+	if len(fields) != 3 {
+		return fmt.Errorf("parse natural trigger decision: expected exactly respond, prompt, and tool_name fields")
+	}
+	for _, name := range []string{"respond", "prompt", "tool_name"} {
+		if _, ok := fields[name]; !ok {
+			return fmt.Errorf("parse natural trigger decision: missing required field %q", name)
+		}
+	}
+	return nil
+}
+
+func normalizeNaturalToolChoice(toolName string) string {
+	normalized := strings.ToLower(strings.TrimSpace(toolName))
+	return naturalPreferredToolChoiceAliases[normalized]
 }
 
 func extractJSONObject(content string) string {
@@ -784,28 +795,20 @@ func (s *Service) completeWithTools(ctx context.Context, config store.GuildConfi
 		if err != nil || s.toolExecutor == nil {
 			return response, confirmations, card, sourceLinks, usedWebSearch, err
 		}
-		if len(response.ToolCalls) == 0 {
-			if toolCalls, ok := parseTextToolCalls(response.Content, request.Tools); ok {
-				response.ToolCalls = toolCalls
-				response.Content = ""
-			} else if containsTextToolCallMarkup(response.Content) {
-				response.Content = textToolCallUnavailableMessage()
-			}
+		if len(response.ToolCalls) == 0 && containsTextToolCallMarkup(response.Content) {
+			response.Content = unavailableToolMessage()
 		}
 		if len(response.ToolCalls) > 0 {
 			filteredToolCalls := filterUnavailableToolCalls(response.ToolCalls, request.Tools)
 			if len(filteredToolCalls) == 0 {
 				response.ToolCalls = nil
-				response.Content = textToolCallUnavailableMessage()
+				response.Content = unavailableToolMessage()
 			} else {
 				response.ToolCalls = filteredToolCalls
 			}
 		}
 		response.ToolCalls = firstToolCallOnly(response.ToolCalls)
 		if len(response.ToolCalls) == 0 {
-			if containsTextToolCallMarkup(response.Content) {
-				response.Content = textToolCallUnavailableMessage()
-			}
 			return response, confirmations, card, sourceLinks, usedWebSearch, nil
 		}
 		if round >= maxToolCallRounds {
@@ -1014,118 +1017,12 @@ func sanitizeToolMessage(message llm.Message) llm.Message {
 	return message
 }
 
-func parseTextToolCalls(content string, availableTools []llm.Tool) ([]llm.ToolCall, bool) {
-	allowed := map[string]struct{}{}
-	for _, tool := range availableTools {
-		name := strings.TrimSpace(tool.Function.Name)
-		if name != "" {
-			allowed[name] = struct{}{}
-		}
-	}
-	if len(allowed) == 0 {
-		return nil, false
-	}
-
-	remaining := strings.TrimSpace(content)
-	if !strings.HasPrefix(remaining, "<tool_call>") {
-		return nil, false
-	}
-	var calls []llm.ToolCall
-	for remaining != "" {
-		block, rest, ok := nextTextToolCallBlock(remaining)
-		if !ok {
-			return nil, false
-		}
-		call, ok := parseTextToolCallBlock(block, len(calls)+1, allowed)
-		if !ok {
-			return nil, false
-		}
-		calls = append(calls, call)
-		remaining = strings.TrimSpace(rest)
-	}
-	return calls, len(calls) > 0
-}
-
-func nextTextToolCallBlock(content string) (string, string, bool) {
-	content = strings.TrimSpace(content)
-	const startTag = "<tool_call>"
-	const endTag = "</tool_call>"
-	if !strings.HasPrefix(content, startTag) {
-		return "", "", false
-	}
-	end := strings.Index(content, endTag)
-	if end < 0 {
-		return "", "", false
-	}
-	block := content[len(startTag):end]
-	rest := content[end+len(endTag):]
-	return block, rest, true
-}
-
-func parseTextToolCallBlock(block string, index int, allowed map[string]struct{}) (llm.ToolCall, bool) {
-	block = strings.TrimSpace(block)
-	if block == "" {
-		return llm.ToolCall{}, false
-	}
-	argStart := strings.Index(block, "<arg_key>")
-	nameText := block
-	argsText := ""
-	if argStart >= 0 {
-		nameText = block[:argStart]
-		argsText = block[argStart:]
-	}
-	name := strings.TrimSpace(nameText)
-	if _, ok := allowed[name]; !ok {
-		return llm.ToolCall{}, false
-	}
-	args := map[string]any{}
-	for strings.TrimSpace(argsText) != "" {
-		key, rest, ok := consumeTextToolTag(argsText, "arg_key")
-		if !ok || strings.TrimSpace(key) == "" {
-			return llm.ToolCall{}, false
-		}
-		value, rest, ok := consumeTextToolTag(rest, "arg_value")
-		if !ok {
-			return llm.ToolCall{}, false
-		}
-		args[strings.TrimSpace(key)] = strings.TrimSpace(value)
-		argsText = rest
-	}
-	arguments, err := json.Marshal(args)
-	if err != nil {
-		return llm.ToolCall{}, false
-	}
-	return llm.ToolCall{
-		ID:   fmt.Sprintf("text_tool_call_%d", index),
-		Type: "function",
-		Function: llm.ToolCallFunction{
-			Name:      name,
-			Arguments: string(arguments),
-		},
-	}, true
-}
-
-func consumeTextToolTag(content, tag string) (string, string, bool) {
-	content = strings.TrimSpace(content)
-	startTag := "<" + tag + ">"
-	endTag := "</" + tag + ">"
-	if !strings.HasPrefix(content, startTag) {
-		return "", content, false
-	}
-	end := strings.Index(content, endTag)
-	if end < 0 {
-		return "", content, false
-	}
-	value := content[len(startTag):end]
-	return value, content[end+len(endTag):], true
-}
-
 func containsTextToolCallMarkup(content string) bool {
 	content = strings.TrimSpace(content)
 	return strings.Contains(content, "<tool_call>") || strings.Contains(content, "</tool_call>")
 }
 
-func textToolCallUnavailableMessage() string {
+func unavailableToolMessage() string {
 	return "I tried to use a Panda tool, but that tool is not available for this request. I did not take any action. Check Panda tool permissions for this channel and try again."
 }
 
@@ -1134,7 +1031,7 @@ const maxAppendedWebSourceLinks = 10
 
 func finalizeAssistantContent(content string, sourceLinks []tools.SourceLink, sourceLimit int) string {
 	if containsTextToolCallMarkup(content) {
-		content = textToolCallUnavailableMessage()
+		content = unavailableToolMessage()
 	}
 	return appendWebSearchSourceLinks(security.SanitizeDiscordContent(content), sourceLinks, sourceLimit)
 }

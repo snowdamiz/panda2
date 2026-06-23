@@ -2196,7 +2196,7 @@ func TestChatUsesThreadManagerWhenAvailable(t *testing.T) {
 
 func TestNaturalMessageUsesInlineChat(t *testing.T) {
 	client := &fakeLLM{responses: []llm.ChatResponse{
-		{Content: `{"respond":true,"prompt":"continue"}`},
+		{Content: `{"respond":true,"prompt":"continue","tool_name":""}`},
 		{Content: "chat fixture"},
 	}}
 	threadManager := &fakeThreadManager{thread: Thread{ID: "thread-1", Name: "Panda: continue", Created: true}}
@@ -2224,7 +2224,7 @@ func TestNaturalMessageUsesInlineChat(t *testing.T) {
 
 func TestNaturalMessageSetsSoulThroughAgentTool(t *testing.T) {
 	client := &fakeLLM{responses: []llm.ChatResponse{
-		{Content: `{"respond":true,"prompt":"set your soul to Be crystalline and kind."}`},
+		{Content: `{"respond":true,"prompt":"set your soul to Be crystalline and kind.","tool_name":""}`},
 		{ToolCalls: []llm.ToolCall{{
 			ID:   "call-soul-set",
 			Type: "function",
@@ -2325,7 +2325,7 @@ func TestNaturalMessageSetsPromptThroughAgentTool(t *testing.T) {
 func TestNaturalMessageDraftsEventAutomationThroughAgentTool(t *testing.T) {
 	const channelID = "100000000000000123"
 	client := &fakeLLM{responses: []llm.ChatResponse{
-		{Content: `{"respond":true,"prompt":"draft an automation for new role announcements"}`},
+		{Content: `{"respond":true,"prompt":"draft an automation for new role announcements","tool_name":""}`},
 		{ToolCalls: []llm.ToolCall{{
 			ID:   "call-composed-draft",
 			Type: "function",
@@ -2436,17 +2436,15 @@ func TestNaturalMessageDraftsEveryTimeEventAutomationThroughAgentTool(t *testing
 	}
 }
 
-func TestNaturalMessageExecutesTextToolCallFallbackForComposedTool(t *testing.T) {
+func TestNaturalMessageRejectsTextToolCallMarkupForComposedTool(t *testing.T) {
 	client := &fakeLLM{responses: []llm.ChatResponse{
-		{Content: `{"respond":true,"prompt":"please draft the requested composed automation"}`},
+		{Content: `{"respond":true,"prompt":"please draft the requested composed automation","tool_name":""}`},
 		{Content: `<tool_call>panda_manage_composed_tool
 <arg_key>action</arg_key>
 <arg_value>draft</arg_value>
 <arg_key>request</arg_key>
 <arg_value>Every time a new user enters the discord server, mention them in a welcome message in channel ID 1517943356074889276 with a funny greeting</arg_value>
 </tool_call>`},
-		{Content: memberWelcomeSpecJSON()},
-		{Content: "Drafted the member welcome automation for approval."},
 	}}
 	router := newTestRouter(t, client, 20)
 
@@ -2460,30 +2458,20 @@ func TestNaturalMessageExecutesTextToolCallFallbackForComposedTool(t *testing.T)
 			"bot_mentioned": "true",
 		},
 	})
-	if response.Confirmation == nil || !strings.Contains(response.Content, "Drafted the member welcome automation for approval.") {
-		t.Fatalf("expected final model response after fallback tool execution, got %+v", response)
+	if response.Confirmation != nil {
+		t.Fatalf("text tool-call markup should not create a confirmation, got %+v", response.Confirmation)
 	}
-	if strings.Contains(response.Content, "<tool_call>") {
+	if strings.Contains(response.Content, "<tool_call>") || strings.Contains(response.Content, "panda_manage_composed_tool") {
 		t.Fatalf("raw text tool-call markup leaked into response: %q", response.Content)
 	}
-	if len(client.requests) != 4 {
-		t.Fatalf("expected classifier, chat fallback, draft LLM, and final chat requests, got %d", len(client.requests))
+	if !strings.Contains(response.Content, "not available") || !strings.Contains(response.Content, "did not take any action") {
+		t.Fatalf("expected unavailable tool response, got %+v", response)
+	}
+	if len(client.requests) != 2 {
+		t.Fatalf("expected classifier and natural chat request only, got %d", len(client.requests))
 	}
 	if !requestToolNames(client.requests[1])["panda_manage_composed_tool"] {
 		t.Fatalf("expected composed tool manager to be available to admin natural chat, got %+v", requestToolNames(client.requests[1]))
-	}
-	finalMessages := joinRequestMessages(client.requests[3])
-	if !strings.Contains(finalMessages, "member_welcome") {
-		t.Fatalf("expected composed draft tool result in final chat request, got:\n%s", finalMessages)
-	}
-	hasToolCallID := false
-	for _, message := range client.requests[3].Messages {
-		if message.ToolCallID == "text_tool_call_1" {
-			hasToolCallID = true
-		}
-	}
-	if !hasToolCallID {
-		t.Fatalf("expected synthetic text tool-call id in final chat request, got %+v", client.requests[3].Messages)
 	}
 }
 
@@ -2683,7 +2671,7 @@ func TestNaturalMessageExposesMusicWhenToolPolicyOff(t *testing.T) {
 func TestNaturalMessageSoulWriterCanBrainstormWithoutAssistantUse(t *testing.T) {
 	ctx := context.Background()
 	client := &fakeLLM{responses: []llm.ChatResponse{
-		{Content: `{"respond":true,"prompt":"let's brainstorm your soul before setting it"}`},
+		{Content: `{"respond":true,"prompt":"let's brainstorm your soul before setting it","tool_name":""}`},
 		{Content: "Let's shape a few options."},
 	}}
 	router := newTestRouter(t, client, 20)
@@ -2716,7 +2704,7 @@ func TestNaturalMessageSoulWriterCanBrainstormWithoutAssistantUse(t *testing.T) 
 
 func TestNaturalMessagePassesReplyContextToChat(t *testing.T) {
 	client := &fakeLLM{responses: []llm.ChatResponse{
-		{Content: `{"respond":true,"prompt":"give me the full list by tool name"}`},
+		{Content: `{"respond":true,"prompt":"give me the full list by tool name","tool_name":""}`},
 		{Content: "chat fixture"},
 	}}
 	router := newTestRouter(t, client, 5)
@@ -2749,7 +2737,7 @@ func TestNaturalMessagePassesReplyContextToChat(t *testing.T) {
 
 func TestNaturalMessageAdminGetsManagementToolsWhenPolicyOff(t *testing.T) {
 	client := &fakeLLM{responses: []llm.ChatResponse{
-		{Content: `{"respond":true,"prompt":"what can you do"}`},
+		{Content: `{"respond":true,"prompt":"what can you do","tool_name":""}`},
 		{Content: "chat fixture"},
 	}}
 	router := newTestRouter(t, client, 5)
@@ -2780,7 +2768,7 @@ func TestNaturalMessageAdminGetsManagementToolsWhenPolicyOff(t *testing.T) {
 
 func TestNaturalMessageClassifiesTrailingPandaMention(t *testing.T) {
 	client := &fakeLLM{responses: []llm.ChatResponse{
-		{Content: `{"respond":true,"prompt":"what can you do"}`},
+		{Content: `{"respond":true,"prompt":"what can you do","tool_name":""}`},
 		{Content: "chat fixture"},
 	}}
 	router := newTestRouter(t, client, 5)
@@ -2890,7 +2878,7 @@ func TestRegularUserGetsWebSearchPermissionByDefault(t *testing.T) {
 }
 
 func TestNaturalMessageDoesNotRespondWhenTriggerDeclines(t *testing.T) {
-	client := &fakeLLM{response: llm.ChatResponse{Content: `{"respond":false,"prompt":""}`}}
+	client := &fakeLLM{response: llm.ChatResponse{Content: `{"respond":false,"prompt":"","tool_name":""}`}}
 	router := newTestRouter(t, client, 5)
 
 	response := router.HandleNaturalMessage(context.Background(), Request{
