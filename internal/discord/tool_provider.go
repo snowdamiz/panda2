@@ -1479,72 +1479,17 @@ func (p *ToolProvider) deleteScheduledEvent(request tools.DiscordToolRequest) (a
 }
 
 func (p *ToolProvider) preflight(request tools.DiscordToolRequest) error {
-	required := permissionBits(request.Permissions)
-	if required == disgoDiscord.PermissionsNone || p.botUserID == 0 {
-		return nil
-	}
-	guildID, err := guildIDArg(request)
-	if err != nil {
-		return fmt.Errorf("discord permission preflight failed: %w", err)
-	}
-	member, err := p.rest.GetMember(guildID, p.botUserID)
-	if err != nil {
-		return fmt.Errorf("discord permission preflight failed: bot member lookup: %w", err)
-	}
-	permissions, err := p.guildPermissions(guildID, *member)
-	if err != nil {
-		return err
-	}
+	channelIDValue := ""
 	if channelID, ok := requestChannelID(request); ok {
-		channel, err := p.rest.GetChannel(channelID)
-		if err != nil {
-			return fmt.Errorf("discord permission preflight failed: channel lookup: %w", err)
-		}
-		if guildChannel, ok := channel.(disgoDiscord.GuildChannel); ok {
-			permissions = applyChannelOverwrites(permissions, guildChannel, *member)
-		}
+		channelIDValue = channelID.String()
 	}
-	if permissions.Has(disgoDiscord.PermissionAdministrator) || permissions.Has(required) {
-		return nil
-	}
-	missing := required &^ permissions
-	return fmt.Errorf("discord permission preflight failed: missing %s", missing.String())
-}
-
-func (p *ToolProvider) guildPermissions(guildID snowflake.ID, member disgoDiscord.Member) (disgoDiscord.Permissions, error) {
-	guild, err := p.rest.GetGuild(guildID, false)
-	if err != nil {
-		return disgoDiscord.PermissionsNone, fmt.Errorf("discord permission preflight failed: guild lookup: %w", err)
-	}
-	if guild.OwnerID == member.User.ID {
-		return disgoDiscord.PermissionsAll, nil
-	}
-	roles, err := p.rest.GetRoles(guildID)
-	if err != nil {
-		return disgoDiscord.PermissionsNone, fmt.Errorf("discord permission preflight failed: role lookup: %w", err)
-	}
-	roleByID := map[snowflake.ID]disgoDiscord.Role{}
-	for _, role := range roles {
-		roleByID[role.ID] = role
-	}
-	permissions := disgoDiscord.PermissionsNone
-	if publicRole, ok := roleByID[guildID]; ok {
-		permissions = publicRole.Permissions
-	}
-	for _, roleID := range member.RoleIDs {
-		role, ok := roleByID[roleID]
-		if !ok {
-			continue
-		}
-		permissions = permissions.Add(role.Permissions)
-		if permissions.Has(disgoDiscord.PermissionAdministrator) {
-			return disgoDiscord.PermissionsAll, nil
-		}
-	}
-	if member.CommunicationDisabledUntil != nil && member.CommunicationDisabledUntil.After(time.Now()) {
-		permissions &= disgoDiscord.PermissionViewChannel | disgoDiscord.PermissionReadMessageHistory
-	}
-	return permissions, nil
+	return preflightDiscordPermissions(discordPermissionPreflightRequest{
+		Rest:        p.rest,
+		BotUserID:   p.botUserID,
+		GuildID:     request.GuildID,
+		ChannelID:   channelIDValue,
+		Permissions: request.Permissions,
+	})
 }
 
 func applyChannelOverwrites(permissions disgoDiscord.Permissions, channel disgoDiscord.GuildChannel, member disgoDiscord.Member) disgoDiscord.Permissions {
