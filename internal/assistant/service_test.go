@@ -774,8 +774,9 @@ func TestAskIncludesDisabledFeatureContextWhenFeatureGateActive(t *testing.T) {
 	for _, want := range []string{
 		"Server feature status",
 		"Music (`music`)",
-		"feature is not enabled for this server",
-		"ask Panda to enable or reauthorize that feature",
+		"Panda server feature gates",
+		"server feature is not enabled",
+		"enable or reauthorize that feature",
 		"reauthorization link",
 	} {
 		if !strings.Contains(joined, want) {

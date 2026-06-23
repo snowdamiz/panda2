@@ -1142,6 +1142,25 @@ var migrations = []Migration{
 			`ALTER TABLE guilds DROP COLUMN feature_flags`,
 		},
 	},
+	{
+		Version: 23,
+		Name:    "default_server_channel_messages",
+		SQL: []string{
+			`INSERT OR IGNORE INTO guild_features (guild_id, feature_id, enabled, source_install_intent_id, enabled_by_user_id, created_at, updated_at)
+				SELECT DISTINCT guild_id, 'discord_messages', 1, 'migration:default_preset', enabled_by_user_id, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+				FROM guild_features
+				WHERE source_install_intent_id = 'migration:default_preset'
+					AND enabled = 1`,
+			`INSERT INTO audit_events (guild_id, actor_id, action, target_type, target_id, metadata, created_at)
+				SELECT DISTINCT guild_id, enabled_by_user_id, 'guild_features.default_enabled', 'guild', guild_id,
+					'{"source":"migration:default_preset","features":["discord_messages"]}',
+					CURRENT_TIMESTAMP
+				FROM guild_features
+				WHERE source_install_intent_id = 'migration:default_preset'
+					AND feature_id = 'discord_messages'
+					AND enabled = 1`,
+		},
+	},
 }
 
 func RunMigrations(db *gorm.DB) error {

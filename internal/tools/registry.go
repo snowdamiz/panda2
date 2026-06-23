@@ -532,16 +532,16 @@ func DefaultDefinitions() []Definition {
 			Audit:                 AuditOnUse,
 			IncludeInModelContext: true,
 		},
-		discordWrite("discord.send_message", "Send a confirmed Discord message to a channel.", []string{"channel_id", "content"}, "VIEW_CHANNEL", "SEND_MESSAGES"),
-		discordWrite("discord.reply_message", "Reply to a Discord message after confirmation.", []string{"channel_id", "message_id", "content"}, "VIEW_CHANNEL", "SEND_MESSAGES", "READ_MESSAGE_HISTORY"),
+		discordWrite("discord.send_message", "Send a confirmed message to a Discord server channel.", []string{"channel_id", "content"}, "VIEW_CHANNEL", "SEND_MESSAGES"),
+		discordWrite("discord.reply_message", "Reply to a Discord server channel message after confirmation.", []string{"channel_id", "message_id", "content"}, "VIEW_CHANNEL", "SEND_MESSAGES", "READ_MESSAGE_HISTORY"),
 		discordWrite("discord.edit_own_message", "Edit a Panda-authored Discord message after confirmation.", []string{"channel_id", "message_id", "content"}, "VIEW_CHANNEL", "SEND_MESSAGES"),
-		discordWrite("discord.delete_own_message", "Delete a Panda-authored Discord message after confirmation.", []string{"channel_id", "message_id"}, "VIEW_CHANNEL", "MANAGE_MESSAGES"),
+		messageActionWrite("discord.delete_own_message", "Delete a Panda-authored Discord message after confirmation.", []string{"channel_id", "message_id"}, "VIEW_CHANNEL", "MANAGE_MESSAGES"),
 		moderationWrite("discord.delete_message", "Delete a Discord message after confirmation.", []string{"channel_id", "message_id"}, "VIEW_CHANNEL", "MANAGE_MESSAGES"),
 		moderationWrite("discord.bulk_delete_messages", "Bulk delete recent Discord messages after confirmation.", []string{"channel_id", "message_ids"}, "VIEW_CHANNEL", "MANAGE_MESSAGES"),
-		discordWrite("discord.pin_message", "Pin a Discord message after confirmation.", []string{"channel_id", "message_id"}, "VIEW_CHANNEL", "PIN_MESSAGES"),
-		discordWrite("discord.unpin_message", "Unpin a Discord message after confirmation.", []string{"channel_id", "message_id"}, "VIEW_CHANNEL", "PIN_MESSAGES"),
-		discordWrite("discord.add_reaction", "Add a reaction to a Discord message.", []string{"channel_id", "message_id", "emoji"}, "VIEW_CHANNEL", "ADD_REACTIONS"),
-		discordWrite("discord.remove_own_reaction", "Remove Panda's reaction from a Discord message.", []string{"channel_id", "message_id", "emoji"}, "VIEW_CHANNEL"),
+		messageActionWrite("discord.pin_message", "Pin a Discord message after confirmation.", []string{"channel_id", "message_id"}, "VIEW_CHANNEL", "PIN_MESSAGES"),
+		messageActionWrite("discord.unpin_message", "Unpin a Discord message after confirmation.", []string{"channel_id", "message_id"}, "VIEW_CHANNEL", "PIN_MESSAGES"),
+		messageActionWrite("discord.add_reaction", "Add a reaction to a Discord message.", []string{"channel_id", "message_id", "emoji"}, "VIEW_CHANNEL", "ADD_REACTIONS"),
+		messageActionWrite("discord.remove_own_reaction", "Remove Panda's reaction from a Discord message.", []string{"channel_id", "message_id", "emoji"}, "VIEW_CHANNEL"),
 		threadWrite("discord.create_thread", "Create a public or private thread after confirmation.", []string{"channel_id", "name"}, "VIEW_CHANNEL", "CREATE_PUBLIC_THREADS", "SEND_MESSAGES_IN_THREADS"),
 		threadWrite("discord.rename_thread", "Rename a thread after confirmation.", []string{"thread_id", "name"}, "VIEW_CHANNEL", "MANAGE_THREADS"),
 		threadWrite("discord.archive_thread", "Archive or unarchive a thread after confirmation.", []string{"thread_id"}, "VIEW_CHANNEL", "MANAGE_THREADS"),
@@ -953,6 +953,12 @@ func threadWrite(name, description string, required []string, permissions ...str
 	definition := discordWrite(name, description, required, permissions...)
 	definition.RequiredPermission = admin.PermissionAssistantUseThreads
 	definition.FeatureID = features.Threads
+	return definition
+}
+
+func messageActionWrite(name, description string, required []string, permissions ...string) Definition {
+	definition := discordWrite(name, description, required, permissions...)
+	definition.FeatureID = features.DiscordMessageActions
 	return definition
 }
 
