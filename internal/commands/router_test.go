@@ -2203,7 +2203,7 @@ func TestNaturalMessageDraftsEventAutomationThroughAgentTool(t *testing.T) {
 
 func TestNaturalMessageDraftsEveryTimeEventAutomationThroughAgentTool(t *testing.T) {
 	client := &fakeLLM{responses: []llm.ChatResponse{
-		{Content: `{"respond":true,"prompt":"draft a member welcome automation"}`},
+		{Content: `{"respond":true,"prompt":"draft a member welcome automation","tool_name":"panda_manage_composed_tool"}`},
 		{ToolCalls: []llm.ToolCall{{
 			ID:   "call-composed-draft",
 			Type: "function",
@@ -2236,8 +2236,8 @@ func TestNaturalMessageDraftsEveryTimeEventAutomationThroughAgentTool(t *testing
 	if len(client.requests) != 4 {
 		t.Fatalf("expected classifier, composed-tool call, draft LLM, and final response, got %d LLM request(s)", len(client.requests))
 	}
-	if !requestToolNames(client.requests[1])["panda_manage_composed_tool"] {
-		t.Fatalf("expected composed tool manager to be available to admin natural chat, got %+v", requestToolNames(client.requests[1]))
+	if names := requestToolNames(client.requests[1]); len(names) != 1 || !names["panda_manage_composed_tool"] {
+		t.Fatalf("expected preferred composed tool manager to be the only natural chat tool, got %+v", names)
 	}
 	if !strings.Contains(joinRequestMessages(client.requests[2]), "Every time a new user enters") {
 		t.Fatalf("expected draft request to include every-time instruction, got:\n%s", joinRequestMessages(client.requests[2]))

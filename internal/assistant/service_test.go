@@ -353,6 +353,9 @@ func TestNaturalTriggerPromptCoversDirectCapabilityQuestionWithoutMention(t *tes
 		"asks to set up or configure Panda",
 		"panda_manage_music",
 		"panda_manage_role_permission",
+		"panda_manage_composed_tool",
+		"event-triggered requests",
+		"Do not use this just because a request mentions a target channel",
 	} {
 		if !strings.Contains(system, want) {
 			t.Fatalf("natural trigger prompt missing %q:\n%s", want, system)
@@ -424,15 +427,62 @@ func naturalTriggerRequestHasSchema(request llm.ChatRequest) bool {
 		return false
 	}
 	schema := string(request.ResponseFormat.JSONSchema.Schema)
-	return strings.Contains(schema, `"respond"`) &&
+	if !(strings.Contains(schema, `"respond"`) &&
 		strings.Contains(schema, `"prompt"`) &&
 		strings.Contains(schema, `"tool_name"`) &&
-		strings.Contains(schema, `"panda_manage_music"`) &&
-		strings.Contains(schema, `"panda_manage_role_permission"`) &&
-		strings.Contains(schema, `"panda_manage_channel_rule"`) &&
-		strings.Contains(schema, `"panda_manage_tool_access"`) &&
-		strings.Contains(schema, `"panda_manage_prompt"`) &&
-		strings.Contains(schema, `"additionalProperties": false`)
+		strings.Contains(schema, `"additionalProperties": false`)) {
+		return false
+	}
+	for _, name := range naturalPreferredToolChoiceNames() {
+		if name == "" {
+			continue
+		}
+		if !strings.Contains(schema, `"`+name+`"`) {
+			return false
+		}
+	}
+	return true
+}
+
+func TestNaturalPreferredToolChoicesStayInSync(t *testing.T) {
+	names := naturalPreferredToolChoiceNames()
+	if len(names) < 2 || names[0] != "" {
+		t.Fatalf("expected empty default tool choice followed by named choices, got %+v", names)
+	}
+	registry, err := tools.NewDefaultRegistry()
+	if err != nil {
+		t.Fatalf("NewDefaultRegistry: %v", err)
+	}
+	schema := string(naturalTriggerResponseFormat().JSONSchema.Schema)
+	prompt := naturalTriggerMessages(NaturalMessageRequest{Content: "Panda help"})[0].Content
+	seen := map[string]struct{}{}
+	for _, name := range names[1:] {
+		if _, exists := seen[name]; exists {
+			t.Fatalf("duplicate preferred tool choice %q in %+v", name, names)
+		}
+		seen[name] = struct{}{}
+		if got := normalizeNaturalToolChoice(name); got != name {
+			t.Fatalf("preferred tool %q normalizes to %q", name, got)
+		}
+		if _, ok := registry.Get(name); !ok {
+			t.Fatalf("preferred tool %q does not resolve in the default registry", name)
+		}
+		if strings.HasPrefix(name, "panda_") {
+			alias := strings.Replace(name, "panda_", "panda.", 1)
+			if got := normalizeNaturalToolChoice(alias); got != name {
+				t.Fatalf("preferred tool alias %q normalizes to %q, want %q", alias, got, name)
+			}
+		}
+		if !strings.Contains(schema, `"`+name+`"`) {
+			t.Fatalf("preferred tool %q missing from schema:\n%s", name, schema)
+		}
+		if !strings.Contains(prompt, "`"+name+"`") {
+			t.Fatalf("preferred tool %q missing from prompt:\n%s", name, prompt)
+		}
+	}
+	if got := normalizeNaturalToolChoice("panda_manage_not_real"); got != "" {
+		t.Fatalf("unknown preferred tool normalized to %q", got)
+	}
 }
 
 func TestParseNaturalMessageDecisionExtractsWrappedJSON(t *testing.T) {
@@ -451,6 +501,16 @@ func TestParseNaturalMessageDecisionKeepsAdminSetupToolHints(t *testing.T) {
 		t.Fatalf("parseNaturalMessageDecision: %v", err)
 	}
 	if !decision.Respond || decision.Prompt != "make Mods the moderator role" || decision.ToolName != "panda_manage_role_permission" {
+		t.Fatalf("unexpected decision: %+v", decision)
+	}
+}
+
+func TestParseNaturalMessageDecisionKeepsComposedToolHint(t *testing.T) {
+	decision, err := parseNaturalMessageDecision(`{"respond":true,"prompt":"draft a member welcome automation","tool_name":"panda.manage_composed_tool"}`)
+	if err != nil {
+		t.Fatalf("parseNaturalMessageDecision: %v", err)
+	}
+	if !decision.Respond || decision.Prompt != "draft a member welcome automation" || decision.ToolName != "panda_manage_composed_tool" {
 		t.Fatalf("unexpected decision: %+v", decision)
 	}
 }
