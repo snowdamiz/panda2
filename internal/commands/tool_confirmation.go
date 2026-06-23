@@ -49,6 +49,7 @@ const (
 	toolActionComposedToolApprove          = "composed_tool.approve"
 	toolActionComposedToolRollback         = "composed_tool.rollback"
 	toolActionDiscordPollCreate            = "discord_poll.create"
+	toolActionDiscordWriteExecute          = "discord_write.execute"
 	toolActionOwnerOpsDrain                = "owner_ops.drain"
 	toolActionOwnerOpsResume               = "owner_ops.resume"
 	toolActionOwnerOpsIncidentEnable       = "owner_ops.incident_enable"
@@ -79,7 +80,7 @@ func ToolConfirmationFromAssistant(userID string, pending *assistant.Interaction
 	if pending == nil {
 		return nil
 	}
-	if pending.Action == toolActionDiscordPollCreate || ownerOpsConfirmationAction(pending.Action) {
+	if pendingToolConfirmationAction(pending.Action) {
 		return confirmationFromPendingTool(userID, pending)
 	}
 	id := toolConfirmationID(userID, pending.Action, pending.Arguments)
@@ -125,6 +126,17 @@ func ownerOpsConfirmationAction(action string) bool {
 		return true
 	default:
 		return false
+	}
+}
+
+func pendingToolConfirmationAction(action string) bool {
+	switch action {
+	case toolActionDiscordPollCreate,
+		toolActionDiscordRoleCreate,
+		toolActionDiscordWriteExecute:
+		return true
+	default:
+		return ownerOpsConfirmationAction(action)
 	}
 }
 
@@ -302,8 +314,14 @@ func (s *pendingToolConfirmationStore) take(id, userID string) (pendingToolConfi
 	now := time.Now()
 	s.pruneLocked(now)
 	item, ok := s.items[id]
-	if !ok || item.userID != cleanConfirmationPart(userID) || now.After(item.expiresAt) {
+	if !ok {
+		return pendingToolConfirmation{}, false
+	}
+	if now.After(item.expiresAt) {
 		delete(s.items, id)
+		return pendingToolConfirmation{}, false
+	}
+	if item.userID != cleanConfirmationPart(userID) {
 		return pendingToolConfirmation{}, false
 	}
 	delete(s.items, id)

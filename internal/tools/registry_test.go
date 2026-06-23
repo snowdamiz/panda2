@@ -1108,6 +1108,7 @@ func TestExecutorWriteToolRequiresDryRunOrConfirmation(t *testing.T) {
 		t.Fatalf("dry run should preview without provider execution: message=%+v calls=%d", message, provider.calls)
 	}
 
+	longContent := strings.Repeat("x", 600)
 	result, err = executor.Execute(context.Background(), ExecutionRequest{
 		GuildID: "guild-1",
 		Access:  access,
@@ -1116,7 +1117,7 @@ func TestExecutorWriteToolRequiresDryRunOrConfirmation(t *testing.T) {
 			Type: "function",
 			Function: llm.ToolCallFunction{
 				Name:      "discord_send_message",
-				Arguments: `{"channel_id":"channel-1","content":"hello"}`,
+				Arguments: `{"channel_id":"channel-1","content":"` + longContent + `"}`,
 			},
 		},
 	})
@@ -1126,6 +1127,35 @@ func TestExecutorWriteToolRequiresDryRunOrConfirmation(t *testing.T) {
 	message = result.Message
 	if !strings.Contains(message.Content, `"confirmation_required":true`) || provider.calls != 0 {
 		t.Fatalf("write should require confirmation without provider execution: message=%+v calls=%d", message, provider.calls)
+	}
+	if strings.Contains(message.Content, longContent) {
+		t.Fatalf("tool transcript should not include full confirmed content: %s", message.Content)
+	}
+	if result.Confirmation == nil || result.Confirmation.Action != "discord_write.execute" {
+		t.Fatalf("expected generic Discord write confirmation, got %+v", result.Confirmation)
+	}
+	if result.Confirmation.Arguments["tool_name"] != "discord.send_message" || !strings.Contains(result.Confirmation.Arguments["arguments_json"], longContent) {
+		t.Fatalf("confirmation should preserve full tool arguments, got %+v", result.Confirmation.Arguments)
+	}
+
+	_, err = executor.Execute(context.Background(), ExecutionRequest{
+		GuildID:              "guild-1",
+		Access:               access,
+		AllowConfirmedWrites: true,
+		Call: llm.ToolCall{
+			ID:   "call-send-confirmed",
+			Type: "function",
+			Function: llm.ToolCallFunction{
+				Name:      "discord_send_message",
+				Arguments: result.Confirmation.Arguments["arguments_json"],
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Execute confirmed write: %v", err)
+	}
+	if provider.calls != 1 || provider.requests[0].ToolName != "discord.send_message" || provider.requests[0].Arguments["content"] != longContent {
+		t.Fatalf("confirmed write should execute original tool arguments: calls=%d requests=%+v", provider.calls, provider.requests)
 	}
 }
 

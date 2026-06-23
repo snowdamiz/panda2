@@ -561,7 +561,12 @@ type naturalPreferredToolChoice struct {
 var naturalPreferredToolChoices = []naturalPreferredToolChoice{
 	{Name: "panda_manage_music", Description: "music playback/control."},
 	{Name: "read_config", Description: "current Panda configuration/status lookup."},
-	{Name: "panda_manage_role_permission", Description: "Panda admin/moderator role access."},
+	{Name: "panda_manage_reminder", Description: "personal reminders and follow-ups that notify later. Use this for \"remind me\", \"follow up\", snooze, complete, list, or cancel reminder requests, not for composed-tool schedules."},
+	{Name: "discord_create_poll", Description: "creating a native Discord poll in the current server channel."},
+	{Name: "panda_manage_schedule", Description: "scheduling, listing, or canceling approved composed-tool runs by tool name. Do not use this for personal reminders, and do not use it to draft new event-triggered automations."},
+	{Name: "panda_manage_discord_role", Description: "creating a brand-new Discord server role. Use this when the user asks to make, create, or add a new role, even if they also want that new role to become a Panda admin or moderator role."},
+	{Name: "panda_manage_member_role", Description: "assigning or removing an existing Discord role for a server member. Do not use this to create a role or to set Panda admin/moderator access profiles."},
+	{Name: "panda_manage_role_permission", Description: "Panda admin/moderator role access for an existing Discord role. Do not use this for creating a new Discord role."},
 	{Name: "panda_manage_channel_rule", Description: "explicit allow, deny, or remove Panda operating channel access only. Do not use this just because a request mentions a target channel for a message, welcome, reminder, or automation."},
 	{Name: "panda_manage_tool_access", Description: "per-tool role access."},
 	{Name: "panda_manage_composed_tool", Description: "user-created workflows/automations, especially event-triggered requests such as \"when\", \"whenever\", \"every time\", or \"on [Discord event] ... do/send/post\". Use this for new-member welcome automations."},
@@ -682,6 +687,16 @@ func normalizeNaturalToolChoice(toolName string) string {
 		return "panda_manage_music"
 	case "read_config":
 		return "read_config"
+	case "panda_manage_reminder", "panda.manage_reminder":
+		return "panda_manage_reminder"
+	case "discord_create_poll", "discord.create_poll":
+		return "discord_create_poll"
+	case "panda_manage_schedule", "panda.manage_schedule":
+		return "panda_manage_schedule"
+	case "panda_manage_discord_role", "panda.manage_discord_role":
+		return "panda_manage_discord_role"
+	case "panda_manage_member_role", "panda.manage_member_role":
+		return "panda_manage_member_role"
 	case "panda_manage_role_permission", "panda.manage_role_permission":
 		return "panda_manage_role_permission"
 	case "panda_manage_channel_rule", "panda.manage_channel_rule":

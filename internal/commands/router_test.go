@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/sn0w/panda2/internal/admin"
 	"github.com/sn0w/panda2/internal/assistant"
+	"github.com/sn0w/panda2/internal/billing"
 	"github.com/sn0w/panda2/internal/composed"
 	"github.com/sn0w/panda2/internal/config"
 	contextsvc "github.com/sn0w/panda2/internal/context"
@@ -264,6 +266,27 @@ func newTestRouter(t *testing.T, client *fakeLLM, limit int, configureExecutor .
 		opsService,
 		ratelimit.New(limit, time.Minute),
 	).WithComposedService(composedService).WithScheduler(schedulerService).WithDataRepository(repository.NewGuildDataRepository(db.DB)).WithToolExecutor(toolExecutor)
+}
+
+func attachTestBilling(t *testing.T, router *Router, guildID string) (*billing.Service, billing.Entitlement) {
+	t.Helper()
+	ctx := context.Background()
+	db, err := store.Open(ctx, filepath.Join(t.TempDir(), "billing.db"))
+	if err != nil {
+		t.Fatalf("open billing store: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	service := billing.NewService(repository.NewBillingRepository(db.DB), billing.Config{})
+	entitlement, err := service.EnsureTrial(ctx, billing.TrialSeed{
+		GuildID:            guildID,
+		BillingOwnerUserID: "owner-1",
+		AuthorizedAt:       time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatalf("EnsureTrial: %v", err)
+	}
+	router.WithBilling(service)
+	return service, entitlement
 }
 
 func attachFeatureService(t *testing.T, router *Router) *repository.FeatureRepository {
@@ -1429,6 +1452,73 @@ func TestToolConfirmationIDRestoresScopedRequest(t *testing.T) {
 	}
 }
 
+func TestToolConfirmationUsesPendingStoreForLongRoleName(t *testing.T) {
+	userID := "123456789012345678"
+	longName := strings.Repeat("a", 100)
+	confirmation := ToolConfirmationFromAssistant(userID, &assistant.InteractionConfirmation{
+		Action:       toolActionDiscordRoleCreate,
+		Arguments:    map[string]string{"name": longName},
+		ConfirmLabel: "Create role",
+		Danger:       true,
+	})
+	if confirmation == nil || confirmation.ID == "" {
+		t.Fatalf("expected role confirmation id, got %+v", confirmation)
+	}
+	if len(confirmation.ID) > 100 {
+		t.Fatalf("confirmation id exceeds Discord component limit: len=%d id=%q", len(confirmation.ID), confirmation.ID)
+	}
+	if _, ok := RequestFromToolConfirmationID(confirmation.ID, Request{UserID: "other-admin"}); ok {
+		t.Fatal("pending confirmation id should be scoped to the original user")
+	}
+	request, ok := RequestFromToolConfirmationID(confirmation.ID, Request{UserID: userID})
+	if !ok || request.Action != toolActionDiscordRoleCreate || request.Options["name"] != longName {
+		t.Fatalf("unexpected role confirmation request: request=%+v ok=%t", request, ok)
+	}
+}
+
+func TestHandleToolConfirmationExecutesGenericDiscordWrite(t *testing.T) {
+	provider := &fakeCommandDiscordProvider{}
+	router := newTestRouter(t, &fakeLLM{}, 20, func(executor *tools.Executor) {
+		executor.WithDiscordToolProvider(provider)
+	})
+	confirmation := ToolConfirmationFromAssistant("admin", &assistant.InteractionConfirmation{
+		Action: toolActionDiscordWriteExecute,
+		Arguments: map[string]string{
+			"tool_name":      "discord.send_message",
+			"arguments_json": `{"channel_id":"channel-1","content":"hello"}`,
+		},
+		ConfirmLabel: "Confirm write",
+		Danger:       true,
+	})
+	if confirmation == nil || confirmation.ID == "" {
+		t.Fatalf("expected generic Discord write confirmation, got %+v", confirmation)
+	}
+	confirmationRequest, ok := RequestFromToolConfirmationID(confirmation.ID, Request{
+		GuildID:      "guild-1",
+		ChannelID:    "channel-1",
+		UserID:       "admin",
+		IsGuildAdmin: true,
+	})
+	if !ok {
+		t.Fatal("expected generic Discord write confirmation id to parse")
+	}
+
+	response := router.HandleToolConfirmation(context.Background(), confirmationRequest)
+	if !strings.Contains(response.Content, "Completed `discord.send_message`.") || response.Presentation.Accent != AccentSuccess {
+		t.Fatalf("unexpected generic Discord write response: %+v", response)
+	}
+	if len(provider.requests) != 1 {
+		t.Fatalf("expected one confirmed Discord write, got %d", len(provider.requests))
+	}
+	request := provider.requests[0]
+	if request.ToolName != "discord.send_message" || request.GuildID != "guild-1" || request.ChannelID != "channel-1" || request.ActorID != "admin" {
+		t.Fatalf("unexpected confirmed Discord write request: %+v", request)
+	}
+	if request.Arguments["content"] != "hello" {
+		t.Fatalf("confirmed write lost original arguments: %+v", request.Arguments)
+	}
+}
+
 func TestHandleToolConfirmationRemovesChannelRule(t *testing.T) {
 	router := newTestRouter(t, &fakeLLM{}, 20)
 	if _, err := router.admin.SetChannelRule(context.Background(), "guild-1", "admin", "channel-1", "deny"); err != nil {
@@ -1526,7 +1616,7 @@ func TestHandleToolConfirmationAssignsMemberRole(t *testing.T) {
 
 func TestNaturalDiscordRoleCreateRendersConfirmationThroughAgentTool(t *testing.T) {
 	client := &fakeLLM{responses: []llm.ChatResponse{
-		{Content: `{"respond":true,"prompt":"create a new role called test"}`},
+		{Content: `{"respond":true,"prompt":"create a new role called test","tool_name":"panda_manage_discord_role"}`},
 		{ToolCalls: []llm.ToolCall{{
 			ID:   "call-role-create",
 			Type: "function",
@@ -1559,11 +1649,54 @@ func TestNaturalDiscordRoleCreateRendersConfirmationThroughAgentTool(t *testing.
 	if !requestToolNames(client.requests[1])["panda_manage_discord_role"] {
 		t.Fatalf("expected Discord role manager tool for natural role request, got %+v", requestToolNames(client.requests[1]))
 	}
+	if len(client.requests[1].Tools) != 1 {
+		t.Fatalf("expected preferred role creation workflow to be the only exposed tool, got %+v", requestToolNames(client.requests[1]))
+	}
+}
+
+func TestNaturalMemberRoleAssignmentRendersConfirmationThroughAgentTool(t *testing.T) {
+	manager := &fakeMemberRoleManager{}
+	client := &fakeLLM{responses: []llm.ChatResponse{
+		{Content: `{"respond":true,"prompt":"assign role role-pickle to user user-target","tool_name":"panda_manage_member_role"}`},
+		{ToolCalls: []llm.ToolCall{{
+			ID:   "call-member-role",
+			Type: "function",
+			Function: llm.ToolCallFunction{
+				Name:      "panda_manage_member_role",
+				Arguments: `{"action":"add","user_id":"user-target","role_id":"role-pickle"}`,
+			},
+		}}},
+		{Content: "Prepared role assignment."},
+	}}
+	router := newTestRouter(t, client, 20, func(executor *tools.Executor) {
+		executor.WithDiscordToolProvider(&fakeCommandDiscordProvider{})
+	}).WithMemberRoleManager(manager)
+
+	response := router.HandleNaturalMessage(context.Background(), Request{
+		GuildID:      "guild-1",
+		ChannelID:    "channel-1",
+		UserID:       "admin",
+		IsGuildAdmin: true,
+		Options:      map[string]string{"message": "panda assign role role-pickle to user user-target", "bot_mentioned": "true"},
+	})
+	if response.Confirmation == nil || response.Confirmation.ConfirmLabel != "Assign role" {
+		t.Fatalf("expected member role confirmation, got %+v", response)
+	}
+	confirmationRequest, ok := RequestFromToolConfirmationID(response.Confirmation.ID, Request{UserID: "admin"})
+	if !ok || confirmationRequest.Action != toolActionMemberRoleAdd || confirmationRequest.Options["user_id"] != "user-target" || confirmationRequest.Options["role_id"] != "role-pickle" {
+		t.Fatalf("unexpected member role confirmation id: request=%+v ok=%t", confirmationRequest, ok)
+	}
+	if len(client.requests) != 3 {
+		t.Fatalf("expected classifier, member-role tool call, and final response, got %d request(s)", len(client.requests))
+	}
+	if names := requestToolNames(client.requests[1]); len(names) != 1 || !names["panda_manage_member_role"] {
+		t.Fatalf("expected preferred member-role workflow to be the only exposed tool, got %+v", names)
+	}
 }
 
 func TestNaturalComposedScheduleCreatesThroughAgentTool(t *testing.T) {
 	client := &fakeLLM{responses: []llm.ChatResponse{
-		{Content: `{"respond":true,"prompt":"schedule welcome_builder in 10 minutes with input topic standup"}`},
+		{Content: `{"respond":true,"prompt":"schedule welcome_builder in 10 minutes with input topic standup","tool_name":"panda_manage_schedule"}`},
 		{ToolCalls: []llm.ToolCall{{
 			ID:   "call-schedule-create",
 			Type: "function",
@@ -1596,6 +1729,9 @@ func TestNaturalComposedScheduleCreatesThroughAgentTool(t *testing.T) {
 	if !requestToolNames(client.requests[1])["panda_manage_schedule"] {
 		t.Fatalf("expected schedule manager tool to be available to admin natural chat, got %+v", requestToolNames(client.requests[1]))
 	}
+	if len(client.requests[1].Tools) != 1 {
+		t.Fatalf("expected preferred schedule workflow to be the only exposed tool, got %+v", requestToolNames(client.requests[1]))
+	}
 	schedules, err := router.scheduler.List(context.Background(), "guild-1", "", scheduler.KindComposed, false, 25)
 	if err != nil {
 		t.Fatalf("list schedules: %v", err)
@@ -1617,7 +1753,7 @@ func TestNaturalComposedScheduleCreatesThroughAgentTool(t *testing.T) {
 
 func TestNaturalComposedScheduleListsAndCancelsThroughAgentTool(t *testing.T) {
 	client := &fakeLLM{responses: []llm.ChatResponse{
-		{Content: `{"respond":true,"prompt":"list composed schedules for welcome_builder"}`},
+		{Content: `{"respond":true,"prompt":"list composed schedules for welcome_builder","tool_name":"panda_manage_schedule"}`},
 		{ToolCalls: []llm.ToolCall{{
 			ID:   "call-schedule-list",
 			Type: "function",
@@ -1627,7 +1763,7 @@ func TestNaturalComposedScheduleListsAndCancelsThroughAgentTool(t *testing.T) {
 			},
 		}}},
 		{Content: "There is one scheduled `welcome_builder` run."},
-		{Content: `{"respond":true,"prompt":"cancel scheduled composed tool welcome_builder"}`},
+		{Content: `{"respond":true,"prompt":"cancel scheduled composed tool welcome_builder","tool_name":"panda_manage_schedule"}`},
 		{ToolCalls: []llm.ToolCall{{
 			ID:   "call-schedule-cancel",
 			Type: "function",
@@ -1664,6 +1800,9 @@ func TestNaturalComposedScheduleListsAndCancelsThroughAgentTool(t *testing.T) {
 	if !requestToolNames(client.requests[1])["panda_manage_schedule"] {
 		t.Fatalf("expected schedule manager tool for list request, got %+v", requestToolNames(client.requests[1]))
 	}
+	if len(client.requests[1].Tools) != 1 {
+		t.Fatalf("expected preferred schedule list workflow to be the only exposed tool, got %+v", requestToolNames(client.requests[1]))
+	}
 	listMessages := joinRequestMessages(client.requests[2])
 	if !strings.Contains(listMessages, `"count":1`) || !strings.Contains(listMessages, `"welcome_builder"`) {
 		t.Fatalf("expected schedule list tool result in final chat request, got:\n%s", listMessages)
@@ -1681,6 +1820,9 @@ func TestNaturalComposedScheduleListsAndCancelsThroughAgentTool(t *testing.T) {
 	}
 	if !requestToolNames(client.requests[4])["panda_manage_schedule"] {
 		t.Fatalf("expected schedule manager tool for cancel request, got %+v", requestToolNames(client.requests[4]))
+	}
+	if len(client.requests[4].Tools) != 1 {
+		t.Fatalf("expected preferred schedule cancel workflow to be the only exposed tool, got %+v", requestToolNames(client.requests[4]))
 	}
 	cancelMessages := joinRequestMessages(client.requests[5])
 	if !strings.Contains(cancelMessages, `"action":"cancel"`) || !strings.Contains(cancelMessages, `"schedule_id":`+createdIDString(created.ID)) {
@@ -1900,6 +2042,56 @@ func TestChatUsesAssistantService(t *testing.T) {
 	})
 	if response.Content != "chat fixture" || response.Presentation.Title != "" {
 		t.Fatalf("unexpected chat response: %+v", response)
+	}
+}
+
+func TestChatEmptyAssistantResponseReleasesBillingReservation(t *testing.T) {
+	ctx := context.Background()
+	router := newTestRouter(t, &fakeLLM{response: llm.ChatResponse{Model: "fixture/model"}}, 20)
+	billingService, entitlement := attachTestBilling(t, router, "guild-1")
+
+	response := router.handleChatModeWithAccess(ctx, Request{
+		Command:      "chat",
+		GuildID:      "guild-1",
+		ChannelID:    "channel-1",
+		UserID:       "admin",
+		IsGuildAdmin: true,
+		Options:      map[string]string{"question": "hello"},
+	}, false, false)
+	if !response.Ephemeral || !strings.Contains(response.Content, "empty response") {
+		t.Fatalf("expected empty response guard, got %+v", response)
+	}
+	reservation, err := billingService.BeginUsage(ctx, "guild-1", billing.MetricAIResponse, int64(entitlement.Plan.AIResponses))
+	if err != nil {
+		t.Fatalf("empty chat response should release billing reservation: %v", err)
+	}
+	if err := billingService.ReleaseUsage(ctx, reservation); err != nil {
+		t.Fatalf("release verification reservation: %v", err)
+	}
+}
+
+func TestBackgroundTaskEmptyAssistantResponseReleasesBillingReservation(t *testing.T) {
+	ctx := context.Background()
+	router := newTestRouter(t, &fakeLLM{response: llm.ChatResponse{Model: "fixture/model"}}, 20)
+	billingService, entitlement := attachTestBilling(t, router, "guild-1")
+
+	response := router.HandleBackgroundTask(ctx, BackgroundTask{
+		RequestID: "task-empty",
+		Command:   "summarize",
+		GuildID:   "guild-1",
+		ChannelID: "channel-1",
+		UserID:    "admin",
+		Input:     "summarize this",
+	})
+	if !response.Ephemeral || !strings.Contains(response.Content, "empty response") {
+		t.Fatalf("expected empty response guard, got %+v", response)
+	}
+	reservation, err := billingService.BeginUsage(ctx, "guild-1", billing.MetricAIResponse, int64(entitlement.Plan.AIResponses))
+	if err != nil {
+		t.Fatalf("empty background response should release billing reservation: %v", err)
+	}
+	if err := billingService.ReleaseUsage(ctx, reservation); err != nil {
+		t.Fatalf("release verification reservation: %v", err)
 	}
 }
 
@@ -2298,7 +2490,7 @@ func TestNaturalMessageExecutesTextToolCallFallbackForComposedTool(t *testing.T)
 func TestNaturalMessageCreatesNativePollThroughAgentTool(t *testing.T) {
 	discordProvider := &fakeCommandDiscordProvider{}
 	client := &fakeLLM{responses: []llm.ChatResponse{
-		{Content: `{"respond":true,"prompt":"make a poll about fable 5 versus gpt 5.6"}`},
+		{Content: `{"respond":true,"prompt":"make a poll about fable 5 versus gpt 5.6","tool_name":"discord_create_poll"}`},
 		{ToolCalls: []llm.ToolCall{{
 			ID:   "call-poll-create",
 			Type: "function",
@@ -2335,6 +2527,9 @@ func TestNaturalMessageCreatesNativePollThroughAgentTool(t *testing.T) {
 	if !requestToolNames(client.requests[1])["discord_create_poll"] {
 		t.Fatalf("expected Discord poll tool for natural poll request, got %+v", requestToolNames(client.requests[1]))
 	}
+	if len(client.requests[1].Tools) != 1 {
+		t.Fatalf("expected preferred poll workflow to be the only exposed tool, got %+v", requestToolNames(client.requests[1]))
+	}
 	if !strings.Contains(joinRequestMessages(client.requests[2]), "What will be better") {
 		t.Fatalf("expected poll tool result in final chat request, got:\n%s", joinRequestMessages(client.requests[2]))
 	}
@@ -2363,7 +2558,7 @@ func TestNaturalMessageCreatesNativePollThroughAgentTool(t *testing.T) {
 
 func TestNaturalMessageCreatesReminderThroughAgentTool(t *testing.T) {
 	client := &fakeLLM{responses: []llm.ChatResponse{
-		{Content: `{"respond":true,"prompt":"remind me in 10 minutes to stand up"}`},
+		{Content: `{"respond":true,"prompt":"remind me in 10 minutes to stand up","tool_name":"panda_manage_reminder"}`},
 		{ToolCalls: []llm.ToolCall{{
 			ID:   "call-reminder-create",
 			Type: "function",
@@ -2393,6 +2588,9 @@ func TestNaturalMessageCreatesReminderThroughAgentTool(t *testing.T) {
 	}
 	if !requestToolNames(client.requests[1])["panda_manage_reminder"] {
 		t.Fatalf("expected reminder tool for natural reminder request, got %+v", requestToolNames(client.requests[1]))
+	}
+	if len(client.requests[1].Tools) != 1 {
+		t.Fatalf("expected preferred reminder workflow to be the only exposed tool, got %+v", requestToolNames(client.requests[1]))
 	}
 	schedules, err := router.scheduler.List(context.Background(), "guild-1", "user-1", scheduler.KindReminder, false, 25)
 	if err != nil {

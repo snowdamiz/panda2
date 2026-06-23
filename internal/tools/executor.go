@@ -505,7 +505,7 @@ func (e *Executor) Execute(ctx context.Context, request ExecutionRequest) (Execu
 		payload = map[string]any{"error": err.Error()}
 	}
 	confirmation := confirmationFromPayload(payload)
-	data, marshalErr := json.Marshal(payload)
+	data, marshalErr := json.Marshal(toolMessagePayload(payload))
 	if marshalErr != nil {
 		return ExecutionResult{}, marshalErr
 	}
@@ -564,13 +564,7 @@ func (e *Executor) executeDiscordTool(ctx context.Context, definition Definition
 		if definition.Name == "discord.create_role" {
 			return confirmationRequired("discord_role.create", safePreviewArguments(arguments)), nil
 		}
-		return map[string]any{
-			"confirmation_required": true,
-			"tool":                  definition.Name,
-			"message":               "This Discord write is prepared as a dry-run from the assistant tool flow. Use an explicit Discord confirmation flow before execution.",
-			"discord_permissions":   discordPermissions,
-			"preview":               safePreviewArguments(arguments),
-		}, nil
+		return discordWriteConfirmationRequired(definition.Name, arguments, discordPermissions), nil
 	}
 	return e.discord.ExecuteDiscordTool(ctx, DiscordToolRequest{
 		ToolName:    definition.Name,
@@ -2318,6 +2312,51 @@ func confirmationRequired(action string, preview map[string]any) map[string]any 
 	}
 }
 
+func confirmationRequiredWithArguments(action string, preview map[string]any, arguments map[string]any) map[string]any {
+	payload := confirmationRequired(action, preview)
+	result, _ := payload["result"].(map[string]any)
+	result["confirmation_arguments"] = arguments
+	return payload
+}
+
+func discordWriteConfirmationRequired(toolName string, arguments map[string]any, permissions []string) map[string]any {
+	return confirmationRequiredWithArguments("discord_write.execute", map[string]any{
+		"tool_name":           toolName,
+		"discord_permissions": permissions,
+		"arguments":           safePreviewArguments(arguments),
+	}, map[string]any{
+		"tool_name": toolName,
+		"arguments": arguments,
+	})
+}
+
+func toolMessagePayload(payload any) any {
+	root, ok := payload.(map[string]any)
+	if !ok {
+		return payload
+	}
+	result, ok := root["result"].(map[string]any)
+	if !ok {
+		return payload
+	}
+	if _, ok := result["confirmation_arguments"]; !ok {
+		return payload
+	}
+	rootCopy := cloneAnyMap(root)
+	resultCopy := cloneAnyMap(result)
+	delete(resultCopy, "confirmation_arguments")
+	rootCopy["result"] = resultCopy
+	return rootCopy
+}
+
+func cloneAnyMap(values map[string]any) map[string]any {
+	clone := make(map[string]any, len(values))
+	for key, value := range values {
+		clone[key] = value
+	}
+	return clone
+}
+
 func confirmationFromPayload(payload any) *InteractionConfirmation {
 	root, ok := payload.(map[string]any)
 	if !ok {
@@ -2332,7 +2371,11 @@ func confirmationFromPayload(payload any) *InteractionConfirmation {
 	if preview == nil {
 		preview, _ = result["confirmation_preview"].(map[string]any)
 	}
-	arguments := confirmationArguments(action, preview)
+	confirmationArgumentsPayload, _ := result["confirmation_arguments"].(map[string]any)
+	if confirmationArgumentsPayload == nil {
+		confirmationArgumentsPayload = preview
+	}
+	arguments := confirmationArguments(action, confirmationArgumentsPayload)
 	if len(arguments) == 0 {
 		return nil
 	}
@@ -2376,6 +2419,8 @@ func confirmationArguments(action string, preview map[string]any) map[string]str
 		return stringArguments(preview, "name")
 	case "discord_poll.create":
 		return discordPollConfirmationArguments(preview)
+	case "discord_write.execute":
+		return discordWriteConfirmationArguments(preview)
 	case "member_role.add", "member_role.remove":
 		return stringArguments(preview, "user_id", "role_id")
 	case "tool_access.add", "tool_access.remove":
@@ -2390,6 +2435,25 @@ func confirmationArguments(action string, preview map[string]any) map[string]str
 		return stringArguments(preview, "operation")
 	default:
 		return nil
+	}
+}
+
+func discordWriteConfirmationArguments(preview map[string]any) map[string]string {
+	if preview == nil {
+		return nil
+	}
+	toolName := strings.TrimSpace(fmt.Sprint(preview["tool_name"]))
+	arguments, ok := preview["arguments"].(map[string]any)
+	if toolName == "" || !ok || arguments == nil {
+		return nil
+	}
+	data, err := json.Marshal(arguments)
+	if err != nil || string(data) == "null" {
+		return nil
+	}
+	return map[string]string{
+		"tool_name":      toolName,
+		"arguments_json": string(data),
 	}
 }
 
@@ -2445,6 +2509,8 @@ func confirmationCopy(action string, arguments map[string]string) (string, strin
 		return fmt.Sprintf("Panda prepared creation of Discord role `%s`.", arguments["name"]), "Create role"
 	case "discord_poll.create":
 		return fmt.Sprintf("Panda prepared a native Discord poll for <#%s>.", arguments["channel_id"]), "Send poll"
+	case "discord_write.execute":
+		return fmt.Sprintf("Panda prepared `%s`.", arguments["tool_name"]), "Confirm write"
 	case "member_role.add":
 		return fmt.Sprintf("Panda prepared assignment of role `%s` to user `%s`.", arguments["role_id"], arguments["user_id"]), "Assign role"
 	case "member_role.remove":
