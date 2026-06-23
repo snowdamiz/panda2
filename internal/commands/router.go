@@ -1257,7 +1257,7 @@ func (r *Router) handleAsk(ctx context.Context, request Request, command string)
 		r.releaseAIUsage(ctx, reservation)
 		return assistantError(err)
 	}
-	if strings.TrimSpace(answer.Content) == "" {
+	if !assistantAnswerHasPayload(answer) {
 		r.releaseAIUsage(ctx, reservation)
 		return Response{Content: "Panda returned an empty response. Please try again.", Ephemeral: true}
 	}
@@ -1347,6 +1347,10 @@ func (r *Router) handleChatModeWithAccess(ctx context.Context, request Request, 
 	if err != nil {
 		r.releaseAIUsage(ctx, reservation)
 		return assistantError(err)
+	}
+	if !assistantAnswerHasPayload(answer) {
+		r.releaseAIUsage(ctx, reservation)
+		return Response{Content: "Panda returned an empty response. Please try again.", Ephemeral: true}
 	}
 	r.commitAIUsage(ctx, reservation)
 	return r.responseFromAssistantAnswer(ctx, request, answer, threadID, threadName)
@@ -1456,6 +1460,10 @@ func (r *Router) HandleBackgroundTask(ctx context.Context, task BackgroundTask) 
 	if err != nil {
 		r.releaseAIUsage(ctx, reservation)
 		return assistantError(err)
+	}
+	if !assistantAnswerHasPayload(answer) {
+		r.releaseAIUsage(ctx, reservation)
+		return Response{Content: "Panda returned an empty response. Please try again.", Ephemeral: true}
 	}
 	r.commitAIUsage(ctx, reservation)
 	return r.responseFromAssistantAnswer(ctx, Request{
@@ -1613,6 +1621,8 @@ func (r *Router) HandleToolConfirmation(ctx context.Context, request ToolConfirm
 		return Response{Content: fmt.Sprintf("Created Discord role `%s` (`%s`).", role.Name, role.ID), Ephemeral: true}
 	case toolActionDiscordPollCreate:
 		return r.handleDiscordPollConfirmation(ctx, request)
+	case toolActionDiscordWriteExecute:
+		return r.handleDiscordWriteConfirmation(ctx, request)
 	case toolActionMemberRoleAdd, toolActionMemberRoleRemove:
 		if denied := r.ensureGuildControl(ctx, request.Request, "Only the Panda owner, server owner or administrator, or the current Panda admin role can assign Discord roles."); denied.Content != "" {
 			return denied
@@ -1824,6 +1834,63 @@ func (r *Router) handleDiscordPollConfirmation(ctx context.Context, request Tool
 		return Response{Content: "Poll could not be sent.", Ephemeral: true, Presentation: Presentation{Title: "Poll not sent", Accent: AccentWarning}}
 	}
 	return Response{Content: "Sent the poll.", Presentation: Presentation{Title: "Poll sent", Accent: AccentSuccess}}
+}
+
+func (r *Router) handleDiscordWriteConfirmation(ctx context.Context, request ToolConfirmationRequest) Response {
+	if r.tools == nil {
+		return Response{Content: "Discord write tools are not configured for this runtime.", Ephemeral: true}
+	}
+	toolName := strings.TrimSpace(request.Options["tool_name"])
+	rawArguments := strings.TrimSpace(request.Options["arguments_json"])
+	if toolName == "" || rawArguments == "" {
+		return Response{Content: "That Discord write confirmation is invalid.", Ephemeral: true}
+	}
+	var arguments map[string]any
+	if err := json.Unmarshal([]byte(rawArguments), &arguments); err != nil || arguments == nil {
+		return Response{Content: "That Discord write confirmation is invalid.", Ephemeral: true}
+	}
+	data, err := json.Marshal(arguments)
+	if err != nil {
+		return Response{Content: "That Discord write confirmation is invalid.", Ephemeral: true}
+	}
+	result, err := r.tools.Execute(ctx, toolsvc.ExecutionRequest{
+		GuildID:              request.Request.GuildID,
+		ChannelID:            request.Request.ChannelID,
+		ActorID:              request.Request.UserID,
+		RequestID:            request.Request.RequestID,
+		InvocationType:       "tool_confirmation",
+		RoleIDs:              append([]string(nil), request.Request.RoleIDs...),
+		IsGuildAdmin:         request.Request.IsGuildAdmin,
+		IsOwner:              request.Request.IsOwner,
+		Access:               r.toolAccess(ctx, request.Request, toolsvc.ToolPolicyWriteConfirmed),
+		AllowConfirmedWrites: true,
+		Call: llm.ToolCall{
+			ID:   "confirmed-discord-write",
+			Type: "function",
+			Function: llm.ToolCallFunction{
+				Name:      toolName,
+				Arguments: string(data),
+			},
+		},
+	})
+	if err != nil {
+		return Response{Content: "Discord write could not be completed: " + err.Error(), Ephemeral: true, Presentation: Presentation{Title: "Discord write failed", Accent: AccentWarning}}
+	}
+	if message := toolExecutionErrorMessage(result.Message.Content); message != "" {
+		return Response{Content: "Discord write could not be completed: " + message, Ephemeral: true, Presentation: Presentation{Title: "Discord write failed", Accent: AccentWarning}}
+	}
+	return Response{Content: fmt.Sprintf("Completed `%s`.", toolName), Ephemeral: true, Presentation: Presentation{Title: "Discord write completed", Accent: AccentSuccess}}
+}
+
+func toolExecutionErrorMessage(content string) string {
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(strings.TrimSpace(content)), &payload); err != nil {
+		return ""
+	}
+	if value, ok := payload["error"]; ok && value != nil {
+		return strings.TrimSpace(fmt.Sprint(value))
+	}
+	return ""
 }
 
 func discordPollConfirmationArguments(options map[string]string) (string, error) {
@@ -2353,6 +2420,21 @@ func answerConfirmations(answer assistant.AskResponse) []assistant.InteractionCo
 		return nil
 	}
 	return []assistant.InteractionConfirmation{*answer.Confirmation}
+}
+
+func assistantAnswerHasPayload(answer assistant.AskResponse) bool {
+	if strings.TrimSpace(answer.Content) != "" || len(answerConfirmations(answer)) > 0 {
+		return true
+	}
+	card := answer.Card
+	if card == nil {
+		return false
+	}
+	return strings.TrimSpace(card.Content) != "" ||
+		strings.TrimSpace(card.Title) != "" ||
+		strings.TrimSpace(card.URL) != "" ||
+		len(card.Fields) > 0 ||
+		len(card.Actions) > 0
 }
 
 func confirmationSummaries(confirmations []assistant.InteractionConfirmation) []string {

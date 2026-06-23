@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/sn0w/panda2/internal/admin"
 	"github.com/sn0w/panda2/internal/assistant"
+	"github.com/sn0w/panda2/internal/billing"
 	"github.com/sn0w/panda2/internal/composed"
 	"github.com/sn0w/panda2/internal/config"
 	contextsvc "github.com/sn0w/panda2/internal/context"
@@ -264,6 +266,27 @@ func newTestRouter(t *testing.T, client *fakeLLM, limit int, configureExecutor .
 		opsService,
 		ratelimit.New(limit, time.Minute),
 	).WithComposedService(composedService).WithScheduler(schedulerService).WithDataRepository(repository.NewGuildDataRepository(db.DB)).WithToolExecutor(toolExecutor)
+}
+
+func attachTestBilling(t *testing.T, router *Router, guildID string) (*billing.Service, billing.Entitlement) {
+	t.Helper()
+	ctx := context.Background()
+	db, err := store.Open(ctx, filepath.Join(t.TempDir(), "billing.db"))
+	if err != nil {
+		t.Fatalf("open billing store: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	service := billing.NewService(repository.NewBillingRepository(db.DB), billing.Config{})
+	entitlement, err := service.EnsureTrial(ctx, billing.TrialSeed{
+		GuildID:            guildID,
+		BillingOwnerUserID: "owner-1",
+		AuthorizedAt:       time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatalf("EnsureTrial: %v", err)
+	}
+	router.WithBilling(service)
+	return service, entitlement
 }
 
 func attachFeatureService(t *testing.T, router *Router) *repository.FeatureRepository {
@@ -1429,6 +1452,73 @@ func TestToolConfirmationIDRestoresScopedRequest(t *testing.T) {
 	}
 }
 
+func TestToolConfirmationUsesPendingStoreForLongRoleName(t *testing.T) {
+	userID := "123456789012345678"
+	longName := strings.Repeat("a", 100)
+	confirmation := ToolConfirmationFromAssistant(userID, &assistant.InteractionConfirmation{
+		Action:       toolActionDiscordRoleCreate,
+		Arguments:    map[string]string{"name": longName},
+		ConfirmLabel: "Create role",
+		Danger:       true,
+	})
+	if confirmation == nil || confirmation.ID == "" {
+		t.Fatalf("expected role confirmation id, got %+v", confirmation)
+	}
+	if len(confirmation.ID) > 100 {
+		t.Fatalf("confirmation id exceeds Discord component limit: len=%d id=%q", len(confirmation.ID), confirmation.ID)
+	}
+	if _, ok := RequestFromToolConfirmationID(confirmation.ID, Request{UserID: "other-admin"}); ok {
+		t.Fatal("pending confirmation id should be scoped to the original user")
+	}
+	request, ok := RequestFromToolConfirmationID(confirmation.ID, Request{UserID: userID})
+	if !ok || request.Action != toolActionDiscordRoleCreate || request.Options["name"] != longName {
+		t.Fatalf("unexpected role confirmation request: request=%+v ok=%t", request, ok)
+	}
+}
+
+func TestHandleToolConfirmationExecutesGenericDiscordWrite(t *testing.T) {
+	provider := &fakeCommandDiscordProvider{}
+	router := newTestRouter(t, &fakeLLM{}, 20, func(executor *tools.Executor) {
+		executor.WithDiscordToolProvider(provider)
+	})
+	confirmation := ToolConfirmationFromAssistant("admin", &assistant.InteractionConfirmation{
+		Action: toolActionDiscordWriteExecute,
+		Arguments: map[string]string{
+			"tool_name":      "discord.send_message",
+			"arguments_json": `{"channel_id":"channel-1","content":"hello"}`,
+		},
+		ConfirmLabel: "Confirm write",
+		Danger:       true,
+	})
+	if confirmation == nil || confirmation.ID == "" {
+		t.Fatalf("expected generic Discord write confirmation, got %+v", confirmation)
+	}
+	confirmationRequest, ok := RequestFromToolConfirmationID(confirmation.ID, Request{
+		GuildID:      "guild-1",
+		ChannelID:    "channel-1",
+		UserID:       "admin",
+		IsGuildAdmin: true,
+	})
+	if !ok {
+		t.Fatal("expected generic Discord write confirmation id to parse")
+	}
+
+	response := router.HandleToolConfirmation(context.Background(), confirmationRequest)
+	if !strings.Contains(response.Content, "Completed `discord.send_message`.") || response.Presentation.Accent != AccentSuccess {
+		t.Fatalf("unexpected generic Discord write response: %+v", response)
+	}
+	if len(provider.requests) != 1 {
+		t.Fatalf("expected one confirmed Discord write, got %d", len(provider.requests))
+	}
+	request := provider.requests[0]
+	if request.ToolName != "discord.send_message" || request.GuildID != "guild-1" || request.ChannelID != "channel-1" || request.ActorID != "admin" {
+		t.Fatalf("unexpected confirmed Discord write request: %+v", request)
+	}
+	if request.Arguments["content"] != "hello" {
+		t.Fatalf("confirmed write lost original arguments: %+v", request.Arguments)
+	}
+}
+
 func TestHandleToolConfirmationRemovesChannelRule(t *testing.T) {
 	router := newTestRouter(t, &fakeLLM{}, 20)
 	if _, err := router.admin.SetChannelRule(context.Background(), "guild-1", "admin", "channel-1", "deny"); err != nil {
@@ -1900,6 +1990,56 @@ func TestChatUsesAssistantService(t *testing.T) {
 	})
 	if response.Content != "chat fixture" || response.Presentation.Title != "" {
 		t.Fatalf("unexpected chat response: %+v", response)
+	}
+}
+
+func TestChatEmptyAssistantResponseReleasesBillingReservation(t *testing.T) {
+	ctx := context.Background()
+	router := newTestRouter(t, &fakeLLM{response: llm.ChatResponse{Model: "fixture/model"}}, 20)
+	billingService, entitlement := attachTestBilling(t, router, "guild-1")
+
+	response := router.handleChatModeWithAccess(ctx, Request{
+		Command:      "chat",
+		GuildID:      "guild-1",
+		ChannelID:    "channel-1",
+		UserID:       "admin",
+		IsGuildAdmin: true,
+		Options:      map[string]string{"question": "hello"},
+	}, false, false)
+	if !response.Ephemeral || !strings.Contains(response.Content, "empty response") {
+		t.Fatalf("expected empty response guard, got %+v", response)
+	}
+	reservation, err := billingService.BeginUsage(ctx, "guild-1", billing.MetricAIResponse, int64(entitlement.Plan.AIResponses))
+	if err != nil {
+		t.Fatalf("empty chat response should release billing reservation: %v", err)
+	}
+	if err := billingService.ReleaseUsage(ctx, reservation); err != nil {
+		t.Fatalf("release verification reservation: %v", err)
+	}
+}
+
+func TestBackgroundTaskEmptyAssistantResponseReleasesBillingReservation(t *testing.T) {
+	ctx := context.Background()
+	router := newTestRouter(t, &fakeLLM{response: llm.ChatResponse{Model: "fixture/model"}}, 20)
+	billingService, entitlement := attachTestBilling(t, router, "guild-1")
+
+	response := router.HandleBackgroundTask(ctx, BackgroundTask{
+		RequestID: "task-empty",
+		Command:   "summarize",
+		GuildID:   "guild-1",
+		ChannelID: "channel-1",
+		UserID:    "admin",
+		Input:     "summarize this",
+	})
+	if !response.Ephemeral || !strings.Contains(response.Content, "empty response") {
+		t.Fatalf("expected empty response guard, got %+v", response)
+	}
+	reservation, err := billingService.BeginUsage(ctx, "guild-1", billing.MetricAIResponse, int64(entitlement.Plan.AIResponses))
+	if err != nil {
+		t.Fatalf("empty background response should release billing reservation: %v", err)
+	}
+	if err := billingService.ReleaseUsage(ctx, reservation); err != nil {
+		t.Fatalf("release verification reservation: %v", err)
 	}
 }
 
