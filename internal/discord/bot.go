@@ -99,6 +99,8 @@ const (
 
 const billingSlashCommand = "billing"
 
+var naturalMessageReplyPermissions = []string{"VIEW_CHANNEL", "SEND_MESSAGES", "READ_MESSAGE_HISTORY", "EMBED_LINKS"}
+
 type interactionJobPayload struct {
 	ApplicationID string                  `json:"application_id"`
 	Token         string                  `json:"token"`
@@ -1376,6 +1378,15 @@ func (b *Bot) respondToNaturalMessage(ctx context.Context, channelID snowflake.I
 	if b == nil || b.client == nil || b.router == nil {
 		return
 	}
+	if err := b.preflightNaturalMessageReply(request); err != nil {
+		b.logger.Warn("natural message reply permission preflight failed",
+			slog.Any("err", err),
+			slog.String("guild_id", request.GuildID),
+			slog.String("channel_id", request.ChannelID),
+			slog.String("request_id", request.RequestID),
+		)
+		return
+	}
 	stopTyping := startTypingIndicator(ctx, b.client.Rest, b.logger, channelID, request.RequestID, typingRefreshInterval)
 	defer stopTyping()
 	response := b.router.HandleNaturalMessage(ctx, request)
@@ -1383,8 +1394,26 @@ func (b *Bot) respondToNaturalMessage(ctx context.Context, channelID snowflake.I
 		return
 	}
 	if err := b.sendChannelResponse(channelID, response, reference); err != nil {
-		b.logger.Warn("failed to reply to natural message", slog.Any("err", err))
+		b.logger.Warn("failed to reply to natural message",
+			slog.Any("err", err),
+			slog.String("guild_id", request.GuildID),
+			slog.String("channel_id", request.ChannelID),
+			slog.String("request_id", request.RequestID),
+		)
 	}
+}
+
+func (b *Bot) preflightNaturalMessageReply(request commands.Request) error {
+	if b == nil || b.client == nil || b.client.Rest == nil || strings.TrimSpace(request.GuildID) == "" {
+		return nil
+	}
+	return preflightDiscordPermissions(discordPermissionPreflightRequest{
+		Rest:        b.client.Rest,
+		BotUserID:   b.client.ID(),
+		GuildID:     request.GuildID,
+		ChannelID:   request.ChannelID,
+		Permissions: naturalMessageReplyPermissions,
+	})
 }
 
 func hasChannelResponsePayload(response commands.Response) bool {
