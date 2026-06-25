@@ -41,6 +41,7 @@ type Service struct {
 	billing               *billing.Service
 	defaultModel          string
 	defaultFallbackModels []string
+	now                   func() time.Time
 }
 
 type ModelRequestError struct {
@@ -92,6 +93,7 @@ type AskRequest struct {
 	AllowedTools                 map[string]struct{}
 	RestrictedTools              map[string]struct{}
 	EnabledFeatures              map[string]struct{}
+	ImageReferences              []generated.ImageReference
 	FeatureGateActive            bool
 	RequireExplicitComposedTools bool
 }
@@ -157,6 +159,7 @@ type TaskRequest struct {
 	AllowedTools                 map[string]struct{}
 	RestrictedTools              map[string]struct{}
 	EnabledFeatures              map[string]struct{}
+	ImageReferences              []generated.ImageReference
 	FeatureGateActive            bool
 	RequireExplicitComposedTools bool
 }
@@ -192,6 +195,7 @@ type toolExecutionContext struct {
 	AllowedTools                 map[string]struct{}
 	RestrictedTools              map[string]struct{}
 	EnabledFeatures              map[string]struct{}
+	ImageReferences              []generated.ImageReference
 	FeatureGateActive            bool
 	RequireExplicitComposedTools bool
 }
@@ -223,6 +227,7 @@ func (s *Service) Ask(ctx context.Context, request AskRequest) (AskResponse, err
 		AllowedTools:                 request.AllowedTools,
 		RestrictedTools:              request.RestrictedTools,
 		EnabledFeatures:              request.EnabledFeatures,
+		ImageReferences:              generated.CloneImageReferences(request.ImageReferences),
 		FeatureGateActive:            request.FeatureGateActive,
 		RequireExplicitComposedTools: request.RequireExplicitComposedTools,
 	})
@@ -237,6 +242,13 @@ func NewService(client llm.Client, usage *repository.UsageRepository, configs *r
 		conversations:         conversations,
 		defaultModel:          defaultModel,
 		defaultFallbackModels: normalizeModelSequence(defaultFallbackModels),
+		now:                   time.Now,
+	}
+}
+
+func (s *Service) SetClock(now func() time.Time) {
+	if now != nil {
+		s.now = now
 	}
 }
 
@@ -296,6 +308,9 @@ func (s *Service) chat(ctx context.Context, request AskRequest, options chatOpti
 	if replyContext := chatReplyContextMessage(request); replyContext.Content != "" {
 		messages = append(messages, replyContext)
 	}
+	if imageContext := imageReferenceContextMessage(request.ImageReferences); imageContext.Content != "" {
+		messages = append(messages, imageContext)
+	}
 	if options.NaturalMessage {
 		if metadata := naturalMessageMetadataMessage(request); metadata.Content != "" {
 			messages = append(messages, metadata)
@@ -323,6 +338,7 @@ func (s *Service) chat(ctx context.Context, request AskRequest, options chatOpti
 		AllowedTools:                 request.AllowedTools,
 		RestrictedTools:              request.RestrictedTools,
 		EnabledFeatures:              request.EnabledFeatures,
+		ImageReferences:              generated.CloneImageReferences(request.ImageReferences),
 		FeatureGateActive:            request.FeatureGateActive,
 		RequireExplicitComposedTools: request.RequireExplicitComposedTools,
 	}, llm.ChatRequest{
@@ -408,6 +424,36 @@ func chatReplyContextMessage(request AskRequest) llm.Message {
 	return llm.Message{Role: "system", Content: strings.TrimSpace(builder.String())}
 }
 
+func imageReferenceContextMessage(references []generated.ImageReference) llm.Message {
+	if len(references) == 0 {
+		return llm.Message{}
+	}
+	var builder strings.Builder
+	builder.WriteString("Image references attached to the current Discord request. These image pixels are available only to image-inspection and image-generation function tools, not to the normal answer model. Do not describe visual details unless the user described them in text or an image-inspection tool result provides them. When the user asks a question whose answer depends on the image pixels, call the image-inspection tool with the relevant IDs in `reference_image_ids` before answering. When the user asks to edit, restyle, remix, use, or base generation on an attached image, call the image-generation tool and pass the relevant IDs in `reference_image_ids`; inspect first only if visual details are needed before generation or for the final answer.\n")
+	for _, reference := range references {
+		id := strings.TrimSpace(reference.ID)
+		if id == "" {
+			continue
+		}
+		fmt.Fprintf(&builder, "- id: %s", sanitizePromptInput(id))
+		if filename := strings.TrimSpace(reference.Filename); filename != "" {
+			fmt.Fprintf(&builder, "; filename: %s", sanitizePromptInput(filename))
+		}
+		if mimeType := strings.TrimSpace(reference.MIMEType); mimeType != "" {
+			fmt.Fprintf(&builder, "; content_type: %s", sanitizePromptInput(mimeType))
+		}
+		if reference.SizeBytes > 0 {
+			fmt.Fprintf(&builder, "; size_bytes: %d", reference.SizeBytes)
+		}
+		builder.WriteString("\n")
+	}
+	content := strings.TrimSpace(builder.String())
+	if content == "" {
+		return llm.Message{}
+	}
+	return llm.Message{Role: "system", Content: content}
+}
+
 func chatUserMessageContent(request AskRequest) string {
 	question := strings.TrimSpace(request.Question)
 	replyContent := strings.TrimSpace(request.ReplyContent)
@@ -453,6 +499,7 @@ func (s *Service) complete(ctx context.Context, request TaskRequest) (AskRespons
 		AllowedTools:                 request.AllowedTools,
 		RestrictedTools:              request.RestrictedTools,
 		EnabledFeatures:              request.EnabledFeatures,
+		ImageReferences:              generated.CloneImageReferences(request.ImageReferences),
 		FeatureGateActive:            request.FeatureGateActive,
 		RequireExplicitComposedTools: request.RequireExplicitComposedTools,
 	}, llm.ChatRequest{
@@ -501,6 +548,9 @@ func (s *Service) taskMessages(ctx context.Context, config store.GuildConfig, re
 	if contextMessage := invocationContextMessage(request.InvocationContext); contextMessage.Content != "" {
 		messages = append(messages, contextMessage)
 	}
+	if imageContext := imageReferenceContextMessage(request.ImageReferences); imageContext.Content != "" {
+		messages = append(messages, imageContext)
+	}
 	messages = append(messages, llm.Message{Role: "user", Content: taskPrompt(request)})
 	return messages
 }
@@ -518,7 +568,7 @@ func invocationContextMessage(contextBlock string) llm.Message {
 }
 
 func (s *Service) baseMessages(ctx context.Context, config store.GuildConfig, guildID, query string) []llm.Message {
-	messages := []llm.Message{{Role: "system", Content: systemPrompt(config)}}
+	messages := []llm.Message{{Role: "system", Content: systemPrompt(config, s.currentTime())}}
 
 	if config.MemoryEnabled && guildID != "" && s.memory != nil {
 		block, err := s.memory.ContextBlock(ctx, guildID, query, 3)
@@ -527,6 +577,13 @@ func (s *Service) baseMessages(ctx context.Context, config store.GuildConfig, gu
 		}
 	}
 	return messages
+}
+
+func (s *Service) currentTime() time.Time {
+	if s != nil && s.now != nil {
+		return s.now()
+	}
+	return time.Now()
 }
 
 func naturalResponseGateMessage() string {
@@ -679,17 +736,18 @@ func (s *Service) completeWithToolsWithOptions(ctx context.Context, config store
 		for _, call := range response.ToolCalls {
 			usedWebSearch = usedWebSearch || isWebSearchToolName(call.Function.Name)
 			result, err := s.toolExecutor.Execute(ctx, tools.ExecutionRequest{
-				GuildID:        config.GuildID,
-				ChannelID:      toolContext.ChannelID,
-				VoiceChannelID: toolContext.VoiceChannelID,
-				ActorID:        toolContext.ActorID,
-				RequestID:      toolContext.RequestID,
-				InvocationType: "chat_tool",
-				RoleIDs:        append([]string(nil), toolContext.RoleIDs...),
-				IsGuildAdmin:   toolContext.IsGuildAdmin,
-				IsOwner:        toolContext.IsOwner,
-				Access:         access,
-				Call:           call,
+				GuildID:         config.GuildID,
+				ChannelID:       toolContext.ChannelID,
+				VoiceChannelID:  toolContext.VoiceChannelID,
+				ActorID:         toolContext.ActorID,
+				RequestID:       toolContext.RequestID,
+				InvocationType:  "chat_tool",
+				RoleIDs:         append([]string(nil), toolContext.RoleIDs...),
+				IsGuildAdmin:    toolContext.IsGuildAdmin,
+				IsOwner:         toolContext.IsOwner,
+				ImageReferences: generated.CloneImageReferences(toolContext.ImageReferences),
+				Access:          access,
+				Call:            call,
 			})
 			message := result.Message
 			generatedFiles = append(generatedFiles, result.GeneratedFiles...)
@@ -1509,13 +1567,17 @@ func toolAvailabilityMessage(availableTools []llm.Tool, access tools.ToolAccess)
 	}
 	adminOnlyNotice := ""
 	if adminOnlyForUser {
-		adminOnlyNotice = " This server's tool policy is `admin_only`; normal chat, any listed web search tool, and any listed image generation tool are still available, but broader tools are disabled for users right now. If the user asks to use an unavailable tool, explain that an admin can enable broader access later."
+		adminOnlyNotice = " This server's tool policy is `admin_only`; normal chat, any listed web search tool, and any listed image media tool are still available, but broader tools are disabled for users right now. If the user asks to use an unavailable tool, explain that an admin can enable broader access later."
 	}
 	disabledFeatureNotice := disabledFeatureAvailabilityNotice(access)
 	contextResolutionNotice := " If recent Discord context resolves a short or elliptical summon to a specific prior question, action, or request for Panda's opinion, answer that resolved request with the current tool constraints. Do not replace it with a generic capability rundown unless the resolved request is genuinely asking what Panda can do."
+	imageInspectionNotice := ""
+	if _, ok := nameSet["panda_inspect_image"]; ok {
+		imageInspectionNotice = " Attached image routing: the normal answer model cannot see image pixels. When the user's request asks what is in an attached image, references visible text, needs visual comparison, critique, transcription, or otherwise depends on image content, call the image inspection tool with the provided reference_image_ids before answering. Do not guess from filenames or surrounding text."
+	}
 	imageCreationNotice := ""
 	if _, ok := nameSet["panda_generate_image"]; ok {
-		imageCreationNotice = " Visual creation routing: when the user asks Panda to create, make, draw, generate, design, or render a visual asset such as a meme, sticker, icon, illustration, sprite sheet, logo, avatar, or poster, call the image generation tool. Do not satisfy those creation requests by searching for or linking existing image pages unless the user explicitly asks to find, browse, compare, or cite existing images."
+		imageCreationNotice = " Visual creation routing: when the user asks Panda to create, make, draw, generate, design, edit, restyle, or render a visual asset such as a meme, sticker, icon, illustration, sprite sheet, logo, avatar, or poster, call the image generation tool. For attached-image edits or variations, pass the provided reference_image_ids. Do not satisfy those creation requests by searching for or linking existing image pages unless the user explicitly asks to find, browse, compare, or cite existing images."
 	}
 	if len(names) == 0 {
 		return "Tool availability for this request and user: no function tools are currently exposed to Panda. If asked what tools or capabilities Panda has, answer for the current user only, say that no function tools are available in this context, and do not list generic model/platform tools." + contextResolutionNotice + accessNotice + adminOnlyNotice + disabledFeatureNotice
@@ -1524,7 +1586,7 @@ func toolAvailabilityMessage(availableTools []llm.Tool, access tools.ToolAccess)
 	if strings.TrimSpace(overview) == "" {
 		overview = "Custom tools\n- Custom or specialized server capabilities are available."
 	}
-	return "Internal tool availability for this request and user. Do not reproduce or summarize this block unless the user explicitly asks what Panda can do. current user-scoped capability overview derived from the actual exposed function tools:\n" + overview + "\nAnswer capability questions directly from this overview and the provided function definitions; do not call a tool only to list capabilities. For direct action requests, use the relevant current function tools instead of summarizing available capabilities." + contextResolutionNotice + imageCreationNotice + " This current availability block overrides older chat history, reply context, or previous assistant capability answers. If history contains different capabilities, exact tool IDs, internal listing/debug wording, or a different enabled/disabled state, treat that history as stale and do not copy it. For broad questions like \"what can you do\", answer in natural user-facing categories with short bullets, not tables. When more than three overview sections are present, use the overview's section labels as headings and include the meaningful bullets under each; do not collapse the answer into one-line categories. Do not say \"I can help with N things\" because the categories may contain multiple capabilities. Do not present internal listing/debug helpers as user-facing capabilities. Mention exact function/tool names only when the user explicitly asks for exact tool names, API names, or internal tool IDs. When the user's request contains multiple actions, call all needed function tools in the same assistant turn and preserve the requested order for dependent actions. Do not describe tools available to other users or roles. Do not claim arbitrary webpage browsing, image generation or analysis, code execution, hidden tools, or platform abilities unless they are represented by the current function tools." + accessNotice + adminOnlyNotice + disabledFeatureNotice
+	return "Internal tool availability for this request and user. Do not reproduce or summarize this block unless the user explicitly asks what Panda can do. current user-scoped capability overview derived from the actual exposed function tools:\n" + overview + "\nAnswer capability questions directly from this overview and the provided function definitions; do not call a tool only to list capabilities. For direct action requests, use the relevant current function tools instead of summarizing available capabilities." + contextResolutionNotice + imageInspectionNotice + imageCreationNotice + " This current availability block overrides older chat history, reply context, or previous assistant capability answers. If history contains different capabilities, exact tool IDs, internal listing/debug wording, or a different enabled/disabled state, treat that history as stale and do not copy it. For broad questions like \"what can you do\", answer in natural user-facing categories with short bullets, not tables. When more than three overview sections are present, use the overview's section labels as headings and include the meaningful bullets under each; do not collapse the answer into one-line categories. Do not say \"I can help with N things\" because the categories may contain multiple capabilities. Do not present internal listing/debug helpers as user-facing capabilities. Mention exact function/tool names only when the user explicitly asks for exact tool names, API names, or internal tool IDs. When the user's request contains multiple actions, call all needed function tools in the same assistant turn and preserve the requested order for dependent actions. Do not describe tools available to other users or roles. Do not claim arbitrary webpage browsing, image generation or analysis, code execution, hidden tools, or platform abilities unless they are represented by the current function tools." + accessNotice + adminOnlyNotice + disabledFeatureNotice
 }
 
 func toolAccessHasAdminPermission(access tools.ToolAccess) bool {

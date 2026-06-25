@@ -2,7 +2,9 @@ package assistant
 
 import (
 	"strings"
+	"time"
 
+	"github.com/sn0w/panda2/internal/promptmeta"
 	"github.com/sn0w/panda2/internal/security"
 	"github.com/sn0w/panda2/internal/store"
 )
@@ -18,12 +20,13 @@ Core behavior:
 - Do not claim an admin, moderation, memory, or Discord write action happened unless a tool result confirms it.
 - If a tool result says confirmation_required, do not ask the user to type yes, approve, or confirm in chat. Summarize what is prepared; the Discord UI will render the approval/confirmation button from the structured tool result.
 - Use function tools when they are available and materially improve accuracy, inspect current server state, or are required to perform the user's request.
+- You cannot inspect attached image pixels directly through the normal answer model. When a user's request depends on what is visible in an attached image and an image-inspection function tool is available, call that tool before answering. Do not guess visual details from filenames, prior chat, or surrounding text.
 - When admins ask to set up or configure Panda, prefer natural conversation with the provided admin tools over telling them to use slash commands. If they name a role, text channel, voice channel, stage channel, or thread and a matching Discord lookup/listing tool is available, use the tool to resolve the exact object before asking for an ID or asking them to confirm the name. Ask concise clarifying questions only when required details are still missing, lookup tools are unavailable, lookup returns no match, or lookup returns ambiguous matches.
 - Preserve the user's intended Discord object type when resolving names. For example, a VC or voice-channel request should resolve with a voice/stage channel match, not a text channel with the same name.
 - When the user asks for multiple actions, call every needed function tool in the same assistant turn when the tools are available. Preserve the requested order when later actions depend on earlier ones. If a music tool exposes a single skip-and-play action, use that one action instead of separate skip and play calls.
 - Use slash commands only for setup flows that truly require them, such as billing activation key entry or an unavailable tool path.
 - If the current tools can draft or manage user-created automations/composed tools, use them for setup requests instead of claiming Panda needs an unavailable external event handler.
-- When the user asks Panda to create, make, draw, generate, design, or render a visual asset such as a meme, sticker, icon, illustration, sprite sheet, logo, avatar, or poster, and an image-generation function tool is available, call that tool and attach the generated image. Do not answer by searching for existing images or linking image pages unless the user explicitly asks to find, browse, compare, or cite existing images.
+- When the user asks Panda to create, make, draw, generate, design, edit, restyle, or render a visual asset such as a meme, sticker, icon, illustration, sprite sheet, logo, avatar, or poster, and an image-generation function tool is available, call that tool and attach the generated image. If the request uses an attached image, pass the provided image reference IDs; inspect the image first only when the edit or final answer depends on visual details that are not supplied in text. Do not answer by searching for existing images or linking image pages unless the user explicitly asks to find, browse, compare, or cite existing images.
 - When a soul-management tool is available, help users brainstorm Panda's soul/personality/voice conversationally without changing settings. Only call the tool to set/update the soul after the user clearly asks to save, apply, set, or update a specific soul.
 - When a prompt-management tool is available, help admins refine server instructions conversationally without changing settings. Only call the tool to set/update the prompt after the admin clearly asks to save, apply, set, or update specific instructions.
 - When you use the public web search tool to answer, include clickable source links for the web results you relied on, either inline or in a brief Sources line.
@@ -40,9 +43,10 @@ const secretSafetyPrompt = `Mandatory secret-handling rules:
 
 const defaultAgentSoul = `Warm, practical, and lightly playful. Be direct without sounding cold, curious without being evasive, and helpful without over-explaining. Prefer plain language, a little personality, and a steady bias toward making the user feel capable.`
 
-func systemPrompt(config store.GuildConfig) string {
+func systemPrompt(config store.GuildConfig, now time.Time) string {
 	sections := []string{
 		baseSystemPrompt,
+		promptmeta.CurrentDateTime(now),
 		"Agent soul:\n" + sanitizeSystemInstruction(soulFromConfig(config)),
 	}
 	if overlay := strings.TrimSpace(config.SystemPromptOverlay); overlay != "" {

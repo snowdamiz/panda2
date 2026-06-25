@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/sn0w/panda2/internal/admin"
 	"github.com/sn0w/panda2/internal/llm"
@@ -12,6 +13,8 @@ import (
 	"github.com/sn0w/panda2/internal/store"
 	"github.com/sn0w/panda2/internal/tools"
 )
+
+var fixedComposedPromptTime = time.Date(2026, time.June, 25, 18, 42, 7, 0, time.UTC)
 
 type fakeDiscordToolProvider struct {
 	calls []tools.DiscordToolRequest
@@ -86,6 +89,21 @@ func newComposedTestService(t *testing.T) (*Service, *fakeDiscordToolProvider) {
 func toolsPayloadString(value any) string {
 	data, _ := json.Marshal(value)
 	return string(data)
+}
+
+func assertComposedPromptMetadata(t *testing.T, content string) {
+	t.Helper()
+	for _, want := range []string{
+		"Request metadata:",
+		"Current date (UTC): Thursday, June 25, 2026",
+		"Current time (UTC): 18:42:07",
+		"Current timestamp (UTC): 2026-06-25T18:42:07Z",
+		"Use this metadata to resolve relative date and time references",
+	} {
+		if !strings.Contains(content, want) {
+			t.Fatalf("prompt missing date/time metadata %q:\n%s", want, content)
+		}
+	}
 }
 
 func memberJoinWelcomeSpec() Spec {
@@ -228,6 +246,7 @@ func TestNaturalDraftApprovalAdvertiseAndRunUserComposedJoinAutomation(t *testin
 	service, provider := newComposedTestService(t)
 	client := &fakeComposedLLM{response: llm.ChatResponse{Content: mustJSON(memberJoinWelcomeSpec())}}
 	service.client = client
+	service.SetClock(func() time.Time { return fixedComposedPromptTime })
 	service.WithDiscordResolver(fakeDiscordResolver{
 		channels: map[string]ResolvedDiscordObject{"bot-test": {ID: "channel-bot-test", Name: "bot-test"}},
 	})
@@ -247,6 +266,7 @@ func TestNaturalDraftApprovalAdvertiseAndRunUserComposedJoinAutomation(t *testin
 	if len(client.requests) != 1 || !strings.Contains(client.requests[0].Messages[0].Content, EventGuildMemberJoined) {
 		t.Fatalf("expected LLM draft request with supported event guidance, got %+v", client.requests)
 	}
+	assertComposedPromptMetadata(t, client.requests[0].Messages[0].Content)
 
 	beforeApproval, err := service.OpenRouterTools(ctx, tools.DynamicToolListRequest{
 		GuildID:        "guild-1",
@@ -318,6 +338,23 @@ func TestNaturalDraftApprovalAdvertiseAndRunUserComposedJoinAutomation(t *testin
 	call := provider.calls[0]
 	if call.ToolName != "discord.send_message" || call.Arguments["channel_id"] != "channel-bot-test" || !strings.Contains(call.Arguments["content"].(string), "<@user-1>") {
 		t.Fatalf("unexpected Discord call: %+v", call)
+	}
+}
+
+func TestAgenticRunnerPromptInjectsCurrentDateTimeMetadata(t *testing.T) {
+	spec := memberJoinWelcomeSpec()
+	spec.Runner = RunnerSpec{
+		Type:          RunnerAgentic,
+		SystemPrompt:  "Draft a concise JSON result.",
+		Temperature:   0.2,
+		MaxTokens:     300,
+		ToolAllowlist: []string{"discord.fetch_message"},
+	}
+
+	prompt := runnerPrompt(spec, fixedComposedPromptTime)
+	assertComposedPromptMetadata(t, prompt)
+	if !strings.Contains(prompt, "Draft a concise JSON result.") || !strings.Contains(prompt, "Approved native tools: discord.fetch_message") {
+		t.Fatalf("runner prompt missing original runner instructions:\n%s", prompt)
 	}
 }
 

@@ -1411,6 +1411,7 @@ func (r *Router) handleAsk(ctx context.Context, request Request, command string)
 		AllowedTools:                 toolFilter.allowed,
 		RestrictedTools:              toolFilter.restricted,
 		EnabledFeatures:              enabledFeatures,
+		ImageReferences:              generated.CloneImageReferences(request.ImageReferences),
 		FeatureGateActive:            featureGateActive,
 		RequireExplicitComposedTools: toolFilter.requireExplicitComposed,
 	})
@@ -1515,6 +1516,7 @@ func (r *Router) handleChatModeWithOptions(ctx context.Context, request Request,
 		AllowedTools:                 toolFilter.allowed,
 		RestrictedTools:              toolFilter.restricted,
 		EnabledFeatures:              enabledFeatures,
+		ImageReferences:              generated.CloneImageReferences(request.ImageReferences),
 		FeatureGateActive:            featureGateActive,
 		RequireExplicitComposedTools: toolFilter.requireExplicitComposed,
 	}
@@ -1578,6 +1580,7 @@ func (r *Router) handleTask(ctx context.Context, request Request) Response {
 		AllowedTools:                 permissionNames(toolFilter.allowed),
 		RestrictedTools:              permissionNames(toolFilter.restricted),
 		EnabledFeatures:              permissionNames(enabledFeatures),
+		ImageReferences:              generated.CloneImageReferences(request.ImageReferences),
 		FeatureGateActive:            featureGateActive,
 		RequireExplicitComposedTools: toolFilter.requireExplicitComposed,
 	}
@@ -1639,6 +1642,7 @@ func (r *Router) HandleBackgroundTask(ctx context.Context, task BackgroundTask) 
 		AllowedTools:                 permissionsFromNames(task.AllowedTools),
 		RestrictedTools:              permissionsFromNames(task.RestrictedTools),
 		EnabledFeatures:              enabledFeatures,
+		ImageReferences:              generated.CloneImageReferences(task.ImageReferences),
 		FeatureGateActive:            featureGateActive,
 		RequireExplicitComposedTools: task.RequireExplicitComposedTools,
 	})

@@ -14,17 +14,18 @@ import (
 var ErrDiscordRoleSetup = errors.New("discord role setup requires bot manage roles permission and sufficient role hierarchy")
 
 type Request struct {
-	RequestID      string
-	Command        string
-	Subcommand     string
-	Options        map[string]string
-	GuildID        string
-	ChannelID      string
-	VoiceChannelID string
-	UserID         string
-	RoleIDs        []string
-	IsGuildAdmin   bool
-	IsOwner        bool
+	RequestID       string
+	Command         string
+	Subcommand      string
+	Options         map[string]string
+	GuildID         string
+	ChannelID       string
+	VoiceChannelID  string
+	UserID          string
+	RoleIDs         []string
+	IsGuildAdmin    bool
+	IsOwner         bool
+	ImageReferences []generated.ImageReference
 }
 
 type Response struct {
@@ -120,26 +121,27 @@ type ModalInput struct {
 }
 
 type BackgroundTask struct {
-	RequestID                    string   `json:"request_id,omitempty"`
-	GuildID                      string   `json:"guild_id"`
-	UserID                       string   `json:"user_id"`
-	ChannelID                    string   `json:"channel_id"`
-	VoiceChannelID               string   `json:"voice_channel_id,omitempty"`
-	Command                      string   `json:"command"`
-	Input                        string   `json:"input"`
-	InvocationContext            string   `json:"invocation_context,omitempty"`
-	Tone                         string   `json:"tone,omitempty"`
-	Language                     string   `json:"language,omitempty"`
-	Detail                       string   `json:"detail,omitempty"`
-	RoleIDs                      []string `json:"role_ids,omitempty"`
-	IsGuildAdmin                 bool     `json:"is_guild_admin,omitempty"`
-	IsOwner                      bool     `json:"is_owner,omitempty"`
-	AllowedPermissions           []string `json:"allowed_permissions,omitempty"`
-	AllowedTools                 []string `json:"allowed_tools,omitempty"`
-	RestrictedTools              []string `json:"restricted_tools,omitempty"`
-	EnabledFeatures              []string `json:"enabled_features,omitempty"`
-	FeatureGateActive            bool     `json:"feature_gate_active,omitempty"`
-	RequireExplicitComposedTools bool     `json:"require_explicit_composed_tools,omitempty"`
+	RequestID                    string                     `json:"request_id,omitempty"`
+	GuildID                      string                     `json:"guild_id"`
+	UserID                       string                     `json:"user_id"`
+	ChannelID                    string                     `json:"channel_id"`
+	VoiceChannelID               string                     `json:"voice_channel_id,omitempty"`
+	Command                      string                     `json:"command"`
+	Input                        string                     `json:"input"`
+	InvocationContext            string                     `json:"invocation_context,omitempty"`
+	Tone                         string                     `json:"tone,omitempty"`
+	Language                     string                     `json:"language,omitempty"`
+	Detail                       string                     `json:"detail,omitempty"`
+	RoleIDs                      []string                   `json:"role_ids,omitempty"`
+	IsGuildAdmin                 bool                       `json:"is_guild_admin,omitempty"`
+	IsOwner                      bool                       `json:"is_owner,omitempty"`
+	AllowedPermissions           []string                   `json:"allowed_permissions,omitempty"`
+	AllowedTools                 []string                   `json:"allowed_tools,omitempty"`
+	RestrictedTools              []string                   `json:"restricted_tools,omitempty"`
+	EnabledFeatures              []string                   `json:"enabled_features,omitempty"`
+	ImageReferences              []generated.ImageReference `json:"image_references,omitempty"`
+	FeatureGateActive            bool                       `json:"feature_gate_active,omitempty"`
+	RequireExplicitComposedTools bool                       `json:"require_explicit_composed_tools,omitempty"`
 }
 
 type ThreadRequest struct {

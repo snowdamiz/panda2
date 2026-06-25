@@ -382,10 +382,10 @@ var catalog = []Feature{
 	{
 		ID:                 ImageGeneration,
 		Label:              "Image generation",
-		Description:        "Generate image files as Panda responses when users ask for visual output.",
+		Description:        "Understand attached images and generate image files as Panda responses when users ask for visual output.",
 		DiscordPermissions: []string{"VIEW_CHANNEL", "SEND_MESSAGES", "ATTACH_FILES"},
 		PandaPermissions:   []string{admin.PermissionAssistantImageGeneration},
-		ToolNames:          []string{"panda.generate_image"},
+		ToolNames:          []string{"panda.generate_image", "panda.inspect_image"},
 		ConsumesPlanQuota:  true,
 		Public:             true,
 		Dependencies:       []string{AssistantChat},

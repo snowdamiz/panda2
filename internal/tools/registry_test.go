@@ -14,6 +14,7 @@ import (
 	"github.com/sn0w/panda2/internal/billing"
 	contextsvc "github.com/sn0w/panda2/internal/context"
 	"github.com/sn0w/panda2/internal/features"
+	"github.com/sn0w/panda2/internal/generated"
 	"github.com/sn0w/panda2/internal/llm"
 	"github.com/sn0w/panda2/internal/memory"
 	"github.com/sn0w/panda2/internal/repository"
@@ -264,8 +265,8 @@ func TestOpenRouterToolsAdminOnlyGatesRegularUsers(t *testing.T) {
 		},
 	})
 	regularNames := toolNames(regularTools)
-	if !regularNames["web_search"] || !regularNames["panda_generate_image"] || regularNames["panda_list_tools"] || regularNames["discord_fetch_message"] {
-		t.Fatalf("admin_only should expose web search and image generation but hide metadata inventory and broader tools from regular users, got %+v", regularNames)
+	if !regularNames["web_search"] || !regularNames["panda_generate_image"] || !regularNames["panda_inspect_image"] || regularNames["panda_list_tools"] || regularNames["discord_fetch_message"] {
+		t.Fatalf("admin_only should expose web search and image media but hide metadata inventory and broader tools from regular users, got %+v", regularNames)
 	}
 
 	adminTools := registry.OpenRouterToolsForAccess(ToolAccess{
@@ -605,6 +606,22 @@ func (f *fakeImageGenerator) Configured() bool {
 }
 
 func (f *fakeImageGenerator) Generate(_ context.Context, request llm.ImageGenerationRequest) (llm.ImageGenerationResponse, error) {
+	f.requests = append(f.requests, request)
+	return f.response, f.err
+}
+
+type fakeImageAnalyzer struct {
+	configured bool
+	response   llm.ImageAnalysisResponse
+	err        error
+	requests   []llm.ImageAnalysisRequest
+}
+
+func (f *fakeImageAnalyzer) Configured() bool {
+	return f.configured
+}
+
+func (f *fakeImageAnalyzer) Analyze(_ context.Context, request llm.ImageAnalysisRequest) (llm.ImageAnalysisResponse, error) {
 	f.requests = append(f.requests, request)
 	return f.response, f.err
 }
@@ -1051,7 +1068,7 @@ func TestExecutorExposesMusicManagerToAssistantUse(t *testing.T) {
 	}
 }
 
-func TestExecutorExposesImageGenerationOnlyWhenConfigured(t *testing.T) {
+func TestExecutorExposesImageMediaOnlyWhenConfigured(t *testing.T) {
 	registry, err := NewDefaultRegistry()
 	if err != nil {
 		t.Fatalf("NewDefaultRegistry: %v", err)
@@ -1061,16 +1078,26 @@ func TestExecutorExposesImageGenerationOnlyWhenConfigured(t *testing.T) {
 	access.EnabledFeatures = map[string]struct{}{features.ImageGeneration: {}}
 
 	withoutGenerator := NewExecutor(registry, nil, nil)
-	if toolNames(withoutGenerator.OpenRouterTools(access))["panda_generate_image"] {
-		t.Fatalf("image generation tool should be hidden when no image generator is configured")
+	if names := toolNames(withoutGenerator.OpenRouterTools(access)); names["panda_generate_image"] || names["panda_inspect_image"] {
+		t.Fatalf("image media tools should be hidden when no image runtime is configured, got %+v", names)
 	}
 	withUnconfiguredGenerator := NewExecutor(registry, nil, nil).WithImageGenerator(&fakeImageGenerator{})
-	if toolNames(withUnconfiguredGenerator.OpenRouterTools(access))["panda_generate_image"] {
-		t.Fatalf("image generation tool should be hidden when the image generator is unconfigured")
+	if names := toolNames(withUnconfiguredGenerator.OpenRouterTools(access)); names["panda_generate_image"] || names["panda_inspect_image"] {
+		t.Fatalf("image media tools should be hidden when the image runtime is unconfigured, got %+v", names)
 	}
 	withGenerator := NewExecutor(registry, nil, nil).WithImageGenerator(&fakeImageGenerator{configured: true})
-	if !toolNames(withGenerator.OpenRouterTools(access))["panda_generate_image"] {
+	if names := toolNames(withGenerator.OpenRouterTools(access)); !names["panda_generate_image"] || names["panda_inspect_image"] {
 		t.Fatalf("image generation tool should be available with feature, permission, and runtime configured")
+	}
+	withAnalyzer := NewExecutor(registry, nil, nil).WithImageAnalyzer(&fakeImageAnalyzer{configured: true})
+	if names := toolNames(withAnalyzer.OpenRouterTools(access)); names["panda_generate_image"] || !names["panda_inspect_image"] {
+		t.Fatalf("image inspection tool should be independently available with analyzer runtime configured, got %+v", names)
+	}
+	withBoth := NewExecutor(registry, nil, nil).
+		WithImageGenerator(&fakeImageGenerator{configured: true}).
+		WithImageAnalyzer(&fakeImageAnalyzer{configured: true})
+	if names := toolNames(withBoth.OpenRouterTools(access)); !names["panda_generate_image"] || !names["panda_inspect_image"] {
+		t.Fatalf("both image media tools should be available with both runtimes configured, got %+v", names)
 	}
 }
 
@@ -1100,13 +1127,19 @@ func TestExecutorGenerateImageCarriesFilesWithoutLeakingBytes(t *testing.T) {
 		ActorID:        "user-1",
 		RequestID:      "request-1",
 		InvocationType: "chat_tool",
-		Access:         access,
+		ImageReferences: []generated.ImageReference{{
+			ID:       "current:100",
+			Filename: "reference.png",
+			MIMEType: "image/png",
+			URL:      "https://cdn.example.test/reference.png",
+		}},
+		Access: access,
 		Call: llm.ToolCall{
 			ID:   "call-image",
 			Type: "function",
 			Function: llm.ToolCallFunction{
 				Name:      "panda.generate_image",
-				Arguments: `{"prompt":"pixel panda icon","caption":"Panda icon","output_format":"png","filename_hint":"panda icon"}`,
+				Arguments: `{"prompt":"pixel panda icon","reference_image_ids":["current:100"],"caption":"Panda icon","output_format":"png","filename_hint":"panda icon"}`,
 			},
 		},
 	})
@@ -1115,6 +1148,9 @@ func TestExecutorGenerateImageCarriesFilesWithoutLeakingBytes(t *testing.T) {
 	}
 	if len(generator.requests) != 1 || generator.requests[0].Prompt != "pixel panda icon" || generator.requests[0].OutputFormat != "png" {
 		t.Fatalf("unexpected generator requests: %+v", generator.requests)
+	}
+	if len(generator.requests[0].InputReferences) != 1 || generator.requests[0].InputReferences[0].URL != "https://cdn.example.test/reference.png" {
+		t.Fatalf("expected selected input reference, got %+v", generator.requests[0].InputReferences)
 	}
 	if len(result.GeneratedFiles) != 1 {
 		t.Fatalf("expected generated file, got %+v", result.GeneratedFiles)
@@ -1127,6 +1163,139 @@ func TestExecutorGenerateImageCarriesFilesWithoutLeakingBytes(t *testing.T) {
 	}
 	if !strings.Contains(result.Message.Content, `"generated":true`) || !strings.Contains(result.Message.Content, `"filename":"panda-icon.png"`) {
 		t.Fatalf("tool message should expose compact metadata, got %s", result.Message.Content)
+	}
+}
+
+func TestExecutorGenerateImageRejectsUnknownReferenceID(t *testing.T) {
+	registry, err := NewDefaultRegistry()
+	if err != nil {
+		t.Fatalf("NewDefaultRegistry: %v", err)
+	}
+	generator := &fakeImageGenerator{configured: true}
+	executor := NewExecutor(registry, nil, nil).WithImageGenerator(generator)
+	access := testAccess(ToolPolicyAssistive, admin.PermissionAssistantImageGeneration)
+	access.FeatureGateActive = true
+	access.EnabledFeatures = map[string]struct{}{features.ImageGeneration: {}}
+	result, err := executor.Execute(context.Background(), ExecutionRequest{
+		GuildID:        "guild-1",
+		ChannelID:      "channel-1",
+		ActorID:        "user-1",
+		RequestID:      "request-1",
+		InvocationType: "chat_tool",
+		Access:         access,
+		Call: llm.ToolCall{
+			ID:   "call-image",
+			Type: "function",
+			Function: llm.ToolCallFunction{
+				Name:      "panda.generate_image",
+				Arguments: `{"prompt":"pixel panda icon","reference_image_ids":["current:missing"]}`,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if len(generator.requests) != 0 {
+		t.Fatalf("unknown references should fail before provider call, got %+v", generator.requests)
+	}
+	if !strings.Contains(result.Message.Content, `"provider_status":"invalid_request"`) || !strings.Contains(result.Message.Content, "attach the image again") {
+		t.Fatalf("expected safe invalid reference response, got %s", result.Message.Content)
+	}
+}
+
+func TestExecutorInspectImageUsesSelectedReferences(t *testing.T) {
+	registry, err := NewDefaultRegistry()
+	if err != nil {
+		t.Fatalf("NewDefaultRegistry: %v", err)
+	}
+	analyzer := &fakeImageAnalyzer{
+		configured: true,
+		response: llm.ImageAnalysisResponse{
+			Model:   "provider/image-model",
+			Content: "The image shows a small panda icon.",
+			Usage:   llm.ImageUsage{PromptTokens: 10, CompletionTokens: 5, TotalTokens: 15},
+		},
+	}
+	executor := NewExecutor(registry, nil, nil).WithImageAnalyzer(analyzer)
+	access := testAccess(ToolPolicyAssistive, admin.PermissionAssistantImageGeneration)
+	access.FeatureGateActive = true
+	access.EnabledFeatures = map[string]struct{}{features.ImageGeneration: {}}
+	result, err := executor.Execute(context.Background(), ExecutionRequest{
+		GuildID:        "guild-1",
+		ChannelID:      "channel-1",
+		ActorID:        "user-1",
+		RequestID:      "request-1",
+		InvocationType: "chat_tool",
+		ImageReferences: []generated.ImageReference{{
+			ID:       "current:100",
+			Filename: "reference.png",
+			MIMEType: "image/png",
+			URL:      "https://cdn.example.test/reference.png",
+		}},
+		Access: access,
+		Call: llm.ToolCall{
+			ID:   "call-inspect",
+			Type: "function",
+			Function: llm.ToolCallFunction{
+				Name:      "panda.inspect_image",
+				Arguments: `{"question":"What is in this image?","reference_image_ids":["current:100"],"detail":"brief"}`,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if len(analyzer.requests) != 1 {
+		t.Fatalf("expected one analyzer request, got %+v", analyzer.requests)
+	}
+	if len(analyzer.requests[0].InputReferences) != 1 || analyzer.requests[0].InputReferences[0].URL != "https://cdn.example.test/reference.png" {
+		t.Fatalf("expected selected input reference, got %+v", analyzer.requests[0].InputReferences)
+	}
+	if !strings.Contains(analyzer.requests[0].Prompt, "What is in this image?") || analyzer.requests[0].MaxTokens != 300 {
+		t.Fatalf("unexpected analyzer prompt/options: %+v", analyzer.requests[0])
+	}
+	if strings.Contains(result.Message.Content, "https://cdn.example.test/reference.png") {
+		t.Fatalf("tool message leaked image reference URL: %s", result.Message.Content)
+	}
+	if !strings.Contains(result.Message.Content, `"analyzed":true`) || !strings.Contains(result.Message.Content, "small panda icon") {
+		t.Fatalf("tool message should expose safe analysis, got %s", result.Message.Content)
+	}
+}
+
+func TestExecutorInspectImageRejectsUnknownReferenceID(t *testing.T) {
+	registry, err := NewDefaultRegistry()
+	if err != nil {
+		t.Fatalf("NewDefaultRegistry: %v", err)
+	}
+	analyzer := &fakeImageAnalyzer{configured: true}
+	executor := NewExecutor(registry, nil, nil).WithImageAnalyzer(analyzer)
+	access := testAccess(ToolPolicyAssistive, admin.PermissionAssistantImageGeneration)
+	access.FeatureGateActive = true
+	access.EnabledFeatures = map[string]struct{}{features.ImageGeneration: {}}
+	result, err := executor.Execute(context.Background(), ExecutionRequest{
+		GuildID:        "guild-1",
+		ChannelID:      "channel-1",
+		ActorID:        "user-1",
+		RequestID:      "request-1",
+		InvocationType: "chat_tool",
+		Access:         access,
+		Call: llm.ToolCall{
+			ID:   "call-inspect",
+			Type: "function",
+			Function: llm.ToolCallFunction{
+				Name:      "panda.inspect_image",
+				Arguments: `{"question":"What is in this image?","reference_image_ids":["current:missing"]}`,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if len(analyzer.requests) != 0 {
+		t.Fatalf("unknown references should fail before provider call, got %+v", analyzer.requests)
+	}
+	if !strings.Contains(result.Message.Content, `"provider_status":"invalid_request"`) || !strings.Contains(result.Message.Content, "attach the image again") {
+		t.Fatalf("expected safe invalid reference response, got %s", result.Message.Content)
 	}
 }
 
