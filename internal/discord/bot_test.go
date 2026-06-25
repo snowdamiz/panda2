@@ -420,6 +420,53 @@ func TestQueueNaturalMessageStoresPayload(t *testing.T) {
 	}
 }
 
+func TestAddReplyContextOptionsMarksCurrentUserSelfReply(t *testing.T) {
+	userID := snowflake.MustParse("100000000000000003")
+	messageID := snowflake.MustParse("100000000000000004")
+	options := map[string]string{}
+	bot := &Bot{}
+
+	bot.addReplyContextOptions(context.Background(), options, disgoDiscord.Message{
+		Author: disgoDiscord.User{ID: userID, Username: "sn0w"},
+		ReferencedMessage: &disgoDiscord.Message{
+			ID:      messageID,
+			Content: "join bot-test vc and play fill my pockets by mgk, also tell me spacex stock price",
+			Author:  disgoDiscord.User{ID: userID, Username: "sn0w"},
+		},
+	})
+
+	if options["reply_message_id"] != messageID.String() || !strings.Contains(options["reply_text"], "fill my pockets") {
+		t.Fatalf("expected reply context options, got %+v", options)
+	}
+	if options["reply_author_is_current_user"] != "true" {
+		t.Fatalf("expected self-reply marker, got %+v", options)
+	}
+}
+
+func TestAddReplyContextOptionsKeepsOtherUserReplyContext(t *testing.T) {
+	currentUserID := snowflake.MustParse("100000000000000003")
+	referencedUserID := snowflake.MustParse("100000000000000005")
+	messageID := snowflake.MustParse("100000000000000004")
+	options := map[string]string{}
+	bot := &Bot{}
+
+	bot.addReplyContextOptions(context.Background(), options, disgoDiscord.Message{
+		Author: disgoDiscord.User{ID: currentUserID, Username: "xer0"},
+		ReferencedMessage: &disgoDiscord.Message{
+			ID:      messageID,
+			Content: "join bot-test vc and play fill my pockets by mgk, also tell me spacex stock price",
+			Author:  disgoDiscord.User{ID: referencedUserID, Username: "sn0w"},
+		},
+	})
+
+	if options["reply_message_id"] != messageID.String() || !strings.Contains(options["reply_text"], "spacex stock price") {
+		t.Fatalf("expected reply context options, got %+v", options)
+	}
+	if options["reply_author_is_current_user"] != "" {
+		t.Fatalf("expected no self-reply marker for another user's message, got %+v", options)
+	}
+}
+
 func TestGuildMemberJoinEnqueuesComposedEvent(t *testing.T) {
 	queue := &fakeInteractionJobQueue{}
 	recorder := &fakeDiscordEventRecorder{}

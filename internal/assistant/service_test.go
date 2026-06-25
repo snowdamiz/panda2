@@ -439,7 +439,7 @@ func TestChatNaturalMessageDeclinesWhenPandaIsDiscussedNotAddressed(t *testing.T
 		GuildID:      "guild-1",
 		UserID:       "user-1",
 		ChannelID:    "channel-1",
-		Question:     "I think Panda is jumping into conversations too often.",
+		Question:     "how are you guys feeling about the new panda bot",
 		BotMentioned: true,
 	}, func() {
 		respondStarted++
@@ -459,7 +459,10 @@ func TestChatNaturalMessageDeclinesWhenPandaIsDiscussedNotAddressed(t *testing.T
 	joined := joinMessages(client.requests[0].Messages)
 	for _, want := range []string{
 		"Mentioning Panda/the bot by name is not enough",
+		"The grammatical addressee must be Panda/the bot/the assistant",
 		"talking about Panda instead of to Panda",
+		"how are you guys feeling about the new panda bot",
+		"Panda is the topic, not the addressee",
 		"Bot mention is only a wake signal",
 	} {
 		if !strings.Contains(joined, want) {
@@ -622,6 +625,115 @@ func TestChatIncludesDiscordReplyContext(t *testing.T) {
 	} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("expected reply context to include %q, got:\n%s", want, joined)
+		}
+	}
+}
+
+func TestChatNaturalMessageSelfReplyWakeUsesRepliedToRequestContext(t *testing.T) {
+	ctx := context.Background()
+	client := &fakeClient{response: llm.ChatResponse{Model: "fixture/model", Content: naturalRespondMarker + "\nI'll handle that."}}
+	service, _ := newTestService(t, client)
+
+	response, err := service.ChatNaturalMessage(ctx, AskRequest{
+		RequestID:                "message-current",
+		GuildID:                  "guild-1",
+		ChannelID:                "channel-1",
+		UserID:                   "user-1",
+		Question:                 "panda",
+		ReplyContent:             "join bot-test vc and play fill my pockets by mgk, also tell me spacex stock price",
+		ReplyMessageID:           "message-replied-to",
+		ReplyAuthorIsCurrentUser: true,
+	}, nil)
+	if err != nil {
+		t.Fatalf("ChatNaturalMessage: %v", err)
+	}
+	if response.Silent || response.Content != "I'll handle that." {
+		t.Fatalf("unexpected natural response: %+v", response)
+	}
+	if len(client.requests) != 1 {
+		t.Fatalf("expected one response-model request, got %d", len(client.requests))
+	}
+	lastMessage := client.requests[0].Messages[len(client.requests[0].Messages)-1]
+	if lastMessage.Role != "user" {
+		t.Fatalf("expected final message to be the resolved user request, got %+v", lastMessage)
+	}
+	if strings.TrimSpace(lastMessage.Content) == "panda" {
+		t.Fatalf("self-reply wake should not leave the model with only the wake word as the active user message")
+	}
+	for _, want := range []string{
+		"Current Discord message content:\npanda",
+		"This message is a reply to the current user's own prior Discord message",
+		"Resolve the active user request from both messages",
+		"Use every suitable function tool needed",
+	} {
+		if !strings.Contains(lastMessage.Content, want) {
+			t.Fatalf("expected final user message to include %q, got:\n%s", want, lastMessage.Content)
+		}
+	}
+	joined := joinMessages(client.requests[0].Messages)
+	for _, want := range []string{
+		"Replied-to author is current user: true",
+		"treat it as the current user asking Panda to handle the replied-to message as the actual request",
+		"apply Panda to that replied-to message now",
+		"join bot-test vc and play fill my pockets by mgk",
+		"spacex stock price",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("expected self-reply context %q, got:\n%s", want, joined)
+		}
+	}
+}
+
+func TestChatNaturalMessageOtherUserReplyWakeUsesRepliedToRequestContext(t *testing.T) {
+	ctx := context.Background()
+	client := &fakeClient{response: llm.ChatResponse{Model: "fixture/model", Content: naturalRespondMarker + "\nI'll handle that."}}
+	service, _ := newTestService(t, client)
+
+	response, err := service.ChatNaturalMessage(ctx, AskRequest{
+		RequestID:      "message-current",
+		GuildID:        "guild-1",
+		ChannelID:      "channel-1",
+		UserID:         "user-2",
+		Question:       "panda",
+		ReplyContent:   "join bot-test vc and play fill my pockets by mgk, also tell me spacex stock price",
+		ReplyMessageID: "message-replied-to",
+	}, nil)
+	if err != nil {
+		t.Fatalf("ChatNaturalMessage: %v", err)
+	}
+	if response.Silent || response.Content != "I'll handle that." {
+		t.Fatalf("unexpected natural response: %+v", response)
+	}
+	if len(client.requests) != 1 {
+		t.Fatalf("expected one response-model request, got %d", len(client.requests))
+	}
+	lastMessage := client.requests[0].Messages[len(client.requests[0].Messages)-1]
+	if lastMessage.Role != "user" {
+		t.Fatalf("expected final message to be the resolved user request, got %+v", lastMessage)
+	}
+	if strings.TrimSpace(lastMessage.Content) == "panda" {
+		t.Fatalf("reply wake should not leave the model with only the wake word as the active user message")
+	}
+	for _, want := range []string{
+		"Current Discord message content:\npanda",
+		"This message is a reply to another user's prior Discord message",
+		"Resolve the active user request from both messages",
+		"Use every suitable function tool needed",
+	} {
+		if !strings.Contains(lastMessage.Content, want) {
+			t.Fatalf("expected final user message to include %q, got:\n%s", want, lastMessage.Content)
+		}
+	}
+	joined := joinMessages(client.requests[0].Messages)
+	for _, want := range []string{
+		"Replied-to author is current user: false",
+		"handle the replied-to non-Panda message as the actual request",
+		"Do not answer with a generic capability overview",
+		"join bot-test vc and play fill my pockets by mgk",
+		"spacex stock price",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("expected reply context %q, got:\n%s", want, joined)
 		}
 	}
 }
@@ -1886,7 +1998,6 @@ func TestFinalAssistantResponseSuppressesStandaloneCardEcho(t *testing.T) {
 		nil,
 		defaultAppendedWebSourceLinks,
 		card,
-		"panda join bot-test vc and play fill my pockets by mgk",
 	)
 
 	if content != "" {
@@ -1910,7 +2021,6 @@ func TestFinalAssistantResponseKeepsStandaloneCardRemainingAnswer(t *testing.T) 
 		nil,
 		defaultAppendedWebSourceLinks,
 		card,
-		"panda join bot-test vc and play fill my pockets by mgk, also find latest spacex stock price",
 	)
 
 	if !strings.Contains(content, "SpaceX is privately held") {
@@ -1918,6 +2028,50 @@ func TestFinalAssistantResponseKeepsStandaloneCardRemainingAnswer(t *testing.T) 
 	}
 	if !card.Standalone {
 		t.Fatalf("card should remain standalone: %+v", card)
+	}
+}
+
+func TestFinalAssistantResponseKeepsShortMixedCardAnswer(t *testing.T) {
+	card := &ToolCard{
+		Title:   "Music stopped",
+		Content: "Stopped playback and cleared the queue.",
+		Accent:  "music",
+	}
+
+	content := finalAssistantResponseContent(
+		"No composed tools are available in this server right now.",
+		nil,
+		defaultAppendedWebSourceLinks,
+		card,
+	)
+
+	if !strings.Contains(content, "No composed tools are available") {
+		t.Fatalf("short remaining non-card answer should be preserved, got %q", content)
+	}
+	if !card.Standalone {
+		t.Fatalf("mixed music card should become standalone: %+v", card)
+	}
+}
+
+func TestFinalAssistantResponseSuppressesMusicCardRestatement(t *testing.T) {
+	card := &ToolCard{
+		Title:   "Music stopped",
+		Content: "Stopped playback and cleared the queue.",
+		Accent:  "music",
+	}
+
+	content := finalAssistantResponseContent(
+		"I stopped playing the song and cleared the queue.",
+		nil,
+		defaultAppendedWebSourceLinks,
+		card,
+	)
+
+	if content != "Stopped playback and cleared the queue." {
+		t.Fatalf("music card restatement should collapse to card content, got %q", content)
+	}
+	if card.Standalone {
+		t.Fatalf("pure card restatement should not make card standalone: %+v", card)
 	}
 }
 
