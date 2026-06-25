@@ -97,6 +97,47 @@ func TestAdminSetupToolSchemasExposeNaturalLanguageFields(t *testing.T) {
 	assertToolSchemaContains("panda.manage_composed_tool", "voice_channel_id", "voice_channel_name", "voice_channel")
 }
 
+func TestChannelAwareToolDescriptionsPreferDiscordChannelLookup(t *testing.T) {
+	registry, err := NewDefaultRegistry()
+	if err != nil {
+		t.Fatalf("NewDefaultRegistry: %v", err)
+	}
+	for _, toolName := range []string{"discord.list_channels", "panda.manage_music", "panda.manage_composed_tool"} {
+		definition, ok := registry.Get(toolName)
+		if !ok {
+			t.Fatalf("tool %s not registered", toolName)
+		}
+		if !strings.Contains(definition.Description, "discord.list_channels") {
+			t.Fatalf("tool %s description should point the model at channel lookup: %q", toolName, definition.Description)
+		}
+	}
+	for _, toolName := range []string{"panda.manage_music", "panda.manage_composed_tool"} {
+		definition, ok := registry.Get(toolName)
+		if !ok {
+			t.Fatalf("tool %s not registered", toolName)
+		}
+		schema := string(definition.InputSchema)
+		if !strings.Contains(schema, "Prefer resolving plain") || !strings.Contains(schema, "voice/stage") {
+			t.Fatalf("tool %s schema missing named VC lookup guidance: %s", toolName, schema)
+		}
+	}
+	composed, ok := registry.Get("panda.manage_composed_tool")
+	if !ok {
+		t.Fatal("panda.manage_composed_tool not registered")
+	}
+	composedSchema := string(composed.InputSchema)
+	if !strings.Contains(composed.Description, "delete, remove") || !strings.Contains(composedSchema, "delete, remove") {
+		t.Fatalf("composed tool should tell the model to delete removals, description=%q schema=%s", composed.Description, composedSchema)
+	}
+	music, ok := registry.Get("panda.manage_music")
+	if !ok {
+		t.Fatal("panda.manage_music not registered")
+	}
+	if !strings.Contains(string(music.InputSchema), "suggestions") {
+		t.Fatalf("music schema should explain ok=false suggestions, got %s", string(music.InputSchema))
+	}
+}
+
 func assertSchemaRequiredIsArray(t *testing.T, toolName, schemaName string, schema json.RawMessage) {
 	t.Helper()
 	var fields map[string]json.RawMessage
@@ -670,6 +711,34 @@ func TestExecutorRunsComposedToolManager(t *testing.T) {
 	}
 	if !strings.Contains(result.Message.Content, `"action":"draft"`) || !strings.Contains(result.Message.Content, `"dry_run":true`) {
 		t.Fatalf("unexpected composed manager result: %+v", result)
+	}
+}
+
+func TestExecutorDeletesComposedToolForRemoveAlias(t *testing.T) {
+	registry, err := NewDefaultRegistry()
+	if err != nil {
+		t.Fatalf("NewDefaultRegistry: %v", err)
+	}
+	manager := &fakeComposedManager{}
+	executor := NewExecutor(registry, nil, nil).WithComposedToolManager(manager)
+	_, err = executor.Execute(context.Background(), ExecutionRequest{
+		GuildID: "guild-1",
+		ActorID: "admin",
+		Access:  testAccess(ToolPolicyWriteConfirmed, admin.PermissionToolComposeApprove),
+		Call: llm.ToolCall{
+			ID:   "call-composed-manager",
+			Type: "function",
+			Function: llm.ToolCallFunction{
+				Name:      "panda_manage_composed_tool",
+				Arguments: `{"action":"remove","tool_name":"play_song_on_voice_join"}`,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if len(manager.requests) != 1 || manager.requests[0].Action != "delete" || manager.requests[0].ToolName != "play_song_on_voice_join" {
+		t.Fatalf("expected remove alias to delete composed tool, got %+v", manager.requests)
 	}
 }
 

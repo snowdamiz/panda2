@@ -119,6 +119,11 @@ type Resolver interface {
 	Resolve(ctx context.Context, query string) (Track, error)
 }
 
+type SuggestingResolver interface {
+	Resolver
+	Suggestions(ctx context.Context, query string, limit int) ([]Track, error)
+}
+
 type Streamer interface {
 	Stream(ctx context.Context, track Track) (OpusFrameProvider, error)
 }

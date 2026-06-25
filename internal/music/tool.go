@@ -40,7 +40,7 @@ func (m *Manager) ManageMusic(ctx context.Context, request toolsvc.MusicManageme
 		Intent:         intent,
 	})
 	if err != nil {
-		return musicToolErrorResult(action, err), nil
+		return m.musicToolErrorResult(ctx, action, intent.Query, err), nil
 	}
 	return map[string]any{"result": map[string]any{
 		"ok":      true,
@@ -54,9 +54,10 @@ func (m *Manager) ManageMusic(ctx context.Context, request toolsvc.MusicManageme
 	}}, nil
 }
 
-func musicToolErrorResult(action Action, err error) map[string]any {
+func (m *Manager) musicToolErrorResult(ctx context.Context, action Action, query string, err error) map[string]any {
 	title := "Music request failed"
 	content := "I couldn't complete that music request. Please try again."
+	suggestions := []Track{}
 	switch {
 	case errors.Is(err, ErrMissingVoice):
 		title = "Voice channel needed"
@@ -75,21 +76,70 @@ func musicToolErrorResult(action Action, err error) map[string]any {
 		content = "I am already playing music in another voice channel."
 	case errors.Is(err, ErrTrackLookupFailed):
 		title = "Track lookup failed"
+		suggestions = m.musicSuggestions(ctx, query, 3)
 		content = "I couldn't find that track. Try a different title or link."
 	case errors.Is(err, ErrTrackStreamFailed):
 		title = "Track stream failed"
+		suggestions = m.musicSuggestions(ctx, query, 3)
 		content = "I found the track, but the audio stream failed. Try again or pick another result."
 	}
+	if len(suggestions) > 0 {
+		content += " Possible matches: " + musicSuggestionSummary(suggestions) + "."
+	}
 	return map[string]any{"result": map[string]any{
-		"ok":      false,
-		"action":  string(action),
-		"title":   title,
-		"content": content,
-		"accent":  "warning",
-		"error":   err.Error(),
-		"fields":  []map[string]any{},
-		"actions": []map[string]string{},
+		"ok":          false,
+		"action":      string(action),
+		"title":       title,
+		"content":     content,
+		"accent":      "warning",
+		"error":       err.Error(),
+		"suggestions": musicSuggestionPayloads(suggestions),
+		"fields":      []map[string]any{},
+		"actions":     []map[string]string{},
 	}}
+}
+
+func (m *Manager) musicSuggestions(ctx context.Context, query string, limit int) []Track {
+	if strings.TrimSpace(query) == "" || m == nil || m.resolver == nil {
+		return nil
+	}
+	resolver, ok := m.resolver.(SuggestingResolver)
+	if !ok {
+		return nil
+	}
+	suggestions, err := resolver.Suggestions(ctx, query, limit)
+	if err != nil {
+		return nil
+	}
+	return suggestions
+}
+
+func musicSuggestionPayloads(tracks []Track) []map[string]any {
+	payloads := make([]map[string]any, 0, len(tracks))
+	for _, track := range tracks {
+		payload := map[string]any{
+			"title":    trackTitle(track),
+			"url":      track.URL,
+			"uploader": track.Uploader,
+		}
+		if track.Duration > 0 {
+			payload["duration_seconds"] = int(track.Duration.Seconds())
+		}
+		payloads = append(payloads, payload)
+	}
+	return payloads
+}
+
+func musicSuggestionSummary(tracks []Track) string {
+	parts := make([]string, 0, len(tracks))
+	for _, track := range tracks {
+		label := trackTitle(track)
+		if track.Uploader != "" {
+			label += " by " + track.Uploader
+		}
+		parts = append(parts, label)
+	}
+	return strings.Join(parts, "; ")
 }
 
 func musicToolFields(fields []Field) []map[string]any {

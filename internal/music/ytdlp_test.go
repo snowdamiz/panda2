@@ -2,6 +2,7 @@ package music
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -27,7 +28,7 @@ func TestYTDLPResolveKeepsPublicURLAndDirectStreamURL(t *testing.T) {
 	client := NewYTDLP(YTDLPConfig{
 		YTDLPPath:     ytdlpPath,
 		FFmpegPath:    ffmpegPath,
-		LookupTimeout: time.Second,
+		LookupTimeout: 5 * time.Second,
 	})
 
 	track, err := client.Resolve(context.Background(), "test track")
@@ -42,6 +43,52 @@ func TestYTDLPResolveKeepsPublicURLAndDirectStreamURL(t *testing.T) {
 	}
 	if track.StreamHeaders["User-Agent"] != "yt-dlp-test" || track.StreamHeaders["Referer"] != "https://www.youtube.com/" {
 		t.Fatalf("expected stream headers from yt-dlp metadata, got %+v", track.StreamHeaders)
+	}
+}
+
+func TestYTDLPSuggestionsParseSearchResults(t *testing.T) {
+	ytdlpPath := writeTestExecutable(t, "yt-dlp", `{"id":"one","title":"First Result","webpage_url":"https://example.test/one","uploader":"Artist","duration":164}
+{"id":"two","title":"Second Result","webpage_url":"https://example.test/two","uploader":"Artist","duration":120}`)
+	ffmpegPath := writeTestExecutable(t, "ffmpeg", "")
+	client := NewYTDLP(YTDLPConfig{
+		YTDLPPath:     ytdlpPath,
+		FFmpegPath:    ffmpegPath,
+		LookupTimeout: 5 * time.Second,
+	})
+
+	tracks, err := client.Suggestions(context.Background(), "fill my pockets", 5)
+	if err != nil {
+		t.Fatalf("Suggestions: %v", err)
+	}
+	if len(tracks) != 2 || tracks[0].Title != "First Result" || tracks[0].URL != "https://example.test/one" || tracks[0].Duration != 164*time.Second {
+		t.Fatalf("unexpected suggestions: %+v", tracks)
+	}
+}
+
+func TestYTDLPStreamReportsBothProcessFailures(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell process fixture is unix-only")
+	}
+	ytdlpPath := writeShellExecutable(t, "yt-dlp", "printf 'not media'; echo 'yt-dlp upstream unavailable' >&2; exit 1")
+	ffmpegPath := writeShellExecutable(t, "ffmpeg", "cat >/dev/null; echo 'ffmpeg decode failed' >&2; exit 1")
+	client := NewYTDLP(YTDLPConfig{
+		YTDLPPath:     ytdlpPath,
+		FFmpegPath:    ffmpegPath,
+		LookupTimeout: 5 * time.Second,
+	})
+
+	provider, err := client.Stream(context.Background(), Track{URL: "https://example.test/watch?v=bad"})
+	if err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+	_, err = provider.ProvideOpusFrame()
+	provider.Close()
+	if !errors.Is(err, ErrTrackStreamFailed) {
+		t.Fatalf("expected track stream failure, got %v", err)
+	}
+	message := err.Error()
+	if !strings.Contains(message, "ffmpeg decode failed") || !strings.Contains(message, "yt-dlp upstream unavailable") {
+		t.Fatalf("expected both process stderr values, got %q", message)
 	}
 }
 
@@ -111,6 +158,17 @@ func writeTestExecutable(t *testing.T, name string, jsonOutput string) string {
 	if strings.TrimSpace(jsonOutput) != "" {
 		body += "cat <<'JSON'\n" + strings.TrimSpace(jsonOutput) + "\nJSON\n"
 	}
+	if err := os.WriteFile(path, []byte(body), 0o755); err != nil {
+		t.Fatalf("write executable: %v", err)
+	}
+	return path
+}
+
+func writeShellExecutable(t *testing.T, name string, script string) string {
+	t.Helper()
+	dir := t.TempDir()
+	path := filepath.Join(dir, name)
+	body := "#!/bin/sh\n" + script + "\n"
 	if err := os.WriteFile(path, []byte(body), 0o755); err != nil {
 		t.Fatalf("write executable: %v", err)
 	}

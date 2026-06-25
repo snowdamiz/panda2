@@ -296,7 +296,7 @@ func TestTypingIndicatorSendsImmediatelyAndRefreshes(t *testing.T) {
 	sender := &fakeTypingSender{}
 	channelID := snowflake.MustParse("100000000000000002")
 
-	stop := startTypingIndicator(context.Background(), sender, nil, channelID, "message-1", 5*time.Millisecond)
+	stop := startTypingIndicator(context.Background(), sender, channelID, 5*time.Millisecond)
 	defer stop()
 
 	deadline := time.Now().Add(100 * time.Millisecond)
@@ -309,7 +309,7 @@ func TestTypingIndicatorSendsImmediatelyAndRefreshes(t *testing.T) {
 }
 
 func TestTypingIndicatorNoopsWithoutSender(t *testing.T) {
-	stop := startTypingIndicator(context.Background(), nil, nil, snowflake.MustParse("100000000000000002"), "message-1", time.Millisecond)
+	stop := startTypingIndicator(context.Background(), nil, snowflake.MustParse("100000000000000002"), time.Millisecond)
 	stop()
 }
 

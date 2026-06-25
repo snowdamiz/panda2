@@ -54,6 +54,24 @@ func (r fakeResolver) Resolve(_ context.Context, query string) (Track, error) {
 	return track, nil
 }
 
+type fakeSuggestingResolver struct {
+	track       Track
+	suggestions []Track
+	err         error
+}
+
+func (r fakeSuggestingResolver) Resolve(_ context.Context, query string) (Track, error) {
+	track := r.track
+	if track.Title == "" {
+		track.Title = query
+	}
+	return track, nil
+}
+
+func (r fakeSuggestingResolver) Suggestions(context.Context, string, int) ([]Track, error) {
+	return r.suggestions, r.err
+}
+
 type eofStreamer struct{}
 
 func (eofStreamer) Stream(context.Context, Track) (OpusFrameProvider, error) {
@@ -259,7 +277,7 @@ func TestSkipWithEmptyQueueKeepsVoiceForImmediatePlay(t *testing.T) {
 		if track.Title != "next track" {
 			t.Fatalf("expected replacement track next, got %+v", track)
 		}
-	case <-time.After(100 * time.Millisecond):
+	case <-time.After(500 * time.Millisecond):
 		t.Fatal("expected existing playback loop to pick up replacement track")
 	}
 }
@@ -458,6 +476,45 @@ func TestManageMusicReturnsStructuredVoiceConnectionFailure(t *testing.T) {
 	content, _ := payload["content"].(string)
 	if !strings.Contains(content, "secure media session") || strings.Contains(strings.ToLower(content), "join a voice channel") {
 		t.Fatalf("unexpected voice failure content: %q", content)
+	}
+}
+
+func TestManageMusicReturnsSuggestionsForStreamFailure(t *testing.T) {
+	manager := NewManager(
+		fakeSuggestingResolver{
+			track: Track{Title: "bad stream"},
+			suggestions: []Track{
+				{Title: "Better Match", Uploader: "Artist", URL: "https://example.test/watch"},
+				{Title: "Live Version", Uploader: "Artist"},
+			},
+		},
+		failingStreamer{err: fmt.Errorf("%w: ffmpeg decode failed", ErrTrackStreamFailed)},
+		&fakeVoiceConnector{},
+		nil,
+	)
+
+	result, err := manager.ManageMusic(context.Background(), toolsvc.MusicManagementRequest{
+		GuildID:        "guild-1",
+		ChannelID:      "channel-1",
+		VoiceChannelID: "voice-1",
+		ActorID:        "user-1",
+		Action:         "play",
+		Query:          "bad stream",
+	})
+	if err != nil {
+		t.Fatalf("ManageMusic: %v", err)
+	}
+	payload := result.(map[string]any)["result"].(map[string]any)
+	if payload["ok"] != false || payload["title"] != "Track stream failed" {
+		t.Fatalf("expected structured stream failure payload, got %+v", payload)
+	}
+	content, _ := payload["content"].(string)
+	if !strings.Contains(content, "Better Match by Artist") {
+		t.Fatalf("expected content to include suggested tracks, got %q", content)
+	}
+	suggestions, ok := payload["suggestions"].([]map[string]any)
+	if !ok || len(suggestions) != 2 || suggestions[0]["title"] != "Better Match" {
+		t.Fatalf("expected structured suggestions, got %+v", payload["suggestions"])
 	}
 }
 

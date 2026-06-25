@@ -1,13 +1,17 @@
 package store
 
 import (
+	"bytes"
 	"context"
+	"log"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
+	"gorm.io/gorm/logger"
 )
 
 func TestOpenRunsMigrationsAndPragmas(t *testing.T) {
@@ -110,6 +114,36 @@ func TestOpenRunsMigrationsAndPragmas(t *testing.T) {
 		}
 	}
 
+}
+
+func TestExecMigrationStatementSkipsIdempotentAlterWithoutWarnings(t *testing.T) {
+	var logs bytes.Buffer
+	db, err := gorm.Open(sqlite.Open(filepath.Join(t.TempDir(), "idempotent-alter.db")), &gorm.Config{
+		Logger: logger.New(log.New(&logs, "", 0), logger.Config{LogLevel: logger.Warn}),
+	})
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	for _, statement := range []string{
+		`CREATE TABLE customer_accounts (id INTEGER PRIMARY KEY)`,
+		`CREATE TABLE invoice_payment_events (id INTEGER PRIMARY KEY, amount_lamports INTEGER NOT NULL DEFAULT 0)`,
+	} {
+		if err := db.Exec(statement).Error; err != nil {
+			t.Fatalf("seed table: %v", err)
+		}
+	}
+	for _, statement := range []string{
+		`ALTER TABLE customer_accounts DROP COLUMN stripe_customer_id`,
+		`ALTER TABLE invoice_payment_events ADD COLUMN amount_lamports INTEGER NOT NULL DEFAULT 0`,
+	} {
+		if err := execMigrationStatement(db, statement); err != nil {
+			t.Fatalf("exec idempotent alter %q: %v", statement, err)
+		}
+	}
+	logOutput := logs.String()
+	if strings.Contains(logOutput, "no such column") || strings.Contains(logOutput, "duplicate column name") {
+		t.Fatalf("expected idempotent alter statements to avoid GORM warnings, got logs:\n%s", logOutput)
+	}
 }
 
 func TestOpenRunsUsefulnessMigrationWhenLegacyVersionsExist(t *testing.T) {

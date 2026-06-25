@@ -699,7 +699,6 @@ func (p *guildPlayer) playTrack(ctx context.Context, track Track, started chan<-
 		signalPlaybackStart(started, err)
 		return err
 	}
-	p.manager.logger.Info("music playback buffered", slog.String("guild_id", p.guildID), slog.String("track", track.Title), slog.Int("buffered_frames", provider.BufferedFrames()))
 	signalPlaybackStart(started, nil)
 
 	speaking := false
@@ -727,7 +726,6 @@ func (p *guildPlayer) playTrack(ctx context.Context, track Track, started chan<-
 
 		frame, stalled, err := provider.ProvideOpusFrameWithin(ctx, playbackFrameStall)
 		if errors.Is(err, io.EOF) {
-			p.manager.logger.Info("music playback finished", slog.String("guild_id", p.guildID), slog.String("track", track.Title), slog.Int("frames", writtenFrames))
 			return nil
 		}
 		if err != nil {
@@ -762,9 +760,6 @@ func (p *guildPlayer) playTrack(ctx context.Context, track Track, started chan<-
 			return err
 		}
 		writtenFrames++
-		if writtenFrames == 1 {
-			p.manager.logger.Info("music playback started", slog.String("guild_id", p.guildID), slog.String("track", track.Title), slog.Int("buffered_frames", provider.BufferedFrames()))
-		}
 		nextFrame = nextFrame.Add(frameDuration)
 		if time.Since(nextFrame) > 3*frameDuration {
 			nextFrame = time.Now().Add(frameDuration)
@@ -1118,9 +1113,7 @@ func (p *guildPlayer) persistQueueSnapshot(tracks []Track) {
 		return
 	}
 	items := queueItemsFromTracks(tracks)
-	if err := p.manager.store.ReplaceQueue(context.Background(), p.guildID, items); err != nil {
-		p.manager.logger.Debug("music queue persistence failed", slog.Any("err", err), slog.String("guild_id", p.guildID))
-	}
+	_ = p.manager.store.ReplaceQueue(context.Background(), p.guildID, items)
 }
 
 func (p *guildPlayer) currentSession() VoiceSession {
@@ -1196,12 +1189,6 @@ func (p *guildPlayer) scheduleEmptyVoiceDisconnect(channelID string, delay time.
 		p.disconnectIfStillEmpty(channelID, token)
 	})
 	p.mu.Unlock()
-
-	p.manager.logger.Info("music voice channel empty; scheduled disconnect",
-		slog.String("guild_id", p.guildID),
-		slog.String("voice_channel_id", channelID),
-		slog.Duration("delay", delay),
-	)
 }
 
 func (p *guildPlayer) cancelEmptyVoiceDisconnect() {
@@ -1210,7 +1197,6 @@ func (p *guildPlayer) cancelEmptyVoiceDisconnect() {
 	p.mu.Unlock()
 	if timer != nil {
 		timer.Stop()
-		p.manager.logger.Info("music voice channel occupied; canceled empty disconnect", slog.String("guild_id", p.guildID))
 	}
 }
 
@@ -1223,10 +1209,6 @@ func (p *guildPlayer) disconnectIfStillEmpty(channelID string, token *emptyDisco
 	p.clearEmptyVoiceDisconnectLocked()
 	p.mu.Unlock()
 
-	p.manager.logger.Info("music voice channel still empty; disconnecting",
-		slog.String("guild_id", p.guildID),
-		slog.String("voice_channel_id", channelID),
-	)
 	if _, err := p.stop(context.Background()); err != nil && !errors.Is(err, ErrNothingPlaying) {
 		p.manager.logger.Warn("music empty voice disconnect failed", slog.Any("err", err), slog.String("guild_id", p.guildID))
 	}

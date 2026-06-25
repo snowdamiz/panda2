@@ -2592,6 +2592,8 @@ func confirmationArguments(action string, preview map[string]any) map[string]str
 		return stringArguments(preview, "channel_id")
 	case "composed_tool.approve", "composed_tool.rollback":
 		return stringArguments(preview, "tool_name", "version")
+	case "composed_tool.delete":
+		return stringArguments(preview, "tool_name")
 	case "owner_ops.drain", "owner_ops.resume", "owner_ops.incident_enable", "owner_ops.incident_disable":
 		return stringArguments(preview, "operation")
 	default:
@@ -2696,6 +2698,8 @@ func confirmationCopy(action string, arguments map[string]string) (string, strin
 		return fmt.Sprintf("Panda prepared approval of `%s` version `%s`.", arguments["tool_name"], arguments["version"]), "Approve tool"
 	case "composed_tool.rollback":
 		return fmt.Sprintf("Panda prepared rollback of `%s` to version `%s`.", arguments["tool_name"], arguments["version"]), "Roll back tool"
+	case "composed_tool.delete":
+		return fmt.Sprintf("Panda prepared permanent deletion of composed tool `%s`.", arguments["tool_name"]), "Delete tool"
 	case "owner_ops.drain":
 		return "Panda prepared draining the queue worker so it will not claim new jobs.", "Drain worker"
 	case "owner_ops.resume":
@@ -2775,8 +2779,10 @@ func normalizeComposedManagementAction(action string) string {
 		return "preview"
 	case "draft", "create":
 		return "draft"
-	case "list", "show", "approve", "pause", "resume", "disable", "archive", "run", "simulate", "export", "rollback":
+	case "list", "show", "approve", "pause", "resume", "disable", "archive", "delete", "run", "simulate", "export", "rollback":
 		return strings.ToLower(strings.TrimSpace(action))
+	case "remove", "destroy":
+		return "delete"
 	case "enable":
 		return "resume"
 	default:
@@ -2861,7 +2867,7 @@ func composedManagementPermission(action string) string {
 		return admin.PermissionToolComposeDraft
 	case "list", "show", "export":
 		return admin.PermissionToolComposeAudit
-	case "approve", "pause", "resume", "disable", "archive", "rollback":
+	case "approve", "pause", "resume", "disable", "archive", "delete", "rollback":
 		return admin.PermissionToolComposeApprove
 	case "run", "simulate":
 		return admin.PermissionToolComposeInvoke

@@ -2320,6 +2320,28 @@ func TestAssistantFeedbackEligible(t *testing.T) {
 	}
 }
 
+func TestAssistantStandaloneCardWithEmptyContentDoesNotCreateFollowup(t *testing.T) {
+	router := &Router{}
+	response := router.responseFromAssistantAnswer(context.Background(), Request{}, assistant.AskResponse{
+		Card: &assistant.ToolCard{
+			Title:      "Connected to voice",
+			Content:    "Joined <#100000000000000222> and started **track**.",
+			Accent:     "music",
+			Standalone: true,
+		},
+	}, "", "")
+
+	if response.Content != "Joined <#100000000000000222> and started **track**." {
+		t.Fatalf("expected card content as primary embed description, got %+v", response)
+	}
+	if response.Presentation.Title != "Connected to voice" || response.Presentation.Accent != AccentMusic {
+		t.Fatalf("expected music card presentation, got %+v", response.Presentation)
+	}
+	if len(response.Followups) != 0 {
+		t.Fatalf("empty standalone card prose should not create a followup, got %+v", response.Followups)
+	}
+}
+
 func TestChatAddsRecentInvocationContext(t *testing.T) {
 	client := &fakeLLM{response: llm.ChatResponse{Content: "chat fixture"}}
 	router := newTestRouter(t, client, 5).WithContextService(contextsvc.NewService(fakeContextProvider{messages: []contextsvc.Message{
@@ -2399,6 +2421,51 @@ func TestNaturalMessageUsesInlineChat(t *testing.T) {
 	}
 	if joined := joinRequestMessages(client.requests[0]); !strings.Contains(joined, "Bot mentioned: true") || !strings.Contains(joined, "Natural Discord response gate") {
 		t.Fatalf("expected natural chat request to include mention metadata and response gate, got:\n%s", joined)
+	}
+}
+
+func TestNaturalMessageEllipticalSummonUsesRecentConversationContext(t *testing.T) {
+	client := &fakeLLM{responses: []llm.ChatResponse{
+		{Content: "<panda_respond>\nI can answer from the recent conversation context."},
+	}}
+	now := time.Now().UTC()
+	router := newTestRouter(t, client, 5).WithContextService(contextsvc.NewService(fakeContextProvider{messages: []contextsvc.Message{
+		{
+			GuildID:   "guild-1",
+			ChannelID: "channel-1",
+			MessageID: "message-prior",
+			AuthorID:  "user-2",
+			Content:   "How are you feeling about the new Panda bot? I like it, but do you think it can understand what we meant from earlier messages?",
+			CreatedAt: now.Add(-30 * time.Second),
+		},
+	}}))
+
+	response := router.HandleNaturalMessage(context.Background(), Request{
+		UserID:    "user-1",
+		GuildID:   "guild-1",
+		ChannelID: "channel-1",
+		RequestID: "message-current",
+		Options: map[string]string{
+			"message": "Idk lets see, panda can you?",
+		},
+	})
+	if response.Content != "I can answer from the recent conversation context." {
+		t.Fatalf("unexpected natural message response: %+v", response)
+	}
+	if len(client.requests) != 1 {
+		t.Fatalf("expected one streamed natural chat request, got %d", len(client.requests))
+	}
+	joined := joinRequestMessages(client.requests[0])
+	for _, want := range []string{
+		"understand what we meant from earlier messages",
+		"latest user message is short or elliptical",
+		"use relevant recent Discord context",
+		"Do not replace a context-resolved request with a generic capability overview",
+		"Do not replace it with a generic capability rundown",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("expected contextual summon instruction/content %q, got:\n%s", want, joined)
+		}
 	}
 }
 
@@ -2821,6 +2888,54 @@ func TestNaturalMessageManagesMusicThroughAgentTool(t *testing.T) {
 	}
 }
 
+func TestNaturalMessagePreservesRemainingAnswerAfterMusicCard(t *testing.T) {
+	client := &fakeLLM{responses: []llm.ChatResponse{
+		{ToolCalls: []llm.ToolCall{{
+			ID:   "call-music-play",
+			Type: "function",
+			Function: llm.ToolCallFunction{
+				Name:      "panda_manage_music",
+				Arguments: `{"action":"play","query":"fill my pockets by mgk","voice_channel_id":"100000000000000222"}`,
+			},
+		}}},
+		{Content: "SpaceX is privately held, so there is no public SpaceX stock ticker or live public stock price."},
+	}}
+	router := newTestRouter(t, client, 5, func(executor *tools.Executor) {
+		executor.WithWebSearcher(fakeCommandWebSearch{response: websearch.Response{
+			Provider: "brave_search",
+			Query:    "SpaceX stock price",
+			Results:  []websearch.Result{{Title: "SpaceX stock", URL: "https://example.com/spacex", Description: "SpaceX is privately held."}},
+		}})
+	})
+
+	response := router.HandleNaturalMessage(context.Background(), Request{
+		UserID:         "user-1",
+		GuildID:        "guild-1",
+		ChannelID:      "channel-1",
+		VoiceChannelID: "100000000000000222",
+		Options: map[string]string{
+			"message":       "panda join bot-test vc and play fill my pockets by mgk, also find latest spacex stock price",
+			"bot_mentioned": "true",
+		},
+	})
+	if response.Content != "playing fill my pockets by mgk" || response.Presentation.Title != "Now playing" || response.Presentation.Accent != AccentMusic {
+		t.Fatalf("expected primary response to stay the music card, got %+v", response)
+	}
+	if len(response.Followups) != 1 {
+		t.Fatalf("expected remaining answer to render as a followup, got %+v", response.Followups)
+	}
+	if followup := response.Followups[0]; !strings.Contains(followup.Content, "SpaceX is privately held") || strings.Contains(followup.Content, "playing fill my pockets") || followup.Presentation.Title != "" {
+		t.Fatalf("expected plain remaining-answer followup, got %+v", followup)
+	}
+	if len(client.requests) != 2 {
+		t.Fatalf("expected music tool and final response requests, got %d", len(client.requests))
+	}
+	finalRequest := joinRequestMessages(client.requests[1])
+	if !strings.Contains(finalRequest, "if any independent part remains unresolved") || !strings.Contains(finalRequest, "web/search/current-information") {
+		t.Fatalf("expected final request to remind model about remaining tool work, got:\n%s", finalRequest)
+	}
+}
+
 func TestNaturalMessageSplitsMusicCardFromWebSearchAnswer(t *testing.T) {
 	sourceURL := "https://example.com/spacex-stock"
 	musicManager := &fakeToolMusicManager{}
@@ -2890,7 +3005,7 @@ func TestNaturalMessageSplitsMusicCardFromWebSearchAnswer(t *testing.T) {
 		t.Fatalf("expected music tool, web search tool, and final response requests, got %d", len(client.requests))
 	}
 	finalRequest := joinRequestMessages(client.requests[2])
-	if !strings.Contains(finalRequest, "rendered as its own Discord card") || !strings.Contains(finalRequest, "Do not repeat") {
+	if !strings.Contains(finalRequest, "may be rendered as a Discord card") || !strings.Contains(finalRequest, "Do not repeat") {
 		t.Fatalf("expected final request to tell the model not to repeat card status, got:\n%s", finalRequest)
 	}
 }

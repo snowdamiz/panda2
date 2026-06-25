@@ -68,11 +68,6 @@ func (c *musicVoiceConnector) Connect(ctx context.Context, guildIDValue string, 
 	var lastErr error
 	for attempt := 1; attempt <= voiceConnectAttempts; attempt++ {
 		conn := c.client.VoiceManager.CreateConn(guildID)
-		c.logger.Info("joining voice channel",
-			slog.String("guild_id", guildID.String()),
-			slog.String("voice_channel_id", channelID.String()),
-			slog.Int("attempt", attempt),
-		)
 		connectCtx, cancel := context.WithTimeout(ctx, voiceConnectTimeout)
 		err := conn.Open(connectCtx, channelID, false, true)
 		cancel()
@@ -85,11 +80,6 @@ func (c *musicVoiceConnector) Connect(ctx context.Context, guildIDValue string, 
 			c.waitBeforeReconnect(ctx, guildID, channelID, attempt, lastErr)
 			continue
 		}
-		c.logger.Info("voice connection opened",
-			slog.String("guild_id", guildID.String()),
-			slog.String("voice_channel_id", channelID.String()),
-			slog.Int("attempt", attempt),
-		)
 		if err := c.waitForDave(ctx, channelID); err != nil {
 			closeVoiceConn(conn)
 			lastErr = err

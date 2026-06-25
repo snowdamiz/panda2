@@ -213,6 +213,18 @@ func (s *Service) SetStatus(ctx context.Context, guildID, name, status, actorID 
 	return tool, nil
 }
 
+func (s *Service) Delete(ctx context.Context, guildID, name, actorID string) (store.ComposedTool, error) {
+	tool, err := s.repo.DeleteByName(ctx, guildID, name)
+	if err != nil {
+		return store.ComposedTool{}, err
+	}
+	s.recordAudit(ctx, guildID, actorID, "composed_tool.deleted", "composed_tool", name, map[string]string{
+		"tool_id": tool.ToolID,
+		"status":  tool.Status,
+	})
+	return tool, nil
+}
+
 func (s *Service) List(ctx context.Context, guildID string) ([]store.ComposedTool, error) {
 	return s.repo.ListByGuild(ctx, guildID)
 }
@@ -336,9 +348,9 @@ func (s *Service) ManageComposedTool(ctx context.Context, request tools.Composed
 		if name == "" {
 			return nil, fmt.Errorf("tool_name is required")
 		}
-		status := action
-		if status == "resume" {
-			status = StatusEnabled
+		status, ok := composedStatusForManagementAction(action)
+		if !ok {
+			return nil, fmt.Errorf("unsupported composed tool action %q", action)
 		}
 		preview := map[string]any{"tool_name": name, "status": status}
 		if request.DryRun {
@@ -349,6 +361,26 @@ func (s *Service) ManageComposedTool(ctx context.Context, request tools.Composed
 			return nil, err
 		}
 		return map[string]any{"result": composedToolPayload(tool)}, nil
+	case "delete":
+		name := strings.TrimSpace(request.ToolName)
+		if name == "" {
+			return nil, fmt.Errorf("tool_name is required")
+		}
+		preview := map[string]any{"tool_name": name}
+		if request.DryRun {
+			return composedDryRunResult("composed_tool.delete", preview), nil
+		}
+		tool, err := s.Delete(ctx, request.GuildID, name, request.ActorID)
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{"result": map[string]any{
+			"action":    "delete",
+			"deleted":   true,
+			"tool_name": tool.Name,
+			"tool_id":   tool.ToolID,
+			"status":    tool.Status,
+		}}, nil
 	case "run", "simulate":
 		name := strings.TrimSpace(request.ToolName)
 		if name == "" {
@@ -734,7 +766,7 @@ Use filters for noisy triggers like message_update, reaction_add, reaction_remov
 message_create is not exposed as a composed automation trigger because it is high-volume; use normal chat behavior or explicit tools for message-response workflows.
 
 For Discord message automations, use native tool discord.send_message with content_template, channel_id or channel_name, and allowed_mentions. Use {{user_id}} to mention the triggering member as <@{{user_id}}>. Suppress broad mentions with {"users":true,"roles":false,"everyone":false}. Never include @everyone or @here.
-For music automations triggered by voice_state_update, use native tool panda.manage_music with action play, query or song, and voice_channel_id "{{channel_id}}" so playback joins the voice/stage channel from the event. Include panda.manage_music in runner.tool_allowlist. Use conservative cooldown_seconds and dedupe_window_seconds to avoid repeated playback from noisy voice updates.
+For music automations triggered by voice_state_update, use native tool panda.manage_music with action play, query or song, and voice_channel_id "{{channel_id}}" so playback joins the voice/stage channel from the event. Include panda.manage_music in runner.tool_allowlist. Its tool result is exposed under top-level result, so music output_schema should require result.ok as a boolean and allow additional properties; do not invent a played field. Use conservative cooldown_seconds and dedupe_window_seconds to avoid repeated playback from noisy voice updates.
 
 If the request contains a Discord channel mention like <#123>, use that numeric ID as channel_id. If the request names a target channel but no channel ID is known, set step arguments channel_name to that plain channel name so the server can resolve it. If the current channel should be the target, use the provided source_channel_id as channel_id.
 If the request names a role but no role ID is known, set invocation filters.role_name to that role name so the server can resolve it.
@@ -801,6 +833,7 @@ func (s *Service) resolveSpecReferences(ctx context.Context, spec Spec, request 
 			return Spec{}, err
 		}
 	}
+	spec = normalizeNativeStepOutputSchema(spec)
 	return spec, nil
 }
 
@@ -896,6 +929,53 @@ func (s *Service) resolveChannelReference(ctx context.Context, arguments map[str
 		return resolved.ID, firstNonEmpty(resolved.Name, channelName), nil
 	}
 	return strings.TrimSpace(request.SourceChannelID), "", nil
+}
+
+func normalizeNativeStepOutputSchema(spec Spec) Spec {
+	for _, step := range spec.Steps {
+		if strings.TrimSpace(step.Type) == StepToolCall && strings.TrimSpace(step.Tool) == "panda.manage_music" {
+			spec.OutputSchema = musicToolRunOutputSchema()
+			return spec
+		}
+	}
+	return spec
+}
+
+func musicToolRunOutputSchema() json.RawMessage {
+	data, _ := json.Marshal(map[string]any{
+		"type":                 "object",
+		"additionalProperties": true,
+		"properties": map[string]any{
+			"result": map[string]any{
+				"type":                 "object",
+				"additionalProperties": true,
+				"properties": map[string]any{
+					"ok":      map[string]string{"type": "boolean"},
+					"action":  map[string]string{"type": "string"},
+					"title":   map[string]string{"type": "string"},
+					"content": map[string]string{"type": "string"},
+				},
+				"required": []string{"ok"},
+			},
+		},
+		"required": []string{"result"},
+	})
+	return data
+}
+
+func composedStatusForManagementAction(action string) (string, bool) {
+	switch strings.ToLower(strings.TrimSpace(action)) {
+	case "pause":
+		return StatusPaused, true
+	case "resume":
+		return StatusEnabled, true
+	case "disable":
+		return StatusDisabled, true
+	case "archive":
+		return StatusArchived, true
+	default:
+		return "", false
+	}
 }
 
 func (s *Service) resolveInvocationReferences(ctx context.Context, invocation *InvocationSpec, request DraftRequest) error {

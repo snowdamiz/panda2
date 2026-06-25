@@ -128,7 +128,8 @@ func New(cfg config.Config, router *commands.Router, logger *slog.Logger) (*Bot,
 	}
 
 	instance := &Bot{cfg: cfg, router: router, logger: logger}
-	daveSessions := newDaveSessionFactory(logger)
+	daveLogger := daveSessionLogger(logger)
+	daveSessions := newDaveSessionFactory(daveLogger)
 	client, err := disgo.New(cfg.DiscordBotToken,
 		bot.WithGatewayConfigOpts(gateway.WithIntents(
 			gateway.IntentsNonPrivileged.Remove(gateway.IntentDirectMessageReactions, gateway.IntentDirectMessageTyping, gateway.IntentDirectMessagePolls),
@@ -138,7 +139,7 @@ func New(cfg config.Config, router *commands.Router, logger *slog.Logger) (*Bot,
 		bot.WithCacheConfigOpts(cache.WithCaches(cache.FlagVoiceStates)),
 		bot.WithVoiceManagerConfigOpts(
 			voice.WithDaveSessionCreateFunc(daveSessions.New),
-			voice.WithDaveSessionLogger(logger),
+			voice.WithDaveSessionLogger(daveLogger),
 		),
 		bot.WithEventListenerFunc(instance.onApplicationCommand),
 		bot.WithEventListenerFunc(instance.onComponentInteraction),
@@ -183,7 +184,6 @@ func New(cfg config.Config, router *commands.Router, logger *slog.Logger) (*Bot,
 		bot.WithEventListenerFunc(instance.onGuildScheduledEventUserAdd),
 		bot.WithEventListenerFunc(instance.onGuildScheduledEventUserRemove),
 		bot.WithEventListenerFunc(instance.onGuildVoiceStateUpdate),
-		bot.WithEventListenerFunc(instance.onVoiceServerUpdate),
 	)
 	if err != nil {
 		return nil, err
@@ -199,7 +199,6 @@ func New(cfg config.Config, router *commands.Router, logger *slog.Logger) (*Bot,
 	ytdlp := music.NewYTDLP(music.YTDLPConfig{
 		YTDLPPath:  cfg.MusicYTDLPPath,
 		FFmpegPath: cfg.MusicFFmpegPath,
-		Logger:     logger,
 		Sidecars:   sidecars,
 	})
 	go func() {
@@ -607,14 +606,11 @@ func (b *Bot) runDeferredInteraction(ctx context.Context, applicationID snowflak
 			return response
 		case <-ticker.C:
 			progressCount++
-			_, err := b.client.Rest.UpdateInteractionResponse(
+			_, _ = b.client.Rest.UpdateInteractionResponse(
 				applicationID,
 				token,
 				webhookMessageUpdateFromResponse(deferredProgressResponse(request.Command, progressCount)),
 			)
-			if err != nil {
-				b.logger.Debug("failed to update deferred progress", slog.Any("err", err), slog.String("request_id", requestID), slog.String("command", request.Command))
-			}
 		case <-ctx.Done():
 			return commands.Response{Content: "Request cancelled before Panda could finish.", Ephemeral: true}
 		}
@@ -728,14 +724,6 @@ func (b *Bot) HandleNaturalMessageJob(ctx context.Context, job store.Job) error 
 	reference, err := messageReferenceFromPayload(payload.Reference)
 	if err != nil {
 		return err
-	}
-	if b.logger != nil {
-		b.logger.Info("running queued natural message",
-			slog.Uint64("job_id", uint64(job.ID)),
-			slog.String("guild_id", payload.Request.GuildID),
-			slog.String("channel_id", payload.Request.ChannelID),
-			slog.String("request_id", payload.Request.RequestID),
-		)
 	}
 	return b.respondToNaturalMessage(ctx, channelID, reference, payload.Request)
 }
@@ -1527,20 +1515,6 @@ func (b *Bot) onMessageCreate(event *events.MessageCreate) {
 		IsOwner:        isOwner,
 		IsGuildAdmin:   isGuildAdmin,
 	}
-	if b.logger != nil {
-		b.logger.Info("natural message request received",
-			slog.String("guild_id", request.GuildID),
-			slog.String("channel_id", request.ChannelID),
-			slog.String("request_id", request.RequestID),
-			slog.String("user_id", request.UserID),
-			slog.Bool("is_owner", request.IsOwner),
-			slog.Bool("is_guild_admin", request.IsGuildAdmin),
-			slog.Int("role_count", len(request.RoleIDs)),
-			slog.Bool("bot_mentioned", options["bot_mentioned"] == "true"),
-			slog.Bool("reply_author_is_bot", options["reply_author_is_bot"] == "true"),
-			slog.Int("content_len", len(content)),
-		)
-	}
 	reference := messageReferenceFromMessage(event.Message)
 	if err := b.queueNaturalMessage(context.Background(), event.ChannelID, reference, request); err != nil {
 		b.logger.Warn("failed to queue natural message; responding inline",
@@ -1578,13 +1552,6 @@ func (b *Bot) queueNaturalMessage(ctx context.Context, channelID snowflake.ID, r
 	if err != nil {
 		return err
 	}
-	if b.logger != nil {
-		b.logger.Info("natural message queued",
-			slog.String("guild_id", request.GuildID),
-			slog.String("channel_id", request.ChannelID),
-			slog.String("request_id", request.RequestID),
-		)
-	}
 	return nil
 }
 
@@ -1621,7 +1588,7 @@ func (b *Bot) respondToNaturalMessage(ctx context.Context, channelID snowflake.I
 		typingOnce.Do(func() {
 			typingMu.Lock()
 			defer typingMu.Unlock()
-			stopTyping = startTypingIndicator(ctx, b.client.Rest, b.logger, channelID, request.RequestID, typingRefreshInterval)
+			stopTyping = startTypingIndicator(ctx, b.client.Rest, channelID, typingRefreshInterval)
 		})
 	}
 	defer func() {
@@ -1632,19 +1599,6 @@ func (b *Bot) respondToNaturalMessage(ctx context.Context, channelID snowflake.I
 		}
 	}()
 	response := b.router.HandleNaturalMessageStream(ctx, request, startTyping)
-	if b.logger != nil {
-		b.logger.Info("natural message response prepared",
-			slog.String("guild_id", request.GuildID),
-			slog.String("channel_id", request.ChannelID),
-			slog.String("request_id", request.RequestID),
-			slog.String("user_id", request.UserID),
-			slog.Bool("has_payload", hasChannelResponsePayload(response)),
-			slog.Int("content_len", len(strings.TrimSpace(response.Content))),
-			slog.Bool("contains_tool_inventory", containsCapabilityAntiPattern(response.Content, "tool inventory")),
-			slog.Bool("contains_panda_list_tools", containsCapabilityAntiPattern(response.Content, "panda_list_tools")),
-			slog.Bool("contains_three_things", containsCapabilityAntiPattern(response.Content, "three things")),
-		)
-	}
 	if !hasChannelResponsePayload(response) {
 		return nil
 	}
@@ -1720,9 +1674,6 @@ func (b *Bot) userVoiceChannelIDFromREST(ctx context.Context, guildID snowflake.
 	}
 	state, err := b.client.Rest.GetUserVoiceState(guildID, userID, rest.WithCtx(ctx))
 	if err != nil || state == nil || state.ChannelID == nil {
-		if err != nil && b.logger != nil {
-			b.logger.Debug("user voice state lookup failed", slog.Any("err", err), slog.String("guild_id", guildID.String()), slog.String("user_id", userID.String()))
-		}
 		return ""
 	}
 	return state.ChannelID.String()
@@ -1809,21 +1760,16 @@ func alertMessageContent(delivery alertsvc.Delivery) string {
 	return strings.Join(lines, "\n")
 }
 
-func startTypingIndicator(ctx context.Context, sender typingSender, logger *slog.Logger, channelID snowflake.ID, requestID string, interval time.Duration) func() {
+func startTypingIndicator(ctx context.Context, sender typingSender, channelID snowflake.ID, interval time.Duration) func() {
 	if sender == nil || channelID == 0 {
 		return func() {}
-	}
-	if logger == nil {
-		logger = slog.Default()
 	}
 	if interval <= 0 {
 		interval = typingRefreshInterval
 	}
 	typingCtx, cancel := context.WithCancel(ctx)
 	send := func() {
-		if err := sender.SendTyping(channelID, rest.WithCtx(typingCtx)); err != nil {
-			logger.Debug("failed to send typing indicator", slog.Any("err", err), slog.String("request_id", requestID), slog.String("channel_id", channelID.String()))
-		}
+		_ = sender.SendTyping(channelID, rest.WithCtx(typingCtx))
 	}
 	send()
 	go func() {
@@ -1907,7 +1853,6 @@ func (b *Bot) captureAttachments(ctx context.Context, message disgoDiscord.Messa
 		}
 		data, contentType, err := downloadAttachment(ctx, client, attachment)
 		if err != nil {
-			logger.Debug("attachment download skipped", slog.Any("err", err), slog.String("filename", attachment.Filename))
 			continue
 		}
 		text, err := attachments.ExtractText(attachments.ExtractRequest{
@@ -1917,7 +1862,6 @@ func (b *Bot) captureAttachments(ctx context.Context, message disgoDiscord.Messa
 			MaxBytes:    maxAttachmentExtractBytes,
 		})
 		if err != nil || strings.TrimSpace(text) == "" {
-			logger.Debug("attachment extraction skipped", slog.Any("err", err), slog.String("filename", attachment.Filename))
 			continue
 		}
 		size := int64(attachment.Size)

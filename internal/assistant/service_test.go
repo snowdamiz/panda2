@@ -44,12 +44,18 @@ type fakeAssistantMusicManager struct {
 	requests []tools.MusicManagementRequest
 }
 
+type fakeAssistantDiscordProvider struct{}
+
 func (f fakeAssistantDynamicTools) OpenRouterTools(context.Context, tools.DynamicToolListRequest) ([]llm.Tool, error) {
 	return f.tools, nil
 }
 
 func (f fakeAssistantDynamicTools) ExecuteDynamicTool(context.Context, tools.DynamicExecutionRequest) (tools.ExecutionResult, error) {
 	return tools.ExecutionResult{Message: llm.Message{Role: "tool", Content: `{}`}}, nil
+}
+
+func (f fakeAssistantDiscordProvider) ExecuteDiscordTool(context.Context, tools.DiscordToolRequest) (any, error) {
+	return map[string]any{"channels": []map[string]any{}}, nil
 }
 
 func (f *fakeAssistantMusicManager) ManageMusic(_ context.Context, request tools.MusicManagementRequest) (any, error) {
@@ -103,6 +109,16 @@ func (f *fakeClient) StreamChat(ctx context.Context, request llm.ChatRequest, on
 		}
 	}
 	return response, nil
+}
+
+func TestCleanupAssistantModelArtifactsRemovesBareToolMarkers(t *testing.T) {
+	content := cleanupAssistantModelArtifacts("SpaceX stock is unavailable [web_search]. Try the private-company valuation instead [web.search†2].")
+	if strings.Contains(content, "web_search") || strings.Contains(content, "web.search") {
+		t.Fatalf("expected web search markers to be removed, got %q", content)
+	}
+	if strings.Contains(content, " ]") || strings.Contains(content, " .") {
+		t.Fatalf("expected punctuation spacing to be cleaned, got %q", content)
+	}
 }
 
 func newTestService(t *testing.T, client *fakeClient) (*Service, *store.Store) {
@@ -192,6 +208,56 @@ func TestSystemPromptRedactsConfigSecretsAndKeepsMandatorySecretRulesLast(t *tes
 	}
 	if !strings.HasSuffix(prompt, secretSafetyPrompt) {
 		t.Fatalf("mandatory secret rules should be the final system prompt section:\n%s", prompt)
+	}
+}
+
+func TestSystemPromptPrefersChannelLookupToolsBeforeClarifying(t *testing.T) {
+	prompt := systemPrompt(store.GuildConfig{})
+	for _, want := range []string{
+		"Discord lookup/listing tool is available",
+		"use the tool to resolve the exact object before asking for an ID",
+		"lookup returns no match",
+		"lookup returns ambiguous matches",
+		"VC or voice-channel request should resolve with a voice/stage channel match",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("system prompt missing channel lookup instruction %q:\n%s", want, prompt)
+		}
+	}
+}
+
+func TestAskExposesDiscordChannelLookupToolWithLookupInstructions(t *testing.T) {
+	ctx := context.Background()
+	client := &fakeClient{response: llm.ChatResponse{Model: "fixture/model", Content: "ok"}}
+	service, db := newTestService(t, client)
+	configs := repository.NewGuildConfigRepository(db.DB)
+	registry, err := tools.NewDefaultRegistry()
+	if err != nil {
+		t.Fatalf("NewDefaultRegistry: %v", err)
+	}
+	service.WithToolExecutor(tools.NewExecutor(registry, nil, configs).WithDiscordToolProvider(fakeAssistantDiscordProvider{}))
+
+	if _, err := service.Ask(ctx, AskRequest{
+		GuildID:      "guild-1",
+		UserID:       "admin-1",
+		ChannelID:    "channel-1",
+		Question:     "Every time someone enters the named VC, play a song.",
+		IsGuildAdmin: true,
+		AllowedPermissions: map[string]struct{}{
+			admin.PermissionAssistantUse:    {},
+			admin.PermissionAdminConfigRead: {},
+		},
+	}); err != nil {
+		t.Fatalf("Ask: %v", err)
+	}
+	if len(client.requests) != 1 {
+		t.Fatalf("expected one LLM request, got %d", len(client.requests))
+	}
+	if !toolNamePresent(client.requests[0].Tools, "discord_list_channels") {
+		t.Fatalf("expected discord_list_channels tool to be exposed, got %+v", client.requests[0].Tools)
+	}
+	if joined := joinMessages(client.requests[0].Messages); !strings.Contains(joined, "use the tool to resolve the exact object before asking for an ID") {
+		t.Fatalf("channel lookup instruction missing from request:\n%s", joined)
 	}
 }
 
@@ -1804,6 +1870,54 @@ func TestAppendWebSearchSourceLinksHonorsExplicitSourceCount(t *testing.T) {
 	want := "Answer.\n\n**Sources:**\n- [example.com/one](https://example.com/one)\n- [example.com/two](https://example.com/two)\n- [example.com/three](https://example.com/three)\n- [example.com/four](https://example.com/four)\n- [example.com/five](https://example.com/five)"
 	if content != want {
 		t.Fatalf("unexpected source markdown:\nwant %q\n got %q", want, content)
+	}
+}
+
+func TestFinalAssistantResponseSuppressesStandaloneCardEcho(t *testing.T) {
+	card := &ToolCard{
+		Title:      "Connected to voice",
+		Content:    "Joined <#100000000000000222> and started **mgk, Wiz Khalifa - fill my pockets (Official Audio)**.",
+		Accent:     "music",
+		Standalone: true,
+	}
+
+	content := finalAssistantResponseContent(
+		"Joined <#100000000000000222> and started **mgk, Wiz Khalifa - fill my pockets (Official Audio)**.",
+		nil,
+		defaultAppendedWebSourceLinks,
+		card,
+		"panda join bot-test vc and play fill my pockets by mgk",
+	)
+
+	if content != "" {
+		t.Fatalf("standalone card echo should be suppressed, got %q", content)
+	}
+	if !card.Standalone {
+		t.Fatalf("card should remain standalone: %+v", card)
+	}
+}
+
+func TestFinalAssistantResponseKeepsStandaloneCardRemainingAnswer(t *testing.T) {
+	card := &ToolCard{
+		Title:      "Connected to voice",
+		Content:    "Joined <#100000000000000222> and started **mgk, Wiz Khalifa - fill my pockets (Official Audio)**.",
+		Accent:     "music",
+		Standalone: true,
+	}
+
+	content := finalAssistantResponseContent(
+		"SpaceX is privately held, so there is no public SpaceX stock ticker or live public stock price.",
+		nil,
+		defaultAppendedWebSourceLinks,
+		card,
+		"panda join bot-test vc and play fill my pockets by mgk, also find latest spacex stock price",
+	)
+
+	if !strings.Contains(content, "SpaceX is privately held") {
+		t.Fatalf("remaining non-card answer should be preserved, got %q", content)
+	}
+	if !card.Standalone {
+		t.Fatalf("card should remain standalone: %+v", card)
 	}
 }
 

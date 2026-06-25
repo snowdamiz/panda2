@@ -592,3 +592,68 @@ func TestComposedToolApprovedVersionsAreImmutable(t *testing.T) {
 		t.Fatalf("new draft version should not disable current approved tool, got %s", tool.Status)
 	}
 }
+
+func TestComposedToolDeleteByNameHardDeletesDependents(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(ctx, "file::memory:?cache=shared")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer db.Close()
+
+	repo := NewComposedToolRepository(db.DB)
+	record, err := repo.CreateDraft(ctx, store.ComposedTool{
+		GuildID:   "guild-1",
+		ToolID:    "guild-1:member_welcome",
+		Name:      "member_welcome",
+		Status:    "pending_approval",
+		CreatedBy: "moderator-1",
+	}, store.ComposedToolVersion{
+		SpecJSON:           `{"schema_version":1}`,
+		ValidationJSON:     `{"valid":true}`,
+		ToolDefinitionJSON: `{"type":"function"}`,
+		CreatedBy:          "moderator-1",
+	})
+	if err != nil {
+		t.Fatalf("CreateDraft: %v", err)
+	}
+	if _, err := repo.ApproveVersion(ctx, "guild-1", "member_welcome", 1, "admin-1"); err != nil {
+		t.Fatalf("ApproveVersion: %v", err)
+	}
+	if _, err := repo.CreateRun(ctx, store.ComposedToolRun{
+		ComposedToolID: record.Tool.ID,
+		VersionID:      record.Version.ID,
+		GuildID:        "guild-1",
+		InvocationType: "manual",
+	}); err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+	if _, err := repo.TryDedupe(ctx, record.Tool.ID, "fingerprint-1", time.Now().Add(time.Hour)); err != nil {
+		t.Fatalf("TryDedupe: %v", err)
+	}
+
+	deleted, err := repo.DeleteByName(ctx, "guild-1", "member_welcome")
+	if err != nil {
+		t.Fatalf("DeleteByName: %v", err)
+	}
+	if deleted.Name != "member_welcome" || deleted.ID != record.Tool.ID {
+		t.Fatalf("unexpected deleted tool: %+v", deleted)
+	}
+	if _, ok, err := repo.GetByName(ctx, "guild-1", "member_welcome"); err != nil || ok {
+		t.Fatalf("GetByName after delete ok=%t err=%v", ok, err)
+	}
+	for name, model := range map[string]any{
+		"composed_tools":         &store.ComposedTool{},
+		"composed_tool_versions": &store.ComposedToolVersion{},
+		"composed_tool_runs":     &store.ComposedToolRun{},
+		"composed_tool_dedupes":  &store.ComposedToolDedupe{},
+	} {
+		var count int64
+		if err := db.DB.Model(model).Count(&count).Error; err != nil {
+			t.Fatalf("count %s: %v", name, err)
+		}
+		if count != 0 {
+			t.Fatalf("expected %s to be empty after delete, got %d", name, count)
+		}
+	}
+}

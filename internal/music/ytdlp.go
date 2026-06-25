@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log/slog"
 	"os/exec"
 	"sort"
 	"strings"
@@ -25,7 +24,6 @@ type YTDLPConfig struct {
 	FFmpegPath    string
 	LookupTimeout time.Duration
 	AudioBitrate  string
-	Logger        *slog.Logger
 	Sidecars      *SidecarManager
 }
 
@@ -34,7 +32,6 @@ type YTDLP struct {
 	ffmpegPath    string
 	lookupTimeout time.Duration
 	audioBitrate  string
-	logger        *slog.Logger
 	sidecars      *SidecarManager
 	toolsMu       sync.RWMutex
 }
@@ -50,16 +47,11 @@ func NewYTDLP(config YTDLPConfig) *YTDLP {
 	}
 	ytdlpPath := strings.TrimSpace(config.YTDLPPath)
 	ffmpegPath := strings.TrimSpace(config.FFmpegPath)
-	logger := config.Logger
-	if logger == nil {
-		logger = slog.Default()
-	}
 	return &YTDLP{
 		ytdlpPath:     ytdlpPath,
 		ffmpegPath:    ffmpegPath,
 		lookupTimeout: lookupTimeout,
 		audioBitrate:  audioBitrate,
-		logger:        logger,
 		sidecars:      config.Sidecars,
 	}
 }
@@ -89,7 +81,13 @@ func (y *YTDLP) Resolve(ctx context.Context, query string) (Track, error) {
 	cmd.Stderr = &stderr
 	output, err := cmd.Output()
 	if err != nil {
-		return Track{}, fmt.Errorf("%w: %s", ErrTrackLookupFailed, stderr.String())
+		detail := strings.TrimSpace(stderr.String())
+		if lookupCtx.Err() != nil {
+			detail = lookupCtx.Err().Error()
+		} else if detail == "" {
+			detail = err.Error()
+		}
+		return Track{}, fmt.Errorf("%w: %s", ErrTrackLookupFailed, detail)
 	}
 	var metadata ytdlpMetadata
 	if err := json.Unmarshal(output, &metadata); err != nil {
@@ -111,6 +109,46 @@ func (y *YTDLP) Resolve(ctx context.Context, query string) (Track, error) {
 		Uploader:      strings.TrimSpace(metadata.Uploader),
 		Duration:      durationFromSeconds(metadata.Duration),
 	}, nil
+}
+
+func (y *YTDLP) Suggestions(ctx context.Context, query string, limit int) ([]Track, error) {
+	query = strings.TrimSpace(query)
+	if query == "" {
+		return nil, ErrMissingSong
+	}
+	if limit <= 0 {
+		limit = 5
+	}
+	if limit > 10 {
+		limit = 10
+	}
+	tools, err := y.ensureTools(ctx)
+	if err != nil {
+		return nil, err
+	}
+	lookupCtx, cancel := context.WithTimeout(ctx, y.lookupTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(lookupCtx, tools.YTDLPPath,
+		"--dump-json",
+		"--flat-playlist",
+		"--no-warnings",
+		"--no-cache-dir",
+		"--skip-download",
+		fmt.Sprintf("ytsearch%d:%s", limit, query),
+	)
+	var stderr limitedBuffer
+	cmd.Stderr = &stderr
+	output, err := cmd.Output()
+	if err != nil {
+		detail := strings.TrimSpace(stderr.String())
+		if lookupCtx.Err() != nil {
+			detail = lookupCtx.Err().Error()
+		} else if detail == "" {
+			detail = err.Error()
+		}
+		return nil, fmt.Errorf("%w: %s", ErrTrackLookupFailed, detail)
+	}
+	return parseYTDLPSuggestions(output, query, limit)
 }
 
 func (y *YTDLP) Stream(ctx context.Context, track Track) (OpusFrameProvider, error) {
@@ -175,7 +213,6 @@ func (y *YTDLP) streamViaYTDLP(ctx context.Context, tools ToolPaths, source stri
 		ffmpeg:    ffmpegCmd,
 		ytdlpErr:  &ytdlpErr,
 		ffmpegErr: &ffmpegErr,
-		logger:    y.logger,
 	}, nil
 }
 
@@ -207,7 +244,6 @@ func (y *YTDLP) streamDirect(ctx context.Context, tools ToolPaths, source string
 		cancel:    cancel,
 		ffmpeg:    ffmpegCmd,
 		ffmpegErr: &ffmpegErr,
-		logger:    y.logger,
 	}, nil
 }
 
@@ -301,6 +337,7 @@ func cleanHeaderPart(value string) string {
 
 type ytdlpMetadata struct {
 	ID          string            `json:"id"`
+	Type        string            `json:"_type"`
 	Title       string            `json:"title"`
 	WebpageURL  string            `json:"webpage_url"`
 	OriginalURL string            `json:"original_url"`
@@ -308,6 +345,62 @@ type ytdlpMetadata struct {
 	HTTPHeaders map[string]string `json:"http_headers"`
 	Uploader    string            `json:"uploader"`
 	Duration    float64           `json:"duration"`
+	Entries     []ytdlpMetadata   `json:"entries"`
+}
+
+func parseYTDLPSuggestions(output []byte, query string, limit int) ([]Track, error) {
+	output = bytes.TrimSpace(output)
+	if len(output) == 0 {
+		return nil, nil
+	}
+	decoder := json.NewDecoder(bytes.NewReader(output))
+	tracks := make([]Track, 0, limit)
+	for {
+		var metadata ytdlpMetadata
+		if err := decoder.Decode(&metadata); err != nil {
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			return nil, fmt.Errorf("%w: parse suggestions: %v", ErrTrackLookupFailed, err)
+		}
+		if len(metadata.Entries) > 0 {
+			for _, entry := range metadata.Entries {
+				if track, ok := suggestionTrack(entry, query); ok {
+					tracks = append(tracks, track)
+				}
+				if len(tracks) >= limit {
+					return tracks, nil
+				}
+			}
+			continue
+		}
+		if track, ok := suggestionTrack(metadata, query); ok {
+			tracks = append(tracks, track)
+		}
+		if len(tracks) >= limit {
+			return tracks, nil
+		}
+	}
+	return tracks, nil
+}
+
+func suggestionTrack(metadata ytdlpMetadata, query string) (Track, bool) {
+	title := strings.TrimSpace(metadata.Title)
+	if title == "" {
+		return Track{}, false
+	}
+	url := strings.TrimSpace(firstNonEmpty(metadata.WebpageURL, metadata.OriginalURL, metadata.URL))
+	if !strings.HasPrefix(url, "http://") && !strings.HasPrefix(url, "https://") {
+		url = ""
+	}
+	return Track{
+		ID:       strings.TrimSpace(metadata.ID),
+		Query:    query,
+		Title:    title,
+		URL:      url,
+		Uploader: strings.TrimSpace(metadata.Uploader),
+		Duration: durationFromSeconds(metadata.Duration),
+	}, true
 }
 
 type processOpusProvider struct {
@@ -317,7 +410,6 @@ type processOpusProvider struct {
 	ffmpeg    *exec.Cmd
 	ytdlpErr  *limitedBuffer
 	ffmpegErr *limitedBuffer
-	logger    *slog.Logger
 	once      sync.Once
 	waitOnce  sync.Once
 	waitErr   error
@@ -340,27 +432,27 @@ func (p *processOpusProvider) ProvideOpusFrame() ([]byte, error) {
 func (p *processOpusProvider) Close() {
 	p.once.Do(func() {
 		p.cancel()
-		if err := p.wait(); err != nil && p.logger != nil {
-			p.logger.Debug("music stream process closed with error", slog.Any("err", err))
-		}
+		_ = p.wait()
 	})
 }
 
 func (p *processOpusProvider) wait() error {
 	p.waitOnce.Do(func() {
+		var failures []string
 		if p.ffmpeg != nil {
 			ffmpegErr := p.ffmpeg.Wait()
 			if ffmpegErr != nil {
-				p.waitErr = fmt.Errorf("%w: ffmpeg: %v %s", ErrTrackStreamFailed, ffmpegErr, p.ffmpegErr.String())
-				return
+				failures = append(failures, strings.TrimSpace(fmt.Sprintf("ffmpeg: %v %s", ffmpegErr, p.ffmpegErr.String())))
 			}
 		}
-		if p.ytdlp == nil {
-			return
+		if p.ytdlp != nil {
+			ytdlpErr := p.ytdlp.Wait()
+			if ytdlpErr != nil {
+				failures = append(failures, strings.TrimSpace(fmt.Sprintf("yt-dlp: %v %s", ytdlpErr, p.ytdlpErr.String())))
+			}
 		}
-		ytdlpErr := p.ytdlp.Wait()
-		if ytdlpErr != nil {
-			p.waitErr = fmt.Errorf("%w: yt-dlp: %v %s", ErrTrackStreamFailed, ytdlpErr, p.ytdlpErr.String())
+		if len(failures) > 0 {
+			p.waitErr = fmt.Errorf("%w: %s", ErrTrackStreamFailed, strings.Join(failures, "; "))
 		}
 	})
 	return p.waitErr
