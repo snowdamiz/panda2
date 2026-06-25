@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	disgoDiscord "github.com/disgoorg/disgo/discord"
 	"github.com/sn0w/panda2/internal/billing"
 	"github.com/sn0w/panda2/internal/features"
 	"github.com/sn0w/panda2/internal/repository"
@@ -525,6 +526,32 @@ func (s *InstallService) HandleWebhookEvent(ctx context.Context, event WebhookEv
 	return s.acceptGuildInstall(ctx, install, data.Scopes)
 }
 
+func (s *InstallService) RecordGatewayGuild(ctx context.Context, guild disgoDiscord.GatewayGuild) error {
+	if s.guilds == nil {
+		return errors.New("guild install repository is not configured")
+	}
+	if guild.Unavailable {
+		return nil
+	}
+	install, err := guildInstallFromGatewayGuild(guild, time.Now().UTC())
+	if err != nil {
+		return err
+	}
+	if _, err := s.guilds.RecordObservedInstall(ctx, install); err != nil {
+		return err
+	}
+	if s.billing != nil {
+		if _, _, err := s.billing.EnsureTrialIfMissing(ctx, billing.TrialSeed{
+			GuildID:            install.GuildID,
+			BillingOwnerUserID: install.InstalledByUserID,
+			AuthorizedAt:       install.AuthorizedAt,
+		}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (s *InstallService) acceptGuildInstall(ctx context.Context, install repository.GuildInstall, scopes []string) error {
 	if _, err := s.guilds.RecordAuthorizedInstall(ctx, install); err != nil {
 		return err
@@ -637,6 +664,29 @@ func isGuildInstall(data applicationAuthorizedData) bool {
 		return false
 	}
 	return data.IntegrationType == nil || *data.IntegrationType == integrationTypeGuildInstall
+}
+
+func guildInstallFromGatewayGuild(guild disgoDiscord.GatewayGuild, observedAt time.Time) (repository.GuildInstall, error) {
+	authorizedAt := guild.JoinedAt
+	if authorizedAt.IsZero() {
+		authorizedAt = observedAt
+	}
+	install := repository.GuildInstall{
+		GuildID:           guild.ID.String(),
+		Name:              strings.TrimSpace(guild.Name),
+		OwnerUserID:       guild.OwnerID.String(),
+		InstalledByUserID: guild.OwnerID.String(),
+		Locale:            strings.TrimSpace(guild.PreferredLocale),
+		AuthorizedAt:      authorizedAt.UTC(),
+	}
+	switch {
+	case guild.ID == 0:
+		return repository.GuildInstall{}, errors.New("gateway guild event is missing guild id")
+	case guild.OwnerID == 0:
+		return repository.GuildInstall{}, errors.New("gateway guild event is missing guild owner id")
+	default:
+		return install, nil
+	}
 }
 
 func guildInstallFromAuthorizedData(data applicationAuthorizedData, authorizedAt time.Time) (repository.GuildInstall, error) {

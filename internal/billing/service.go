@@ -193,6 +193,22 @@ func (s *Service) EnsureTrial(ctx context.Context, seed TrialSeed) (Entitlement,
 	return s.entitlementFromSubscription(ctx, subscription)
 }
 
+func (s *Service) EnsureTrialIfMissing(ctx context.Context, seed TrialSeed) (Entitlement, bool, error) {
+	if s == nil || s.repo == nil {
+		return Entitlement{}, false, ErrNoSubscription
+	}
+	existing, ok, err := s.repo.GetSubscriptionByGuild(ctx, seed.GuildID)
+	if err != nil {
+		return Entitlement{}, false, err
+	}
+	if ok {
+		entitlement, err := s.entitlementFromSubscription(ctx, existing)
+		return entitlement, false, err
+	}
+	entitlement, err := s.EnsureTrial(ctx, seed)
+	return entitlement, err == nil, err
+}
+
 func (s *Service) Resolve(ctx context.Context, guildID string) (Entitlement, error) {
 	if s == nil || s.repo == nil {
 		return Entitlement{}, ErrNoSubscription

@@ -14,6 +14,7 @@ const (
 	ActionPause    Action = "pause"
 	ActionResume   Action = "resume"
 	ActionSkip     Action = "skip"
+	ActionSkipPlay Action = "skip_play"
 	ActionStop     Action = "stop"
 	ActionQueue    Action = "queue"
 	ActionClear    Action = "clear"
@@ -106,6 +107,8 @@ type Track struct {
 	Query         string
 	Title         string
 	URL           string
+	StreamURL     string
+	StreamHeaders map[string]string
 	Uploader      string
 	Duration      time.Duration
 	RequestedBy   string
@@ -114,6 +117,11 @@ type Track struct {
 
 type Resolver interface {
 	Resolve(ctx context.Context, query string) (Track, error)
+}
+
+type SuggestingResolver interface {
+	Resolver
+	Suggestions(ctx context.Context, query string, limit int) ([]Track, error)
 }
 
 type Streamer interface {

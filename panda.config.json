@@ -3,7 +3,12 @@
     "application_id": "",
     "guild_id": "",
     "public_key": "",
-    "owner_user_ids": []
+    "owner_user_ids": ["525185475187572736"]
+  },
+  "openrouter": {
+    "default_model": "openai/gpt-oss-120b",
+    "provider_order": ["cerebras"],
+    "allow_provider_fallbacks": false
   },
   "billing": {
     "public_url": "",

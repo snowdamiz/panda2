@@ -27,6 +27,10 @@ type fakeDiscordResolver struct {
 	roles    map[string]ResolvedDiscordObject
 }
 
+type fakeComposedMusicManager struct {
+	requests []tools.MusicManagementRequest
+}
+
 func (f *fakeDiscordToolProvider) ExecuteDiscordTool(_ context.Context, request tools.DiscordToolRequest) (any, error) {
 	f.calls = append(f.calls, request)
 	return map[string]any{
@@ -49,6 +53,15 @@ func (f fakeDiscordResolver) ResolveRoleByName(_ context.Context, _ string, name
 func (f fakeDiscordResolver) ResolveChannelByName(_ context.Context, _ string, name string) (ResolvedDiscordObject, bool, error) {
 	resolved, ok := f.channels[strings.ToLower(strings.TrimSpace(name))]
 	return resolved, ok, nil
+}
+
+func (f *fakeComposedMusicManager) ManageMusic(_ context.Context, request tools.MusicManagementRequest) (any, error) {
+	f.requests = append(f.requests, request)
+	return map[string]any{"result": map[string]any{
+		"ok":      true,
+		"action":  request.Action,
+		"content": "started " + request.Query,
+	}}, nil
 }
 
 func newComposedTestService(t *testing.T) (*Service, *fakeDiscordToolProvider) {
@@ -154,6 +167,60 @@ func reactionThanksSpec() Spec {
 		},
 	}
 	return NormalizeSpec(spec)
+}
+
+func voiceRickrollSpecWithNames() Spec {
+	return NormalizeSpec(Spec{
+		SchemaVersion: 1,
+		Name:          "voice_rickroll",
+		Description:   "Plays Rick Astley when the configured member enters the configured voice channel.",
+		InputSchema: rawObjectSchema([]string{"user_id", "channel_id"}, map[string]string{
+			"user_id":    "string",
+			"channel_id": "string",
+		}),
+		OutputSchema: rawObjectSchema([]string{"action"}, map[string]string{
+			"action":  "string",
+			"content": "string",
+		}),
+		Runner: RunnerSpec{
+			Type:         RunnerDeterministic,
+			SystemPrompt: "Play only the approved song in the triggering voice channel.",
+			Temperature:  0.2,
+			MaxTokens:    300,
+			ToolAllowlist: []string{
+				"panda.manage_music",
+			},
+		},
+		Steps: []StepSpec{{
+			ID:   "play_rickroll",
+			Type: StepToolCall,
+			Tool: "panda.manage_music",
+			Arguments: map[string]any{
+				"action":             "play",
+				"query":              "Rick Astley - Never Gonna Give You Up",
+				"voice_channel_name": "bot-test",
+			},
+		}},
+		Invocations: []InvocationSpec{
+			{
+				Type:      InvocationEvent,
+				EventType: EventVoiceStateUpdated,
+				Filters: map[string]string{
+					"channel_name": "bot-test",
+					"user_id":      "user-xer0",
+				},
+			},
+			{Type: InvocationChatTool},
+		},
+		Safety: SafetySpec{
+			RequiresApproval:            true,
+			RequiresConfirmationOnWrite: false,
+			MaxNestedDepth:              2,
+			CooldownSeconds:             30,
+			MaxRunsPerHour:              10,
+			DedupeWindowSeconds:         300,
+		},
+	})
 }
 
 func TestNaturalDraftApprovalAdvertiseAndRunUserComposedJoinAutomation(t *testing.T) {
@@ -313,6 +380,172 @@ func TestManageComposedToolDraftAndApprovalConfirmation(t *testing.T) {
 	}
 	if !strings.Contains(toolsPayloadString(approval), `"confirmation_required":true`) || !strings.Contains(toolsPayloadString(approval), "composed_tool.approve") {
 		t.Fatalf("approval should require confirmation, got %+v", approval)
+	}
+}
+
+func TestManageComposedToolArchiveUsesArchivedStatus(t *testing.T) {
+	ctx := context.Background()
+	service, _ := newComposedTestService(t)
+	spec := roleWelcomeSpec()
+	spec.Name = "archivable_tool"
+	if _, err := service.Draft(ctx, DraftRequest{
+		GuildID:  "guild-1",
+		ActorID:  "admin-1",
+		SpecJSON: mustJSON(spec),
+	}); err != nil {
+		t.Fatalf("Draft: %v", err)
+	}
+
+	result, err := service.ManageComposedTool(ctx, tools.ComposedToolManagementRequest{
+		GuildID:  "guild-1",
+		ActorID:  "admin-1",
+		Action:   "archive",
+		ToolName: "archivable_tool",
+	})
+	if err != nil {
+		t.Fatalf("archive: %v", err)
+	}
+	payload := toolsPayloadString(result)
+	if !strings.Contains(payload, `"status":"archived"`) {
+		t.Fatalf("expected archived status payload, got %+v", result)
+	}
+	records, err := service.List(ctx, "guild-1")
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(records) != 1 || records[0].Status != StatusArchived {
+		t.Fatalf("expected archived record, got %+v", records)
+	}
+}
+
+func TestManageComposedToolDeleteHardDeletesTool(t *testing.T) {
+	ctx := context.Background()
+	service, _ := newComposedTestService(t)
+	spec := roleWelcomeSpec()
+	spec.Name = "deletable_tool"
+	if _, err := service.Draft(ctx, DraftRequest{
+		GuildID:  "guild-1",
+		ActorID:  "admin-1",
+		SpecJSON: mustJSON(spec),
+	}); err != nil {
+		t.Fatalf("Draft: %v", err)
+	}
+
+	result, err := service.ManageComposedTool(ctx, tools.ComposedToolManagementRequest{
+		GuildID:  "guild-1",
+		ActorID:  "admin-1",
+		Action:   "delete",
+		ToolName: "deletable_tool",
+	})
+	if err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	payload := toolsPayloadString(result)
+	if !strings.Contains(payload, `"deleted":true`) || !strings.Contains(payload, `"tool_name":"deletable_tool"`) {
+		t.Fatalf("expected delete result payload, got %+v", result)
+	}
+	records, err := service.List(ctx, "guild-1")
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(records) != 0 {
+		t.Fatalf("expected deleted tool to be absent, got %+v", records)
+	}
+}
+
+func TestVoiceMusicDraftResolvesChannelAndRequiresApproval(t *testing.T) {
+	ctx := context.Background()
+	service, _ := newComposedTestService(t)
+	service.client = &fakeComposedLLM{response: llm.ChatResponse{Content: mustJSON(voiceRickrollSpecWithNames())}}
+	service.WithDiscordResolver(fakeDiscordResolver{
+		channels: map[string]ResolvedDiscordObject{"bot-test": {ID: "voice-bot-test", Name: "bot-test"}},
+	})
+
+	preview, err := service.PreviewDraft(ctx, DraftRequest{
+		GuildID:          "guild-1",
+		ActorID:          "admin-1",
+		Text:             "Every time @xer0 enters bot-test vc, play the rick roll song.",
+		VoiceChannelName: "bot-test",
+	})
+	if err != nil {
+		t.Fatalf("PreviewDraft: %v", err)
+	}
+	if !preview.Validation.Valid {
+		t.Fatalf("expected voice music draft to validate, got %+v", preview.Validation)
+	}
+	if got := preview.Spec.Invocations[0].Filters["channel_id"]; got != "voice-bot-test" {
+		t.Fatalf("expected resolved voice filter, got %+v", preview.Spec.Invocations[0].Filters)
+	}
+	if _, exists := preview.Spec.Invocations[0].Filters["channel_name"]; exists {
+		t.Fatalf("expected channel_name filter to be replaced, got %+v", preview.Spec.Invocations[0].Filters)
+	}
+	if got := preview.Spec.Steps[0].Arguments["voice_channel_id"]; got != "voice-bot-test" {
+		t.Fatalf("expected resolved music voice channel, got %+v", preview.Spec.Steps[0].Arguments)
+	}
+
+	draft, err := service.ManageComposedTool(ctx, tools.ComposedToolManagementRequest{
+		GuildID:          "guild-1",
+		ActorID:          "admin-1",
+		Action:           "draft",
+		Text:             "Every time @xer0 enters bot-test vc, play the rick roll song.",
+		VoiceChannelName: "bot-test",
+	})
+	if err != nil {
+		t.Fatalf("draft: %v", err)
+	}
+	payload := toolsPayloadString(draft)
+	if !strings.Contains(payload, `"confirmation_required":true`) || !strings.Contains(payload, "composed_tool.approve") || !strings.Contains(payload, "voice_rickroll") {
+		t.Fatalf("draft should include approval confirmation metadata, got %+v", draft)
+	}
+}
+
+func TestVoiceMusicDraftNormalizesOutputSchemaToMusicToolResult(t *testing.T) {
+	ctx := context.Background()
+	service, _ := newComposedTestService(t)
+	musicManager := &fakeComposedMusicManager{}
+	service.executor = service.executor.WithMusicManager(musicManager)
+	spec := voiceRickrollSpecWithNames()
+	spec.OutputSchema = rawObjectSchema([]string{"played"}, map[string]string{"played": "boolean"})
+	service.client = &fakeComposedLLM{response: llm.ChatResponse{Content: mustJSON(spec)}}
+	service.WithDiscordResolver(fakeDiscordResolver{
+		channels: map[string]ResolvedDiscordObject{"bot-test": {ID: "100000000000000222", Name: "bot-test"}},
+	})
+
+	draft, err := service.Draft(ctx, DraftRequest{
+		GuildID:          "guild-1",
+		ActorID:          "admin-1",
+		Text:             "Every time @xer0 enters bot-test vc, play the rick roll song.",
+		VoiceChannelName: "bot-test",
+	})
+	if err != nil {
+		t.Fatalf("Draft: %v", err)
+	}
+	schema := string(draft.Spec.OutputSchema)
+	if strings.Contains(schema, "played") || !strings.Contains(schema, `"result"`) || !strings.Contains(schema, `"ok"`) {
+		t.Fatalf("expected music output schema to match tool result, got %s", schema)
+	}
+	if _, err := service.Approve(ctx, "guild-1", "voice_rickroll", 1, "admin-1"); err != nil {
+		t.Fatalf("Approve: %v", err)
+	}
+	run, err := service.Run(ctx, RunRequest{
+		GuildID:           "guild-1",
+		ToolName:          "voice_rickroll",
+		InvocationType:    InvocationEvent,
+		InvokingUserID:    "user-xer0",
+		TriggeringEventID: "event-1",
+		Input: map[string]any{
+			"user_id":    "user-xer0",
+			"channel_id": "100000000000000222",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if run.Status != RunSucceeded || run.Output["result"] == nil {
+		t.Fatalf("expected successful music run output, got %+v", run)
+	}
+	if len(musicManager.requests) != 1 || musicManager.requests[0].VoiceChannelID != "100000000000000222" {
+		t.Fatalf("expected music manager call with resolved voice channel, got %+v", musicManager.requests)
 	}
 }
 
@@ -513,6 +746,21 @@ func TestValidateSpecRejectsUnsupportedEventTypes(t *testing.T) {
 	report := ValidateSpec(spec, registry)
 	if report.Valid || !strings.Contains(strings.Join(report.Errors, " "), "not supported") {
 		t.Fatalf("expected unsupported event to be rejected: %+v", report)
+	}
+}
+
+func TestValidateSpecRejectsBroadVoiceStateEvent(t *testing.T) {
+	registry, err := tools.NewDefaultRegistry()
+	if err != nil {
+		t.Fatalf("tool registry: %v", err)
+	}
+	spec := voiceRickrollSpecWithNames()
+	spec.Name = "broad_voice_rickroll"
+	spec.Invocations[0].Filters = map[string]string{"user_id": "user-xer0"}
+
+	report := ValidateSpec(spec, registry)
+	if report.Valid || !strings.Contains(strings.Join(report.Errors, " "), "filters.channel_id") {
+		t.Fatalf("expected broad voice event to be rejected: %+v", report)
 	}
 }
 

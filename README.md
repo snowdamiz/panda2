@@ -74,6 +74,8 @@ Setup and administration are handled through natural Discord messages. Ask Panda
 - Use `/billing action:activate api_key:<key>` only for one-time activation keys, so secrets stay out of normal chat.
 - Destructive or privileged changes use confirmation buttons before Panda acts.
 
+Configured bot owners from `OWNER_USER_IDS` or `discord.owner_user_ids` are Panda admins in every server where Panda is installed. Use Discord user IDs, not usernames or display names.
+
 Panda does not expose model names, provider names, fallback routing, token prices, or provider diagnostics to normal users or guild admins.
 
 ## Data And Safety

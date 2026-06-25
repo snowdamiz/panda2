@@ -109,3 +109,47 @@ func TestWorkerDrainSkipsJobs(t *testing.T) {
 		t.Fatalf("expected queued job to remain, got depth %d", depth)
 	}
 }
+
+func TestWorkerRunDrainsReadyJobsBeforeWaiting(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(ctx, "file::memory:?cache=shared")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer db.Close()
+
+	jobs := repository.NewJobRepository(db.DB)
+	for range 2 {
+		if _, err := jobs.Enqueue(ctx, store.Job{Kind: "fixture"}); err != nil {
+			t.Fatalf("Enqueue: %v", err)
+		}
+	}
+	worker := NewWorker(jobs, "worker-1")
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	handled := 0
+	worker.Register("fixture", func(context.Context, store.Job) error {
+		handled++
+		if handled == 2 {
+			cancel()
+		}
+		return nil
+	})
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- worker.Run(runCtx, "", time.Hour)
+	}()
+
+	select {
+	case err := <-errCh:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("Run: %v", err)
+		}
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("expected Run to drain both ready jobs without waiting for the interval")
+	}
+	if handled != 2 {
+		t.Fatalf("expected two handled jobs, got %d", handled)
+	}
+}

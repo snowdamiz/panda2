@@ -1,12 +1,17 @@
 package store
 
 import (
+	"bytes"
 	"context"
+	"log"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
+	"gorm.io/gorm/logger"
 )
 
 func TestOpenRunsMigrationsAndPragmas(t *testing.T) {
@@ -77,6 +82,13 @@ func TestOpenRunsMigrationsAndPragmas(t *testing.T) {
 		t.Fatalf("expected guild_tool_roles table, got %d", tableCount)
 	}
 
+	if err := store.DB.Raw("SELECT COUNT(*) FROM sqlite_master WHERE name = 'guild_user_permissions'").Scan(&tableCount).Error; err != nil {
+		t.Fatalf("guild user permissions table lookup failed: %v", err)
+	}
+	if tableCount != 1 {
+		t.Fatalf("expected guild_user_permissions table, got %d", tableCount)
+	}
+
 	for _, table := range []string{"install_intents", "guild_features"} {
 		if err := store.DB.Raw("SELECT COUNT(*) FROM sqlite_master WHERE name = ?", table).Scan(&tableCount).Error; err != nil {
 			t.Fatalf("%s table lookup failed: %v", table, err)
@@ -102,6 +114,36 @@ func TestOpenRunsMigrationsAndPragmas(t *testing.T) {
 		}
 	}
 
+}
+
+func TestExecMigrationStatementSkipsIdempotentAlterWithoutWarnings(t *testing.T) {
+	var logs bytes.Buffer
+	db, err := gorm.Open(sqlite.Open(filepath.Join(t.TempDir(), "idempotent-alter.db")), &gorm.Config{
+		Logger: logger.New(log.New(&logs, "", 0), logger.Config{LogLevel: logger.Warn}),
+	})
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	for _, statement := range []string{
+		`CREATE TABLE customer_accounts (id INTEGER PRIMARY KEY)`,
+		`CREATE TABLE invoice_payment_events (id INTEGER PRIMARY KEY, amount_lamports INTEGER NOT NULL DEFAULT 0)`,
+	} {
+		if err := db.Exec(statement).Error; err != nil {
+			t.Fatalf("seed table: %v", err)
+		}
+	}
+	for _, statement := range []string{
+		`ALTER TABLE customer_accounts DROP COLUMN stripe_customer_id`,
+		`ALTER TABLE invoice_payment_events ADD COLUMN amount_lamports INTEGER NOT NULL DEFAULT 0`,
+	} {
+		if err := execMigrationStatement(db, statement); err != nil {
+			t.Fatalf("exec idempotent alter %q: %v", statement, err)
+		}
+	}
+	logOutput := logs.String()
+	if strings.Contains(logOutput, "no such column") || strings.Contains(logOutput, "duplicate column name") {
+		t.Fatalf("expected idempotent alter statements to avoid GORM warnings, got logs:\n%s", logOutput)
+	}
 }
 
 func TestOpenRunsUsefulnessMigrationWhenLegacyVersionsExist(t *testing.T) {
@@ -248,7 +290,7 @@ func TestLandingDefaultChannelMessagesMigrationBackfillsOldInstallIntents(t *tes
 		t.Fatalf("create schema_migrations: %v", err)
 	}
 	for _, migration := range migrations {
-		if migration.Version >= 24 {
+		if migration.Version == 24 {
 			continue
 		}
 		if err := db.Exec(`INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, CURRENT_TIMESTAMP)`, migration.Version, migration.Name).Error; err != nil {
@@ -377,6 +419,98 @@ func TestLandingDefaultChannelMessagesMigrationBackfillsOldInstallIntents(t *tes
 	}
 }
 
+func TestActiveInstallTrialBackfillCreatesFreeTrialSubscriptions(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(filepath.Join(t.TempDir(), "trial-backfill.db")), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open seed db: %v", err)
+	}
+	if err := runMigrationsBeforeVersion(db, 28); err != nil {
+		t.Fatalf("seed prior migrations: %v", err)
+	}
+	now := time.Date(2026, 6, 24, 19, 0, 0, 0, time.UTC)
+	rows := []struct {
+		guildID     string
+		status      string
+		installerID string
+		leftAt      *time.Time
+	}{
+		{guildID: "guild-needs-trial", status: "active", installerID: "installer-1"},
+		{guildID: "guild-paid", status: "active", installerID: "installer-2"},
+		{guildID: "guild-left", status: "active", installerID: "installer-3", leftAt: &now},
+		{guildID: "guild-inactive", status: "inactive", installerID: "installer-4"},
+	}
+	for _, row := range rows {
+		if err := db.Exec(`INSERT INTO guilds (
+			guild_id, name, install_status, owner_user_id, installed_by_user_id, locale, joined_at, left_at, created_at, updated_at
+		) VALUES (?, ?, ?, 'owner-1', ?, 'en-US', ?, ?, ?, ?)`,
+			row.guildID, row.guildID, row.status, row.installerID, now, row.leftAt, now, now).Error; err != nil {
+			t.Fatalf("seed guild %s: %v", row.guildID, err)
+		}
+	}
+	if err := db.Exec(`INSERT INTO guild_subscriptions (
+		guild_id, customer_account_id, plan, status, grace_state, payment_provider,
+		external_subscription_id, external_entitlement_id, billing_owner_user_id,
+		current_period_start, current_period_end, trial_ends_at, cancel_at_period_end, created_at, updated_at
+	) VALUES (
+		'guild-paid', 0, 'plus', 'active', 'active', 'sol',
+		'sub-1', 'ent-1', 'installer-2',
+		?, ?, NULL, 0, ?, ?
+	)`, now, now.Add(30*24*time.Hour), now, now).Error; err != nil {
+		t.Fatalf("seed paid subscription: %v", err)
+	}
+
+	if err := RunMigrations(db); err != nil {
+		t.Fatalf("RunMigrations: %v", err)
+	}
+
+	var trial struct {
+		Plan               string
+		Status             string
+		GraceState         string
+		PaymentProvider    string
+		BillingOwnerUserID string
+	}
+	if err := db.Raw(`SELECT plan, status, grace_state, payment_provider, billing_owner_user_id
+		FROM guild_subscriptions WHERE guild_id = ?`, "guild-needs-trial").Scan(&trial).Error; err != nil {
+		t.Fatalf("query backfilled subscription: %v", err)
+	}
+	if trial.Plan != "trial" || trial.Status != "trialing" || trial.GraceState != "trialing" || trial.PaymentProvider != "trial" || trial.BillingOwnerUserID != "installer-1" {
+		t.Fatalf("unexpected backfilled trial: %+v", trial)
+	}
+
+	var count int64
+	if err := db.Table("customer_accounts").Where("guild_id = ? AND billing_owner_user_id = ?", "guild-needs-trial", "installer-1").Count(&count).Error; err != nil {
+		t.Fatalf("query customer account: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("expected backfilled customer account, got %d", count)
+	}
+	if err := db.Table("entitlement_snapshots").Where("guild_id = ? AND plan = ? AND status = ? AND ai_responses_limit = ? AND music_enabled = ? AND premium_tools_enabled = ?", "guild-needs-trial", "trial", "trialing", 250, true, true).Count(&count).Error; err != nil {
+		t.Fatalf("query entitlement snapshot: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("expected trial entitlement snapshot, got %d", count)
+	}
+	if err := db.Table("audit_events").Where("guild_id = ? AND action = ?", "guild-needs-trial", "billing.trial_backfilled").Count(&count).Error; err != nil {
+		t.Fatalf("query audit event: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("expected one trial backfill audit event, got %d", count)
+	}
+	if err := db.Table("guild_subscriptions").Where("guild_id = ? AND plan = ?", "guild-paid", "plus").Count(&count).Error; err != nil {
+		t.Fatalf("query paid subscription: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("expected paid subscription to remain untouched, got %d", count)
+	}
+	if err := db.Table("guild_subscriptions").Where("guild_id IN ?", []string{"guild-left", "guild-inactive"}).Count(&count).Error; err != nil {
+		t.Fatalf("query skipped guilds: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("expected inactive installs to stay without subscriptions, got %d", count)
+	}
+}
+
 func TestBackupCreatesRestorableSQLiteFile(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
@@ -411,4 +545,34 @@ func TestBackupCreatesRestorableSQLiteFile(t *testing.T) {
 	if count != 1 {
 		t.Fatalf("expected backed-up guild config, got %d", count)
 	}
+}
+
+func runMigrationsBeforeVersion(db *gorm.DB, version int) error {
+	return db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Exec(`CREATE TABLE IF NOT EXISTS schema_migrations (
+			version INTEGER PRIMARY KEY,
+			name TEXT NOT NULL,
+			applied_at DATETIME NOT NULL
+		)`).Error; err != nil {
+			return err
+		}
+		for _, migration := range migrations {
+			if migration.Version >= version {
+				continue
+			}
+			for _, statement := range migration.SQL {
+				if err := execMigrationStatement(tx, statement); err != nil {
+					return err
+				}
+			}
+			if err := tx.Create(&SchemaMigration{
+				Version:   migration.Version,
+				Name:      migration.Name,
+				AppliedAt: time.Now().UTC(),
+			}).Error; err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 }

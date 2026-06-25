@@ -62,13 +62,13 @@ func (r *MusicRepository) EnsureSettings(ctx context.Context, guildID string) (s
 	}
 	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var existing store.MusicSettings
-		err := tx.Where("guild_id = ?", guildID).First(&existing).Error
-		if err == nil {
+		result := tx.Where("guild_id = ?", guildID).Limit(1).Find(&existing)
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected > 0 {
 			settings = existing
 			return nil
-		}
-		if err != gorm.ErrRecordNotFound {
-			return err
 		}
 		return tx.Create(&settings).Error
 	})

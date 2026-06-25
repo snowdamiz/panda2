@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log/slog"
 	"strings"
 	"sync/atomic"
 
@@ -40,11 +39,6 @@ func (b *Bot) recordDiscordEvent(ctx context.Context, event store.DiscordEvent) 
 		saved, err := b.events.Record(ctx, event)
 		if err != nil {
 			discordEventDrops.Add(1)
-			logger := b.logger
-			if logger == nil {
-				logger = slog.Default()
-			}
-			logger.Debug("failed to record discord event", slog.Any("err", err), slog.String("event_type", event.EventType))
 		} else {
 			recorded = saved
 		}
@@ -296,12 +290,18 @@ func (b *Bot) onGuildVoiceStateUpdate(event *events.GuildVoiceStateUpdate) {
 	if event.VoiceState.ChannelID != nil {
 		channelID = event.VoiceState.ChannelID.String()
 	}
+	metadata := map[string]string{
+		"username":       event.Member.User.Username,
+		"effective_name": event.Member.EffectiveName(),
+		"user_is_bot":    fmt.Sprintf("%t", event.Member.User.Bot),
+	}
 	b.recordDiscordEvent(context.Background(), store.DiscordEvent{
 		GuildID:   event.VoiceState.GuildID.String(),
 		ChannelID: channelID,
 		UserID:    event.VoiceState.UserID.String(),
-		EventType: "voice_state_update",
+		EventType: composed.EventVoiceStateUpdated,
 		Summary:   "Voice state updated",
+		Metadata:  metadataJSON(metadata),
 	})
 }
 
@@ -321,9 +321,6 @@ func (b *Bot) updateMusicVoiceOccupancy(event *events.GuildVoiceStateUpdate) {
 	}
 	channelID, err := snowflake.Parse(channelIDValue)
 	if err != nil {
-		if b.logger != nil {
-			b.logger.Debug("active music voice channel id is invalid", slog.Any("err", err), slog.String("channel_id", channelIDValue))
-		}
 		return
 	}
 	if !voiceStateUpdateTouchesChannel(event, channelID) {
@@ -373,20 +370,6 @@ func voiceStateUpdateTouchesChannel(event *events.GuildVoiceStateUpdate, channel
 	return event.OldVoiceState.ChannelID != nil && *event.OldVoiceState.ChannelID == channelID
 }
 
-func (b *Bot) onVoiceServerUpdate(event *events.VoiceServerUpdate) {
-	if b == nil || b.logger == nil || event == nil {
-		return
-	}
-	endpoint := ""
-	if event.Endpoint != nil {
-		endpoint = *event.Endpoint
-	}
-	b.logger.Info("voice server update received",
-		slog.String("guild_id", event.GuildID.String()),
-		slog.String("endpoint", endpoint),
-	)
-}
-
 func (b *Bot) forwardOwnVoiceStateToVoiceManager(event *events.GuildVoiceStateUpdate) {
 	if b == nil || b.client == nil || b.client.VoiceManager == nil || event == nil {
 		return
@@ -399,17 +382,6 @@ func (b *Bot) forwardOwnVoiceStateToVoiceManager(event *events.GuildVoiceStateUp
 		VoiceState: event.VoiceState,
 		Member:     event.Member,
 	})
-	if b.logger != nil {
-		channelID := ""
-		if event.VoiceState.ChannelID != nil {
-			channelID = event.VoiceState.ChannelID.String()
-		}
-		b.logger.Debug("forwarded own voice state to voice manager",
-			slog.String("guild_id", event.VoiceState.GuildID.String()),
-			slog.String("channel_id", channelID),
-			slog.String("session_id", event.VoiceState.SessionID),
-		)
-	}
 }
 
 func (b *Bot) selfUserID() snowflake.ID {
@@ -556,18 +528,12 @@ func (b *Bot) enqueueComposedEvent(ctx context.Context, event store.DiscordEvent
 	if err != nil {
 		return
 	}
-	if _, err := b.jobs.Enqueue(ctx, store.Job{
+	_, _ = b.jobs.Enqueue(ctx, store.Job{
 		Kind:        composed.EventJobKind,
 		GuildID:     event.GuildID,
 		Payload:     string(payload),
 		MaxAttempts: 3,
-	}); err != nil {
-		logger := b.logger
-		if logger == nil {
-			logger = slog.Default()
-		}
-		logger.Debug("failed to enqueue composed event", slog.Any("err", err), slog.String("event_type", event.EventType))
-	}
+	})
 }
 
 func (b *Bot) roleName(guildID, roleID snowflake.ID) string {

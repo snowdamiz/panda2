@@ -14,18 +14,18 @@ import (
 )
 
 const (
-	configPathEnv                    = "PANDA_CONFIG"
-	envFilePathEnv                   = "PANDA_ENV_FILE"
-	defaultConfigPath                = "panda.config.json"
-	defaultEnvFilePath               = ".env"
-	defaultDevDataDir                = "data"
-	defaultProdDataDir               = "/data"
-	defaultOpenRouterModel           = "inception/mercury-2"
-	defaultOpenRouterClassifierModel = "inclusionai/ling-2.6-flash"
-	defaultSolanaCluster             = "devnet"
-	defaultSolanaConfirmation        = "finalized"
-	defaultSolanaOrderExpiration     = 30 * time.Minute
-	defaultSolanaActivationKeyTTL    = 48 * time.Hour
+	configPathEnv                 = "PANDA_CONFIG"
+	envFilePathEnv                = "PANDA_ENV_FILE"
+	defaultConfigPath             = "panda.config.json"
+	defaultEnvFilePath            = ".env"
+	defaultDevDataDir             = "data"
+	defaultProdDataDir            = "/data"
+	defaultOpenRouterModel        = "openai/gpt-oss-120b"
+	defaultOpenRouterProvider     = "cerebras"
+	defaultSolanaCluster          = "devnet"
+	defaultSolanaConfirmation     = "finalized"
+	defaultSolanaOrderExpiration  = 30 * time.Minute
+	defaultSolanaActivationKeyTTL = 48 * time.Hour
 )
 
 var paidPlanNames = []string{"starter", "plus", "pro", "business"}
@@ -40,8 +40,9 @@ type Config struct {
 	OpenRouterAPIKey                         string
 	OpenRouterBaseURL                        string
 	OpenRouterModel                          string
-	OpenRouterClassifierModel                string
 	OpenRouterFallbackModels                 []string
+	OpenRouterProviderOrder                  []string
+	OpenRouterAllowProviderFallbacks         bool
 	OpenRouterEmbeddingModel                 string
 	OpenRouterAppURL                         string
 	OpenRouterAppTitle                       string
@@ -91,14 +92,15 @@ type fileDiscordConfig struct {
 }
 
 type fileOpenRouterConfig struct {
-	BaseURL         string                   `json:"base_url"`
-	DefaultModel    string                   `json:"default_model"`
-	ClassifierModel string                   `json:"classifier_model"`
-	FallbackModels  []string                 `json:"fallback_models"`
-	EmbeddingModel  string                   `json:"embedding_model"`
-	AppURL          string                   `json:"app_url"`
-	AppTitle        string                   `json:"app_title"`
-	CircuitBreaker  fileCircuitBreakerConfig `json:"circuit_breaker"`
+	BaseURL        string                   `json:"base_url"`
+	DefaultModel   string                   `json:"default_model"`
+	FallbackModels []string                 `json:"fallback_models"`
+	ProviderOrder  []string                 `json:"provider_order"`
+	AllowFallbacks *bool                    `json:"allow_provider_fallbacks"`
+	EmbeddingModel string                   `json:"embedding_model"`
+	AppURL         string                   `json:"app_url"`
+	AppTitle       string                   `json:"app_title"`
+	CircuitBreaker fileCircuitBreakerConfig `json:"circuit_breaker"`
 }
 
 type fileCircuitBreakerConfig struct {
@@ -350,7 +352,7 @@ func defaultConfig() Config {
 	return Config{
 		OpenRouterBaseURL:                        "https://openrouter.ai/api/v1",
 		OpenRouterModel:                          defaultOpenRouterModel,
-		OpenRouterClassifierModel:                defaultOpenRouterClassifierModel,
+		OpenRouterProviderOrder:                  []string{defaultOpenRouterProvider},
 		OpenRouterAppTitle:                       "Panda Assistant",
 		OpenRouterCircuitBreakerFailureThreshold: 5,
 		OpenRouterCircuitBreakerCooldown:         30 * time.Second,
@@ -614,11 +616,14 @@ func applyFileConfig(cfg *Config, file fileConfig) error {
 	if value := strings.TrimSpace(file.OpenRouter.DefaultModel); value != "" {
 		cfg.OpenRouterModel = value
 	}
-	if value := strings.TrimSpace(file.OpenRouter.ClassifierModel); value != "" {
-		cfg.OpenRouterClassifierModel = value
-	}
 	if file.OpenRouter.FallbackModels != nil {
 		cfg.OpenRouterFallbackModels = normalizeList(file.OpenRouter.FallbackModels)
+	}
+	if file.OpenRouter.ProviderOrder != nil {
+		cfg.OpenRouterProviderOrder = normalizeList(file.OpenRouter.ProviderOrder)
+	}
+	if file.OpenRouter.AllowFallbacks != nil {
+		cfg.OpenRouterAllowProviderFallbacks = *file.OpenRouter.AllowFallbacks
 	}
 	if value := strings.TrimSpace(file.OpenRouter.EmbeddingModel); value != "" {
 		cfg.OpenRouterEmbeddingModel = value
@@ -732,10 +737,13 @@ func applyEnvValues(cfg *Config, lookup func(string) (string, bool)) {
 	cfg.OpenRouterAPIKey = stringFromLookup(lookup, "OPENROUTER_API_KEY", cfg.OpenRouterAPIKey)
 	cfg.OpenRouterBaseURL = nonEmptyStringFromLookup(lookup, "OPENROUTER_BASE_URL", cfg.OpenRouterBaseURL)
 	cfg.OpenRouterModel = nonEmptyStringFromLookup(lookup, "OPENROUTER_DEFAULT_MODEL", cfg.OpenRouterModel)
-	cfg.OpenRouterClassifierModel = nonEmptyStringFromLookup(lookup, "OPENROUTER_CLASSIFIER_MODEL", cfg.OpenRouterClassifierModel)
 	if value, ok := csvListFromLookup(lookup, "OPENROUTER_FALLBACK_MODELS"); ok {
 		cfg.OpenRouterFallbackModels = value
 	}
+	if value, ok := csvListFromLookup(lookup, "OPENROUTER_PROVIDER_ORDER"); ok {
+		cfg.OpenRouterProviderOrder = value
+	}
+	cfg.OpenRouterAllowProviderFallbacks = boolFromLookup(lookup, "OPENROUTER_ALLOW_PROVIDER_FALLBACKS", cfg.OpenRouterAllowProviderFallbacks)
 	cfg.OpenRouterEmbeddingModel = nonEmptyStringFromLookup(lookup, "OPENROUTER_EMBEDDING_MODEL", cfg.OpenRouterEmbeddingModel)
 	cfg.OpenRouterAppURL = nonEmptyStringFromLookup(lookup, "OPENROUTER_APP_URL", cfg.OpenRouterAppURL)
 	cfg.OpenRouterAppTitle = nonEmptyStringFromLookup(lookup, "OPENROUTER_APP_TITLE", cfg.OpenRouterAppTitle)
@@ -870,6 +878,22 @@ func intFromLookup(lookup func(string) (string, bool), name string, fallback int
 		return fallback
 	}
 	parsed, err := strconv.Atoi(value)
+	if err != nil {
+		return fallback
+	}
+	return parsed
+}
+
+func boolFromLookup(lookup func(string) (string, bool), name string, fallback bool) bool {
+	value, ok := lookup(name)
+	if !ok {
+		return fallback
+	}
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return fallback
+	}
+	parsed, err := strconv.ParseBool(value)
 	if err != nil {
 		return fallback
 	}

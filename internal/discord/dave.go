@@ -20,9 +20,7 @@ type daveSessionFactory struct {
 }
 
 func newDaveSessionFactory(logger *slog.Logger) *daveSessionFactory {
-	if logger == nil {
-		logger = slog.Default()
-	}
+	logger = daveSessionLogger(logger)
 	return &daveSessionFactory{
 		logger:    logger,
 		byChannel: map[godave.ChannelID]*trackedDaveSession{},
@@ -33,10 +31,10 @@ func (f *daveSessionFactory) New(logger *slog.Logger, userID godave.UserID, call
 	if logger == nil {
 		logger = f.logger
 	}
+	logger = daveSessionLogger(logger)
 	return &trackedDaveSession{
 		Session: davesession.New(logger, userID, callbacks),
 		factory: f,
-		logger:  logger,
 		readyCh: make(chan struct{}),
 		userID:  userID,
 	}
@@ -83,7 +81,6 @@ type trackedDaveSession struct {
 	godave.Session
 
 	factory *daveSessionFactory
-	logger  *slog.Logger
 	userID  godave.UserID
 
 	mu                    sync.Mutex
@@ -116,7 +113,6 @@ func (s *trackedDaveSession) OnSelectProtocolAck(protocolVersion uint16) {
 	s.executeZeroTransition = false
 	s.mu.Unlock()
 	s.resetReady()
-	s.logDaveEvent("dave select protocol ack", slog.Int("protocol_version", int(protocolVersion)))
 	s.Session.OnSelectProtocolAck(protocolVersion)
 }
 
@@ -126,47 +122,34 @@ func (s *trackedDaveSession) OnDavePrepareTransition(transitionID uint16, protoc
 		s.executeZeroTransition = true
 		s.mu.Unlock()
 	}
-	s.logDaveEvent("dave prepare transition",
-		slog.Int("transition_id", int(transitionID)),
-		slog.Int("protocol_version", int(protocolVersion)),
-	)
 	s.Session.OnDavePrepareTransition(transitionID, protocolVersion)
 }
 
 func (s *trackedDaveSession) OnDavePrepareEpoch(epoch int, protocolVersion uint16) {
 	s.resetReady()
-	s.logDaveEvent("dave prepare epoch", slog.Int("epoch", epoch), slog.Int("protocol_version", int(protocolVersion)))
 	s.Session.OnDavePrepareEpoch(epoch, protocolVersion)
 }
 
 func (s *trackedDaveSession) OnDaveExecuteTransition(transitionID uint16) {
-	s.logDaveEvent("dave execute transition", slog.Int("transition_id", int(transitionID)))
 	s.Session.OnDaveExecuteTransition(transitionID)
 	s.markReadyIfInnerReady()
 }
 
 func (s *trackedDaveSession) OnDaveMLSExternalSenderPackage(externalSenderPackage []byte) {
-	s.logDaveEvent("dave mls external sender package", slog.Int("size", len(externalSenderPackage)))
 	s.Session.OnDaveMLSExternalSenderPackage(externalSenderPackage)
 }
 
 func (s *trackedDaveSession) OnDaveMLSProposals(proposals []byte) {
-	s.logDaveEvent("dave mls proposals", slog.Int("size", len(proposals)))
 	s.Session.OnDaveMLSProposals(proposals)
 	s.executeZeroTransitionIfNeeded()
 }
 
 func (s *trackedDaveSession) OnDaveMLSPrepareCommitTransition(transitionID uint16, commitMessage []byte) {
-	s.logDaveEvent("dave mls prepare commit transition",
-		slog.Int("transition_id", int(transitionID)),
-		slog.Int("size", len(commitMessage)),
-	)
 	s.Session.OnDaveMLSPrepareCommitTransition(transitionID, commitMessage)
 	s.markReadyIfInnerReady()
 }
 
 func (s *trackedDaveSession) OnDaveMLSWelcome(transitionID uint16, welcomeMessage []byte) {
-	s.logDaveEvent("dave mls welcome", slog.Int("transition_id", int(transitionID)), slog.Int("size", len(welcomeMessage)))
 	s.Session.OnDaveMLSWelcome(transitionID, welcomeMessage)
 	s.markReadyIfInnerReady()
 }
@@ -178,7 +161,6 @@ func (s *trackedDaveSession) executeZeroTransitionIfNeeded() {
 	if !shouldExecute {
 		return
 	}
-	s.logDaveEvent("dave executing pending zero transition")
 	s.Session.OnDaveExecuteTransition(0)
 	s.markReadyIfInnerReady()
 }
@@ -228,22 +210,35 @@ func (s *trackedDaveSession) markReadyIfInnerReady() {
 	s.ready = true
 	s.executeZeroTransition = false
 	close(s.readyCh)
-	if s.logger != nil {
-		s.logger.Info("dave media ready", slog.String("user_id", string(s.userID)), slog.Uint64("channel_id", uint64(s.channelID)))
-	}
 }
 
-func (s *trackedDaveSession) logDaveEvent(message string, attrs ...slog.Attr) {
-	if s.logger == nil {
-		return
+func daveSessionLogger(logger *slog.Logger) *slog.Logger {
+	if logger == nil {
+		logger = slog.Default()
 	}
-	values := make([]any, 0, len(attrs)+2)
-	values = append(values,
-		slog.String("user_id", string(s.userID)),
-		slog.Uint64("channel_id", uint64(s.channelID)),
-	)
-	for _, attr := range attrs {
-		values = append(values, attr)
+	return slog.New(minLevelHandler{handler: logger.Handler(), min: slog.LevelWarn})
+}
+
+type minLevelHandler struct {
+	handler slog.Handler
+	min     slog.Level
+}
+
+func (h minLevelHandler) Enabled(ctx context.Context, level slog.Level) bool {
+	return level >= h.min && h.handler.Enabled(ctx, level)
+}
+
+func (h minLevelHandler) Handle(ctx context.Context, record slog.Record) error {
+	if record.Level < h.min {
+		return nil
 	}
-	s.logger.Info(message, values...)
+	return h.handler.Handle(ctx, record)
+}
+
+func (h minLevelHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
+	return minLevelHandler{handler: h.handler.WithAttrs(attrs), min: h.min}
+}
+
+func (h minLevelHandler) WithGroup(name string) slog.Handler {
+	return minLevelHandler{handler: h.handler.WithGroup(name), min: h.min}
 }

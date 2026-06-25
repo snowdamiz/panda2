@@ -31,14 +31,18 @@ func NewGuildRepository(db *gorm.DB) *GuildRepository {
 }
 
 func (r *GuildRepository) RecordAuthorizedInstall(ctx context.Context, install GuildInstall) (store.Guild, error) {
-	return r.upsertInstall(ctx, install, GuildInstallStatusActive, nil)
+	return r.upsertInstall(ctx, install, GuildInstallStatusActive, nil, true)
+}
+
+func (r *GuildRepository) RecordObservedInstall(ctx context.Context, install GuildInstall) (store.Guild, error) {
+	return r.upsertInstall(ctx, install, GuildInstallStatusActive, nil, false)
 }
 
 func (r *GuildRepository) Get(ctx context.Context, guildID string) (store.Guild, bool, error) {
 	return findGuildByID(r.db.WithContext(ctx), guildID)
 }
 
-func (r *GuildRepository) upsertInstall(ctx context.Context, install GuildInstall, status string, leftAt *time.Time) (store.Guild, error) {
+func (r *GuildRepository) upsertInstall(ctx context.Context, install GuildInstall, status string, leftAt *time.Time, overwriteInstaller bool) (store.Guild, error) {
 	now := time.Now().UTC()
 	if install.AuthorizedAt.IsZero() {
 		install.AuthorizedAt = now
@@ -67,14 +71,16 @@ func (r *GuildRepository) upsertInstall(ctx context.Context, install GuildInstal
 		}
 
 		updates := map[string]any{
-			"name":                 guild.Name,
-			"install_status":       status,
-			"owner_user_id":        guild.OwnerUserID,
-			"installed_by_user_id": guild.InstalledByUserID,
-			"locale":               guild.Locale,
-			"joined_at":            guild.JoinedAt,
-			"left_at":              leftAt,
-			"updated_at":           now,
+			"name":           guild.Name,
+			"install_status": status,
+			"owner_user_id":  guild.OwnerUserID,
+			"locale":         guild.Locale,
+			"joined_at":      guild.JoinedAt,
+			"left_at":        leftAt,
+			"updated_at":     now,
+		}
+		if strings.TrimSpace(guild.InstalledByUserID) != "" && (overwriteInstaller || strings.TrimSpace(existing.InstalledByUserID) == "") {
+			updates["installed_by_user_id"] = guild.InstalledByUserID
 		}
 		if err := tx.Model(&existing).Updates(updates).Error; err != nil {
 			return err

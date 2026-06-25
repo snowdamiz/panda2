@@ -41,3 +41,38 @@ func TestGuildRepositoryRecordsInstallOwnership(t *testing.T) {
 		t.Fatalf("unexpected stored guild: %+v", guild)
 	}
 }
+
+func TestGuildRepositoryObservedInstallPreservesAuthorizedInstaller(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(ctx, "file::memory:?cache=shared")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer db.Close()
+
+	repo := NewGuildRepository(db.DB)
+	if _, err := repo.RecordAuthorizedInstall(ctx, GuildInstall{
+		GuildID:           "guild-1",
+		Name:              "Original Guild",
+		OwnerUserID:       "owner-1",
+		InstalledByUserID: "installer-1",
+		Locale:            "en-US",
+		AuthorizedAt:      time.Date(2026, 6, 20, 12, 0, 0, 0, time.UTC),
+	}); err != nil {
+		t.Fatalf("RecordAuthorizedInstall: %v", err)
+	}
+	guild, err := repo.RecordObservedInstall(ctx, GuildInstall{
+		GuildID:           "guild-1",
+		Name:              "Renamed Guild",
+		OwnerUserID:       "owner-2",
+		InstalledByUserID: "owner-2",
+		Locale:            "en-GB",
+		AuthorizedAt:      time.Date(2026, 6, 24, 12, 0, 0, 0, time.UTC),
+	})
+	if err != nil {
+		t.Fatalf("RecordObservedInstall: %v", err)
+	}
+	if guild.Name != "Renamed Guild" || guild.OwnerUserID != "owner-2" || guild.InstalledByUserID != "installer-1" {
+		t.Fatalf("observed install should refresh guild metadata without replacing installer: %+v", guild)
+	}
+}

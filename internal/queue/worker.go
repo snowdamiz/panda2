@@ -89,8 +89,12 @@ func (w *Worker) Run(ctx context.Context, kind string, interval time.Duration) e
 		default:
 		}
 
-		if _, err := w.WorkOnce(ctx, kind); err != nil {
+		worked, err := w.WorkOnce(ctx, kind)
+		if err != nil {
 			return err
+		}
+		if worked {
+			continue
 		}
 
 		select {

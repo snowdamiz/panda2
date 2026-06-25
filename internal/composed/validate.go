@@ -204,6 +204,9 @@ func ValidateSpec(spec Spec, registry *tools.Registry) ValidationReport {
 			if (invocation.EventType == EventGuildMemberRoleAdded || invocation.EventType == EventGuildMemberRoleRemoved) && strings.TrimSpace(invocation.Filters["role_id"]) == "" {
 				addError("%s invocation requires filters.role_id", invocation.EventType)
 			}
+			if invocation.EventType == EventVoiceStateUpdated && strings.TrimSpace(invocation.Filters["channel_id"]) == "" {
+				addError("%s invocation requires filters.channel_id", invocation.EventType)
+			}
 		}
 		if (mode == InvocationEvent || mode == InvocationScheduled) && len(report.Writes) > 0 && spec.Safety.RequiresConfirmationOnWrite {
 			addError("%s invocations cannot use write tools while safety.requires_confirmation_on_write is true", mode)

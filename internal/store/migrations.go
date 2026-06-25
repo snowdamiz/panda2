@@ -1196,6 +1196,188 @@ var migrations = []Migration{
 				WHERE intent.guild_id <> ''`,
 		},
 	},
+	{
+		Version: 28,
+		Name:    "active_install_trial_backfill",
+		SQL: []string{
+			`INSERT INTO audit_events (guild_id, actor_id, action, target_type, target_id, metadata, created_at)
+				SELECT guild_id, installed_by_user_id, 'billing.trial_backfilled', 'guild', guild_id,
+					'{"source":"migration:active_install_trial_backfill","plan":"trial","status":"trialing"}',
+					CURRENT_TIMESTAMP
+				FROM guilds
+				WHERE guild_id <> ''
+					AND install_status = 'active'
+					AND left_at IS NULL
+					AND NOT EXISTS (
+						SELECT 1 FROM guild_subscriptions existing
+						WHERE existing.guild_id = guilds.guild_id
+					)`,
+			`INSERT OR IGNORE INTO customer_accounts (
+				guild_id,
+				billing_owner_user_id,
+				email,
+				tax_country,
+				support_contact,
+				created_at,
+				updated_at
+			)
+				SELECT guild_id, installed_by_user_id, '', '', '', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+				FROM guilds
+				WHERE guild_id <> ''
+					AND install_status = 'active'
+					AND left_at IS NULL
+					AND NOT EXISTS (
+						SELECT 1 FROM guild_subscriptions existing
+						WHERE existing.guild_id = guilds.guild_id
+					)`,
+			`INSERT OR IGNORE INTO guild_subscriptions (
+				guild_id,
+				customer_account_id,
+				plan,
+				status,
+				grace_state,
+				payment_provider,
+				external_subscription_id,
+				external_entitlement_id,
+				billing_owner_user_id,
+				current_period_start,
+				current_period_end,
+				trial_ends_at,
+				cancel_at_period_end,
+				created_at,
+				updated_at
+			)
+				SELECT
+					guilds.guild_id,
+					COALESCE(customer_accounts.id, 0),
+					'trial',
+					'trialing',
+					'trialing',
+					'trial',
+					'',
+					'',
+					COALESCE(NULLIF(customer_accounts.billing_owner_user_id, ''), guilds.installed_by_user_id),
+					CURRENT_TIMESTAMP,
+					datetime(CURRENT_TIMESTAMP, '+14 days'),
+					datetime(CURRENT_TIMESTAMP, '+14 days'),
+					0,
+					CURRENT_TIMESTAMP,
+					CURRENT_TIMESTAMP
+				FROM guilds
+				LEFT JOIN customer_accounts ON customer_accounts.guild_id = guilds.guild_id
+				WHERE guilds.guild_id <> ''
+					AND guilds.install_status = 'active'
+					AND guilds.left_at IS NULL
+					AND NOT EXISTS (
+						SELECT 1 FROM guild_subscriptions existing
+						WHERE existing.guild_id = guilds.guild_id
+					)`,
+			`INSERT INTO entitlement_snapshots (
+				guild_id,
+				subscription_id,
+				plan,
+				status,
+				grace_state,
+				ai_responses_limit,
+				web_searches_limit,
+				knowledge_storage_bytes_limit,
+				schedules_limit,
+				retention_days,
+				music_enabled,
+				premium_tools_enabled,
+				created_at,
+				expires_at
+			)
+				SELECT
+					subscriptions.guild_id,
+					subscriptions.id,
+					'trial',
+					'trialing',
+					'trialing',
+					250,
+					20,
+					26214400,
+					3,
+					14,
+					1,
+					1,
+					CURRENT_TIMESTAMP,
+					NULL
+				FROM guild_subscriptions subscriptions
+				INNER JOIN guilds ON guilds.guild_id = subscriptions.guild_id
+				WHERE guilds.install_status = 'active'
+					AND guilds.left_at IS NULL
+					AND subscriptions.plan = 'trial'
+					AND subscriptions.status = 'trialing'
+					AND subscriptions.payment_provider = 'trial'
+					AND NOT EXISTS (
+						SELECT 1 FROM entitlement_snapshots existing
+						WHERE existing.subscription_id = subscriptions.id
+			)`,
+		},
+	},
+	{
+		Version: 29,
+		Name:    "remove_legacy_tool_policy_off",
+		SQL: []string{
+			`CREATE TABLE guild_configs_rebuilt (
+				guild_id TEXT PRIMARY KEY,
+				temperature REAL NOT NULL DEFAULT 0.3,
+				max_response_tokens INTEGER NOT NULL DEFAULT 900,
+				tool_policy TEXT NOT NULL DEFAULT 'admin_only',
+				system_prompt_overlay TEXT NOT NULL DEFAULT '',
+				agent_soul TEXT NOT NULL DEFAULT '',
+				assistant_enabled INTEGER NOT NULL DEFAULT 1,
+				memory_enabled INTEGER NOT NULL DEFAULT 1,
+				created_at DATETIME NOT NULL,
+				updated_at DATETIME NOT NULL
+			)`,
+			`INSERT INTO guild_configs_rebuilt (
+				guild_id,
+				temperature,
+				max_response_tokens,
+				tool_policy,
+				system_prompt_overlay,
+				agent_soul,
+				assistant_enabled,
+				memory_enabled,
+				created_at,
+				updated_at
+			)
+				SELECT
+					guild_id,
+					temperature,
+					max_response_tokens,
+					CASE WHEN tool_policy = 'off' THEN 'admin_only' ELSE tool_policy END,
+					system_prompt_overlay,
+					agent_soul,
+					assistant_enabled,
+					CASE WHEN memory_enabled = 0 THEN 1 ELSE memory_enabled END,
+					created_at,
+					CURRENT_TIMESTAMP
+				FROM guild_configs`,
+			`DROP TABLE guild_configs`,
+			`ALTER TABLE guild_configs_rebuilt RENAME TO guild_configs`,
+		},
+	},
+	{
+		Version: 30,
+		Name:    "guild_user_permissions",
+		SQL: []string{
+			`CREATE TABLE IF NOT EXISTS guild_user_permissions (
+				id INTEGER PRIMARY KEY AUTOINCREMENT,
+				guild_id TEXT NOT NULL,
+				user_id TEXT NOT NULL,
+				permission TEXT NOT NULL,
+				created_at DATETIME NOT NULL,
+				updated_at DATETIME NOT NULL,
+				UNIQUE(guild_id, user_id, permission)
+			)`,
+			`CREATE INDEX IF NOT EXISTS idx_guild_user_permissions_guild_id ON guild_user_permissions(guild_id)`,
+			`CREATE INDEX IF NOT EXISTS idx_guild_user_permissions_user_id ON guild_user_permissions(user_id)`,
+			`CREATE INDEX IF NOT EXISTS idx_guild_user_permissions_permission ON guild_user_permissions(permission)`,
+		},
+	},
 }
 
 func RunMigrations(db *gorm.DB) error {
@@ -1237,6 +1419,9 @@ func execMigrationStatement(tx *gorm.DB, statement string) error {
 	if isKnowledgeFTS5Statement(statement) && !sqliteSupportsFTS5(tx) {
 		return createFallbackKnowledgeSearchTable(tx)
 	}
+	if canSkipIdempotentAlterStatement(tx, statement) {
+		return nil
+	}
 
 	err := tx.Exec(statement).Error
 	if err == nil {
@@ -1262,6 +1447,41 @@ func isAddColumnStatement(statement string) bool {
 func isDropColumnStatement(statement string) bool {
 	normalized := strings.ToLower(strings.TrimSpace(statement))
 	return strings.HasPrefix(normalized, "alter table ") && strings.Contains(normalized, " drop column ")
+}
+
+func canSkipIdempotentAlterStatement(tx *gorm.DB, statement string) bool {
+	table, column, ok := alterTableColumn(statement, "add")
+	if ok && tx.Migrator().HasTable(table) && tx.Migrator().HasColumn(table, column) {
+		return true
+	}
+	table, column, ok = alterTableColumn(statement, "drop")
+	if ok && tx.Migrator().HasTable(table) && !tx.Migrator().HasColumn(table, column) {
+		return true
+	}
+	return false
+}
+
+func alterTableColumn(statement, operation string) (string, string, bool) {
+	fields := strings.Fields(strings.TrimSpace(statement))
+	if len(fields) < 6 || !strings.EqualFold(fields[0], "alter") || !strings.EqualFold(fields[1], "table") {
+		return "", "", false
+	}
+	if !strings.EqualFold(fields[3], operation) || !strings.EqualFold(fields[4], "column") {
+		return "", "", false
+	}
+	table := cleanSQLIdentifier(fields[2])
+	column := cleanSQLIdentifier(fields[5])
+	if table == "" || column == "" {
+		return "", "", false
+	}
+	return table, column, true
+}
+
+func cleanSQLIdentifier(value string) string {
+	value = strings.TrimSpace(value)
+	value = strings.Trim(value, "`\"")
+	value = strings.TrimPrefix(strings.TrimSuffix(value, "]"), "[")
+	return strings.TrimSpace(value)
 }
 
 func isDuplicateColumnError(err error) bool {

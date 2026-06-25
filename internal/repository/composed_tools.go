@@ -211,6 +211,38 @@ func (r *ComposedToolRepository) SetStatus(ctx context.Context, guildID, name, s
 	return tool, err
 }
 
+func (r *ComposedToolRepository) DeleteByName(ctx context.Context, guildID, name string) (store.ComposedTool, error) {
+	var tool store.ComposedTool
+	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+			Where("guild_id = ? AND name = ?", guildID, name).
+			First(&tool).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return ErrNotFound
+			}
+			return err
+		}
+		if err := tx.Where("composed_tool_id = ?", tool.ID).Delete(&store.ComposedToolDedupe{}).Error; err != nil {
+			return err
+		}
+		if err := tx.Where("composed_tool_id = ?", tool.ID).Delete(&store.ComposedToolRun{}).Error; err != nil {
+			return err
+		}
+		if err := tx.Where("composed_tool_id = ?", tool.ID).Delete(&store.ComposedToolVersion{}).Error; err != nil {
+			return err
+		}
+		result := tx.Delete(&tool)
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected == 0 {
+			return ErrNotFound
+		}
+		return nil
+	})
+	return tool, err
+}
+
 func (r *ComposedToolRepository) GetByName(ctx context.Context, guildID, name string) (store.ComposedTool, bool, error) {
 	var tool store.ComposedTool
 	err := r.db.WithContext(ctx).Where("guild_id = ? AND name = ?", guildID, name).First(&tool).Error
