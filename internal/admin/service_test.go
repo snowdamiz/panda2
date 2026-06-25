@@ -151,6 +151,24 @@ func TestAddRolePermissionRejectsUnknownPermission(t *testing.T) {
 	}
 }
 
+func TestImageGenerationPermissionIsAllowed(t *testing.T) {
+	if !IsPermissionNameAllowed(PermissionAssistantImageGeneration) {
+		t.Fatal("assistant image generation permission should be assignable")
+	}
+	if !containsString(AllPermissionNames(), PermissionAssistantImageGeneration) {
+		t.Fatal("assistant image generation permission should be listed")
+	}
+}
+
+func containsString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
+}
+
 func TestAdminRoleHasGuildControl(t *testing.T) {
 	ctx := context.Background()
 	db, err := store.Open(ctx, "file::memory:?cache=shared")

@@ -32,7 +32,23 @@ type fakeAssistantWebSearch struct {
 	err      error
 }
 
+type fakeAssistantImageGenerator struct {
+	configured bool
+	response   llm.ImageGenerationResponse
+	err        error
+	requests   []llm.ImageGenerationRequest
+}
+
 func (f fakeAssistantWebSearch) Search(context.Context, websearch.Request) (websearch.Response, error) {
+	return f.response, f.err
+}
+
+func (f *fakeAssistantImageGenerator) Configured() bool {
+	return f.configured
+}
+
+func (f *fakeAssistantImageGenerator) Generate(_ context.Context, request llm.ImageGenerationRequest) (llm.ImageGenerationResponse, error) {
+	f.requests = append(f.requests, request)
 	return f.response, f.err
 }
 
@@ -1032,14 +1048,14 @@ func TestToolAvailabilityMessageExplainsAdminOnlyPolicyForNormalUsers(t *testing
 	message := toolAvailabilityMessage([]llm.Tool{{
 		Type: "function",
 		Function: llm.ToolFunction{
-			Name:       "web_search",
+			Name:       "panda_generate_image",
 			Parameters: []byte(`{"type":"object"}`),
 		},
 	}}, tools.ToolAccess{
 		Policy:      tools.ToolPolicyAdminOnly,
 		Permissions: map[string]struct{}{admin.PermissionAssistantUse: {}},
 	})
-	if !strings.Contains(message, "normal chat and any listed web search tool are still available") || !strings.Contains(message, "broader tools are disabled for users right now") {
+	if !strings.Contains(message, "normal chat, any listed web search tool, and any listed image generation tool are still available") || !strings.Contains(message, "broader tools are disabled for users right now") {
 		t.Fatalf("expected admin-only notice, got %s", message)
 	}
 }
@@ -1118,6 +1134,31 @@ func TestToolAvailabilityMessageUsesRichUserScopedCapabilitySections(t *testing.
 	}
 	if strings.Contains(strings.ToLower(message), "webhook") {
 		t.Fatalf("capability context should not mention webhooks unless webhook tools are exposed:\n%s", message)
+	}
+}
+
+func TestToolAvailabilityMessageRoutesVisualCreationToImageGeneration(t *testing.T) {
+	message := toolAvailabilityMessage(testCapabilityTools(
+		"panda_generate_image",
+		"web_search",
+	), tools.ToolAccess{
+		Policy: tools.ToolPolicyAssistive,
+		Permissions: map[string]struct{}{
+			admin.PermissionAssistantUse:             {},
+			admin.PermissionAssistantImageGeneration: {},
+			admin.PermissionAssistantWebSearch:       {},
+		},
+	})
+	for _, want := range []string{
+		"Visual creation routing",
+		"create, make, draw, generate",
+		"meme",
+		"call the image generation tool",
+		"Do not satisfy those creation requests by searching",
+	} {
+		if !strings.Contains(message, want) {
+			t.Fatalf("image generation routing context missing %q:\n%s", want, message)
+		}
 	}
 }
 
@@ -1448,6 +1489,77 @@ func TestAskExecutesMultipleToolCallsFromOneModelTurn(t *testing.T) {
 		if !strings.Contains(finalMessages, want) {
 			t.Fatalf("final request should include %s from batched tool results, got %s", want, finalMessages)
 		}
+	}
+}
+
+func TestCompleteTaskCarriesGeneratedFilesFromToolRounds(t *testing.T) {
+	ctx := context.Background()
+	client := &fakeClient{responses: []llm.ChatResponse{
+		{
+			Model: "fixture/model",
+			ToolCalls: []llm.ToolCall{{
+				ID:   "call-image",
+				Type: "function",
+				Function: llm.ToolCallFunction{
+					Name:      "panda_generate_image",
+					Arguments: `{"prompt":"pixel panda icon","caption":"Panda icon","filename_hint":"panda icon"}`,
+				},
+			}},
+		},
+		{Model: "fixture/model"},
+	}}
+	service, db := newTestService(t, client)
+	configs := repository.NewGuildConfigRepository(db.DB)
+	registry, err := tools.NewDefaultRegistry()
+	if err != nil {
+		t.Fatalf("NewDefaultRegistry: %v", err)
+	}
+	imageGenerator := &fakeAssistantImageGenerator{
+		configured: true,
+		response: llm.ImageGenerationResponse{
+			Images: []llm.GeneratedImage{{
+				Bytes:    []byte("image-bytes"),
+				MIMEType: "image/png",
+			}},
+		},
+	}
+	service.WithToolExecutor(tools.NewExecutor(registry, nil, configs).WithImageGenerator(imageGenerator))
+	if _, err := configs.EnsureDefault(ctx, "guild-1"); err != nil {
+		t.Fatalf("EnsureDefault: %v", err)
+	}
+	if _, err := configs.UpdateBehaviorSettings(ctx, "guild-1", map[string]any{"tool_policy": tools.ToolPolicyAssistive}); err != nil {
+		t.Fatalf("UpdateBehaviorSettings: %v", err)
+	}
+
+	answer, err := service.CompleteTask(ctx, TaskRequest{
+		RequestID:         "request-1",
+		GuildID:           "guild-1",
+		UserID:            "user-1",
+		ChannelID:         "channel-1",
+		Command:           "chat",
+		Input:             "make a panda icon",
+		FeatureGateActive: true,
+		AllowedPermissions: map[string]struct{}{
+			admin.PermissionAssistantImageGeneration: {},
+		},
+		EnabledFeatures: map[string]struct{}{
+			features.ImageGeneration: {},
+		},
+	})
+	if err != nil {
+		t.Fatalf("CompleteTask: %v", err)
+	}
+	if len(imageGenerator.requests) != 1 || imageGenerator.requests[0].Prompt != "pixel panda icon" {
+		t.Fatalf("expected image generator request, got %+v", imageGenerator.requests)
+	}
+	if len(answer.GeneratedFiles) != 1 {
+		t.Fatalf("expected generated file in assistant answer, got %+v", answer.GeneratedFiles)
+	}
+	if answer.GeneratedFiles[0].Filename != "panda-icon.png" || string(answer.GeneratedFiles[0].Data) != "image-bytes" {
+		t.Fatalf("unexpected generated file: %+v", answer.GeneratedFiles[0])
+	}
+	if strings.Contains(answer.Content, "image-bytes") {
+		t.Fatalf("assistant content should not contain image bytes: %q", answer.Content)
 	}
 }
 

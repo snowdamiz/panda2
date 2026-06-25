@@ -498,6 +498,7 @@ func snapshotForLimits(guildID string, subscriptionID uint, limits PlanLimits, s
 		GraceState:                 grace,
 		AIResponsesLimit:           limits.AIResponses,
 		WebSearchesLimit:           limits.WebSearches,
+		ImageGenerationsLimit:      limits.ImageGenerations,
 		KnowledgeStorageBytesLimit: limits.KnowledgeStorageBytes,
 		SchedulesLimit:             limits.Schedules,
 		RetentionDays:              limits.RetentionDays,
@@ -614,6 +615,8 @@ func (e Entitlement) metricConsumed(metric string) int64 {
 		return e.Usage.AIResponsesConsumed
 	case MetricWebSearch:
 		return e.Usage.WebSearchesConsumed
+	case MetricImageGeneration:
+		return e.Usage.ImageGenerationsConsumed
 	case MetricKnowledgeStorageByte:
 		return e.Usage.KnowledgeStorageBytesConsumed
 	case MetricScheduledRun:
@@ -631,6 +634,8 @@ func (e Entitlement) metricReserved(metric string) int64 {
 		return e.Usage.AIResponsesReserved
 	case MetricWebSearch:
 		return e.Usage.WebSearchesReserved
+	case MetricImageGeneration:
+		return e.Usage.ImageGenerationsReserved
 	case MetricKnowledgeStorageByte:
 		return e.Usage.KnowledgeStorageBytesReserved
 	case MetricScheduledRun:
@@ -655,6 +660,7 @@ func (e Entitlement) SummaryText() string {
 		fmt.Sprintf("Renewal/reset: %s", e.PeriodEnd.Format("2006-01-02")),
 		fmt.Sprintf("AI responses: %s", e.UsageLine(MetricAIResponse)),
 		fmt.Sprintf("Web searches: %s", e.UsageLine(MetricWebSearch)),
+		fmt.Sprintf("Image generations: %s", e.UsageLine(MetricImageGeneration)),
 		fmt.Sprintf("Knowledge storage: %s", e.UsageLine(MetricKnowledgeStorageByte)),
 		fmt.Sprintf("Retention: %d days", e.Plan.RetentionDays),
 	}, "\n")

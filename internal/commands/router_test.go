@@ -19,6 +19,7 @@ import (
 	"github.com/sn0w/panda2/internal/config"
 	contextsvc "github.com/sn0w/panda2/internal/context"
 	"github.com/sn0w/panda2/internal/features"
+	"github.com/sn0w/panda2/internal/generated"
 	"github.com/sn0w/panda2/internal/llm"
 	"github.com/sn0w/panda2/internal/memory"
 	"github.com/sn0w/panda2/internal/ops"
@@ -2342,6 +2343,69 @@ func TestAssistantStandaloneCardWithEmptyContentDoesNotCreateFollowup(t *testing
 	}
 }
 
+func TestAssistantResponseWithGeneratedFileIsPayload(t *testing.T) {
+	router := &Router{}
+	answer := assistant.AskResponse{
+		GeneratedFiles: []generated.File{{
+			Filename: "panda-icon.png",
+			MIMEType: "image/png",
+			Data:     []byte("image-bytes"),
+			AltText:  "Panda icon",
+		}},
+		UsageReservations: []billing.Reservation{{ID: "reservation-1", GuildID: "guild-1", Metric: billing.MetricImageGeneration, Units: 1}},
+	}
+	if !assistantAnswerHasPayload(answer) {
+		t.Fatal("generated-file-only assistant response should count as payload")
+	}
+	response := router.responseFromAssistantAnswer(context.Background(), Request{}, answer, "", "")
+	if len(response.GeneratedFiles) != 1 || response.GeneratedFiles[0].Filename != "panda-icon.png" {
+		t.Fatalf("expected generated file on command response, got %+v", response.GeneratedFiles)
+	}
+	if len(response.UsageReservations) != 1 || response.UsageReservations[0].ID != "reservation-1" {
+		t.Fatalf("expected usage reservation on command response, got %+v", response.UsageReservations)
+	}
+	answer.GeneratedFiles[0].Data[0] = 'X'
+	if string(response.GeneratedFiles[0].Data) != "image-bytes" {
+		t.Fatalf("response should clone generated file bytes, got %q", string(response.GeneratedFiles[0].Data))
+	}
+}
+
+func TestRouterFinalizesImageUsageReservations(t *testing.T) {
+	ctx := context.Background()
+	router := newTestRouter(t, &fakeLLM{response: llm.ChatResponse{Content: "fixture"}}, 20)
+	billingService, _ := attachTestBilling(t, router, "guild-1")
+
+	commitReservation, err := billingService.BeginUsage(ctx, "guild-1", billing.MetricImageGeneration, 1)
+	if err != nil {
+		t.Fatalf("BeginUsage commit reservation: %v", err)
+	}
+	if err := router.CommitResponseUsage(ctx, Response{UsageReservations: []billing.Reservation{commitReservation}}); err != nil {
+		t.Fatalf("CommitResponseUsage: %v", err)
+	}
+	entitlement, err := billingService.Resolve(ctx, "guild-1")
+	if err != nil {
+		t.Fatalf("Resolve committed usage: %v", err)
+	}
+	if entitlement.Usage.ImageGenerationsConsumed != 1 || entitlement.Usage.ImageGenerationsReserved != 0 {
+		t.Fatalf("expected one committed image generation, got %+v", entitlement.Usage)
+	}
+
+	releaseReservation, err := billingService.BeginUsage(ctx, "guild-1", billing.MetricImageGeneration, 1)
+	if err != nil {
+		t.Fatalf("BeginUsage release reservation: %v", err)
+	}
+	if err := router.ReleaseResponseUsage(ctx, Response{UsageReservations: []billing.Reservation{releaseReservation}}); err != nil {
+		t.Fatalf("ReleaseResponseUsage: %v", err)
+	}
+	entitlement, err = billingService.Resolve(ctx, "guild-1")
+	if err != nil {
+		t.Fatalf("Resolve released usage: %v", err)
+	}
+	if entitlement.Usage.ImageGenerationsConsumed != 1 || entitlement.Usage.ImageGenerationsReserved != 0 {
+		t.Fatalf("expected released reservation to leave usage unchanged, got %+v", entitlement.Usage)
+	}
+}
+
 func TestChatAddsRecentInvocationContext(t *testing.T) {
 	client := &fakeLLM{response: llm.ChatResponse{Content: "chat fixture"}}
 	router := newTestRouter(t, client, 5).WithContextService(contextsvc.NewService(fakeContextProvider{messages: []contextsvc.Message{
@@ -3701,6 +3765,25 @@ func TestRegularUserGetsWebSearchPermissionWhenFeatureGateOmitsWebSearch(t *test
 	enabled, active := router.featureSetForAccess(ctx, "guild-1")
 	if !active || !features.Has(enabled, features.WebSearch) {
 		t.Fatalf("web search should be injected into access feature set, active=%t enabled=%+v", active, enabled)
+	}
+}
+
+func TestRegularUserGetsImageGenerationPermissionWhenFeatureEnabled(t *testing.T) {
+	ctx := context.Background()
+	router := newTestRouter(t, &fakeLLM{}, 5)
+	repo := attachFeatureService(t, router)
+	if err := repo.SetGuildFeatures(ctx, "guild-1", []string{features.AssistantChat, features.ImageGeneration}, "test", "admin", time.Now().UTC()); err != nil {
+		t.Fatalf("SetGuildFeatures: %v", err)
+	}
+
+	permissions := router.allowedToolPermissions(ctx, Request{
+		UserID:    "user-1",
+		GuildID:   "guild-1",
+		ChannelID: "channel-1",
+		RoleIDs:   []string{"member"},
+	})
+	if _, ok := permissions[admin.PermissionAssistantImageGeneration]; !ok {
+		t.Fatalf("regular users should get image generation when the guild feature is enabled: %+v", permissions)
 	}
 }
 

@@ -40,6 +40,7 @@ const (
 	ToolClassMemory          ToolClass = "memory"
 	ToolClassWebRead         ToolClass = "web_read"
 	ToolClassWorkflow        ToolClass = "workflow"
+	ToolClassMedia           ToolClass = "media"
 	ToolClassMetadata        ToolClass = "metadata"
 	ToolClassOwnerOps        ToolClass = "owner_ops"
 )
@@ -221,15 +222,19 @@ func (d Definition) AvailableTo(access ToolAccess) bool {
 			d.ToolClass == ToolClassMemory ||
 			d.ToolClass == ToolClassWebRead ||
 			d.ToolClass == ToolClassWorkflow ||
+			d.ToolClass == ToolClassMedia ||
 			d.ToolClass == ToolClassMetadata ||
 			(d.ToolClass == ToolClassModerationWrite && d.RequiresConfirmation)
 	case ToolPolicyAdminOnly:
-		return d.ToolClass == ToolClassWebRead || (hasAdminPolicyAccess(access) && d.ToolClass != ToolClassOwnerOps)
+		return d.ToolClass == ToolClassWebRead ||
+			d.ToolClass == ToolClassMedia ||
+			(hasAdminPolicyAccess(access) && d.ToolClass != ToolClassOwnerOps)
 	case ToolPolicyModerator:
 		return d.ToolClass == ToolClassDiscordRead ||
 			d.ToolClass == ToolClassMemory ||
 			d.ToolClass == ToolClassWebRead ||
 			d.ToolClass == ToolClassWorkflow ||
+			d.ToolClass == ToolClassMedia ||
 			d.ToolClass == ToolClassMetadata ||
 			d.ToolClass == ToolClassModerationWrite
 	case ToolPolicyWriteConfirmed:
@@ -241,7 +246,8 @@ func (d Definition) AvailableTo(access ToolAccess) bool {
 			d.ToolClass == ToolClassAdminRead ||
 			d.ToolClass == ToolClassAdminWrite ||
 			d.ToolClass == ToolClassDiscordWrite ||
-			d.ToolClass == ToolClassModerationWrite
+			d.ToolClass == ToolClassModerationWrite ||
+			d.ToolClass == ToolClassMedia
 	case ToolPolicyOwnerOps:
 		return d.ToolClass == ToolClassOwnerOps ||
 			d.ToolClass == ToolClassAdminRead ||
@@ -252,6 +258,7 @@ func (d Definition) AvailableTo(access ToolAccess) bool {
 			d.ToolClass == ToolClassMemory ||
 			d.ToolClass == ToolClassWebRead ||
 			d.ToolClass == ToolClassWorkflow ||
+			d.ToolClass == ToolClassMedia ||
 			d.ToolClass == ToolClassMetadata
 	default:
 		return hasAdminPolicyAccess(access) && d.ToolClass != ToolClassOwnerOps
@@ -395,6 +402,20 @@ func DefaultDefinitions() []Definition {
 			Audit:                 AuditSensitive,
 			IncludeInModelContext: true,
 			MaxLimit:              20,
+		},
+		{
+			Name:                  "panda.generate_image",
+			Description:           "Generate one image file for the current Discord response when the user asks Panda to create, make, draw, generate, design, or render visual output such as a meme, sprite sheet, icon, illustration, sticker, logo, avatar, poster, or similar asset. For requests like \"make me a random meme\", create an original image instead of searching for meme pages. Do not use this for plain text answers or requests to find existing images.",
+			RequiredPermission:    admin.PermissionAssistantImageGeneration,
+			FeatureID:             features.ImageGeneration,
+			ToolClass:             ToolClassMedia,
+			InputSchema:           imageGenerationSchema(),
+			OutputSchema:          objectSchema("generated", "image_count", "filename", "caption", "provider_status", "user_message"),
+			Timeout:               2 * time.Minute,
+			Redaction:             RedactContent,
+			Audit:                 AuditSensitive,
+			IncludeInModelContext: true,
+			DiscordPermissions:    []string{"VIEW_CHANNEL", "SEND_MESSAGES", "ATTACH_FILES"},
 		},
 		{
 			Name:                  "summarize_text_file",
@@ -738,6 +759,55 @@ func toolListSchema() json.RawMessage {
 	return schemaWithProperties(nil, map[string]any{
 		"kind":            map[string]string{"type": "string", "description": "Optional filter: native, composed, or all."},
 		"include_schemas": map[string]string{"type": "boolean", "description": "Include input schemas in the listing."},
+	})
+}
+
+func imageGenerationSchema() json.RawMessage {
+	return schemaWithProperties([]string{"prompt"}, map[string]any{
+		"prompt": map[string]any{
+			"type":        "string",
+			"minLength":   1,
+			"maxLength":   4000,
+			"description": "Concise visual prompt to send to the image model. Include any requested text exactly as it should appear in the image.",
+		},
+		"caption": map[string]any{
+			"type":        "string",
+			"maxLength":   500,
+			"description": "Optional short Discord caption to accompany the generated file.",
+		},
+		"aspect_ratio": map[string]any{
+			"type":        "string",
+			"description": "Optional normalized aspect ratio such as 1:1, 16:9, 9:16, or 4:3.",
+		},
+		"size": map[string]any{
+			"type":        "string",
+			"description": "Optional provider-supported size tier or pixel dimensions.",
+		},
+		"quality": map[string]any{
+			"type":        "string",
+			"enum":        []string{"auto", "low", "medium", "high"},
+			"description": "Optional provider-supported rendering quality.",
+		},
+		"output_format": map[string]any{
+			"type":        "string",
+			"enum":        []string{"png", "jpeg", "webp"},
+			"description": "Optional output format. Use png or webp for transparent backgrounds.",
+		},
+		"transparent_background": map[string]any{
+			"type":        "boolean",
+			"description": "Request transparent output only when the selected model supports it.",
+		},
+		"count": map[string]any{
+			"type":        "integer",
+			"minimum":     1,
+			"maximum":     1,
+			"description": "Number of images to generate. The first production slice supports exactly one.",
+		},
+		"filename_hint": map[string]any{
+			"type":        "string",
+			"maxLength":   80,
+			"description": "Optional filename stem for the Discord attachment.",
+		},
 	})
 }
 

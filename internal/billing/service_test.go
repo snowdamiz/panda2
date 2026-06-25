@@ -635,3 +635,104 @@ func verifiedTransaction(order SolPaymentOrderView, payer string, lamports int64
 	}
 	return transaction
 }
+
+func TestAdminOverviewReportsTrialAndUsage(t *testing.T) {
+	ctx := context.Background()
+	service, database := newBillingTestService(t)
+	defer database.Close()
+
+	now := time.Date(2026, 6, 21, 12, 0, 0, 0, time.UTC)
+	service.SetClock(func() time.Time { return now })
+
+	overview, err := service.AdminOverview(ctx, "guild-1")
+	if err != nil {
+		t.Fatalf("AdminOverview before subscription: %v", err)
+	}
+	if overview.HasSubscription {
+		t.Fatalf("expected no subscription, got %+v", overview)
+	}
+
+	if _, err := service.EnsureTrial(ctx, TrialSeed{GuildID: "guild-1", BillingOwnerUserID: "owner-1", Email: "owner@example.com", AuthorizedAt: now}); err != nil {
+		t.Fatalf("EnsureTrial: %v", err)
+	}
+
+	overview, err = service.AdminOverview(ctx, "guild-1")
+	if err != nil {
+		t.Fatalf("AdminOverview: %v", err)
+	}
+	if !overview.HasSubscription || overview.Plan != PlanTrial || overview.StoredStatus != StatusTrialing {
+		t.Fatalf("unexpected overview: %+v", overview)
+	}
+	if overview.Email != "owner@example.com" || overview.BillingOwnerUserID != "owner-1" {
+		t.Fatalf("expected customer account details, got %+v", overview)
+	}
+	if overview.Limits.AIResponses != planLimits[PlanTrial].AIResponses {
+		t.Fatalf("unexpected limits: %+v", overview.Limits)
+	}
+}
+
+func TestAdminSetSubscriptionOverridesPlanAndStatus(t *testing.T) {
+	ctx := context.Background()
+	service, database := newBillingTestService(t)
+	defer database.Close()
+
+	now := time.Date(2026, 6, 21, 12, 0, 0, 0, time.UTC)
+	service.SetClock(func() time.Time { return now })
+	if _, err := service.EnsureTrial(ctx, TrialSeed{GuildID: "guild-1", BillingOwnerUserID: "owner-1", AuthorizedAt: now}); err != nil {
+		t.Fatalf("EnsureTrial: %v", err)
+	}
+
+	periodEnd := now.AddDate(0, 1, 0)
+	cancel := true
+	overview, err := service.AdminSetSubscription(ctx, AdminSetSubscriptionRequest{
+		GuildID:           "guild-1",
+		ActorUserID:       "treasury_wallet:abc",
+		Plan:              PlanPro,
+		Status:            StatusActive,
+		PeriodEnd:         &periodEnd,
+		CancelAtPeriodEnd: &cancel,
+	})
+	if err != nil {
+		t.Fatalf("AdminSetSubscription: %v", err)
+	}
+	if overview.Plan != PlanPro || overview.StoredStatus != StatusActive {
+		t.Fatalf("expected pro/active, got %+v", overview)
+	}
+	if overview.PaymentProvider != ProviderManual {
+		t.Fatalf("expected manual provider, got %q", overview.PaymentProvider)
+	}
+	if !overview.CancelAtPeriodEnd || !overview.PeriodEnd.Equal(periodEnd) {
+		t.Fatalf("unexpected period fields: %+v", overview)
+	}
+
+	// The override should be persisted and resolvable as paid entitlement.
+	entitlement, err := service.Resolve(ctx, "guild-1")
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if entitlement.Plan.Plan != PlanPro || !entitlement.CanUsePaidFeatures {
+		t.Fatalf("unexpected resolved entitlement: %+v", entitlement)
+	}
+
+	// Suspending should remove paid access without changing the plan.
+	overview, err = service.AdminSetSubscription(ctx, AdminSetSubscriptionRequest{
+		GuildID: "guild-1",
+		Status:  StatusSuspended,
+	})
+	if err != nil {
+		t.Fatalf("AdminSetSubscription suspend: %v", err)
+	}
+	if overview.Plan != PlanPro || overview.StoredStatus != StatusSuspended || !overview.ReadOnly {
+		t.Fatalf("expected suspended read-only pro plan, got %+v", overview)
+	}
+}
+
+func TestAdminSetSubscriptionRejectsUnknownPlan(t *testing.T) {
+	ctx := context.Background()
+	service, database := newBillingTestService(t)
+	defer database.Close()
+
+	if _, err := service.AdminSetSubscription(ctx, AdminSetSubscriptionRequest{GuildID: "guild-1", Plan: "enterprise"}); err == nil {
+		t.Fatal("expected error for unknown plan")
+	}
+}

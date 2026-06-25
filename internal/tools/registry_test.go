@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"path/filepath"
@@ -257,13 +258,14 @@ func TestOpenRouterToolsAdminOnlyGatesRegularUsers(t *testing.T) {
 	regularTools := registry.OpenRouterToolsForAccess(ToolAccess{
 		Policy: ToolPolicyAdminOnly,
 		Permissions: map[string]struct{}{
-			admin.PermissionAssistantUse:       {},
-			admin.PermissionAssistantWebSearch: {},
+			admin.PermissionAssistantUse:             {},
+			admin.PermissionAssistantWebSearch:       {},
+			admin.PermissionAssistantImageGeneration: {},
 		},
 	})
 	regularNames := toolNames(regularTools)
-	if !regularNames["web_search"] || regularNames["panda_list_tools"] || regularNames["discord_fetch_message"] {
-		t.Fatalf("admin_only should expose web search but hide metadata inventory and broader tools from regular users, got %+v", regularNames)
+	if !regularNames["web_search"] || !regularNames["panda_generate_image"] || regularNames["panda_list_tools"] || regularNames["discord_fetch_message"] {
+		t.Fatalf("admin_only should expose web search and image generation but hide metadata inventory and broader tools from regular users, got %+v", regularNames)
 	}
 
 	adminTools := registry.OpenRouterToolsForAccess(ToolAccess{
@@ -589,6 +591,22 @@ func (f fakeDynamicProvider) ExecuteDynamicTool(context.Context, DynamicExecutio
 		return f.result, f.err
 	}
 	return ExecutionResult{}, ErrUnknownTool
+}
+
+type fakeImageGenerator struct {
+	configured bool
+	response   llm.ImageGenerationResponse
+	err        error
+	requests   []llm.ImageGenerationRequest
+}
+
+func (f *fakeImageGenerator) Configured() bool {
+	return f.configured
+}
+
+func (f *fakeImageGenerator) Generate(_ context.Context, request llm.ImageGenerationRequest) (llm.ImageGenerationResponse, error) {
+	f.requests = append(f.requests, request)
+	return f.response, f.err
 }
 
 type fakeComposedManager struct {
@@ -1030,6 +1048,129 @@ func TestExecutorExposesMusicManagerToAssistantUse(t *testing.T) {
 	withManager := NewExecutor(registry, nil, nil).WithMusicManager(&fakeMusicManager{})
 	if !toolNames(withManager.OpenRouterTools(access))["panda_manage_music"] {
 		t.Fatalf("music manager tool should be available to assistant use")
+	}
+}
+
+func TestExecutorExposesImageGenerationOnlyWhenConfigured(t *testing.T) {
+	registry, err := NewDefaultRegistry()
+	if err != nil {
+		t.Fatalf("NewDefaultRegistry: %v", err)
+	}
+	access := testAccess(ToolPolicyAssistive, admin.PermissionAssistantImageGeneration)
+	access.FeatureGateActive = true
+	access.EnabledFeatures = map[string]struct{}{features.ImageGeneration: {}}
+
+	withoutGenerator := NewExecutor(registry, nil, nil)
+	if toolNames(withoutGenerator.OpenRouterTools(access))["panda_generate_image"] {
+		t.Fatalf("image generation tool should be hidden when no image generator is configured")
+	}
+	withUnconfiguredGenerator := NewExecutor(registry, nil, nil).WithImageGenerator(&fakeImageGenerator{})
+	if toolNames(withUnconfiguredGenerator.OpenRouterTools(access))["panda_generate_image"] {
+		t.Fatalf("image generation tool should be hidden when the image generator is unconfigured")
+	}
+	withGenerator := NewExecutor(registry, nil, nil).WithImageGenerator(&fakeImageGenerator{configured: true})
+	if !toolNames(withGenerator.OpenRouterTools(access))["panda_generate_image"] {
+		t.Fatalf("image generation tool should be available with feature, permission, and runtime configured")
+	}
+}
+
+func TestExecutorGenerateImageCarriesFilesWithoutLeakingBytes(t *testing.T) {
+	registry, err := NewDefaultRegistry()
+	if err != nil {
+		t.Fatalf("NewDefaultRegistry: %v", err)
+	}
+	imageBytes := []byte("secret-image-bytes")
+	generator := &fakeImageGenerator{
+		configured: true,
+		response: llm.ImageGenerationResponse{
+			Model: "provider/image-model",
+			Images: []llm.GeneratedImage{{
+				Bytes:    imageBytes,
+				MIMEType: "image/png",
+			}},
+		},
+	}
+	executor := NewExecutor(registry, nil, nil).WithImageGenerator(generator)
+	access := testAccess(ToolPolicyAssistive, admin.PermissionAssistantImageGeneration)
+	access.FeatureGateActive = true
+	access.EnabledFeatures = map[string]struct{}{features.ImageGeneration: {}}
+	result, err := executor.Execute(context.Background(), ExecutionRequest{
+		GuildID:        "guild-1",
+		ChannelID:      "channel-1",
+		ActorID:        "user-1",
+		RequestID:      "request-1",
+		InvocationType: "chat_tool",
+		Access:         access,
+		Call: llm.ToolCall{
+			ID:   "call-image",
+			Type: "function",
+			Function: llm.ToolCallFunction{
+				Name:      "panda.generate_image",
+				Arguments: `{"prompt":"pixel panda icon","caption":"Panda icon","output_format":"png","filename_hint":"panda icon"}`,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if len(generator.requests) != 1 || generator.requests[0].Prompt != "pixel panda icon" || generator.requests[0].OutputFormat != "png" {
+		t.Fatalf("unexpected generator requests: %+v", generator.requests)
+	}
+	if len(result.GeneratedFiles) != 1 {
+		t.Fatalf("expected generated file, got %+v", result.GeneratedFiles)
+	}
+	if result.GeneratedFiles[0].Filename != "panda-icon.png" || string(result.GeneratedFiles[0].Data) != string(imageBytes) {
+		t.Fatalf("unexpected generated file: %+v", result.GeneratedFiles[0])
+	}
+	if strings.Contains(result.Message.Content, string(imageBytes)) || strings.Contains(result.Message.Content, base64.StdEncoding.EncodeToString(imageBytes)) {
+		t.Fatalf("tool message leaked image bytes: %s", result.Message.Content)
+	}
+	if !strings.Contains(result.Message.Content, `"generated":true`) || !strings.Contains(result.Message.Content, `"filename":"panda-icon.png"`) {
+		t.Fatalf("tool message should expose compact metadata, got %s", result.Message.Content)
+	}
+}
+
+func TestExecutorGenerateImageReturnsSafePolicyFailure(t *testing.T) {
+	registry, err := NewDefaultRegistry()
+	if err != nil {
+		t.Fatalf("NewDefaultRegistry: %v", err)
+	}
+	generator := &fakeImageGenerator{
+		configured: true,
+		err: llm.ImageGenerationError{
+			Status:  llm.ImageProviderStatusPolicyBlocked,
+			Message: "I could not generate that image because the request was blocked by the image provider's safety policy. Try a safer revision.",
+		},
+	}
+	executor := NewExecutor(registry, nil, nil).WithImageGenerator(generator)
+	access := testAccess(ToolPolicyAssistive, admin.PermissionAssistantImageGeneration)
+	access.FeatureGateActive = true
+	access.EnabledFeatures = map[string]struct{}{features.ImageGeneration: {}}
+	result, err := executor.Execute(context.Background(), ExecutionRequest{
+		GuildID:        "guild-1",
+		ChannelID:      "channel-1",
+		ActorID:        "user-1",
+		RequestID:      "request-1",
+		InvocationType: "chat_tool",
+		Access:         access,
+		Call: llm.ToolCall{
+			ID:   "call-image-policy",
+			Type: "function",
+			Function: llm.ToolCallFunction{
+				Name:      "panda.generate_image",
+				Arguments: `{"prompt":"unsafe visual prompt"}`,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if len(result.GeneratedFiles) != 0 {
+		t.Fatalf("policy failures should not carry files: %+v", result.GeneratedFiles)
+	}
+	if !strings.Contains(result.Message.Content, `"provider_status":"policy_blocked"`) ||
+		!strings.Contains(result.Message.Content, "safer revision") {
+		t.Fatalf("expected safe policy response, got %s", result.Message.Content)
 	}
 }
 

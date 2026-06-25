@@ -101,6 +101,18 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 		CircuitBreakerFailureThreshold: cfg.OpenRouterCircuitBreakerFailureThreshold,
 		CircuitBreakerCooldown:         cfg.OpenRouterCircuitBreakerCooldown,
 	})
+	openRouterImages := llm.NewOpenRouterImageClient(llm.OpenRouterImageConfig{
+		APIKey:                         cfg.OpenRouterAPIKey,
+		BaseURL:                        cfg.OpenRouterImageBaseURL,
+		Model:                          cfg.OpenRouterImageModel,
+		AppURL:                         cfg.OpenRouterAppURL,
+		AppTitle:                       cfg.OpenRouterAppTitle,
+		Timeout:                        cfg.OpenRouterImageTimeout,
+		MaxRetries:                     2,
+		MaxBytes:                       cfg.OpenRouterImageMaxBytes,
+		CircuitBreakerFailureThreshold: cfg.OpenRouterCircuitBreakerFailureThreshold,
+		CircuitBreakerCooldown:         cfg.OpenRouterCircuitBreakerCooldown,
+	})
 	memoryService := memory.NewServiceWithEmbeddings(knowledge, openRouter, cfg.OpenRouterEmbeddingModel)
 	billingService := billing.NewService(billingRepo, billing.Config{
 		PublicURL:              cfg.PublicAppURL,
@@ -137,6 +149,7 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 		WithAttachmentReader(attachments).
 		WithAuditRecorder(audit).
 		WithAdminOperations(adminService).
+		WithImageGenerator(openRouterImages).
 		WithBilling(billingService).
 		WithOpsManager(opsService)
 	composedService := composed.NewService(composedRepo, toolRegistry, toolExecutor, openRouter, cfg.OpenRouterModel).
@@ -222,7 +235,8 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 		httpServer: pandahttp.New(cfg, dataStore).
 			WithDiscordWebhookHandler(installService).
 			WithInstallHandler(installService).
-			WithBillingService(billingService),
+			WithBillingService(billingService).
+			WithGuildRepository(guilds),
 		discord:   discord,
 		worker:    worker,
 		scheduler: schedulerService,

@@ -49,6 +49,7 @@ export type AccountEntitlement = {
   usage: {
     ai_responses?: AccountUsageMetric;
     web_searches?: AccountUsageMetric;
+    image_generations?: AccountUsageMetric;
     knowledge_storage?: AccountUsageMetric;
   };
 };
@@ -85,6 +86,7 @@ type AccountNodes = {
   trialTime: HTMLElement;
   trialAI: HTMLElement;
   trialSearch: HTMLElement;
+  trialImages: HTMLElement;
   trialStorage: HTMLElement;
   billingLink: HTMLAnchorElement;
   logoutButton: HTMLButtonElement;
@@ -451,6 +453,7 @@ class WalletAccountController {
     }
     this.nodes.trialAI.textContent = formatRemaining(entitlement.usage.ai_responses);
     this.nodes.trialSearch.textContent = formatRemaining(entitlement.usage.web_searches);
+    this.nodes.trialImages.textContent = formatRemaining(entitlement.usage.image_generations);
     this.nodes.trialStorage.textContent = formatRemaining(entitlement.usage.knowledge_storage, 'bytes');
   }
 
@@ -460,6 +463,7 @@ class WalletAccountController {
     this.nodes.trialTime.textContent = '--';
     this.nodes.trialAI.textContent = '--';
     this.nodes.trialSearch.textContent = '--';
+    this.nodes.trialImages.textContent = '--';
     this.nodes.trialStorage.textContent = '--';
   }
 
@@ -527,6 +531,7 @@ const collectAccountNodes = (root: HTMLElement): AccountNodes | null => {
   const trialTime = root.querySelector<HTMLElement>('[data-account-trial-time]');
   const trialAI = root.querySelector<HTMLElement>('[data-account-trial-ai]');
   const trialSearch = root.querySelector<HTMLElement>('[data-account-trial-search]');
+  const trialImages = root.querySelector<HTMLElement>('[data-account-trial-images]');
   const trialStorage = root.querySelector<HTMLElement>('[data-account-trial-storage]');
   const billingLink = root.querySelector<HTMLAnchorElement>('[data-account-billing-link]');
   const logoutButton = root.querySelector<HTMLButtonElement>('[data-account-logout]');
@@ -551,6 +556,7 @@ const collectAccountNodes = (root: HTMLElement): AccountNodes | null => {
     !trialTime ||
     !trialAI ||
     !trialSearch ||
+    !trialImages ||
     !trialStorage ||
     !billingLink ||
     !logoutButton ||
@@ -579,6 +585,7 @@ const collectAccountNodes = (root: HTMLElement): AccountNodes | null => {
     trialTime,
     trialAI,
     trialSearch,
+    trialImages,
     trialStorage,
     billingLink,
     logoutButton,

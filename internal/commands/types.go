@@ -5,7 +5,9 @@ import (
 	"errors"
 	"time"
 
+	"github.com/sn0w/panda2/internal/billing"
 	"github.com/sn0w/panda2/internal/features"
+	"github.com/sn0w/panda2/internal/generated"
 	"github.com/sn0w/panda2/internal/polls"
 )
 
@@ -26,19 +28,21 @@ type Request struct {
 }
 
 type Response struct {
-	Content       string
-	Ephemeral     bool
-	ThreadID      string
-	ThreadName    string
-	Presentation  Presentation
-	Actions       []Action
-	Followups     []Response
-	Confirmation  *Confirmation
-	Confirmations []Confirmation
-	Modal         *Modal
-	Background    *BackgroundTask
-	Poll          *polls.Poll
-	Feedback      *FeedbackControls
+	Content           string
+	Ephemeral         bool
+	ThreadID          string
+	ThreadName        string
+	Presentation      Presentation
+	Actions           []Action
+	Followups         []Response
+	Confirmation      *Confirmation
+	Confirmations     []Confirmation
+	Modal             *Modal
+	Background        *BackgroundTask
+	Poll              *polls.Poll
+	Feedback          *FeedbackControls
+	GeneratedFiles    []generated.File
+	UsageReservations []billing.Reservation
 }
 
 type FeatureInstallIntentCreator interface {

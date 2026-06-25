@@ -520,6 +520,9 @@ func TestBillingEntitlementEndpointReportsTrialUsage(t *testing.T) {
 	if err := service.SyncCurrentUsage(t.Context(), "guild-1", billing.MetricWebSearch, 3); err != nil {
 		t.Fatalf("sync search usage: %v", err)
 	}
+	if err := service.SyncCurrentUsage(t.Context(), "guild-1", billing.MetricImageGeneration, 2); err != nil {
+		t.Fatalf("sync image usage: %v", err)
+	}
 	if err := service.SyncCurrentUsage(t.Context(), "guild-1", billing.MetricKnowledgeStorageByte, 1024); err != nil {
 		t.Fatalf("sync storage usage: %v", err)
 	}
@@ -573,6 +576,9 @@ func TestBillingEntitlementEndpointReportsTrialUsage(t *testing.T) {
 	}
 	if got := body.Usage["web_searches"]; got.Used != 3 || got.Limit != 20 || got.Remaining != 17 {
 		t.Fatalf("unexpected search usage: %+v", got)
+	}
+	if got := body.Usage["image_generations"]; got.Used != 2 || got.Limit != 5 || got.Remaining != 3 {
+		t.Fatalf("unexpected image generation usage: %+v", got)
 	}
 	if got := body.Usage["knowledge_storage"]; got.Used != 1024 || got.Limit != 25*1024*1024 || got.Remaining != 25*1024*1024-1024 {
 		t.Fatalf("unexpected storage usage: %+v", got)
@@ -878,4 +884,118 @@ func signedDiscordWebhookRequest(t *testing.T, body string, privateKey ed25519.P
 	req.Header.Set("X-Signature-Timestamp", timestampText)
 	req.Header.Set("X-Signature-Ed25519", hex.EncodeToString(signature))
 	return req
+}
+
+func TestAdminGuildEndpointsListAndUpdateSubscription(t *testing.T) {
+	db, err := store.Open(t.Context(), "file::memory:?cache=shared")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer db.Close()
+
+	guilds := repository.NewGuildRepository(db.DB)
+	if _, err := guilds.RecordAuthorizedInstall(t.Context(), repository.GuildInstall{
+		GuildID:           "guild-1",
+		Name:              "Test Guild",
+		OwnerUserID:       "owner-1",
+		InstalledByUserID: "owner-1",
+	}); err != nil {
+		t.Fatalf("RecordAuthorizedInstall: %v", err)
+	}
+
+	billingService := solBillingService(db)
+	if _, err := billingService.EnsureTrial(t.Context(), billing.TrialSeed{GuildID: "guild-1", BillingOwnerUserID: "owner-1", Email: "owner@example.com"}); err != nil {
+		t.Fatalf("EnsureTrial: %v", err)
+	}
+
+	cfg := solHTTPConfig(t)
+	treasuryWallet, treasuryPrivateKey := adminTestWallet(t)
+	cfg.SolanaTreasuryWallet = treasuryWallet
+	server := New(cfg, db).WithBillingService(billingService).WithGuildRepository(guilds)
+
+	req, _ := stdhttp.NewRequest(stdhttp.MethodGet, "/admin/guilds", nil)
+	resp, err := server.Test(req)
+	if err != nil {
+		t.Fatalf("unauthorized guild list failed: %v", err)
+	}
+	if resp.StatusCode != stdhttp.StatusUnauthorized {
+		t.Fatalf("expected 401 without session, got %d", resp.StatusCode)
+	}
+
+	sessionToken := createAdminSessionForTest(t, server, treasuryWallet, treasuryPrivateKey)
+
+	req, _ = stdhttp.NewRequest(stdhttp.MethodGet, "/admin/guilds", nil)
+	req.Header.Set("Authorization", "Bearer "+sessionToken)
+	resp, err = server.Test(req)
+	if err != nil {
+		t.Fatalf("guild list request failed: %v", err)
+	}
+	if resp.StatusCode != stdhttp.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("expected 200, got %d: %s", resp.StatusCode, body)
+	}
+	var list adminGuildListResponse
+	if err := json.NewDecoder(resp.Body).Decode(&list); err != nil {
+		t.Fatalf("decode guild list: %v", err)
+	}
+	if list.Total != 1 || len(list.Guilds) != 1 {
+		t.Fatalf("expected one guild, got %+v", list)
+	}
+	guild := list.Guilds[0]
+	if guild.GuildID != "guild-1" || guild.Name != "Test Guild" {
+		t.Fatalf("unexpected guild metadata: %+v", guild)
+	}
+	if guild.Billing == nil || !guild.Billing.HasSubscription || guild.Billing.Plan != billing.PlanTrial {
+		t.Fatalf("expected trial billing, got %+v", guild.Billing)
+	}
+	if guild.Billing.Email != "owner@example.com" {
+		t.Fatalf("expected billing email, got %q", guild.Billing.Email)
+	}
+	if guild.Billing.Limits == nil || guild.Billing.Limits.ImageGenerations != 5 {
+		t.Fatalf("expected image generation limit in admin guild view, got %+v", guild.Billing.Limits)
+	}
+	if guild.Billing.Usage.ImageGenerations != 0 {
+		t.Fatalf("expected image generation usage in admin guild view, got %+v", guild.Billing.Usage)
+	}
+	if len(list.PlanCatalog) == 0 || len(list.Statuses) == 0 {
+		t.Fatalf("expected plan catalog and statuses, got %+v", list)
+	}
+
+	req, _ = stdhttp.NewRequest(stdhttp.MethodPost, "/admin/guilds/guild-1/subscription", strings.NewReader(`{
+		"plan": "pro",
+		"status": "active",
+		"period_end": "2026-12-31",
+		"cancel_at_period_end": true
+	}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+sessionToken)
+	resp, err = server.Test(req)
+	if err != nil {
+		t.Fatalf("update subscription request failed: %v", err)
+	}
+	if resp.StatusCode != stdhttp.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("expected 200, got %d: %s", resp.StatusCode, body)
+	}
+	var updated adminGuildView
+	if err := json.NewDecoder(resp.Body).Decode(&updated); err != nil {
+		t.Fatalf("decode update response: %v", err)
+	}
+	if updated.Billing == nil || updated.Billing.Plan != billing.PlanPro || updated.Billing.StoredStatus != billing.StatusActive {
+		t.Fatalf("expected pro/active subscription, got %+v", updated.Billing)
+	}
+	if !updated.Billing.CancelAtPeriodEnd {
+		t.Fatalf("expected cancel-at-period-end, got %+v", updated.Billing)
+	}
+
+	req, _ = stdhttp.NewRequest(stdhttp.MethodPost, "/admin/guilds/missing/subscription", strings.NewReader(`{"plan":"pro"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+sessionToken)
+	resp, err = server.Test(req)
+	if err != nil {
+		t.Fatalf("missing guild update failed: %v", err)
+	}
+	if resp.StatusCode != stdhttp.StatusNotFound {
+		t.Fatalf("expected 404 for unknown guild, got %d", resp.StatusCode)
+	}
 }

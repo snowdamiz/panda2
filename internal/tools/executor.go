@@ -13,6 +13,7 @@ import (
 	"github.com/sn0w/panda2/internal/admin"
 	"github.com/sn0w/panda2/internal/billing"
 	contextsvc "github.com/sn0w/panda2/internal/context"
+	"github.com/sn0w/panda2/internal/generated"
 	"github.com/sn0w/panda2/internal/llm"
 	"github.com/sn0w/panda2/internal/memory"
 	"github.com/sn0w/panda2/internal/ops"
@@ -29,6 +30,11 @@ type KnowledgeSearcher interface {
 
 type WebSearcher interface {
 	Search(ctx context.Context, request websearch.Request) (websearch.Response, error)
+}
+
+type ImageGenerator interface {
+	Configured() bool
+	Generate(ctx context.Context, request llm.ImageGenerationRequest) (llm.ImageGenerationResponse, error)
 }
 
 type ConfigReader interface {
@@ -130,6 +136,7 @@ type Executor struct {
 	registry    *Registry
 	knowledge   KnowledgeSearcher
 	webSearch   WebSearcher
+	images      ImageGenerator
 	configs     ConfigReader
 	context     ContextReader
 	attachments AttachmentReader
@@ -161,9 +168,11 @@ type ExecutionRequest struct {
 }
 
 type ExecutionResult struct {
-	Message      llm.Message
-	Confirmation *InteractionConfirmation
-	SourceLinks  []SourceLink
+	Message           llm.Message
+	Confirmation      *InteractionConfirmation
+	SourceLinks       []SourceLink
+	GeneratedFiles    []generated.File
+	UsageReservations []billing.Reservation
 }
 
 type SourceLink struct {
@@ -290,6 +299,11 @@ func (e *Executor) WithContextReader(reader ContextReader) *Executor {
 
 func (e *Executor) WithWebSearcher(searcher WebSearcher) *Executor {
 	e.webSearch = searcher
+	return e
+}
+
+func (e *Executor) WithImageGenerator(generator ImageGenerator) *Executor {
+	e.images = generator
 	return e
 }
 
@@ -442,6 +456,8 @@ func (e *Executor) Execute(ctx context.Context, request ExecutionRequest) (Execu
 	e.recordToolAudit(toolCtx, definition, request, arguments)
 
 	var payload any
+	var generatedFiles []generated.File
+	var usageReservations []billing.Reservation
 	switch definition.Name {
 	case "discord.fetch_messages":
 		if e.discord != nil {
@@ -459,6 +475,8 @@ func (e *Executor) Execute(ctx context.Context, request ExecutionRequest) (Execu
 		payload, err = e.searchKnowledge(toolCtx, request.GuildID, arguments)
 	case "web.search":
 		payload, err = e.searchWeb(toolCtx, request, arguments)
+	case "panda.generate_image":
+		payload, generatedFiles, usageReservations, err = e.generateImage(toolCtx, request, arguments)
 	case "summarize_text_file":
 		payload, err = e.summarizeTextFile(toolCtx, request.GuildID, arguments)
 	case "read_config":
@@ -524,8 +542,10 @@ func (e *Executor) Execute(ctx context.Context, request ExecutionRequest) (Execu
 			ToolCallID: request.Call.ID,
 			Content:    security.RedactSecrets(string(data)),
 		},
-		Confirmation: confirmation,
-		SourceLinks:  sourceLinksFromPayload(definition.Name, payload),
+		Confirmation:      confirmation,
+		SourceLinks:       sourceLinksFromPayload(definition.Name, payload),
+		GeneratedFiles:    generatedFiles,
+		UsageReservations: usageReservations,
 	}, nil
 }
 
@@ -541,6 +561,8 @@ func redactExecutionResult(result ExecutionResult) ExecutionResult {
 			result.Confirmation.Arguments[key] = security.RedactSecrets(value)
 		}
 	}
+	result.GeneratedFiles = generated.CloneFiles(result.GeneratedFiles)
+	result.UsageReservations = append([]billing.Reservation(nil), result.UsageReservations...)
 	return result
 }
 
@@ -860,6 +882,249 @@ func (e *Executor) searchWeb(ctx context.Context, request ExecutionRequest, argu
 		"more_results_available": response.MoreResultsAvailable,
 		"results":                results,
 	}, nil
+}
+
+const (
+	maxImagePromptChars  = 4000
+	maxImageCaptionChars = 500
+)
+
+func (e *Executor) generateImage(ctx context.Context, request ExecutionRequest, arguments string) (any, []generated.File, []billing.Reservation, error) {
+	args, err := parseArguments(arguments)
+	if err != nil {
+		return imageToolPayload(false, 0, "", "", llm.ImageProviderStatusInvalid, "I could not read the image request settings. Please try again."), nil, nil, nil
+	}
+	if e.images == nil || !e.images.Configured() {
+		return imageToolPayload(false, 0, "", "", llm.ImageProviderStatusUnavailable, "Image generation is not enabled or configured for this server."), nil, nil, nil
+	}
+	prompt := strings.TrimSpace(stringArgument(args, "prompt"))
+	if prompt == "" {
+		return imageToolPayload(false, 0, "", "", llm.ImageProviderStatusInvalid, "I need a visual prompt before I can generate an image."), nil, nil, nil
+	}
+	if len([]rune(prompt)) > maxImagePromptChars {
+		return imageToolPayload(false, 0, "", "", llm.ImageProviderStatusInvalid, "That image prompt is too long. Please ask with a shorter visual description."), nil, nil, nil
+	}
+	caption := truncateRunes(strings.TrimSpace(stringArgument(args, "caption")), maxImageCaptionChars)
+	count := intArgument(args, "count", 1)
+	if count <= 0 {
+		count = 1
+	}
+	if count > 1 {
+		return imageToolPayload(false, 0, "", caption, llm.ImageProviderStatusInvalid, "This Panda rollout can generate one image at a time. Please ask for one image."), nil, nil, nil
+	}
+
+	e.recordImageAudit(ctx, request, "image_generation.attempt", map[string]any{
+		"prompt_chars": len([]rune(prompt)),
+		"has_caption":  caption != "",
+		"aspect_ratio": stringArgument(args, "aspect_ratio"),
+		"size":         stringArgument(args, "size"),
+		"quality":      stringArgument(args, "quality"),
+		"format":       stringArgument(args, "output_format"),
+	})
+
+	var reservation billing.Reservation
+	releaseReservation := false
+	if e.billing != nil {
+		reservation, err = e.billing.BeginUsage(ctx, request.GuildID, billing.MetricImageGeneration, 1)
+		if err != nil {
+			return imageToolPayload(false, 0, "", caption, llm.ImageProviderStatusUnavailable, imageBillingMessage(err)), nil, nil, nil
+		}
+		releaseReservation = reservation.ID != ""
+		defer func() {
+			if releaseReservation && reservation.ID != "" {
+				_ = e.billing.ReleaseUsage(context.Background(), reservation)
+			}
+		}()
+	}
+
+	response, err := e.images.Generate(ctx, llm.ImageGenerationRequest{
+		Prompt:                prompt,
+		AspectRatio:           stringArgument(args, "aspect_ratio"),
+		Size:                  stringArgument(args, "size"),
+		Quality:               stringArgument(args, "quality"),
+		OutputFormat:          stringArgument(args, "output_format"),
+		TransparentBackground: boolArgument(args, "transparent_background"),
+		Count:                 count,
+	})
+	if err != nil {
+		status, userMessage := imageErrorStatusAndMessage(err)
+		e.recordImageProviderCost(ctx, request, "", llm.ImageUsage{}, false, string(status))
+		e.recordImageAudit(ctx, request, imageAuditActionForStatus(status), map[string]any{"provider_status": string(status)})
+		return imageToolPayload(false, 0, "", caption, status, userMessage), nil, nil, nil
+	}
+	if len(response.Images) == 0 || len(response.Images[0].Bytes) == 0 {
+		status := llm.ImageProviderStatusError
+		userMessage := "I could not generate that image. Please try again later."
+		e.recordImageProviderCost(ctx, request, response.Model, response.Usage, false, string(status))
+		e.recordImageAudit(ctx, request, "image_generation.provider_failure", map[string]any{"provider_status": string(status)})
+		return imageToolPayload(false, 0, "", caption, status, userMessage), nil, nil, nil
+	}
+
+	image := response.Images[0]
+	filename := generatedImageFilename(stringArgument(args, "filename_hint"), image.MIMEType)
+	file := generated.File{
+		Filename: filename,
+		MIMEType: image.MIMEType,
+		Data:     append([]byte(nil), image.Bytes...),
+		AltText:  firstNonEmpty(caption, "Generated image"),
+	}
+	releaseReservation = false
+	reservations := []billing.Reservation{}
+	if reservation.ID != "" {
+		reservations = append(reservations, reservation)
+	}
+	e.recordImageProviderCost(ctx, request, response.Model, response.Usage, true, "")
+	e.recordImageAudit(ctx, request, "image_generation.success", map[string]any{
+		"provider_status": string(llm.ImageProviderStatusSuccess),
+		"filename":        filename,
+		"mime_type":       image.MIMEType,
+		"size_bytes":      len(image.Bytes),
+	})
+	payload := imageToolPayload(true, 1, filename, caption, llm.ImageProviderStatusSuccess, "Generated the image and attached it to this response.")
+	return payload, []generated.File{file}, reservations, nil
+}
+
+func (e *Executor) recordImageProviderCost(ctx context.Context, request ExecutionRequest, model string, usage llm.ImageUsage, success bool, errorCode string) {
+	if e == nil || e.billing == nil {
+		return
+	}
+	_ = e.billing.RecordCost(ctx, billing.CostEvent{
+		GuildID:          request.GuildID,
+		RequestID:        request.RequestID,
+		Source:           "tool",
+		Operation:        "image_generation",
+		Command:          request.InvocationType,
+		Provider:         "openrouter",
+		Model:            model,
+		PromptTokens:     usage.PromptTokens,
+		CompletionTokens: usage.CompletionTokens,
+		TotalTokens:      usage.TotalTokens,
+		FinalCostMicros:  usage.CostMicros,
+		Success:          success,
+		ErrorCode:        errorCode,
+	})
+}
+
+func (e *Executor) recordImageAudit(ctx context.Context, request ExecutionRequest, action string, values map[string]any) {
+	if e == nil || e.audit == nil {
+		return
+	}
+	if values == nil {
+		values = map[string]any{}
+	}
+	values["request_id"] = request.RequestID
+	values["channel_id"] = request.ChannelID
+	data, _ := json.Marshal(values)
+	_ = e.audit.Record(ctx, store.AuditEvent{
+		GuildID:    request.GuildID,
+		ActorID:    request.ActorID,
+		Action:     action,
+		TargetType: "image_generation",
+		TargetID:   request.RequestID,
+		Metadata:   string(data),
+	})
+}
+
+func imageToolPayload(generated bool, imageCount int, filename, caption string, status llm.ImageProviderStatus, userMessage string) map[string]any {
+	return map[string]any{
+		"generated":       generated,
+		"image_count":     imageCount,
+		"filename":        filename,
+		"caption":         caption,
+		"provider_status": string(status),
+		"user_message":    userMessage,
+	}
+}
+
+func imageErrorStatusAndMessage(err error) (llm.ImageProviderStatus, string) {
+	var imageErr llm.ImageGenerationError
+	if errors.As(err, &imageErr) {
+		return imageErr.Status, imageErr.Message
+	}
+	return llm.ImageProviderStatusError, "I could not generate that image. Please try again later."
+}
+
+func imageAuditActionForStatus(status llm.ImageProviderStatus) string {
+	switch status {
+	case llm.ImageProviderStatusPolicyBlocked:
+		return "image_generation.policy_blocked"
+	default:
+		return "image_generation.provider_failure"
+	}
+}
+
+func imageBillingMessage(err error) string {
+	var quotaErr billing.QuotaError
+	if errors.As(err, &quotaErr) {
+		return fmt.Sprintf("This server has used its included %s for the current billing period.", billing.MetricLabel(quotaErr.Metric))
+	}
+	if errors.Is(err, billing.ErrNoSubscription) {
+		return "This server does not have an active Panda subscription for image generation."
+	}
+	if errors.Is(err, billing.ErrReadOnly) {
+		return "This server's Panda subscription is read-only, so image generation is paused."
+	}
+	return "Image generation quota could not be checked. Please try again later."
+}
+
+func generatedImageFilename(hint, mimeType string) string {
+	stem := sanitizeFilenameStem(hint)
+	if stem == "" {
+		stem = "panda-image"
+	}
+	return stem + extensionForMIME(mimeType)
+}
+
+func sanitizeFilenameStem(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	var builder strings.Builder
+	lastWasDash := false
+	for _, r := range strings.ToLower(value) {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9':
+			builder.WriteRune(r)
+			lastWasDash = false
+		case r == '_' || r == '-':
+			if !lastWasDash && builder.Len() > 0 {
+				builder.WriteByte('-')
+				lastWasDash = true
+			}
+		default:
+			if !lastWasDash && builder.Len() > 0 {
+				builder.WriteByte('-')
+				lastWasDash = true
+			}
+		}
+		if builder.Len() >= 80 {
+			break
+		}
+	}
+	return strings.Trim(builder.String(), "-")
+}
+
+func extensionForMIME(mimeType string) string {
+	switch strings.ToLower(strings.TrimSpace(mimeType)) {
+	case "image/jpeg":
+		return ".jpg"
+	case "image/webp":
+		return ".webp"
+	default:
+		return ".png"
+	}
+}
+
+func truncateRunes(value string, limit int) string {
+	if limit <= 0 {
+		return ""
+	}
+	runes := []rune(value)
+	if len(runes) <= limit {
+		return value
+	}
+	return strings.TrimSpace(string(runes[:limit]))
 }
 
 func sourceLinksFromPayload(toolName string, payload any) []SourceLink {
@@ -2199,7 +2464,7 @@ func (e *Executor) listAvailableTools(ctx context.Context, request ExecutionRequ
 		response["admin_tools_notice"] = hiddenAdminToolsNotice()
 	}
 	if normalizeToolPolicy(request.Access.Policy) == ToolPolicyAdminOnly && !canSeeAdminTools {
-		response["user_tools_notice"] = "Normal chat and any listed web search tool are available. Broader tools are disabled for users right now; an admin can enable broader tool access for this server later."
+		response["user_tools_notice"] = "Normal chat, any listed web search tool, and any listed image generation tool are available. Broader tools are disabled for users right now; an admin can enable broader tool access for this server later."
 	}
 	return response, nil
 }
@@ -2282,7 +2547,7 @@ func (e *Executor) listUserCapabilities(ctx context.Context, request ExecutionRe
 		response["admin_tools_notice"] = hiddenAdminToolsNotice()
 	}
 	if normalizeToolPolicy(request.Access.Policy) == ToolPolicyAdminOnly {
-		response["user_tools_notice"] = "Normal chat and any listed web search capability are available. Broader tools are disabled for users right now; an admin can enable broader access later."
+		response["user_tools_notice"] = "Normal chat, any listed web search capability, and any listed image generation capability are available. Broader tools are disabled for users right now; an admin can enable broader access later."
 	}
 	return response, nil
 }
@@ -2315,6 +2580,9 @@ func userNativeCapabilities(definitions map[string]Definition) []map[string]any 
 	}
 	if has("web.search") {
 		add("search_the_web", "Search the web", "Look up current public information and answer with source links.", false)
+	}
+	if has("panda.generate_image") {
+		add("generate_images", "Generate images", "Generate image files for memes, stickers, icons, illustrations, and other visual requests.", false)
 	}
 	if has("summarize_text_file") {
 		add("summarize_uploaded_files", "Summarize uploaded files", "Summarize extracted text from safe uploaded text or PDF files.", false)
@@ -2419,6 +2687,8 @@ func (e *Executor) canExecute(name string) bool {
 		return e.knowledge != nil
 	case "web.search":
 		return e.webSearch != nil
+	case "panda.generate_image":
+		return e.images != nil && e.images.Configured()
 	case "summarize_text_file":
 		return e.attachments != nil
 	case "read_config":

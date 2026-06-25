@@ -1,5 +1,5 @@
 import { commandViews } from '../data/landing';
-import { initAdminCoupons } from './admin-coupons';
+import { initAdminConsole } from './admin-console';
 import { initWalletAccount } from './account';
 import { initSolPayments } from './sol-payments';
 
@@ -107,5 +107,5 @@ import { initSolPayments } from './sol-payments';
 
   initWalletAccount();
   initSolPayments();
-  initAdminCoupons();
+  initAdminConsole();
 })();

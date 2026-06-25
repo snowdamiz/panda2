@@ -52,7 +52,7 @@ func TestPublicCatalogExcludesOwnerOps(t *testing.T) {
 
 func TestDefaultInstallPresetIncludesAdminAutomationAndChannelMessages(t *testing.T) {
 	defaults := FeatureSet(DefaultInstallPreset())
-	for _, want := range []string{Threads, AdminSetup, AdminAccessControl, AdminAudit, ComposedTools, DiscordMessages} {
+	for _, want := range []string{Threads, WebSearch, ImageGeneration, AdminSetup, AdminAccessControl, AdminAudit, ComposedTools, DiscordMessages} {
 		if !Has(defaults, want) {
 			t.Fatalf("expected default install preset to include %s, got %+v", want, DefaultInstallPreset())
 		}
@@ -69,6 +69,28 @@ func TestDefaultInstallPresetIncludesAdminAutomationAndChannelMessages(t *testin
 		if Has(permissions, heavy) {
 			t.Fatalf("default channel messages should not request %s, got %+v", heavy, selection.DiscordPermissionNames)
 		}
+	}
+}
+
+func TestImageGenerationFeatureRequestsAttachFiles(t *testing.T) {
+	selection, err := Calculate([]string{ImageGeneration}, true)
+	if err != nil {
+		t.Fatalf("Calculate: %v", err)
+	}
+	features := FeatureSet(selection.ExpandedFeatureIDs)
+	for _, want := range []string{AssistantChat, ImageGeneration} {
+		if !Has(features, want) {
+			t.Fatalf("expected expanded feature %s in %+v", want, selection.ExpandedFeatureIDs)
+		}
+	}
+	permissions := FeatureSet(selection.DiscordPermissionNames)
+	for _, want := range []string{"VIEW_CHANNEL", "SEND_MESSAGES", "ATTACH_FILES"} {
+		if !Has(permissions, want) {
+			t.Fatalf("expected image generation to request %s, got %+v", want, selection.DiscordPermissionNames)
+		}
+	}
+	if selection.DiscordPermissionBitfield64&int64(disgoDiscord.PermissionAttachFiles) == 0 {
+		t.Fatalf("expected Attach Files bit in %d", selection.DiscordPermissionBitfield64)
 	}
 }
 

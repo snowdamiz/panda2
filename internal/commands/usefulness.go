@@ -287,23 +287,27 @@ func (r *Router) handleAdminStatus(ctx context.Context, request Request) Respons
 	budgets, _ := r.admin.ListBudgetLimits(ctx, request.GuildID)
 	var queueDepth int64
 	aiServiceStatus := "unknown"
+	imageServiceStatus := "unknown"
 	discordStatus := "unknown"
 	if r.ops != nil {
 		if health, err := r.ops.Health(ctx); err == nil {
 			queueDepth = health.QueuedJobs
 			aiServiceStatus = health.AIService
+			imageServiceStatus = health.ImageService
 			discordStatus = health.Discord
 		}
 	}
 	billingStatus := "not configured"
 	aiUsage := "not available"
 	webUsage := "not available"
+	imageUsage := "not available"
 	retention := 0
 	if r.billing != nil {
 		if entitlement, err := r.billing.Resolve(ctx, request.GuildID); err == nil {
 			billingStatus = fmt.Sprintf("%s (%s)", entitlement.Plan.DisplayName, entitlement.Status)
 			aiUsage = entitlement.UsageLine("ai_response")
 			webUsage = entitlement.UsageLine("web_search")
+			imageUsage = entitlement.UsageLine("image_generation")
 			retention = entitlement.Plan.RetentionDays
 		}
 	}
@@ -339,6 +343,7 @@ func (r *Router) handleAdminStatus(ctx context.Context, request Request) Respons
 		fmt.Sprintf("- subscription: `%s`", billingStatus),
 		fmt.Sprintf("- AI responses: `%s`", aiUsage),
 		fmt.Sprintf("- web searches: `%s`", webUsage),
+		fmt.Sprintf("- image generations: `%s`", imageUsage),
 		fmt.Sprintf("- retention: `%d days`", retention),
 		fmt.Sprintf("- assistant: `%t`", config.AssistantEnabled),
 		fmt.Sprintf("- memory: `%t`", config.MemoryEnabled),
@@ -346,6 +351,7 @@ func (r *Router) handleAdminStatus(ctx context.Context, request Request) Respons
 		fmt.Sprintf("- tool policy: `%s`", config.ToolPolicy),
 		fmt.Sprintf("- discord: `%s`", discordStatus),
 		fmt.Sprintf("- AI service: `%s`", aiServiceStatus),
+		fmt.Sprintf("- image service: `%s`", imageServiceStatus),
 		fmt.Sprintf("- role mappings: `%d`", len(roles)),
 		fmt.Sprintf("- user mappings: `%d`", len(users)),
 		fmt.Sprintf("- tool role grants: `%d`", len(toolRoles)),

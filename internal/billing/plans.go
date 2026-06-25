@@ -31,6 +31,7 @@ const (
 
 	MetricAIResponse           = "ai_response"
 	MetricWebSearch            = "web_search"
+	MetricImageGeneration      = "image_generation"
 	MetricKnowledgeStorageByte = "knowledge_storage_byte"
 	MetricScheduledRun         = "scheduled_run"
 	MetricMusicMinute          = "music_minute"
@@ -56,6 +57,7 @@ type PlanLimits struct {
 	PriceCents            int
 	AIResponses           int
 	WebSearches           int
+	ImageGenerations      int
 	KnowledgeStorageBytes int64
 	Schedules             int
 	RetentionDays         int
@@ -70,6 +72,7 @@ var planLimits = map[string]PlanLimits{
 		PriceCents:            0,
 		AIResponses:           250,
 		WebSearches:           20,
+		ImageGenerations:      5,
 		KnowledgeStorageBytes: 25 * 1024 * 1024,
 		Schedules:             3,
 		RetentionDays:         14,
@@ -82,6 +85,7 @@ var planLimits = map[string]PlanLimits{
 		PriceCents:            1900,
 		AIResponses:           2000,
 		WebSearches:           100,
+		ImageGenerations:      25,
 		KnowledgeStorageBytes: 100 * 1024 * 1024,
 		Schedules:             10,
 		RetentionDays:         30,
@@ -94,6 +98,7 @@ var planLimits = map[string]PlanLimits{
 		PriceCents:            4900,
 		AIResponses:           5000,
 		WebSearches:           400,
+		ImageGenerations:      100,
 		KnowledgeStorageBytes: 500 * 1024 * 1024,
 		Schedules:             50,
 		RetentionDays:         90,
@@ -106,6 +111,7 @@ var planLimits = map[string]PlanLimits{
 		PriceCents:            9900,
 		AIResponses:           10000,
 		WebSearches:           1000,
+		ImageGenerations:      250,
 		KnowledgeStorageBytes: 2 * 1024 * 1024 * 1024,
 		Schedules:             200,
 		RetentionDays:         180,
@@ -118,6 +124,7 @@ var planLimits = map[string]PlanLimits{
 		PriceCents:            24900,
 		AIResponses:           25000,
 		WebSearches:           2000,
+		ImageGenerations:      1000,
 		KnowledgeStorageBytes: 10 * 1024 * 1024 * 1024,
 		Schedules:             1000,
 		RetentionDays:         365,
@@ -157,7 +164,7 @@ func PlanCatalog() []PlanLimits {
 func NormalizeMetric(metric string) (string, bool) {
 	normalized := strings.ToLower(strings.TrimSpace(metric))
 	switch normalized {
-	case MetricAIResponse, MetricWebSearch, MetricKnowledgeStorageByte, MetricScheduledRun, MetricMusicMinute:
+	case MetricAIResponse, MetricWebSearch, MetricImageGeneration, MetricKnowledgeStorageByte, MetricScheduledRun, MetricMusicMinute:
 		return normalized, true
 	default:
 		return "", false
@@ -170,6 +177,8 @@ func MetricLabel(metric string) string {
 		return "AI responses"
 	case MetricWebSearch:
 		return "web searches"
+	case MetricImageGeneration:
+		return "image generations"
 	case MetricKnowledgeStorageByte:
 		return "knowledge storage"
 	case MetricScheduledRun:
@@ -187,6 +196,8 @@ func IncludedLimit(limits PlanLimits, metric string) int64 {
 		return int64(limits.AIResponses)
 	case MetricWebSearch:
 		return int64(limits.WebSearches)
+	case MetricImageGeneration:
+		return int64(limits.ImageGenerations)
 	case MetricKnowledgeStorageByte:
 		return limits.KnowledgeStorageBytes
 	case MetricScheduledRun:

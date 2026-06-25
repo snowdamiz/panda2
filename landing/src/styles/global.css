@@ -2042,63 +2042,67 @@ svg {
 }
 
 .admin-page {
-  padding-top: clamp(176px, 18vh, 218px);
+  height: 100dvh;
+  display: flex;
+  overflow: hidden;
   color: var(--color-paper-bright);
   background: var(--color-ink);
 }
 
 .admin-shell {
-  max-width: 1260px;
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
 }
 
-.admin-heading {
-  grid-template-columns: 1fr;
-  gap: 24px;
-  max-width: 780px;
-  margin-inline: auto;
-  margin-bottom: clamp(54px, 7vh, 76px);
+/* --- Login gate --- */
+.admin-gate {
+  display: grid;
+  gap: 30px;
+  width: min(560px, 100%);
+  margin: auto;
+  padding: 24px;
   text-align: center;
 }
 
-.admin-heading .kicker {
-  justify-content: center;
+.admin-gate[hidden] {
+  display: none;
 }
 
-.admin-heading h1 {
-  max-width: 780px;
-  margin-inline: auto;
-  font-size: clamp(3.8rem, 5.9vw, 5.8rem);
+.admin-gate-intro {
+  display: grid;
+  gap: 18px;
+  justify-items: center;
 }
 
-.admin-heading > p {
-  max-width: 560px;
-  margin: 0 auto;
+.admin-gate-intro h1 {
+  margin: 0;
+  font-size: clamp(2.8rem, 5vw, 3.8rem);
+  font-weight: 580;
+  letter-spacing: -.05em;
+  line-height: .98;
 }
 
-.admin-login-card,
-.admin-dashboard {
-  width: min(920px, 100%);
-  margin-inline: auto;
-}
-
-.admin-login-card,
-.admin-toolbar,
-.admin-coupon-form,
-.admin-created-code,
-.admin-coupon-row {
-  border: 1px solid color-mix(in oklab, var(--color-white) 14%, transparent);
-  border-radius: var(--radius-panel);
-  background: color-mix(in oklab, var(--color-white) 3%, transparent);
-  box-shadow: var(--shadow-account-panel);
+.admin-gate-intro > p {
+  max-width: 440px;
+  margin: 0;
+  color: color-mix(in oklab, var(--color-paper-bright) 54%, transparent);
+  line-height: 1.7;
 }
 
 .admin-login-card {
+  width: 100%;
   overflow: hidden;
+  border: 1px solid var(--line-dark);
+  border-radius: var(--radius-panel);
+  background: color-mix(in oklab, var(--color-white) 3%, transparent);
+  box-shadow: var(--shadow-account-panel);
+  text-align: left;
 }
 
-.admin-login-card[hidden],
-.admin-dashboard[hidden],
-.admin-created-code[hidden] {
+.admin-login-card[hidden] {
   display: none;
 }
 
@@ -2107,27 +2111,223 @@ svg {
   display: grid;
 }
 
-.admin-coupon-form label {
+/* --- Console frame --- */
+.admin-console {
+  flex: 1;
+  min-height: 0;
   display: grid;
-  gap: 9px;
+  grid-template-columns: 264px minmax(0, 1fr);
+  align-items: stretch;
+  overflow: hidden;
 }
 
-.admin-coupon-form label span,
-.admin-coupon-form legend,
-.admin-toolbar span,
-.admin-created-code span,
-.admin-coupon-details dt {
-  color: color-mix(in oklab, var(--color-white) 40%, transparent);
+.admin-console[hidden] {
+  display: none;
+}
+
+/* --- Sidebar --- */
+.admin-sidebar {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 22px 16px;
+  border-right: 1px solid color-mix(in oklab, var(--color-white) 8%, transparent);
+  background: color-mix(in oklab, var(--color-ink) 30%, transparent);
+}
+
+.admin-brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 12px;
+  padding: 4px 12px 20px;
+  margin-bottom: 6px;
+  border-bottom: 1px solid color-mix(in oklab, var(--color-white) 8%, transparent);
+  color: var(--color-paper-bright);
+  font-size: .88rem;
+  font-weight: 800;
+  letter-spacing: .22em;
+}
+
+.admin-brand .brand-mark {
+  width: 32px;
+  height: 32px;
+  display: block;
+  flex: 0 0 auto;
+  object-fit: contain;
+}
+
+.admin-nav {
+  display: grid;
+  gap: 4px;
+}
+
+.admin-nav-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  min-height: 44px;
+  padding: 0 12px;
+  border: 0;
+  border-radius: var(--radius-tile);
+  color: color-mix(in oklab, var(--color-paper-bright) 60%, transparent);
+  background: transparent;
+  font-size: .82rem;
+  font-weight: 500;
+  text-align: left;
+  cursor: pointer;
+  transition: color .2s ease, background .2s ease;
+}
+
+.admin-nav-item svg {
+  width: 18px;
+  height: 18px;
+  flex-shrink: 0;
+  opacity: .8;
+}
+
+.admin-nav-item:hover,
+.admin-nav-item:focus-visible {
+  color: var(--color-paper-bright);
+  background: color-mix(in oklab, var(--color-white) 5%, transparent);
+}
+
+.admin-nav-item.active {
+  color: var(--color-ink);
+  background: var(--color-paper-bright);
+}
+
+.admin-nav-item.active svg {
+  opacity: 1;
+}
+
+.admin-sidebar-foot {
+  margin-top: auto;
+  display: grid;
+  gap: 12px;
+  padding-top: 16px;
+}
+
+.admin-session-card {
+  display: grid;
+  gap: 6px;
+  padding: 14px;
+  border: 1px solid color-mix(in oklab, var(--color-white) 9%, transparent);
+  border-radius: var(--radius-tile);
+  background: color-mix(in oklab, var(--color-white) 3%, transparent);
+}
+
+.admin-session-card span {
   font-family: var(--font-mono);
-  font-size: .55rem;
+  font-size: .52rem;
   font-weight: 760;
   letter-spacing: .13em;
   text-transform: uppercase;
+  color: color-mix(in oklab, var(--color-white) 40%, transparent);
 }
 
-.admin-coupon-form input {
-  min-height: 48px;
-  width: 100%;
+.admin-session-card small {
+  font-family: var(--font-mono);
+  font-size: .68rem;
+  color: var(--color-paper-bright);
+  overflow-wrap: anywhere;
+}
+
+.admin-sidebar-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.admin-sidebar-actions button {
+  min-height: 40px;
+  padding: 0 10px;
+  border: 1px solid color-mix(in oklab, var(--color-white) 12%, transparent);
+  border-radius: var(--radius-xs);
+  color: color-mix(in oklab, var(--color-paper-bright) 76%, transparent);
+  background: color-mix(in oklab, var(--color-white) 4%, transparent);
+  font-family: var(--font-mono);
+  font-size: .58rem;
+  font-weight: 760;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+  cursor: pointer;
+  transition: border-color .2s ease, background .2s ease, color .2s ease;
+}
+
+.admin-sidebar-actions button:hover,
+.admin-sidebar-actions button:focus-visible {
+  color: var(--color-paper-bright);
+  border-color: color-mix(in oklab, var(--color-white) 30%, transparent);
+  background: color-mix(in oklab, var(--color-white) 8%, transparent);
+}
+
+.admin-sidebar-actions button:disabled {
+  cursor: not-allowed;
+  opacity: .45;
+}
+
+/* --- Main content --- */
+.admin-main {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  padding: 26px clamp(20px, 2.4vw, 34px) 24px;
+}
+
+.admin-panel {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  min-height: 0;
+}
+
+.admin-panel[hidden] {
+  display: none;
+}
+
+.admin-panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  flex-wrap: wrap;
+  padding-bottom: 4px;
+}
+
+.admin-panel-title {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+}
+
+.admin-panel-title h2 {
+  margin: 0;
+  font-size: 1.5rem;
+  font-weight: 560;
+  letter-spacing: -.02em;
+}
+
+.admin-count {
+  font-family: var(--font-mono);
+  font-size: .62rem;
+  font-weight: 760;
+  letter-spacing: .1em;
+  text-transform: uppercase;
+  color: color-mix(in oklab, var(--color-white) 44%, transparent);
+}
+
+.admin-search {
+  display: flex;
+  gap: 8px;
+}
+
+.admin-search input {
+  min-height: 42px;
+  min-width: min(280px, 56vw);
   padding: 0 14px;
   border: 1px solid color-mix(in oklab, var(--color-white) 13%, transparent);
   border-radius: var(--radius-xs);
@@ -2136,58 +2336,14 @@ svg {
   font: inherit;
 }
 
-.admin-coupon-form input:focus {
+.admin-search input:focus {
   outline: 2px solid color-mix(in oklab, var(--color-white) 50%, transparent);
   outline-offset: 2px;
 }
 
-.admin-dashboard,
-.admin-workspace,
-.admin-coupon-list {
-  display: grid;
-  gap: 12px;
-}
-
-.admin-toolbar {
-  min-height: 76px;
-  padding: 18px 20px;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 16px;
-}
-
-.admin-toolbar strong {
-  display: block;
-  margin-top: 6px;
-  color: var(--color-paper-bright);
-  font-size: 1.16rem;
-  font-weight: 560;
-}
-
-.admin-toolbar small {
-  display: block;
-  margin-top: 5px;
-  color: color-mix(in oklab, var(--color-white) 38%, transparent);
-  font-family: var(--font-mono);
-  font-size: .58rem;
-  letter-spacing: .04em;
-}
-
-.admin-toolbar-actions,
-.admin-create-actions,
-.admin-coupon-actions {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-}
-
-.admin-toolbar-actions button,
-.admin-secondary-button,
-.admin-created-code button,
-.admin-coupon-actions button {
+.admin-search button {
   min-height: 42px;
-  padding: 0 13px;
+  padding: 0 16px;
   border: 1px solid color-mix(in oklab, var(--color-white) 12%, transparent);
   border-radius: var(--radius-xs);
   color: color-mix(in oklab, var(--color-paper-bright) 76%, transparent);
@@ -2198,36 +2354,453 @@ svg {
   letter-spacing: .08em;
   text-transform: uppercase;
   cursor: pointer;
-  transition: border-color .2s ease, background .2s ease, color .2s ease, transform .2s ease;
+  transition: border-color .2s ease, background .2s ease, color .2s ease;
 }
 
-.admin-toolbar-actions button:hover,
-.admin-toolbar-actions button:focus-visible,
-.admin-secondary-button:hover,
-.admin-secondary-button:focus-visible,
-.admin-created-code button:hover,
-.admin-created-code button:focus-visible,
-.admin-coupon-actions button:hover,
-.admin-coupon-actions button:focus-visible {
+.admin-search button:hover,
+.admin-search button:focus-visible {
+  color: var(--color-paper-bright);
+  border-color: color-mix(in oklab, var(--color-white) 30%, transparent);
+}
+
+/* --- Tables --- */
+.admin-table-wrap {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  border: 1px solid color-mix(in oklab, var(--color-white) 8%, transparent);
+  border-radius: var(--radius-content);
+}
+
+.admin-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: .8rem;
+}
+
+.admin-table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  padding: 13px 16px;
+  text-align: left;
+  white-space: nowrap;
+  color: color-mix(in oklab, var(--color-white) 42%, transparent);
+  background: color-mix(in oklab, var(--color-ink) 64%, transparent);
+  backdrop-filter: blur(8px);
+  border-bottom: 1px solid color-mix(in oklab, var(--color-white) 10%, transparent);
+  font-family: var(--font-mono);
+  font-size: .54rem;
+  font-weight: 760;
+  letter-spacing: .12em;
+  text-transform: uppercase;
+}
+
+.admin-table th.admin-th-action,
+.admin-table td.admin-cell-action {
+  text-align: right;
+}
+
+.admin-table tbody td {
+  padding: 14px 16px;
+  vertical-align: middle;
+  border-bottom: 1px solid color-mix(in oklab, var(--color-white) 6%, transparent);
+  color: color-mix(in oklab, var(--color-paper-bright) 76%, transparent);
+}
+
+.admin-table tbody tr:last-child td {
+  border-bottom: 0;
+}
+
+.admin-guild-row td,
+.admin-coupon-row td {
+  transition: background .15s ease;
+}
+
+.admin-guild-row:hover td,
+.admin-coupon-row:hover td {
+  background: color-mix(in oklab, var(--color-white) 3%, transparent);
+}
+
+.admin-guild-row.expanded td {
+  border-bottom-color: transparent;
+  background: color-mix(in oklab, var(--color-white) 4%, transparent);
+}
+
+.admin-cell-primary strong {
+  display: block;
+  color: var(--color-paper-bright);
+  font-size: .86rem;
+  font-weight: 560;
+  overflow-wrap: anywhere;
+}
+
+.admin-cell-primary span {
+  display: block;
+  margin-top: 3px;
+  color: color-mix(in oklab, var(--color-white) 38%, transparent);
+  font-family: var(--font-mono);
+  font-size: .58rem;
+  overflow-wrap: anywhere;
+}
+
+.admin-cell-primary small {
+  display: block;
+  margin-top: 5px;
+  max-width: 280px;
+  color: color-mix(in oklab, var(--color-white) 46%, transparent);
+  font-size: .68rem;
+  line-height: 1.4;
+}
+
+.admin-cell-mono {
+  font-family: var(--font-mono);
+  font-size: .7rem;
+  overflow-wrap: anywhere;
+}
+
+/* row action buttons */
+.admin-row-toggle,
+.admin-row-action {
+  min-height: 34px;
+  padding: 0 14px;
+  border: 1px solid color-mix(in oklab, var(--color-white) 14%, transparent);
+  border-radius: var(--radius-xs);
+  color: color-mix(in oklab, var(--color-paper-bright) 80%, transparent);
+  background: color-mix(in oklab, var(--color-white) 4%, transparent);
+  font-family: var(--font-mono);
+  font-size: .56rem;
+  font-weight: 760;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: border-color .2s ease, background .2s ease, color .2s ease;
+}
+
+.admin-row-toggle:hover,
+.admin-row-toggle:focus-visible,
+.admin-row-action:hover,
+.admin-row-action:focus-visible {
   color: var(--color-paper-bright);
   border-color: color-mix(in oklab, var(--color-white) 30%, transparent);
   background: color-mix(in oklab, var(--color-white) 8%, transparent);
-  transform: translateY(-1px);
 }
 
-.admin-toolbar-actions button:disabled,
-.admin-secondary-button:disabled,
-.admin-created-code button:disabled,
-.admin-coupon-actions button:disabled {
+.admin-row-action-danger {
+  color: color-mix(in oklab, var(--color-status-error) 82%, var(--color-paper-bright));
+}
+
+.admin-row-toggle:disabled,
+.admin-row-action:disabled {
   cursor: not-allowed;
   opacity: .45;
-  transform: none;
+}
+
+/* badges */
+.admin-guild-badge {
+  display: inline-block;
+  padding: 4px 9px;
+  border: 1px solid color-mix(in oklab, var(--color-white) 14%, transparent);
+  border-radius: var(--radius-xs);
+  color: color-mix(in oklab, var(--color-paper-bright) 80%, transparent);
+  background: color-mix(in oklab, var(--color-white) 5%, transparent);
+  font-family: var(--font-mono);
+  font-size: .54rem;
+  font-weight: 760;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.admin-guild-badge + .admin-guild-badge {
+  margin-left: 6px;
+}
+
+.admin-guild-badge[data-kind="plan"] {
+  color: var(--color-paper-bright);
+  border-color: color-mix(in oklab, var(--color-white) 30%, transparent);
+}
+
+.admin-guild-badge[data-kind="status"] {
+  color: color-mix(in oklab, var(--color-status-good) 82%, var(--color-paper-bright));
+}
+
+.admin-guild-row[data-state="read_only"] .admin-guild-badge[data-kind="status"] {
+  color: color-mix(in oklab, var(--color-status-error) 82%, var(--color-paper-bright));
+}
+
+/* coupon status pill */
+.admin-status-pill {
+  display: inline-block;
+  padding: 4px 10px;
+  border-radius: var(--radius-pill);
+  background: color-mix(in oklab, var(--color-status-good) 18%, transparent);
+  color: color-mix(in oklab, var(--color-status-good) 86%, var(--color-paper-bright));
+  font-family: var(--font-mono);
+  font-size: .54rem;
+  font-weight: 760;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
+
+.admin-status-pill[data-status="revoked"],
+.admin-status-pill[data-status="expired"] {
+  background: color-mix(in oklab, var(--color-status-error) 18%, transparent);
+  color: color-mix(in oklab, var(--color-status-error) 86%, var(--color-paper-bright));
+}
+
+/* empty + detail rows */
+.admin-table .admin-empty-cell {
+  padding: 48px 20px;
+  text-align: center;
+  color: color-mix(in oklab, var(--color-white) 42%, transparent);
+}
+
+.admin-detail-row[hidden] {
+  display: none;
+}
+
+.admin-table .admin-detail-row > td {
+  padding: 0;
+  background: color-mix(in oklab, var(--color-ink) 26%, transparent);
+}
+
+.admin-detail {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+  padding: 18px 16px 22px;
+}
+
+.admin-detail-card {
+  overflow: hidden;
+  border: 1px solid color-mix(in oklab, var(--color-white) 8%, transparent);
+  border-radius: var(--radius-sm);
+  background: color-mix(in oklab, var(--color-ink) 42%, transparent);
+}
+
+.admin-detail-card-wide {
+  grid-column: 1 / -1;
+}
+
+.admin-detail-card-title {
+  margin: 0;
+  padding: 11px 14px;
+  border-bottom: 1px solid color-mix(in oklab, var(--color-white) 7%, transparent);
+  color: color-mix(in oklab, var(--color-white) 50%, transparent);
+  font-family: var(--font-mono);
+  font-size: .52rem;
+  font-weight: 760;
+  letter-spacing: .14em;
+  text-transform: uppercase;
+}
+
+.admin-detail-card-body {
+  padding: 14px;
+}
+
+.admin-kv {
+  margin: 0;
+  display: grid;
+}
+
+.admin-kv-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 9px 0;
+  border-bottom: 1px solid color-mix(in oklab, var(--color-white) 6%, transparent);
+}
+
+.admin-kv-row:first-child {
+  padding-top: 0;
+}
+
+.admin-kv-row:last-child {
+  padding-bottom: 0;
+  border-bottom: 0;
+}
+
+.admin-kv-row dt {
+  flex-shrink: 0;
+  color: color-mix(in oklab, var(--color-white) 42%, transparent);
+  font-family: var(--font-mono);
+  font-size: .54rem;
+  font-weight: 760;
+  letter-spacing: .1em;
+  text-transform: uppercase;
+}
+
+.admin-kv-row dd {
+  margin: 0;
+  text-align: right;
+  color: color-mix(in oklab, var(--color-paper-bright) 82%, transparent);
+  font-size: .78rem;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.admin-guild-usage {
+  display: grid;
+  gap: 16px;
+}
+
+.admin-guild-meter-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.admin-guild-meter-head span {
+  color: color-mix(in oklab, var(--color-white) 40%, transparent);
+  font-family: var(--font-mono);
+  font-size: .52rem;
+  font-weight: 760;
+  letter-spacing: .1em;
+  text-transform: uppercase;
+}
+
+.admin-guild-meter-head strong {
+  color: var(--color-paper-bright);
+  font-family: var(--font-mono);
+  font-size: .64rem;
+  font-weight: 560;
+}
+
+.admin-guild-meter-track {
+  margin-top: 8px;
+  height: 6px;
+  border-radius: var(--radius-xs);
+  background: color-mix(in oklab, var(--color-white) 10%, transparent);
+  overflow: hidden;
+}
+
+.admin-guild-meter-fill {
+  height: 100%;
+  background: color-mix(in oklab, var(--color-status-good) 70%, var(--color-paper-bright));
+}
+
+.admin-guild-meter-fill[data-level="high"] {
+  background: color-mix(in oklab, var(--color-status-error) 72%, var(--color-paper-bright));
+}
+
+/* --- Inline subscription editor --- */
+.admin-guild-form {
+  display: grid;
+  gap: 16px;
+}
+
+.admin-guild-form-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.admin-guild-form label {
+  display: grid;
+  gap: 9px;
+}
+
+.admin-guild-form label > span {
+  color: color-mix(in oklab, var(--color-white) 40%, transparent);
+  font-family: var(--font-mono);
+  font-size: .52rem;
+  font-weight: 760;
+  letter-spacing: .12em;
+  text-transform: uppercase;
+}
+
+.admin-guild-form input,
+.admin-guild-form select {
+  min-height: 46px;
+  width: 100%;
+  padding: 0 14px;
+  border: 1px solid color-mix(in oklab, var(--color-white) 13%, transparent);
+  border-radius: var(--radius-xs);
+  color: var(--color-paper-bright);
+  background: color-mix(in oklab, var(--color-ink) 38%, transparent);
+  font: inherit;
+}
+
+.admin-guild-form input:focus,
+.admin-guild-form select:focus {
+  outline: 2px solid color-mix(in oklab, var(--color-white) 50%, transparent);
+  outline-offset: 2px;
+}
+
+.admin-guild-form-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.admin-guild-form-actions .app-primary {
+  min-height: 46px;
+  min-width: 200px;
+}
+
+.admin-guild-checkbox {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: color-mix(in oklab, var(--color-paper-bright) 76%, transparent);
+  font-size: .76rem;
+  cursor: pointer;
+}
+
+.admin-guild-checkbox input {
+  width: 18px;
+  height: 18px;
+  accent-color: var(--color-paper-bright);
+}
+
+/* --- Coupon create panel --- */
+.admin-create {
+  border: 1px solid color-mix(in oklab, var(--color-white) 9%, transparent);
+  border-radius: var(--radius-content);
+  background: color-mix(in oklab, var(--color-white) 2.5%, transparent);
+}
+
+.admin-create > summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 56px;
+  padding: 0 18px;
+  list-style: none;
+  cursor: pointer;
+  color: var(--color-paper-bright);
+  font-size: .92rem;
+  font-weight: 560;
+}
+
+.admin-create > summary::-webkit-details-marker {
+  display: none;
+}
+
+.admin-create > summary em {
+  font-family: var(--font-mono);
+  font-size: .54rem;
+  font-weight: 760;
+  font-style: normal;
+  letter-spacing: .1em;
+  text-transform: uppercase;
+  color: color-mix(in oklab, var(--color-white) 42%, transparent);
+}
+
+.admin-create[open] > summary {
+  border-bottom: 1px solid color-mix(in oklab, var(--color-white) 8%, transparent);
 }
 
 .admin-coupon-form {
-  padding: 20px;
   display: grid;
   gap: 18px;
+  padding: 20px 18px;
 }
 
 .admin-coupon-form fieldset {
@@ -2235,6 +2808,37 @@ svg {
   margin: 0;
   padding: 0;
   border: 0;
+}
+
+.admin-coupon-form legend,
+.admin-coupon-form label span {
+  color: color-mix(in oklab, var(--color-white) 40%, transparent);
+  font-family: var(--font-mono);
+  font-size: .52rem;
+  font-weight: 760;
+  letter-spacing: .12em;
+  text-transform: uppercase;
+}
+
+.admin-coupon-form label {
+  display: grid;
+  gap: 9px;
+}
+
+.admin-coupon-form input {
+  min-height: 46px;
+  width: 100%;
+  padding: 0 14px;
+  border: 1px solid color-mix(in oklab, var(--color-white) 13%, transparent);
+  border-radius: var(--radius-xs);
+  color: var(--color-paper-bright);
+  background: color-mix(in oklab, var(--color-ink) 38%, transparent);
+  font: inherit;
+}
+
+.admin-coupon-form input:focus {
+  outline: 2px solid color-mix(in oklab, var(--color-white) 50%, transparent);
+  outline-offset: 2px;
 }
 
 .admin-plan-picker {
@@ -2245,11 +2849,11 @@ svg {
 }
 
 .admin-plan-option {
-  min-height: 76px;
-  padding: 14px;
+  min-height: 70px;
+  padding: 12px 14px;
   border: 1px solid color-mix(in oklab, var(--color-white) 12%, transparent);
   border-radius: var(--radius-xs);
-  color: color-mix(in oklab, var(--color-paper-bright) 66%, transparent);
+  color: color-mix(in oklab, var(--color-paper-bright) 64%, transparent);
   background: color-mix(in oklab, var(--color-white) 3%, transparent);
   cursor: pointer;
   text-align: left;
@@ -2269,15 +2873,15 @@ svg {
 
 .admin-plan-option span {
   font-family: var(--font-mono);
-  font-size: .58rem;
+  font-size: .56rem;
   font-weight: 760;
   letter-spacing: .1em;
   text-transform: uppercase;
 }
 
 .admin-plan-option strong {
-  margin-top: 9px;
-  font-size: 1.36rem;
+  margin-top: 8px;
+  font-size: 1.24rem;
   font-weight: 560;
 }
 
@@ -2292,20 +2896,68 @@ svg {
 }
 
 .admin-create-actions {
+  display: flex;
+  align-items: center;
   justify-content: flex-end;
+  gap: 10px;
 }
 
 .admin-create-actions .app-primary {
-  min-height: 48px;
-  min-width: 210px;
+  min-height: 46px;
+  min-width: 200px;
+}
+
+.admin-secondary-button {
+  min-height: 46px;
+  padding: 0 16px;
+  border: 1px solid color-mix(in oklab, var(--color-white) 12%, transparent);
+  border-radius: var(--radius-xs);
+  color: color-mix(in oklab, var(--color-paper-bright) 76%, transparent);
+  background: color-mix(in oklab, var(--color-white) 4%, transparent);
+  font-family: var(--font-mono);
+  font-size: .61rem;
+  font-weight: 760;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+  cursor: pointer;
+  transition: border-color .2s ease, background .2s ease, color .2s ease;
+}
+
+.admin-secondary-button:hover,
+.admin-secondary-button:focus-visible {
+  color: var(--color-paper-bright);
+  border-color: color-mix(in oklab, var(--color-white) 30%, transparent);
+  background: color-mix(in oklab, var(--color-white) 8%, transparent);
+}
+
+.admin-secondary-button:disabled {
+  cursor: not-allowed;
+  opacity: .45;
 }
 
 .admin-created-code {
-  padding: 16px 18px;
   display: flex;
   justify-content: space-between;
   align-items: center;
   gap: 18px;
+  margin: 0 18px 18px;
+  padding: 14px 16px;
+  border: 1px solid color-mix(in oklab, var(--color-white) 14%, transparent);
+  border-radius: var(--radius-sm);
+  background: color-mix(in oklab, var(--color-white) 4%, transparent);
+}
+
+.admin-created-code[hidden] {
+  display: none;
+}
+
+.admin-created-code span {
+  color: color-mix(in oklab, var(--color-white) 40%, transparent);
+  font-family: var(--font-mono);
+  font-size: .52rem;
+  font-weight: 760;
+  letter-spacing: .12em;
+  text-transform: uppercase;
 }
 
 .admin-created-code code {
@@ -2317,101 +2969,49 @@ svg {
   overflow-wrap: anywhere;
 }
 
-.admin-empty {
-  margin: 0;
-  padding: 24px 20px;
-  border: 1px dashed color-mix(in oklab, var(--color-white) 16%, transparent);
-  border-radius: var(--radius-panel);
-  color: color-mix(in oklab, var(--color-white) 45%, transparent);
-}
-
-.admin-coupon-row {
-  overflow: hidden;
-}
-
-.admin-coupon-row-head {
-  min-height: 68px;
-  padding: 16px 18px;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 18px;
-  border-bottom: 1px solid color-mix(in oklab, var(--color-white) 8%, transparent);
-}
-
-.admin-coupon-row-head strong,
-.admin-coupon-row-head span {
-  display: block;
-}
-
-.admin-coupon-row-head strong {
-  color: var(--color-paper-bright);
-  font-family: var(--font-mono);
-  font-size: .78rem;
-  overflow-wrap: anywhere;
-}
-
-.admin-coupon-row-head span {
-  margin-top: 5px;
-  color: color-mix(in oklab, var(--color-white) 38%, transparent);
+.admin-created-code button {
+  min-height: 40px;
+  padding: 0 14px;
+  border: 1px solid color-mix(in oklab, var(--color-white) 12%, transparent);
+  border-radius: var(--radius-xs);
+  color: color-mix(in oklab, var(--color-paper-bright) 76%, transparent);
+  background: color-mix(in oklab, var(--color-white) 4%, transparent);
   font-family: var(--font-mono);
   font-size: .58rem;
-}
-
-.admin-coupon-row-head em {
-  color: color-mix(in oklab, var(--color-status-good) 82%, var(--color-paper-bright));
-  font-family: var(--font-mono);
-  font-size: .6rem;
-  font-style: normal;
   font-weight: 760;
-  letter-spacing: .09em;
+  letter-spacing: .08em;
   text-transform: uppercase;
+  cursor: pointer;
+  transition: border-color .2s ease, background .2s ease, color .2s ease;
 }
 
-.admin-coupon-row[data-status="revoked"] .admin-coupon-row-head em,
-.admin-coupon-row[data-status="expired"] .admin-coupon-row-head em {
-  color: color-mix(in oklab, var(--color-status-error) 82%, var(--color-paper-bright));
+.admin-created-code button:hover,
+.admin-created-code button:focus-visible {
+  color: var(--color-paper-bright);
+  border-color: color-mix(in oklab, var(--color-white) 30%, transparent);
 }
 
-.admin-coupon-details {
-  margin: 0;
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-}
-
-.admin-coupon-details > div {
-  min-height: 74px;
-  padding: 15px 18px;
-  border-right: 1px solid color-mix(in oklab, var(--color-white) 7%, transparent);
-  border-bottom: 1px solid color-mix(in oklab, var(--color-white) 7%, transparent);
-}
-
-.admin-coupon-details > div:nth-child(3n) {
-  border-right: 0;
-}
-
-.admin-coupon-details dd {
-  margin: 7px 0 0;
-  color: color-mix(in oklab, var(--color-paper-bright) 76%, transparent);
-  font-size: .77rem;
-  line-height: 1.45;
-  overflow-wrap: anywhere;
-}
-
-.admin-coupon-actions {
-  justify-content: flex-end;
-  padding: 14px 18px;
-}
-
-.admin-coupon-actions button {
-  color: color-mix(in oklab, var(--color-status-error) 80%, var(--color-paper-bright));
-}
-
+/* --- Status toast --- */
 .admin-status {
-  min-height: 26px;
-  max-width: 920px;
-  margin: 18px auto 0;
-  color: color-mix(in oklab, var(--color-white) 45%, transparent);
+  position: absolute;
+  right: clamp(16px, 2.4vw, 24px);
+  bottom: 16px;
+  z-index: 5;
+  margin: 0;
+  padding: 9px 15px;
+  border: 1px solid color-mix(in oklab, var(--color-white) 12%, transparent);
+  border-radius: var(--radius-pill);
+  background: color-mix(in oklab, var(--color-ink) 86%, transparent);
+  box-shadow: var(--shadow-menu);
+  color: color-mix(in oklab, var(--color-paper-bright) 72%, transparent);
+  font-family: var(--font-mono);
+  font-size: .62rem;
+  letter-spacing: .04em;
+  pointer-events: none;
+}
+
+.admin-status:empty {
+  display: none;
 }
 
 .admin-status[data-tone="error"] {
@@ -4505,23 +5105,63 @@ svg {
   }
 
   .admin-shell {
-    max-width: 760px;
+    width: 100%;
+  }
+
+  .admin-console {
+    grid-template-columns: 1fr;
+    grid-template-rows: auto minmax(0, 1fr);
+    min-height: 0;
+  }
+
+  .admin-sidebar {
+    flex-direction: row;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 12px 16px;
+    padding: 16px 18px;
+    border-right: 0;
+    border-bottom: 1px solid color-mix(in oklab, var(--color-white) 8%, transparent);
+  }
+
+  .admin-brand {
+    padding: 0;
+    margin: 0;
+    border-bottom: 0;
+  }
+
+  .admin-nav {
+    grid-auto-flow: column;
+    gap: 6px;
+  }
+
+  .admin-nav-item {
+    min-height: 38px;
+  }
+
+  .admin-sidebar-foot {
+    width: 100%;
+    margin: 0;
+    padding-top: 12px;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
+    border-top: 1px solid color-mix(in oklab, var(--color-white) 8%, transparent);
+  }
+
+  .admin-sidebar-actions {
+    grid-template-columns: auto auto;
+  }
+
+  .admin-coupon-table {
+    min-width: 760px;
+  }
+
+  .admin-guild-table {
+    min-width: 680px;
   }
 
   .admin-plan-picker {
     grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-
-  .admin-coupon-details {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-
-  .admin-coupon-details > div:nth-child(3n) {
-    border-right: 1px solid color-mix(in oklab, var(--color-white) 7%, transparent);
-  }
-
-  .admin-coupon-details > div:nth-child(2n) {
-    border-right: 0;
   }
 
   .account-summary-grid {
@@ -4710,24 +5350,18 @@ svg {
     padding-top: 142px;
   }
 
-  .admin-page {
-    padding-top: 142px;
-  }
-
   .app-page-heading {
     gap: 28px;
     margin-bottom: 22px;
   }
 
   .account-heading,
-  .billing-heading,
-  .admin-heading {
+  .billing-heading {
     margin-bottom: 40px;
   }
 
   .account-heading h1,
-  .billing-heading h1,
-  .admin-heading h1 {
+  .billing-heading h1 {
     font-size: clamp(3rem, 13vw, 4.4rem);
   }
 
@@ -4735,36 +5369,74 @@ svg {
     grid-template-columns: 1fr;
   }
 
-  .admin-toolbar,
-  .admin-created-code,
-  .admin-coupon-row-head {
+  .admin-main {
+    padding: 20px 16px;
+  }
+
+  .admin-nav {
+    width: 100%;
+    grid-auto-flow: column;
+    grid-auto-columns: 1fr;
+  }
+
+  .admin-sidebar-foot {
+    grid-template-columns: 1fr;
+  }
+
+  .admin-sidebar-actions {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .admin-panel-head {
     align-items: flex-start;
     flex-direction: column;
   }
 
-  .admin-toolbar-actions,
-  .admin-create-actions {
+  .admin-search {
     width: 100%;
+  }
+
+  .admin-search input {
+    flex: 1;
+    min-width: 0;
+  }
+
+  .admin-form-grid,
+  .admin-guild-form-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .admin-detail {
+    grid-template-columns: 1fr;
+  }
+
+  .admin-create-actions {
     align-items: stretch;
     flex-direction: column;
   }
 
-  .admin-toolbar-actions button,
   .admin-create-actions .app-primary,
-  .admin-secondary-button,
+  .admin-secondary-button {
+    width: 100%;
+  }
+
+  .admin-created-code {
+    align-items: stretch;
+    flex-direction: column;
+    gap: 12px;
+  }
+
   .admin-created-code button {
     width: 100%;
   }
 
-  .admin-form-grid,
-  .admin-coupon-details {
-    grid-template-columns: 1fr;
+  .admin-guild-form-actions {
+    align-items: stretch;
+    flex-direction: column;
   }
 
-  .admin-coupon-details > div,
-  .admin-coupon-details > div:nth-child(2n),
-  .admin-coupon-details > div:nth-child(3n) {
-    border-right: 0;
+  .admin-guild-form-actions .app-primary {
+    width: 100%;
   }
 
   .account-detail-list > div {

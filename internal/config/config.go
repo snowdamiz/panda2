@@ -21,9 +21,12 @@ const (
 	defaultDevDataDir             = "data"
 	defaultProdDataDir            = "/data"
 	defaultOpenRouterModel        = "openai/gpt-oss-120b"
+	defaultOpenRouterImageModel   = "google/gemini-3.1-flash-image"
 	defaultOpenRouterProvider     = "cerebras"
 	defaultSolanaCluster          = "devnet"
 	defaultSolanaConfirmation     = "finalized"
+	defaultImageTimeout           = 90 * time.Second
+	defaultImageMaxBytes          = 8 * 1024 * 1024
 	defaultSolanaOrderExpiration  = 30 * time.Minute
 	defaultSolanaActivationKeyTTL = 48 * time.Hour
 )
@@ -40,6 +43,10 @@ type Config struct {
 	OpenRouterAPIKey                         string
 	OpenRouterBaseURL                        string
 	OpenRouterModel                          string
+	OpenRouterImageBaseURL                   string
+	OpenRouterImageModel                     string
+	OpenRouterImageTimeout                   time.Duration
+	OpenRouterImageMaxBytes                  int64
 	OpenRouterFallbackModels                 []string
 	OpenRouterProviderOrder                  []string
 	OpenRouterAllowProviderFallbacks         bool
@@ -94,6 +101,10 @@ type fileDiscordConfig struct {
 type fileOpenRouterConfig struct {
 	BaseURL        string                   `json:"base_url"`
 	DefaultModel   string                   `json:"default_model"`
+	ImageBaseURL   string                   `json:"image_base_url"`
+	ImageModel     string                   `json:"image_model"`
+	ImageTimeout   string                   `json:"image_timeout"`
+	ImageMaxBytes  *int64                   `json:"image_max_bytes"`
 	FallbackModels []string                 `json:"fallback_models"`
 	ProviderOrder  []string                 `json:"provider_order"`
 	AllowFallbacks *bool                    `json:"allow_provider_fallbacks"`
@@ -174,6 +185,18 @@ func (c Config) Validate() ([]string, error) {
 	}
 	if c.OpenRouterModel == "" {
 		return nil, errors.New("openrouter.default_model (OPENROUTER_DEFAULT_MODEL) must not be empty")
+	}
+	if c.OpenRouterImageBaseURL == "" {
+		return nil, errors.New("openrouter.image_base_url (OPENROUTER_IMAGE_BASE_URL) must not be empty")
+	}
+	if c.OpenRouterImageModel == "" {
+		return nil, errors.New("openrouter.image_model (OPENROUTER_IMAGE_MODEL) must not be empty")
+	}
+	if c.OpenRouterImageTimeout <= 0 {
+		return nil, errors.New("openrouter.image_timeout (OPENROUTER_IMAGE_TIMEOUT) must be greater than zero")
+	}
+	if c.OpenRouterImageMaxBytes <= 0 {
+		return nil, errors.New("openrouter.image_max_bytes (OPENROUTER_IMAGE_MAX_BYTES) must be greater than zero")
 	}
 	if c.BraveSearchBaseURL == "" {
 		return nil, errors.New("brave_search.base_url (BRAVE_SEARCH_BASE_URL) must not be empty")
@@ -312,6 +335,12 @@ func (c Config) OpenRouterConfigured() bool {
 	return c.OpenRouterAPIKey != ""
 }
 
+func (c Config) OpenRouterImagesConfigured() bool {
+	return strings.TrimSpace(c.OpenRouterAPIKey) != "" &&
+		strings.TrimSpace(c.OpenRouterImageBaseURL) != "" &&
+		strings.TrimSpace(c.OpenRouterImageModel) != ""
+}
+
 func (c Config) BraveSearchConfigured() bool {
 	return c.BraveSearchAPIKey != ""
 }
@@ -352,6 +381,10 @@ func defaultConfig() Config {
 	return Config{
 		OpenRouterBaseURL:                        "https://openrouter.ai/api/v1",
 		OpenRouterModel:                          defaultOpenRouterModel,
+		OpenRouterImageBaseURL:                   "https://openrouter.ai/api/v1",
+		OpenRouterImageModel:                     defaultOpenRouterImageModel,
+		OpenRouterImageTimeout:                   defaultImageTimeout,
+		OpenRouterImageMaxBytes:                  defaultImageMaxBytes,
 		OpenRouterProviderOrder:                  []string{defaultOpenRouterProvider},
 		OpenRouterAppTitle:                       "Panda Assistant",
 		OpenRouterCircuitBreakerFailureThreshold: 5,
@@ -616,6 +649,22 @@ func applyFileConfig(cfg *Config, file fileConfig) error {
 	if value := strings.TrimSpace(file.OpenRouter.DefaultModel); value != "" {
 		cfg.OpenRouterModel = value
 	}
+	if value := strings.TrimSpace(file.OpenRouter.ImageBaseURL); value != "" {
+		cfg.OpenRouterImageBaseURL = value
+	}
+	if value := strings.TrimSpace(file.OpenRouter.ImageModel); value != "" {
+		cfg.OpenRouterImageModel = value
+	}
+	if value := strings.TrimSpace(file.OpenRouter.ImageTimeout); value != "" {
+		parsed, err := parseDuration("openrouter.image_timeout", value)
+		if err != nil {
+			return err
+		}
+		cfg.OpenRouterImageTimeout = parsed
+	}
+	if file.OpenRouter.ImageMaxBytes != nil {
+		cfg.OpenRouterImageMaxBytes = *file.OpenRouter.ImageMaxBytes
+	}
 	if file.OpenRouter.FallbackModels != nil {
 		cfg.OpenRouterFallbackModels = normalizeList(file.OpenRouter.FallbackModels)
 	}
@@ -737,6 +786,10 @@ func applyEnvValues(cfg *Config, lookup func(string) (string, bool)) {
 	cfg.OpenRouterAPIKey = stringFromLookup(lookup, "OPENROUTER_API_KEY", cfg.OpenRouterAPIKey)
 	cfg.OpenRouterBaseURL = nonEmptyStringFromLookup(lookup, "OPENROUTER_BASE_URL", cfg.OpenRouterBaseURL)
 	cfg.OpenRouterModel = nonEmptyStringFromLookup(lookup, "OPENROUTER_DEFAULT_MODEL", cfg.OpenRouterModel)
+	cfg.OpenRouterImageBaseURL = nonEmptyStringFromLookup(lookup, "OPENROUTER_IMAGE_BASE_URL", cfg.OpenRouterImageBaseURL)
+	cfg.OpenRouterImageModel = nonEmptyStringFromLookup(lookup, "OPENROUTER_IMAGE_MODEL", cfg.OpenRouterImageModel)
+	cfg.OpenRouterImageTimeout = durationFromLookup(lookup, "OPENROUTER_IMAGE_TIMEOUT", cfg.OpenRouterImageTimeout)
+	cfg.OpenRouterImageMaxBytes = int64FromLookup(lookup, "OPENROUTER_IMAGE_MAX_BYTES", cfg.OpenRouterImageMaxBytes)
 	if value, ok := csvListFromLookup(lookup, "OPENROUTER_FALLBACK_MODELS"); ok {
 		cfg.OpenRouterFallbackModels = value
 	}
@@ -792,6 +845,9 @@ func finalize(cfg *Config) {
 	}
 	if cfg.MusicSidecarDir == "" {
 		cfg.MusicSidecarDir = cfg.DataDir + "/music-bin"
+	}
+	if cfg.OpenRouterImageBaseURL == "" {
+		cfg.OpenRouterImageBaseURL = cfg.OpenRouterBaseURL
 	}
 }
 
@@ -878,6 +934,22 @@ func intFromLookup(lookup func(string) (string, bool), name string, fallback int
 		return fallback
 	}
 	parsed, err := strconv.Atoi(value)
+	if err != nil {
+		return fallback
+	}
+	return parsed
+}
+
+func int64FromLookup(lookup func(string) (string, bool), name string, fallback int64) int64 {
+	value, ok := lookup(name)
+	if !ok {
+		return fallback
+	}
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return fallback
+	}
+	parsed, err := strconv.ParseInt(value, 10, 64)
 	if err != nil {
 		return fallback
 	}

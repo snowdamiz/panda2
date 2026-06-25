@@ -8,7 +8,11 @@
   "openrouter": {
     "default_model": "openai/gpt-oss-120b",
     "provider_order": ["cerebras"],
-    "allow_provider_fallbacks": false
+    "allow_provider_fallbacks": false,
+    "image_base_url": "https://openrouter.ai/api/v1",
+    "image_model": "google/gemini-3.1-flash-image",
+    "image_timeout": "90s",
+    "image_max_bytes": 8388608
   },
   "billing": {
     "public_url": "",

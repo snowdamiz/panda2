@@ -39,6 +39,7 @@ type Server struct {
 	discordWebhook DiscordWebhookHandler
 	install        InstallHandler
 	billing        *billing.Service
+	guilds         *repository.GuildRepository
 	paymentLimiter *ratelimit.Limiter
 	adminAuth      adminAuthStore
 }
@@ -119,6 +120,11 @@ func (s *Server) WithBillingService(service *billing.Service) *Server {
 	return s
 }
 
+func (s *Server) WithGuildRepository(guilds *repository.GuildRepository) *Server {
+	s.guilds = guilds
+	return s
+}
+
 func (s *Server) Listen(addr string) error {
 	return s.app.Listen(addr)
 }
@@ -188,6 +194,8 @@ func (s *Server) routes() {
 	s.app.Get("/admin/coupons", s.listAdminCoupons)
 	s.app.Post("/admin/coupons", s.createAdminCoupon)
 	s.app.Post("/admin/coupons/:coupon/revoke", s.revokeAdminCoupon)
+	s.app.Get("/admin/guilds", s.listAdminGuilds)
+	s.app.Post("/admin/guilds/:guild_id/subscription", s.updateAdminGuildSubscription)
 	s.app.Get("/billing/entitlements/:guild_id", s.getBillingEntitlement)
 	s.app.Post("/billing/sol/orders", s.createSolPaymentOrder)
 	s.app.Get("/billing/sol/orders/:order_id", s.getSolPaymentOrder)
@@ -417,10 +425,11 @@ func (s *Server) healthPayload(ctx context.Context) (healthResponse, int) {
 		"discord": configuredStatus(s.cfg.DiscordConfigured(), "credentials missing; gateway disabled"),
 		"discord_webhook": configuredStatus(s.cfg.DiscordWebhookConfigured(),
 			"public key missing; owner-only install webhooks disabled"),
-		"ai_service":    configuredStatus(s.cfg.OpenRouterConfigured(), "AI service key missing; natural-language assistant disabled"),
-		"brave_search":  configuredStatus(s.cfg.BraveSearchConfigured(), "api key missing; web search disabled"),
-		"sol_payments":  configuredStatus(s.cfg.SolanaPaymentsConfigured(), "SOL payment settings incomplete; paid purchases disabled"),
-		"local_storage": localStorageStatus(s.cfg.DataDir),
+		"ai_service":       configuredStatus(s.cfg.OpenRouterConfigured(), "AI service key missing; natural-language assistant disabled"),
+		"image_generation": configuredStatus(s.cfg.OpenRouterImagesConfigured(), "image model/API key missing; generated image responses disabled"),
+		"brave_search":     configuredStatus(s.cfg.BraveSearchConfigured(), "api key missing; web search disabled"),
+		"sol_payments":     configuredStatus(s.cfg.SolanaPaymentsConfigured(), "SOL payment settings incomplete; paid purchases disabled"),
+		"local_storage":    localStorageStatus(s.cfg.DataDir),
 	}
 
 	if checks["local_storage"].Status == "error" {
@@ -817,6 +826,254 @@ func (s *Server) revokeAdminCoupon(c *fiber.Ctx) error {
 	return c.JSON(coupon)
 }
 
+type adminGuildLimitsView struct {
+	AIResponses           int   `json:"ai_responses"`
+	WebSearches           int   `json:"web_searches"`
+	ImageGenerations      int   `json:"image_generations"`
+	KnowledgeStorageBytes int64 `json:"knowledge_storage_bytes"`
+	Schedules             int   `json:"schedules"`
+	RetentionDays         int   `json:"retention_days"`
+	MusicEnabled          bool  `json:"music_enabled"`
+	PremiumToolsEnabled   bool  `json:"premium_tools_enabled"`
+}
+
+type adminGuildUsageView struct {
+	AIResponses           int64 `json:"ai_responses"`
+	WebSearches           int64 `json:"web_searches"`
+	ImageGenerations      int64 `json:"image_generations"`
+	KnowledgeStorageBytes int64 `json:"knowledge_storage_bytes"`
+}
+
+type adminGuildBillingView struct {
+	HasSubscription    bool                  `json:"has_subscription"`
+	Plan               string                `json:"plan"`
+	PlanDisplayName    string                `json:"plan_display_name"`
+	Status             string                `json:"status"`
+	StoredStatus       string                `json:"stored_status"`
+	GraceState         string                `json:"grace_state"`
+	PaymentProvider    string                `json:"payment_provider"`
+	PeriodStart        *time.Time            `json:"period_start,omitempty"`
+	PeriodEnd          *time.Time            `json:"period_end,omitempty"`
+	TrialEndsAt        *time.Time            `json:"trial_ends_at,omitempty"`
+	CancelAtPeriodEnd  bool                  `json:"cancel_at_period_end"`
+	CanUsePaidFeatures bool                  `json:"can_use_paid_features"`
+	ReadOnly           bool                  `json:"read_only"`
+	BillingOwnerUserID string                `json:"billing_owner_user_id"`
+	Email              string                `json:"email"`
+	Limits             *adminGuildLimitsView `json:"limits,omitempty"`
+	Usage              adminGuildUsageView   `json:"usage"`
+}
+
+type adminGuildView struct {
+	GuildID           string                 `json:"guild_id"`
+	Name              string                 `json:"name"`
+	InstallStatus     string                 `json:"install_status"`
+	OwnerUserID       string                 `json:"owner_user_id"`
+	InstalledByUserID string                 `json:"installed_by_user_id"`
+	Locale            string                 `json:"locale"`
+	JoinedAt          time.Time              `json:"joined_at"`
+	LeftAt            *time.Time             `json:"left_at,omitempty"`
+	Billing           *adminGuildBillingView `json:"billing"`
+}
+
+type adminPlanView struct {
+	Plan        string `json:"plan"`
+	DisplayName string `json:"display_name"`
+	PriceCents  int    `json:"price_cents"`
+}
+
+type adminGuildListResponse struct {
+	Guilds      []adminGuildView `json:"guilds"`
+	Total       int64            `json:"total"`
+	Limit       int              `json:"limit"`
+	Offset      int              `json:"offset"`
+	PlanCatalog []adminPlanView  `json:"plan_catalog"`
+	Statuses    []string         `json:"statuses"`
+}
+
+type updateAdminGuildSubscriptionRequest struct {
+	Plan              string `json:"plan"`
+	Status            string `json:"status"`
+	PeriodEnd         string `json:"period_end"`
+	TrialEndsAt       string `json:"trial_ends_at"`
+	ClearTrialEndsAt  bool   `json:"clear_trial_ends_at"`
+	CancelAtPeriodEnd *bool  `json:"cancel_at_period_end"`
+}
+
+func adminPlanCatalog() []adminPlanView {
+	catalog := billing.PlanCatalog()
+	views := make([]adminPlanView, 0, len(catalog))
+	for _, plan := range catalog {
+		views = append(views, adminPlanView{
+			Plan:        plan.Plan,
+			DisplayName: plan.DisplayName,
+			PriceCents:  plan.PriceCents,
+		})
+	}
+	return views
+}
+
+func adminGuildBillingViewFrom(overview billing.AdminGuildBilling) *adminGuildBillingView {
+	view := &adminGuildBillingView{
+		HasSubscription:    overview.HasSubscription,
+		Plan:               overview.Plan,
+		PlanDisplayName:    overview.PlanDisplayName,
+		Status:             overview.Status,
+		StoredStatus:       overview.StoredStatus,
+		GraceState:         overview.GraceState,
+		PaymentProvider:    overview.PaymentProvider,
+		TrialEndsAt:        overview.TrialEndsAt,
+		CancelAtPeriodEnd:  overview.CancelAtPeriodEnd,
+		CanUsePaidFeatures: overview.CanUsePaidFeatures,
+		ReadOnly:           overview.ReadOnly,
+		BillingOwnerUserID: overview.BillingOwnerUserID,
+		Email:              overview.Email,
+		Usage: adminGuildUsageView{
+			AIResponses:           overview.Usage.AIResponsesConsumed,
+			WebSearches:           overview.Usage.WebSearchesConsumed,
+			ImageGenerations:      overview.Usage.ImageGenerationsConsumed,
+			KnowledgeStorageBytes: overview.Usage.KnowledgeStorageBytesConsumed,
+		},
+	}
+	if overview.HasSubscription {
+		periodStart := overview.PeriodStart
+		periodEnd := overview.PeriodEnd
+		view.PeriodStart = &periodStart
+		view.PeriodEnd = &periodEnd
+		view.Limits = &adminGuildLimitsView{
+			AIResponses:           overview.Limits.AIResponses,
+			WebSearches:           overview.Limits.WebSearches,
+			ImageGenerations:      overview.Limits.ImageGenerations,
+			KnowledgeStorageBytes: overview.Limits.KnowledgeStorageBytes,
+			Schedules:             overview.Limits.Schedules,
+			RetentionDays:         overview.Limits.RetentionDays,
+			MusicEnabled:          overview.Limits.MusicEnabled,
+			PremiumToolsEnabled:   overview.Limits.PremiumToolsEnabled,
+		}
+	}
+	return view
+}
+
+func (s *Server) listAdminGuilds(c *fiber.Ctx) error {
+	if _, denied := s.requireAdmin(c); denied != nil {
+		return denied
+	}
+	if s.guilds == nil || s.billing == nil {
+		return c.SendStatus(fiber.StatusServiceUnavailable)
+	}
+
+	limit := 50
+	if raw := strings.TrimSpace(c.Query("limit")); raw != "" {
+		if parsed, err := strconv.Atoi(raw); err == nil && parsed > 0 {
+			limit = parsed
+		}
+	}
+	offset := 0
+	if raw := strings.TrimSpace(c.Query("offset")); raw != "" {
+		if parsed, err := strconv.Atoi(raw); err == nil && parsed > 0 {
+			offset = parsed
+		}
+	}
+
+	guilds, total, err := s.guilds.List(c.Context(), repository.GuildListFilter{
+		Search: strings.TrimSpace(c.Query("q")),
+		Limit:  limit,
+		Offset: offset,
+	})
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(map[string]string{"error": "guild_list_failed"})
+	}
+
+	views := make([]adminGuildView, 0, len(guilds))
+	for _, guild := range guilds {
+		overview, err := s.billing.AdminOverview(c.Context(), guild.GuildID)
+		if err != nil {
+			return c.Status(fiber.StatusInternalServerError).JSON(map[string]string{"error": "guild_billing_failed"})
+		}
+		views = append(views, adminGuildView{
+			GuildID:           guild.GuildID,
+			Name:              guild.Name,
+			InstallStatus:     guild.InstallStatus,
+			OwnerUserID:       guild.OwnerUserID,
+			InstalledByUserID: guild.InstalledByUserID,
+			Locale:            guild.Locale,
+			JoinedAt:          guild.JoinedAt.UTC(),
+			LeftAt:            guild.LeftAt,
+			Billing:           adminGuildBillingViewFrom(overview),
+		})
+	}
+
+	return c.JSON(adminGuildListResponse{
+		Guilds:      views,
+		Total:       total,
+		Limit:       limit,
+		Offset:      offset,
+		PlanCatalog: adminPlanCatalog(),
+		Statuses:    billing.AdminStatuses(),
+	})
+}
+
+func (s *Server) updateAdminGuildSubscription(c *fiber.Ctx) error {
+	session, denied := s.requireAdmin(c)
+	if denied != nil {
+		return denied
+	}
+	if s.guilds == nil || s.billing == nil {
+		return c.SendStatus(fiber.StatusServiceUnavailable)
+	}
+	guildID := strings.TrimSpace(c.Params("guild_id"))
+	if guildID == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(map[string]string{"error": "guild_id_required"})
+	}
+	guild, ok, err := s.guilds.Get(c.Context(), guildID)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(map[string]string{"error": "guild_lookup_failed"})
+	}
+	if !ok {
+		return c.Status(fiber.StatusNotFound).JSON(map[string]string{"error": "guild_not_found"})
+	}
+
+	var request updateAdminGuildSubscriptionRequest
+	if err := c.BodyParser(&request); err != nil {
+		return c.SendStatus(fiber.StatusBadRequest)
+	}
+
+	periodEnd, err := parseAdminCouponExpiry(request.PeriodEnd)
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(map[string]string{"error": "invalid_period_end"})
+	}
+	trialEndsAt, err := parseAdminCouponExpiry(request.TrialEndsAt)
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(map[string]string{"error": "invalid_trial_ends_at"})
+	}
+
+	overview, err := s.billing.AdminSetSubscription(c.Context(), billing.AdminSetSubscriptionRequest{
+		GuildID:           guildID,
+		ActorUserID:       "treasury_wallet:" + session.Wallet,
+		Plan:              request.Plan,
+		Status:            request.Status,
+		PeriodEnd:         periodEnd,
+		TrialEndsAt:       trialEndsAt,
+		ClearTrialEndsAt:  request.ClearTrialEndsAt,
+		CancelAtPeriodEnd: request.CancelAtPeriodEnd,
+	})
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(map[string]string{"error": "subscription_update_failed"})
+	}
+
+	return c.JSON(adminGuildView{
+		GuildID:           guild.GuildID,
+		Name:              guild.Name,
+		InstallStatus:     guild.InstallStatus,
+		OwnerUserID:       guild.OwnerUserID,
+		InstalledByUserID: guild.InstalledByUserID,
+		Locale:            guild.Locale,
+		JoinedAt:          guild.JoinedAt.UTC(),
+		LeftAt:            guild.LeftAt,
+		Billing:           adminGuildBillingViewFrom(overview),
+	})
+}
+
 func (s *Server) requireAdmin(c *fiber.Ctx) (adminSession, error) {
 	token := bearerToken(c)
 	if token == "" {
@@ -846,7 +1103,7 @@ func adminAuthMessage(wallet, challengeID string, expiresAt time.Time) string {
 	return strings.Join([]string{
 		"Panda admin login",
 		"",
-		"Sign this message to manage Panda billing coupons.",
+		"Sign this message to manage Panda guilds and billing.",
 		"Wallet: " + wallet,
 		"Challenge: " + challengeID,
 		"Expires: " + expiresAt.UTC().Format(time.RFC3339),
@@ -1015,6 +1272,12 @@ func entitlementResponse(entitlement billing.Entitlement) billingEntitlementResp
 				entitlement.Usage.WebSearchesConsumed,
 				entitlement.Usage.WebSearchesReserved,
 				billing.IncludedLimit(entitlement.Plan, billing.MetricWebSearch),
+			),
+			"image_generations": billingUsageMetric(
+				billing.MetricImageGeneration,
+				entitlement.Usage.ImageGenerationsConsumed,
+				entitlement.Usage.ImageGenerationsReserved,
+				billing.IncludedLimit(entitlement.Plan, billing.MetricImageGeneration),
 			),
 			"knowledge_storage": billingUsageMetric(
 				billing.MetricKnowledgeStorageByte,

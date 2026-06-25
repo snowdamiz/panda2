@@ -81,6 +81,10 @@ func TestLoadConfigFile(t *testing.T) {
 			"openrouter": {
 				"base_url": "https://openrouter.example/api/v1",
 				"default_model": "provider/model",
+				"image_base_url": "https://images.example/api/v1",
+				"image_model": "provider/image-model",
+				"image_timeout": "2m",
+				"image_max_bytes": 1234567,
 				"fallback_models": ["provider/fallback-a", "provider/fallback-b", "provider/fallback-a"],
 			"provider_order": ["cerebras", "groq", "cerebras"],
 			"allow_provider_fallbacks": true,
@@ -130,6 +134,12 @@ func TestLoadConfigFile(t *testing.T) {
 	if cfg.OpenRouterBaseURL != "https://openrouter.example/api/v1" || cfg.OpenRouterModel != "provider/model" {
 		t.Fatalf("unexpected OpenRouter routing config: base=%q model=%q", cfg.OpenRouterBaseURL, cfg.OpenRouterModel)
 	}
+	if cfg.OpenRouterImageBaseURL != "https://images.example/api/v1" || cfg.OpenRouterImageModel != "provider/image-model" {
+		t.Fatalf("unexpected OpenRouter image config: base=%q model=%q", cfg.OpenRouterImageBaseURL, cfg.OpenRouterImageModel)
+	}
+	if cfg.OpenRouterImageTimeout.String() != "2m0s" || cfg.OpenRouterImageMaxBytes != 1234567 {
+		t.Fatalf("unexpected OpenRouter image limits: timeout=%s max_bytes=%d", cfg.OpenRouterImageTimeout, cfg.OpenRouterImageMaxBytes)
+	}
 	if len(cfg.OpenRouterFallbackModels) != 2 || cfg.OpenRouterFallbackModels[0] != "provider/fallback-a" || cfg.OpenRouterFallbackModels[1] != "provider/fallback-b" {
 		t.Fatalf("unexpected fallback models %#v", cfg.OpenRouterFallbackModels)
 	}
@@ -175,6 +185,7 @@ func TestEnvOverridesConfigFile(t *testing.T) {
 			},
 			"openrouter": {
 				"default_model": "provider/from-file",
+				"image_model": "provider/image-from-file",
 				"fallback_models": ["provider/file-fallback"],
 			"provider_order": ["groq"],
 			"allow_provider_fallbacks": true
@@ -184,6 +195,10 @@ func TestEnvOverridesConfigFile(t *testing.T) {
 	t.Setenv("DISCORD_APPLICATION_ID", "app-from-env")
 	t.Setenv("DISCORD_PUBLIC_KEY", "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789")
 	t.Setenv("OPENROUTER_DEFAULT_MODEL", "provider/from-env")
+	t.Setenv("OPENROUTER_IMAGE_BASE_URL", "https://images-env.example/api/v1")
+	t.Setenv("OPENROUTER_IMAGE_MODEL", "provider/image-from-env")
+	t.Setenv("OPENROUTER_IMAGE_TIMEOUT", "75s")
+	t.Setenv("OPENROUTER_IMAGE_MAX_BYTES", "7654321")
 	t.Setenv("OPENROUTER_FALLBACK_MODELS", "provider/env-a,provider/env-b")
 	t.Setenv("OPENROUTER_PROVIDER_ORDER", "cerebras,groq,cerebras")
 	t.Setenv("OPENROUTER_ALLOW_PROVIDER_FALLBACKS", "false")
@@ -206,6 +221,12 @@ func TestEnvOverridesConfigFile(t *testing.T) {
 	}
 	if cfg.OpenRouterModel != "provider/from-env" {
 		t.Fatalf("expected env default model, got %q", cfg.OpenRouterModel)
+	}
+	if cfg.OpenRouterImageBaseURL != "https://images-env.example/api/v1" || cfg.OpenRouterImageModel != "provider/image-from-env" {
+		t.Fatalf("expected env image settings, base=%q model=%q", cfg.OpenRouterImageBaseURL, cfg.OpenRouterImageModel)
+	}
+	if cfg.OpenRouterImageTimeout.String() != "1m15s" || cfg.OpenRouterImageMaxBytes != 7654321 {
+		t.Fatalf("expected env image limits, timeout=%s max_bytes=%d", cfg.OpenRouterImageTimeout, cfg.OpenRouterImageMaxBytes)
 	}
 	if len(cfg.OpenRouterFallbackModels) != 2 || cfg.OpenRouterFallbackModels[0] != "provider/env-a" || cfg.OpenRouterFallbackModels[1] != "provider/env-b" {
 		t.Fatalf("expected env fallback models, got %#v", cfg.OpenRouterFallbackModels)
@@ -258,6 +279,9 @@ export DISCORD_APPLICATION_ID=app-from-env-file
 DISCORD_BOT_TOKEN="bot token"
 OPENROUTER_API_KEY='router key'
 OPENROUTER_DEFAULT_MODEL=provider/from-env-file
+OPENROUTER_IMAGE_MODEL=provider/image-from-env-file
+OPENROUTER_IMAGE_TIMEOUT=80s
+OPENROUTER_IMAGE_MAX_BYTES=2345678
 OPENROUTER_FALLBACK_MODELS=provider/env-a, provider/env-b, provider/env-a
 OPENROUTER_PROVIDER_ORDER=cerebras, groq, cerebras
 OPENROUTER_ALLOW_PROVIDER_FALLBACKS=true
@@ -278,6 +302,9 @@ USER_RATE_LIMIT_WINDOW=90s
 	}
 	if cfg.OpenRouterAPIKey != "router key" || cfg.OpenRouterModel != "provider/from-env-file" {
 		t.Fatalf("expected env file OpenRouter settings, key=%q model=%q", cfg.OpenRouterAPIKey, cfg.OpenRouterModel)
+	}
+	if cfg.OpenRouterImageModel != "provider/image-from-env-file" || cfg.OpenRouterImageTimeout.String() != "1m20s" || cfg.OpenRouterImageMaxBytes != 2345678 {
+		t.Fatalf("expected env file OpenRouter image settings, model=%q timeout=%s max_bytes=%d", cfg.OpenRouterImageModel, cfg.OpenRouterImageTimeout, cfg.OpenRouterImageMaxBytes)
 	}
 	if len(cfg.OpenRouterFallbackModels) != 2 || cfg.OpenRouterFallbackModels[0] != "provider/env-a" || cfg.OpenRouterFallbackModels[1] != "provider/env-b" {
 		t.Fatalf("expected env file fallback models, got %#v", cfg.OpenRouterFallbackModels)
@@ -341,6 +368,9 @@ func TestLoadOptionalRuntimeEnvOverrides(t *testing.T) {
 	t.Setenv("SQLITE_PATH", ":memory:")
 	t.Setenv("PORT", "8081")
 	t.Setenv("OPENROUTER_EMBEDDING_MODEL", "openai/text-embedding-3-small")
+	t.Setenv("OPENROUTER_IMAGE_MODEL", "provider/image")
+	t.Setenv("OPENROUTER_IMAGE_TIMEOUT", "55s")
+	t.Setenv("OPENROUTER_IMAGE_MAX_BYTES", "3456789")
 	t.Setenv("OPENROUTER_FALLBACK_MODELS", "provider/a, provider/b, provider/a")
 	t.Setenv("OPENROUTER_PROVIDER_ORDER", "cerebras, groq, cerebras")
 	t.Setenv("OPENROUTER_ALLOW_PROVIDER_FALLBACKS", "true")
@@ -353,6 +383,9 @@ func TestLoadOptionalRuntimeEnvOverrides(t *testing.T) {
 	}
 	if cfg.OpenRouterEmbeddingModel != "openai/text-embedding-3-small" {
 		t.Fatalf("unexpected embedding model %q", cfg.OpenRouterEmbeddingModel)
+	}
+	if cfg.OpenRouterImageModel != "provider/image" || cfg.OpenRouterImageTimeout.String() != "55s" || cfg.OpenRouterImageMaxBytes != 3456789 {
+		t.Fatalf("unexpected image config: model=%q timeout=%s max_bytes=%d", cfg.OpenRouterImageModel, cfg.OpenRouterImageTimeout, cfg.OpenRouterImageMaxBytes)
 	}
 	if len(cfg.OpenRouterFallbackModels) != 2 || cfg.OpenRouterFallbackModels[0] != "provider/a" || cfg.OpenRouterFallbackModels[1] != "provider/b" {
 		t.Fatalf("unexpected fallback models %#v", cfg.OpenRouterFallbackModels)
@@ -440,6 +473,10 @@ func clearConfigEnv(t *testing.T) {
 		"OPENROUTER_API_KEY",
 		"OPENROUTER_BASE_URL",
 		"OPENROUTER_DEFAULT_MODEL",
+		"OPENROUTER_IMAGE_BASE_URL",
+		"OPENROUTER_IMAGE_MODEL",
+		"OPENROUTER_IMAGE_TIMEOUT",
+		"OPENROUTER_IMAGE_MAX_BYTES",
 		"OPENROUTER_FALLBACK_MODELS",
 		"OPENROUTER_PROVIDER_ORDER",
 		"OPENROUTER_ALLOW_PROVIDER_FALLBACKS",

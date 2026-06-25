@@ -20,6 +20,7 @@ const (
 	Knowledge             = "knowledge"
 	Attachments           = "attachments"
 	WebSearch             = "web_search"
+	ImageGeneration       = "image_generation"
 	AdminSetup            = "admin_setup"
 	AdminAccessControl    = "admin_access_control"
 	AdminAudit            = "admin_audit"
@@ -38,7 +39,7 @@ var (
 	ErrUnknownFeature       = errors.New("unknown feature")
 	ErrInternalFeature      = errors.New("feature is not selectable in public install")
 	ErrUnknownPermission    = errors.New("unknown Discord permission")
-	defaultInstallPresetIDs = []string{AssistantChat, Threads, Polls, Reminders, WebSearch, Knowledge, Attachments, Music, AdminSetup, AdminAccessControl, AdminAudit, ComposedTools, DiscordMessages}
+	defaultInstallPresetIDs = []string{AssistantChat, Threads, Polls, Reminders, WebSearch, ImageGeneration, Knowledge, Attachments, Music, AdminSetup, AdminAccessControl, AdminAudit, ComposedTools, DiscordMessages}
 	defaultInstallScopes    = []string{"bot", "applications.commands", "identify", "guilds"}
 )
 
@@ -377,6 +378,17 @@ var catalog = []Feature{
 		ConsumesPlanQuota: true,
 		Public:            true,
 		Dependencies:      []string{AssistantChat},
+	},
+	{
+		ID:                 ImageGeneration,
+		Label:              "Image generation",
+		Description:        "Generate image files as Panda responses when users ask for visual output.",
+		DiscordPermissions: []string{"VIEW_CHANNEL", "SEND_MESSAGES", "ATTACH_FILES"},
+		PandaPermissions:   []string{admin.PermissionAssistantImageGeneration},
+		ToolNames:          []string{"panda.generate_image"},
+		ConsumesPlanQuota:  true,
+		Public:             true,
+		Dependencies:       []string{AssistantChat},
 	},
 	{
 		ID:               AdminSetup,
