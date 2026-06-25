@@ -1,4 +1,5 @@
 @import "tailwindcss";
+@import "./fonts.css";
 @import "../design/tokens.css";
 
 :root {
@@ -340,16 +341,18 @@ svg {
 }
 
 .hero h1 {
-  max-width: 720px;
-  font-size: clamp(4.4rem, 7.6vw, 7.5rem);
+  max-width: 18ch;
+  font-size: clamp(4.2rem, 7.1vw, 7rem);
+  text-wrap: balance;
 }
 
 .hero h1 em {
-  color: color-mix(in oklab, var(--color-paper-bright) 38%, transparent);
+  color: color-mix(in oklab, var(--color-paper-bright) 44%, transparent);
   font-family: var(--font-serif);
-  font-size: .91em;
+  font-size: .96em;
   font-weight: 400;
-  letter-spacing: -.055em;
+  font-style: italic;
+  letter-spacing: -.015em;
 }
 
 .hero-lede {
@@ -1128,15 +1131,21 @@ svg {
 }
 
 .feature-icon {
-  width: 120px;
-  height: 120px;
-  margin: 54px auto 20px;
+  width: 132px;
+  height: 132px;
+  margin: auto;
   display: grid;
   place-items: center;
   border: 1px solid var(--line-light);
   border-radius: 50%;
-  background: color-mix(in oklab, var(--color-white) 35%, transparent);
+  background: radial-gradient(circle at 50% 36%, var(--color-paper-bright), color-mix(in oklab, var(--color-white) 28%, transparent) 72%);
   box-shadow: var(--shadow-feature-halo);
+  transition: transform .45s var(--ease-fluid), box-shadow .45s ease;
+}
+
+.feature-card:hover .feature-icon {
+  transform: translateY(-4px) scale(1.035);
+  box-shadow: var(--shadow-feature-icon-hover);
 }
 
 .feature-icon svg {
@@ -5893,3 +5902,4 @@ svg {
     transform: none;
   }
 }
+

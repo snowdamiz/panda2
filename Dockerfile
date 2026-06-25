@@ -20,6 +20,7 @@ FROM debian:12.12-slim AS runtime
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
+    ffmpeg \
   && rm -rf /var/lib/apt/lists/* \
   && groupadd --system panda \
   && useradd --system --gid panda --home-dir /nonexistent --shell /usr/sbin/nologin panda \
@@ -33,6 +34,7 @@ COPY --from=builder /out/panda /app/panda
 COPY --from=builder /src/panda.config.json /app/panda.config.json
 
 ENV PORT=8080
+ENV FFMPEG_PATH=/usr/bin/ffmpeg
 EXPOSE 8080
 VOLUME ["/data"]
 HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
