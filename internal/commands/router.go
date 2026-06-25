@@ -441,6 +441,16 @@ func (r *Router) HandleNaturalMessageStream(ctx context.Context, request Request
 	if message == "" {
 		return Response{}
 	}
+	slog.Info("natural message router received",
+		slog.String("guild_id", request.GuildID),
+		slog.String("channel_id", request.ChannelID),
+		slog.String("request_id", request.RequestID),
+		slog.String("user_id", request.UserID),
+		slog.Bool("bot_mentioned", truthyOption(request.Options["bot_mentioned"])),
+		slog.String("reply_message_id", request.Options["reply_message_id"]),
+		slog.Int("image_ref_count", len(request.ImageReferences)),
+		slog.Any("image_ref_ids", commandImageReferenceIDs(request.ImageReferences)),
+	)
 	if response := r.maintenanceResponse(ctx); response.Content != "" {
 		return response
 	}
@@ -1711,6 +1721,26 @@ func (r *Router) handleChatModeWithOptions(ctx context.Context, request Request,
 		FeatureGateActive:            featureGateActive,
 		RequireExplicitComposedTools: toolFilter.requireExplicitComposed,
 	}
+	if options.naturalMessage || len(request.ImageReferences) > 0 {
+		_, imagePermissionAllowed := allowedPermissions[admin.PermissionAssistantImageGeneration]
+		slog.Info("assistant chat request prepared",
+			slog.String("guild_id", request.GuildID),
+			slog.String("channel_id", chatChannelID),
+			slog.String("request_id", request.RequestID),
+			slog.String("user_id", request.UserID),
+			slog.Bool("natural_message", options.naturalMessage),
+			slog.String("reply_message_id", request.Options["reply_message_id"]),
+			slog.Int("image_ref_count", len(request.ImageReferences)),
+			slog.Any("image_ref_ids", commandImageReferenceIDs(request.ImageReferences)),
+			slog.Bool("feature_gate_active", featureGateActive),
+			slog.Bool("image_feature_enabled", features.Has(enabledFeatures, features.ImageGeneration)),
+			slog.Bool("image_permission_allowed", imagePermissionAllowed),
+			slog.Any("allowed_permissions", permissionNames(allowedPermissions)),
+			slog.Any("enabled_features", permissionNames(enabledFeatures)),
+			slog.Any("allowed_tools", permissionNames(toolFilter.allowed)),
+			slog.Any("restricted_tools", permissionNames(toolFilter.restricted)),
+		)
+	}
 	var answer assistant.AskResponse
 	var err error
 	if options.naturalMessage {
@@ -2768,6 +2798,17 @@ func namesToSet(names []string) map[string]struct{} {
 		}
 	}
 	return values
+}
+
+func commandImageReferenceIDs(references []generated.ImageReference) []string {
+	ids := make([]string, 0, len(references))
+	for _, reference := range references {
+		id := strings.TrimSpace(reference.ID)
+		if id != "" {
+			ids = append(ids, id)
+		}
+	}
+	return ids
 }
 
 func (r *Router) addPermissionIfAllowed(ctx context.Context, request Request, permissions map[string]struct{}, permission string, check func(context.Context, admin.AssistantAccessRequest) (bool, error)) {

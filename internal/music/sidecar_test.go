@@ -31,6 +31,23 @@ func TestSidecarManagerUsesConfiguredExecutables(t *testing.T) {
 	}
 }
 
+func TestSidecarManagerEnsuresOnlyFFmpegFromConfiguredPath(t *testing.T) {
+	dir := t.TempDir()
+	ffmpeg := executableFixture(t, dir, "ffmpeg")
+
+	manager := NewSidecarManager(SidecarConfig{
+		FFmpegPath: ffmpeg,
+		HTTPClient: sidecarHTTPClient("not used"),
+	})
+	path, err := manager.EnsureFFmpeg(context.Background())
+	if err != nil {
+		t.Fatalf("EnsureFFmpeg returned error: %v", err)
+	}
+	if path != ffmpeg {
+		t.Fatalf("expected configured ffmpeg path %q, got %q", ffmpeg, path)
+	}
+}
+
 func TestSidecarManagerDownloadsMissingTools(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("fixture uses a POSIX executable script")

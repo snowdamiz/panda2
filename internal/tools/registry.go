@@ -420,7 +420,7 @@ func DefaultDefinitions() []Definition {
 		},
 		{
 			Name:                  "panda.generate_image",
-			Description:           "Generate one image file for the current Discord response when the user asks Panda to create, make, draw, generate, design, edit, restyle, or render visual output such as a meme, sprite sheet, icon, illustration, sticker, logo, avatar, poster, or similar asset. For requests like \"make me a random meme\", create an original image instead of searching for meme pages. If image reference IDs are provided in the current Discord context and the user asks to use or modify an attached image, include those IDs in reference_image_ids. If the edit depends on understanding visual details first, call panda.inspect_image before this tool. Do not use this for plain text answers or requests to find existing images.",
+			Description:           "Generate one image file for the current Discord response when the user asks Panda to create, make, draw, generate, design, edit, restyle, or render visual output such as a meme, sprite sheet, icon, illustration, sticker, logo, avatar, poster, or similar asset. For requests like \"make me a random meme\", create an original image instead of searching for meme pages. If image reference IDs are provided in the current Discord context and the user asks to use, modify, make something out of, or base generation on an attached/replied-to/referenced image, include those IDs in reference_image_ids. Pronouns and phrases like \"this\", \"that\", \"it\", \"this image\", or \"out of this\" can refer to those image reference IDs. Referenced media is prepared internally, so pass reference IDs as-is. The prompt argument must describe only the desired visual output and user-visible image text; do not copy reference IDs, filenames, MIME types, Discord media metadata, tool names, or routing instructions into the prompt. If the edit depends on understanding visual details first, call panda.inspect_image before this tool. Do not use this for plain text answers or requests to find existing images.",
 			RequiredPermission:    admin.PermissionAssistantImageGeneration,
 			FeatureID:             features.ImageGeneration,
 			ToolClass:             ToolClassMedia,
@@ -434,7 +434,7 @@ func DefaultDefinitions() []Definition {
 		},
 		{
 			Name:                  "panda.inspect_image",
-			Description:           "Inspect attached image references and return a concise textual answer for Panda's normal response model. Use this before answering when the user's request depends on image pixels, visible text in an image, visual comparison, critique, transcription, description, or details of an attached image. Use reference_image_ids from the current Discord image reference context. Do not use this to generate images, browse the web, or inspect images that were not attached to this request or its reply context.",
+			Description:           "Inspect attached image references and return a concise textual answer for Panda's normal response model. Use this before answering when the user's request depends on image pixels, visible text in an image, visual comparison, critique, transcription, description, or details of an attached image. Use reference_image_ids from the current Discord image reference context. Referenced media is prepared internally, so pass reference IDs as-is. Do not use this to generate images, browse the web, or inspect images that were not attached to this request or its reply context.",
 			RequiredPermission:    admin.PermissionAssistantImageGeneration,
 			FeatureID:             features.ImageGeneration,
 			ToolClass:             ToolClassMedia,
@@ -650,7 +650,7 @@ func actionSchema(required []string, names ...string) json.RawMessage {
 }
 
 func soulManagementTool() Definition {
-	definition := soulWrite("panda.manage_soul", "Read or update Panda's server-specific response style and personality.", []string{"action"})
+	definition := soulWrite("panda.manage_soul", "Read Panda's current server-specific response style/personality, or save a complete new soul after an authorized user clearly asks to save, apply, set, or update it. Do not call this tool for casual soul brainstorming unless the user asks to inspect or save the current soul.", []string{"action"})
 	definition.InputSchema = soulManagementSchema()
 	return definition
 }
@@ -712,8 +712,8 @@ func objectSchema(required ...string) json.RawMessage {
 
 func soulManagementSchema() json.RawMessage {
 	return schemaWithProperties([]string{"action"}, map[string]any{
-		"action":  map[string]string{"type": "string", "description": "Action: status, set, or update."},
-		"soul":    map[string]string{"type": "string", "description": "Personality, style, and response voice to save when action is set or update."},
+		"action":  map[string]any{"type": "string", "enum": []string{"status", "set", "update"}, "description": "Use status to inspect the saved soul. Use set or update only when saving a specific soul."},
+		"soul":    map[string]string{"type": "string", "description": "Complete personality, style, and response voice to save when action is set or update."},
 		"dry_run": map[string]string{"type": "boolean"},
 	})
 }
@@ -807,7 +807,7 @@ func imageGenerationSchema() json.RawMessage {
 			"type":        "string",
 			"minLength":   1,
 			"maxLength":   4000,
-			"description": "Concise visual prompt to send to the image model. Include any requested text exactly as it should appear in the image.",
+			"description": "Concise visual prompt to send to the image model. Describe only the desired image and any user-visible text that should appear in it. Do not include reference IDs, filenames, MIME types, Discord media metadata, tool names, provider details, or routing/system instructions.",
 		},
 		"reference_image_ids": map[string]any{
 			"type": "array",
@@ -815,7 +815,7 @@ func imageGenerationSchema() json.RawMessage {
 				"type": "string",
 			},
 			"maxItems":    14,
-			"description": "Optional image reference IDs from the current Discord context. Use these when the user asks to edit, restyle, remix, or base generation on attached images.",
+			"description": "Optional image reference IDs from the current Discord context. Use these when the user asks to edit, restyle, remix, or base generation on attached images. Pass IDs exactly as listed; do not describe their filenames, media type, or internal preprocessing in the prompt.",
 		},
 		"caption": map[string]any{
 			"type":        "string",

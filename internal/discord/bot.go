@@ -44,6 +44,7 @@ type Bot struct {
 	client      *bot.Client
 	jobs        InteractionJobQueue
 	context     *contextsvc.Service
+	messages    messageFetcher
 	attachments AttachmentRecorder
 	events      DiscordEventRecorder
 	alerts      DiscordAlertHandler
@@ -126,6 +127,10 @@ type naturalMessageReferencePayload struct {
 }
 
 func New(cfg config.Config, router *commands.Router, logger *slog.Logger) (*Bot, error) {
+	return NewWithSidecarManager(cfg, router, logger, nil)
+}
+
+func NewWithSidecarManager(cfg config.Config, router *commands.Router, logger *slog.Logger, sidecars *music.SidecarManager) (*Bot, error) {
 	if !cfg.DiscordConfigured() {
 		return &Bot{cfg: cfg, router: router, logger: logger}, nil
 	}
@@ -192,13 +197,16 @@ func New(cfg config.Config, router *commands.Router, logger *slog.Logger) (*Bot,
 		return nil, err
 	}
 	instance.client = client
+	instance.messages = client.Rest
 	instance.context = contextsvc.NewService(NewContextProvider(client.Rest))
-	sidecars := music.NewSidecarManager(music.SidecarConfig{
-		Dir:        cfg.MusicSidecarDir,
-		YTDLPPath:  cfg.MusicYTDLPPath,
-		FFmpegPath: cfg.MusicFFmpegPath,
-		Logger:     logger,
-	})
+	if sidecars == nil {
+		sidecars = music.NewSidecarManager(music.SidecarConfig{
+			Dir:        cfg.MusicSidecarDir,
+			YTDLPPath:  cfg.MusicYTDLPPath,
+			FFmpegPath: cfg.MusicFFmpegPath,
+			Logger:     logger,
+		})
+	}
 	ytdlp := music.NewYTDLP(music.YTDLPConfig{
 		YTDLPPath:  cfg.MusicYTDLPPath,
 		FFmpegPath: cfg.MusicFFmpegPath,
@@ -731,6 +739,17 @@ func (b *Bot) HandleNaturalMessageJob(ctx context.Context, job store.Job) error 
 	var payload naturalMessageJobPayload
 	if err := json.Unmarshal([]byte(job.Payload), &payload); err != nil {
 		return err
+	}
+	if b.logger != nil {
+		b.logger.Info("natural message job decoded",
+			slog.Uint64("job_id", uint64(job.ID)),
+			slog.String("guild_id", job.GuildID),
+			slog.String("request_id", payload.Request.RequestID),
+			slog.String("channel_id", payload.ChannelID),
+			slog.String("user_id", payload.Request.UserID),
+			slog.Int("image_ref_count", len(payload.Request.ImageReferences)),
+			slog.Any("image_ref_ids", imageReferenceIDs(payload.Request.ImageReferences)),
+		)
 	}
 	channelID, err := snowflake.Parse(payload.ChannelID)
 	if err != nil {
@@ -1583,25 +1602,65 @@ func (b *Bot) onMessageCreate(event *events.MessageCreate) {
 		options["bot_mentioned"] = "true"
 	}
 	replyImageReferences := b.addReplyContextOptions(context.Background(), options, event.Message)
+	currentImageReferences := imageReferencesFromMessage(event.Message, "current")
 	if !shouldHandleNaturalMessage(content, options) {
+		if b.logger != nil && (len(currentImageReferences) > 0 || len(replyImageReferences) > 0 || event.Message.ReferencedMessage != nil || event.Message.MessageReference != nil) {
+			b.logger.Info("natural message ignored after reply context extraction",
+				slog.String("guild_id", guildID),
+				slog.String("channel_id", event.ChannelID.String()),
+				slog.String("request_id", event.Message.ID.String()),
+				slog.String("user_id", event.Message.Author.ID.String()),
+				slog.Bool("bot_mentioned", truthyDiscordOption(options["bot_mentioned"])),
+				slog.Bool("reply_author_is_bot", truthyDiscordOption(options["reply_author_is_bot"])),
+				slog.Bool("has_message_reference", event.Message.MessageReference != nil),
+				slog.Bool("has_referenced_message", event.Message.ReferencedMessage != nil),
+				slog.Int("current_embed_count", len(event.Message.Embeds)),
+				slog.Int("current_sticker_count", len(event.Message.StickerItems)),
+				slog.Int("current_image_ref_count", len(currentImageReferences)),
+				slog.Int("reply_image_ref_count", len(replyImageReferences)),
+			)
+		}
 		return
+	}
+	if len(replyImageReferences) == 0 && event.Message.ReferencedMessage != nil {
+		replyImageReferences = b.hydrateReplyContextOptions(context.Background(), options, event.Message)
+	}
+	imageReferences := append(currentImageReferences, replyImageReferences...)
+	if b.logger != nil {
+		b.logger.Info("natural message image context prepared",
+			slog.String("guild_id", guildID),
+			slog.String("channel_id", event.ChannelID.String()),
+			slog.String("request_id", event.Message.ID.String()),
+			slog.String("user_id", event.Message.Author.ID.String()),
+			slog.Bool("bot_mentioned", truthyDiscordOption(options["bot_mentioned"])),
+			slog.String("reply_message_id", options["reply_message_id"]),
+			slog.Bool("has_message_reference", event.Message.MessageReference != nil),
+			slog.Bool("has_referenced_message", event.Message.ReferencedMessage != nil),
+			slog.Int("current_attachment_count", len(event.Message.Attachments)),
+			slog.Int("current_embed_count", len(event.Message.Embeds)),
+			slog.Int("current_sticker_count", len(event.Message.StickerItems)),
+			slog.Int("current_snapshot_count", len(event.Message.MessageSnapshots)),
+			slog.Int("current_snapshot_embed_count", snapshotEmbedCount(event.Message.MessageSnapshots)),
+			slog.Int("current_snapshot_sticker_count", snapshotStickerCount(event.Message.MessageSnapshots)),
+			slog.Int("current_image_ref_count", len(currentImageReferences)),
+			slog.Int("reply_image_ref_count", len(replyImageReferences)),
+			slog.Int("image_ref_count", len(imageReferences)),
+			slog.Any("image_ref_ids", imageReferenceIDs(imageReferences)),
+		)
 	}
 	isOwner := b.cfg.IsOwner(event.Message.Author.ID.String())
 	isGuildAdmin := b.isMessageGuildAdmin(event, event.Message.Author.ID)
 	request := commands.Request{
-		RequestID:      event.Message.ID.String(),
-		Options:        options,
-		GuildID:        guildID,
-		ChannelID:      event.ChannelID.String(),
-		VoiceChannelID: b.userVoiceChannelID(context.Background(), guildID, event.Message.Author.ID),
-		UserID:         event.Message.Author.ID.String(),
-		RoleIDs:        messageRoleIDs(event.Message.Member),
-		IsOwner:        isOwner,
-		IsGuildAdmin:   isGuildAdmin,
-		ImageReferences: append(
-			imageReferencesFromMessage(event.Message, "current"),
-			replyImageReferences...,
-		),
+		RequestID:       event.Message.ID.String(),
+		Options:         options,
+		GuildID:         guildID,
+		ChannelID:       event.ChannelID.String(),
+		VoiceChannelID:  b.userVoiceChannelID(context.Background(), guildID, event.Message.Author.ID),
+		UserID:          event.Message.Author.ID.String(),
+		RoleIDs:         messageRoleIDs(event.Message.Member),
+		IsOwner:         isOwner,
+		IsGuildAdmin:    isGuildAdmin,
+		ImageReferences: imageReferences,
 	}
 	reference := messageReferenceFromMessage(event.Message)
 	if err := b.queueNaturalMessage(context.Background(), event.ChannelID, reference, request); err != nil {
@@ -1620,6 +1679,16 @@ func (b *Bot) queueNaturalMessage(ctx context.Context, channelID snowflake.ID, r
 		return nil
 	}
 	if b.jobs == nil {
+		if b.logger != nil {
+			b.logger.Info("natural message handling inline without queue",
+				slog.String("guild_id", request.GuildID),
+				slog.String("channel_id", request.ChannelID),
+				slog.String("request_id", request.RequestID),
+				slog.String("user_id", request.UserID),
+				slog.Int("image_ref_count", len(request.ImageReferences)),
+				slog.Any("image_ref_ids", imageReferenceIDs(request.ImageReferences)),
+			)
+		}
 		b.respondToNaturalMessageAsync(ctx, channelID, reference, request)
 		return nil
 	}
@@ -1639,6 +1708,16 @@ func (b *Bot) queueNaturalMessage(ctx context.Context, channelID snowflake.ID, r
 	})
 	if err != nil {
 		return err
+	}
+	if b.logger != nil {
+		b.logger.Info("natural message queued",
+			slog.String("guild_id", request.GuildID),
+			slog.String("channel_id", request.ChannelID),
+			slog.String("request_id", request.RequestID),
+			slog.String("user_id", request.UserID),
+			slog.Int("image_ref_count", len(request.ImageReferences)),
+			slog.Any("image_ref_ids", imageReferenceIDs(request.ImageReferences)),
+		)
 	}
 	return nil
 }
@@ -1687,6 +1766,17 @@ func (b *Bot) respondToNaturalMessage(ctx context.Context, channelID snowflake.I
 		}
 	}()
 	response := b.router.HandleNaturalMessageStream(ctx, request, startTyping)
+	if b.logger != nil {
+		b.logger.Info("natural message router completed",
+			slog.String("guild_id", request.GuildID),
+			slog.String("channel_id", request.ChannelID),
+			slog.String("request_id", request.RequestID),
+			slog.String("user_id", request.UserID),
+			slog.Int("image_ref_count", len(request.ImageReferences)),
+			slog.Int("generated_file_count", len(response.GeneratedFiles)),
+			slog.Bool("has_response_payload", hasChannelResponsePayload(response)),
+		)
+	}
 	if !hasChannelResponsePayload(response) {
 		return nil
 	}
@@ -1907,20 +1997,71 @@ func startTypingIndicator(ctx context.Context, sender typingSender, channelID sn
 func (b *Bot) addReplyContextOptions(ctx context.Context, options map[string]string, message disgoDiscord.Message) []generated.ImageReference {
 	if referenced := message.ReferencedMessage; referenced != nil {
 		b.setReplyContextOptions(options, *referenced, message.Author.ID)
-		return imageReferencesFromMessage(*referenced, "reply")
+		references := imageReferencesFromMessage(*referenced, "reply")
+		if b.logger != nil {
+			b.logger.Info("natural message reply preview inspected",
+				slog.String("channel_id", message.ChannelID.String()),
+				slog.String("request_id", message.ID.String()),
+				slog.String("user_id", message.Author.ID.String()),
+				slog.String("reply_message_id", options["reply_message_id"]),
+				slog.Bool("has_message_reference", message.MessageReference != nil),
+				slog.Int("reply_attachment_count", len(referenced.Attachments)),
+				slog.Int("reply_embed_count", len(referenced.Embeds)),
+				slog.Int("reply_sticker_count", len(referenced.StickerItems)),
+				slog.Int("reply_snapshot_count", len(referenced.MessageSnapshots)),
+				slog.Int("reply_snapshot_embed_count", snapshotEmbedCount(referenced.MessageSnapshots)),
+				slog.Int("reply_snapshot_sticker_count", snapshotStickerCount(referenced.MessageSnapshots)),
+				slog.Int("reply_image_ref_count", len(references)),
+				slog.Any("reply_image_ref_ids", imageReferenceIDs(references)),
+				slog.Any("reply_attachment_debug", imageAttachmentDebugSummaries(referenced.Attachments)),
+				slog.Any("reply_embed_debug", imageEmbedDebugSummaries(referenced.Embeds)),
+				slog.Any("reply_sticker_debug", imageStickerDebugSummaries(referenced.StickerItems)),
+			)
+		}
+		return references
 	}
+	return b.hydrateReplyContextOptions(ctx, options, message)
+}
+
+func (b *Bot) hydrateReplyContextOptions(ctx context.Context, options map[string]string, message disgoDiscord.Message) []generated.ImageReference {
 	if message.MessageReference == nil || message.MessageReference.MessageID == nil {
+		if b.logger != nil && message.ReferencedMessage != nil {
+			b.logger.Info("natural message reply hydration skipped",
+				slog.String("channel_id", message.ChannelID.String()),
+				slog.String("request_id", message.ID.String()),
+				slog.String("user_id", message.Author.ID.String()),
+				slog.String("reason", "missing_message_reference"),
+			)
+		}
 		return nil
 	}
 	options["reply_message_id"] = message.MessageReference.MessageID.String()
-	if b.client == nil {
+	messages := b.replyMessageFetcher()
+	if messages == nil {
+		if b.logger != nil {
+			b.logger.Info("natural message reply hydration skipped",
+				slog.String("channel_id", message.ChannelID.String()),
+				slog.String("request_id", message.ID.String()),
+				slog.String("user_id", message.Author.ID.String()),
+				slog.String("reply_message_id", options["reply_message_id"]),
+				slog.String("reason", "message_fetcher_unavailable"),
+			)
+		}
 		return nil
 	}
 	channelID := message.ChannelID
 	if message.MessageReference.ChannelID != nil {
 		channelID = *message.MessageReference.ChannelID
 	}
-	referenced, err := b.client.Rest.GetMessage(channelID, *message.MessageReference.MessageID)
+	if b.logger != nil {
+		b.logger.Info("natural message reply hydration fetching",
+			slog.String("channel_id", channelID.String()),
+			slog.String("request_id", message.ID.String()),
+			slog.String("user_id", message.Author.ID.String()),
+			slog.String("reply_message_id", options["reply_message_id"]),
+		)
+	}
+	referenced, err := messages.GetMessage(channelID, *message.MessageReference.MessageID)
 	if err != nil {
 		if b.logger != nil {
 			b.logger.Warn("failed to fetch referenced message for natural reply", slog.Any("err", err), slog.String("channel_id", channelID.String()), slog.String("message_id", message.MessageReference.MessageID.String()))
@@ -1928,12 +2069,47 @@ func (b *Bot) addReplyContextOptions(ctx context.Context, options map[string]str
 		return nil
 	}
 	b.setReplyContextOptions(options, *referenced, message.Author.ID)
-	return imageReferencesFromMessage(*referenced, "reply")
+	references := imageReferencesFromMessage(*referenced, "reply")
+	if b.logger != nil {
+		b.logger.Info("natural message reply hydration completed",
+			slog.String("channel_id", channelID.String()),
+			slog.String("request_id", message.ID.String()),
+			slog.String("user_id", message.Author.ID.String()),
+			slog.String("reply_message_id", options["reply_message_id"]),
+			slog.Int("reply_attachment_count", len(referenced.Attachments)),
+			slog.Int("reply_embed_count", len(referenced.Embeds)),
+			slog.Int("reply_sticker_count", len(referenced.StickerItems)),
+			slog.Int("reply_snapshot_count", len(referenced.MessageSnapshots)),
+			slog.Int("reply_snapshot_embed_count", snapshotEmbedCount(referenced.MessageSnapshots)),
+			slog.Int("reply_snapshot_sticker_count", snapshotStickerCount(referenced.MessageSnapshots)),
+			slog.Int("reply_image_ref_count", len(references)),
+			slog.Any("reply_image_ref_ids", imageReferenceIDs(references)),
+			slog.Any("reply_attachment_debug", imageAttachmentDebugSummaries(referenced.Attachments)),
+			slog.Any("reply_embed_debug", imageEmbedDebugSummaries(referenced.Embeds)),
+			slog.Any("reply_sticker_debug", imageStickerDebugSummaries(referenced.StickerItems)),
+		)
+	}
+	return references
+}
+
+func (b *Bot) replyMessageFetcher() messageFetcher {
+	if b == nil {
+		return nil
+	}
+	if b.messages != nil {
+		return b.messages
+	}
+	if b.client == nil {
+		return nil
+	}
+	return b.client.Rest
 }
 
 func (b *Bot) setReplyContextOptions(options map[string]string, referenced disgoDiscord.Message, currentAuthorID snowflake.ID) {
 	options["reply_text"] = referenced.Content
-	options["reply_message_id"] = referenced.ID.String()
+	if referenced.ID != 0 {
+		options["reply_message_id"] = referenced.ID.String()
+	}
 	if currentAuthorID != 0 && referenced.Author.ID == currentAuthorID {
 		options["reply_author_is_current_user"] = "true"
 	}
@@ -2040,16 +2216,33 @@ func attachmentContentType(attachment disgoDiscord.Attachment) string {
 }
 
 func imageReferencesFromMessage(message disgoDiscord.Message, source string) []generated.ImageReference {
-	if len(message.Attachments) == 0 {
+	source = normalizedImageReferenceSource(source)
+	references := imageReferencesFromAttachments(message.Attachments, source)
+	references = append(references, imageReferencesFromEmbeds(message.Embeds, source)...)
+	references = append(references, imageReferencesFromMessageStickers(message.StickerItems, source)...)
+	for index, snapshot := range message.MessageSnapshots {
+		snapshotSource := fmt.Sprintf("%s_snapshot_%d", source, index+1)
+		references = append(references, imageReferencesFromAttachments(snapshot.Message.Attachments, snapshotSource)...)
+		references = append(references, imageReferencesFromEmbeds(snapshot.Message.Embeds, snapshotSource)...)
+		references = append(references, imageReferencesFromMessageStickers(snapshot.Message.StickerItems, snapshotSource)...)
+		references = append(references, imageReferencesFromStickers(snapshot.Message.Stickers, snapshotSource)...)
+	}
+	return references
+}
+
+func imageReferencesFromAttachments(attachments []disgoDiscord.Attachment, source string) []generated.ImageReference {
+	if len(attachments) == 0 {
 		return nil
 	}
+	source = normalizedImageReferenceSource(source)
 	references := []generated.ImageReference{}
-	for index, attachment := range message.Attachments {
-		if strings.TrimSpace(attachment.URL) == "" {
+	for index, attachment := range attachments {
+		url := imageAttachmentURL(attachment)
+		if url == "" {
 			continue
 		}
 		contentType := imageAttachmentContentType(attachment)
-		if contentType == "" {
+		if contentType == "" && !discordAttachmentHasImageDimensions(attachment) {
 			continue
 		}
 		idPart := strings.TrimSpace(attachment.ID.String())
@@ -2058,31 +2251,454 @@ func imageReferencesFromMessage(message disgoDiscord.Message, source string) []g
 		}
 		size := int64(attachment.Size)
 		references = append(references, generated.ImageReference{
-			ID:        strings.TrimSpace(source) + ":" + idPart,
+			ID:        source + ":" + idPart,
 			Filename:  attachment.Filename,
 			MIMEType:  contentType,
-			URL:       attachment.URL,
+			URL:       url,
 			SizeBytes: size,
 		})
 	}
 	return references
 }
 
+func imageReferencesFromEmbeds(embeds []disgoDiscord.Embed, source string) []generated.ImageReference {
+	if len(embeds) == 0 {
+		return nil
+	}
+	source = normalizedImageReferenceSource(source)
+	references := []generated.ImageReference{}
+	for index, embed := range embeds {
+		resource, kind, ok := preferredEmbedMediaResource(embed)
+		if !ok {
+			continue
+		}
+		rawURL := embedResourceURL(resource)
+		if rawURL == "" {
+			continue
+		}
+		mimeType := embedResourceMIMEType(embed, kind, resource)
+		if mimeType == "" && !embedResourceHasDimensions(resource) {
+			continue
+		}
+		sourcePart := fmt.Sprintf("%s_embed_%d", source, index+1)
+		references = append(references, generated.ImageReference{
+			ID:       sourcePart,
+			Filename: embedResourceFilename(rawURL, fmt.Sprintf("embed-%s", kind), mimeType),
+			MIMEType: mimeType,
+			URL:      rawURL,
+		})
+	}
+	return references
+}
+
+func preferredEmbedMediaResource(embed disgoDiscord.Embed) (disgoDiscord.EmbedResource, string, bool) {
+	type candidate struct {
+		kind     string
+		resource *disgoDiscord.EmbedResource
+	}
+	candidates := []candidate{}
+	switch embed.Type {
+	case disgoDiscord.EmbedTypeGifV, disgoDiscord.EmbedTypeVideo:
+		candidates = append(candidates,
+			candidate{kind: "video", resource: embed.Video},
+			candidate{kind: "image", resource: embed.Image},
+			candidate{kind: "thumbnail", resource: embed.Thumbnail},
+		)
+	default:
+		candidates = append(candidates,
+			candidate{kind: "image", resource: embed.Image},
+			candidate{kind: "thumbnail", resource: embed.Thumbnail},
+			candidate{kind: "video", resource: embed.Video},
+		)
+	}
+	for _, candidate := range candidates {
+		if candidate.resource == nil {
+			continue
+		}
+		resource := *candidate.resource
+		if embedResourceURL(resource) == "" {
+			continue
+		}
+		if embedResourceMIMEType(embed, candidate.kind, resource) != "" || embedResourceHasDimensions(resource) {
+			return resource, candidate.kind, true
+		}
+	}
+	return disgoDiscord.EmbedResource{}, "", false
+}
+
+func imageReferencesFromMessageStickers(stickers []disgoDiscord.MessageSticker, source string) []generated.ImageReference {
+	if len(stickers) == 0 {
+		return nil
+	}
+	fullStickers := make([]disgoDiscord.Sticker, 0, len(stickers))
+	for _, sticker := range stickers {
+		fullStickers = append(fullStickers, disgoDiscord.Sticker{
+			ID:         sticker.ID,
+			Name:       sticker.Name,
+			FormatType: sticker.FormatType,
+		})
+	}
+	return imageReferencesFromStickers(fullStickers, source)
+}
+
+func imageReferencesFromStickers(stickers []disgoDiscord.Sticker, source string) []generated.ImageReference {
+	if len(stickers) == 0 {
+		return nil
+	}
+	source = normalizedImageReferenceSource(source)
+	references := []generated.ImageReference{}
+	for index, sticker := range stickers {
+		mimeType := stickerMIMEType(sticker.FormatType)
+		if mimeType == "" {
+			continue
+		}
+		rawURL := strings.TrimSpace(sticker.URL())
+		if rawURL == "" {
+			continue
+		}
+		idPart := strings.TrimSpace(sticker.ID.String())
+		if idPart == "" || idPart == "0" {
+			idPart = fmt.Sprintf("%d", index+1)
+		}
+		references = append(references, generated.ImageReference{
+			ID:       source + "_sticker:" + idPart,
+			Filename: stickerFilename(sticker.Name, idPart, mimeType),
+			MIMEType: mimeType,
+			URL:      rawURL,
+		})
+	}
+	return references
+}
+
+func imageReferenceIDs(references []generated.ImageReference) []string {
+	ids := make([]string, 0, len(references))
+	for _, reference := range references {
+		id := strings.TrimSpace(reference.ID)
+		if id != "" {
+			ids = append(ids, id)
+		}
+	}
+	return ids
+}
+
+func imageAttachmentDebugSummaries(attachments []disgoDiscord.Attachment) []map[string]any {
+	summaries := make([]map[string]any, 0, len(attachments))
+	for _, attachment := range attachments {
+		summaries = append(summaries, map[string]any{
+			"id":            attachment.ID.String(),
+			"filename_ext":  attachmentFilenameExtension(attachment.Filename),
+			"content_type":  strings.ToLower(strings.TrimSpace(attachmentContentType(attachment))),
+			"has_url":       strings.TrimSpace(attachment.URL) != "",
+			"has_proxy_url": strings.TrimSpace(attachment.ProxyURL) != "",
+			"has_width":     attachment.Width != nil,
+			"has_height":    attachment.Height != nil,
+			"image_mime":    imageAttachmentContentType(attachment),
+			"accepted":      imageAttachmentURL(attachment) != "" && (imageAttachmentContentType(attachment) != "" || discordAttachmentHasImageDimensions(attachment)),
+		})
+	}
+	return summaries
+}
+
+func imageEmbedDebugSummaries(embeds []disgoDiscord.Embed) []map[string]any {
+	summaries := make([]map[string]any, 0, len(embeds))
+	for _, embed := range embeds {
+		_, acceptedKind, accepted := preferredEmbedMediaResource(embed)
+		summaries = append(summaries, map[string]any{
+			"type":          string(embed.Type),
+			"provider":      embedProviderName(embed.Provider),
+			"has_url":       strings.TrimSpace(embed.URL) != "",
+			"has_image":     embed.Image != nil,
+			"has_thumbnail": embed.Thumbnail != nil,
+			"has_video":     embed.Video != nil,
+			"image":         embedResourceDebugSummary(embed.Image),
+			"thumbnail":     embedResourceDebugSummary(embed.Thumbnail),
+			"video":         embedResourceDebugSummary(embed.Video),
+			"accepted":      accepted,
+			"accepted_kind": acceptedKind,
+		})
+	}
+	return summaries
+}
+
+func embedProviderName(provider *disgoDiscord.EmbedProvider) string {
+	if provider == nil {
+		return ""
+	}
+	return strings.TrimSpace(provider.Name)
+}
+
+func embedResourceDebugSummary(resource *disgoDiscord.EmbedResource) map[string]any {
+	if resource == nil {
+		return nil
+	}
+	contentType := strings.ToLower(strings.TrimSpace(strings.Split(resource.ContentType, ";")[0]))
+	return map[string]any{
+		"has_url":       strings.TrimSpace(resource.URL) != "",
+		"has_proxy_url": strings.TrimSpace(resource.ProxyURL) != "",
+		"content_type":  contentType,
+		"url_ext":       attachmentFilenameExtension(resource.URL),
+		"proxy_url_ext": attachmentFilenameExtension(resource.ProxyURL),
+		"has_width":     resource.Width > 0,
+		"has_height":    resource.Height > 0,
+		"animated":      resource.Flags.Has(disgoDiscord.EmbedResourceFlagIsAnimated),
+	}
+}
+
+func imageStickerDebugSummaries(stickers []disgoDiscord.MessageSticker) []map[string]any {
+	summaries := make([]map[string]any, 0, len(stickers))
+	for _, sticker := range stickers {
+		summaries = append(summaries, map[string]any{
+			"id":          sticker.ID.String(),
+			"format_type": int(sticker.FormatType),
+			"image_mime":  stickerMIMEType(sticker.FormatType),
+			"accepted":    stickerMIMEType(sticker.FormatType) != "",
+		})
+	}
+	return summaries
+}
+
+func snapshotEmbedCount(snapshots []disgoDiscord.MessageSnapshot) int {
+	count := 0
+	for _, snapshot := range snapshots {
+		count += len(snapshot.Message.Embeds)
+	}
+	return count
+}
+
+func snapshotStickerCount(snapshots []disgoDiscord.MessageSnapshot) int {
+	count := 0
+	for _, snapshot := range snapshots {
+		count += len(snapshot.Message.StickerItems)
+		count += len(snapshot.Message.Stickers)
+	}
+	return count
+}
+
+func normalizedImageReferenceSource(source string) string {
+	source = strings.TrimSpace(source)
+	if source == "" {
+		return "message"
+	}
+	return source
+}
+
+func imageAttachmentURL(attachment disgoDiscord.Attachment) string {
+	if url := strings.TrimSpace(attachment.URL); url != "" {
+		return url
+	}
+	return strings.TrimSpace(attachment.ProxyURL)
+}
+
+func embedResourceURL(resource disgoDiscord.EmbedResource) string {
+	if url := strings.TrimSpace(resource.URL); url != "" {
+		return url
+	}
+	return strings.TrimSpace(resource.ProxyURL)
+}
+
 func imageAttachmentContentType(attachment disgoDiscord.Attachment) string {
 	contentType := strings.ToLower(strings.TrimSpace(strings.Split(attachmentContentType(attachment), ";")[0]))
-	switch contentType {
-	case "image/png", "image/jpeg", "image/webp":
-		return contentType
-	case "image/jpg":
+	if contentType == "image/jpg" {
 		return "image/jpeg"
 	}
-	switch strings.ToLower(strings.TrimSpace(attachment.Filename[strings.LastIndex(attachment.Filename, ".")+1:])) {
+	if strings.HasPrefix(contentType, "image/") {
+		return contentType
+	}
+	for _, raw := range []string{attachment.Filename, attachment.URL, attachment.ProxyURL} {
+		if mimeType := imageMIMETypeFromPath(raw); mimeType != "" {
+			return mimeType
+		}
+	}
+	return ""
+}
+
+func embedResourceMIMEType(embed disgoDiscord.Embed, kind string, resource disgoDiscord.EmbedResource) string {
+	contentType := normalizeReferenceMIMEType(resource.ContentType)
+	if contentType != "" {
+		return contentType
+	}
+	if kind == "video" {
+		for _, raw := range []string{resource.URL, resource.ProxyURL, embed.URL} {
+			if mimeType := mediaMIMETypeFromPath(raw); mimeType != "" {
+				return mimeType
+			}
+		}
+		if embed.Type == disgoDiscord.EmbedTypeGifV || embed.Type == disgoDiscord.EmbedTypeVideo {
+			return "video/mp4"
+		}
+		return ""
+	}
+	for _, raw := range []string{resource.URL, resource.ProxyURL} {
+		if mimeType := imageMIMETypeFromPath(raw); mimeType != "" {
+			return mimeType
+		}
+	}
+	return ""
+}
+
+func normalizeReferenceMIMEType(raw string) string {
+	contentType := strings.ToLower(strings.TrimSpace(strings.Split(raw, ";")[0]))
+	switch contentType {
+	case "":
+		return ""
+	case "image/jpg":
+		return "image/jpeg"
+	case "video/quicktime":
+		return "video/quicktime"
+	}
+	if strings.HasPrefix(contentType, "image/") || strings.HasPrefix(contentType, "video/") {
+		return contentType
+	}
+	return ""
+}
+
+func imageMIMETypeFromPath(raw string) string {
+	extension := attachmentFilenameExtension(raw)
+	switch extension {
 	case "png":
 		return "image/png"
 	case "jpg", "jpeg":
 		return "image/jpeg"
 	case "webp":
 		return "image/webp"
+	case "gif":
+		return "image/gif"
+	case "avif":
+		return "image/avif"
+	case "heic":
+		return "image/heic"
+	case "heif":
+		return "image/heif"
+	default:
+		return ""
+	}
+}
+
+func mediaMIMETypeFromPath(raw string) string {
+	if mimeType := imageMIMETypeFromPath(raw); mimeType != "" {
+		return mimeType
+	}
+	extension := attachmentFilenameExtension(raw)
+	switch extension {
+	case "mp4", "m4v", "gifv":
+		return "video/mp4"
+	case "webm":
+		return "video/webm"
+	case "mov":
+		return "video/quicktime"
+	default:
+		return ""
+	}
+}
+
+func embedResourceFilename(rawURL, fallback, mimeType string) string {
+	if filename := filenameFromURLPath(rawURL); filename != "" {
+		return filename
+	}
+	extension := extensionForReferenceMIMEType(mimeType)
+	if extension == "" {
+		return fallback
+	}
+	return strings.TrimSuffix(fallback, ".") + "." + extension
+}
+
+func stickerFilename(name, fallbackID, mimeType string) string {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		name = "sticker-" + strings.TrimSpace(fallbackID)
+	}
+	name = strings.Trim(name, ".")
+	if name == "" {
+		name = "sticker"
+	}
+	if attachmentFilenameExtension(name) != "" {
+		return name
+	}
+	if extension := extensionForReferenceMIMEType(mimeType); extension != "" {
+		return name + "." + extension
+	}
+	return name
+}
+
+func filenameFromURLPath(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	if parsed, err := url.Parse(raw); err == nil && parsed.Path != "" {
+		raw = parsed.Path
+	}
+	lastSlash := strings.LastIndex(raw, "/")
+	if lastSlash >= 0 {
+		raw = raw[lastSlash+1:]
+	}
+	raw = strings.Trim(raw, ".")
+	if raw == "" || attachmentFilenameExtension(raw) == "" {
+		return ""
+	}
+	return raw
+}
+
+func extensionForReferenceMIMEType(mimeType string) string {
+	switch normalizeReferenceMIMEType(mimeType) {
+	case "image/png":
+		return "png"
+	case "image/jpeg":
+		return "jpg"
+	case "image/webp":
+		return "webp"
+	case "image/gif":
+		return "gif"
+	case "image/avif":
+		return "avif"
+	case "image/heic":
+		return "heic"
+	case "image/heif":
+		return "heif"
+	case "video/mp4":
+		return "mp4"
+	case "video/webm":
+		return "webm"
+	case "video/quicktime":
+		return "mov"
+	default:
+		return ""
+	}
+}
+
+func attachmentFilenameExtension(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	if parsed, err := url.Parse(raw); err == nil && parsed.Path != "" {
+		raw = parsed.Path
+	}
+	lastSlash := strings.LastIndex(raw, "/")
+	if lastSlash >= 0 && lastSlash+1 < len(raw) {
+		raw = raw[lastSlash+1:]
+	}
+	lastDot := strings.LastIndex(raw, ".")
+	if lastDot < 0 || lastDot+1 >= len(raw) {
+		return ""
+	}
+	return strings.ToLower(strings.TrimSpace(raw[lastDot+1:]))
+}
+
+func discordAttachmentHasImageDimensions(attachment disgoDiscord.Attachment) bool {
+	return attachment.Width != nil || attachment.Height != nil
+}
+
+func embedResourceHasDimensions(resource disgoDiscord.EmbedResource) bool {
+	return resource.Width > 0 || resource.Height > 0
+}
+
+func stickerMIMEType(format disgoDiscord.StickerFormatType) string {
+	switch format {
+	case disgoDiscord.StickerFormatTypePNG, disgoDiscord.StickerFormatTypeAPNG:
+		return "image/png"
+	case disgoDiscord.StickerFormatTypeGIF:
+		return "image/gif"
 	default:
 		return ""
 	}
