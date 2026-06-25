@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -26,6 +27,8 @@ type Service struct {
 	guilds  *repository.GuildRepository
 	billing *billing.Service
 }
+
+var ErrToolAccessEveryoneRole = errors.New("tool access cannot target @everyone as a role; open the tool to everyone instead")
 
 const (
 	RoleProfileAdmin     = "admin"
@@ -104,7 +107,27 @@ type BehaviorSettings struct {
 
 type ToolRoleAccess struct {
 	AllowedTools    []string
+	DeniedTools     []string
 	RestrictedTools []string
+}
+
+type ToolAccessRule struct {
+	ToolName    string
+	SubjectType string
+	SubjectID   string
+	Rule        string
+}
+
+type PermissionAccessClearResult struct {
+	Permission       string
+	RemovedRoleRules int64
+	RemovedUserRules int64
+}
+
+type ToolAccessClearResult struct {
+	ToolName         string
+	RemovedRoleRules int64
+	RemovedUserRules int64
 }
 
 func NormalizeRoleProfile(profile string) (string, bool) {
@@ -719,12 +742,16 @@ func (s *Service) ListUserPermissions(ctx context.Context, guildID string) ([]st
 
 func (s *Service) AddToolRole(ctx context.Context, guildID, actorID, toolName, roleID string) (store.GuildToolRole, error) {
 	toolName = normalizeToolName(toolName)
+	guildID = strings.TrimSpace(guildID)
 	roleID = strings.TrimSpace(roleID)
 	if toolName == "" {
 		return store.GuildToolRole{}, fmt.Errorf("tool name is required")
 	}
 	if roleID == "" {
 		return store.GuildToolRole{}, fmt.Errorf("role id is required")
+	}
+	if guildID != "" && roleID == guildID {
+		return store.GuildToolRole{}, ErrToolAccessEveryoneRole
 	}
 	toolRole, err := s.access.AddToolRole(ctx, guildID, toolName, roleID)
 	if err != nil {
@@ -741,8 +768,85 @@ func (s *Service) AddToolRole(ctx context.Context, guildID, actorID, toolName, r
 	return toolRole, nil
 }
 
+func (s *Service) AddToolUser(ctx context.Context, guildID, actorID, toolName, userID string) (store.GuildToolUser, error) {
+	toolName = normalizeToolName(toolName)
+	userID = strings.TrimSpace(userID)
+	if toolName == "" {
+		return store.GuildToolUser{}, fmt.Errorf("tool name is required")
+	}
+	if userID == "" {
+		return store.GuildToolUser{}, fmt.Errorf("user id is required")
+	}
+	toolUser, err := s.access.AddToolUser(ctx, guildID, toolName, userID)
+	if err != nil {
+		return store.GuildToolUser{}, err
+	}
+	_ = s.audit.Record(ctx, store.AuditEvent{
+		GuildID:    guildID,
+		ActorID:    actorID,
+		Action:     "admin.tools.allow_user",
+		TargetType: "tool",
+		TargetID:   toolName,
+		Metadata:   metadata(map[string]string{"user_id": userID}),
+	})
+	return toolUser, nil
+}
+
+func (s *Service) DenyToolRole(ctx context.Context, guildID, actorID, toolName, roleID string) (store.GuildToolRole, error) {
+	toolName = normalizeToolName(toolName)
+	guildID = strings.TrimSpace(guildID)
+	roleID = strings.TrimSpace(roleID)
+	if toolName == "" {
+		return store.GuildToolRole{}, fmt.Errorf("tool name is required")
+	}
+	if roleID == "" {
+		return store.GuildToolRole{}, fmt.Errorf("role id is required")
+	}
+	if guildID != "" && roleID == guildID {
+		return store.GuildToolRole{}, ErrToolAccessEveryoneRole
+	}
+	toolRole, err := s.access.DenyToolRole(ctx, guildID, toolName, roleID)
+	if err != nil {
+		return store.GuildToolRole{}, err
+	}
+	_ = s.audit.Record(ctx, store.AuditEvent{
+		GuildID:    guildID,
+		ActorID:    actorID,
+		Action:     "admin.tools.deny_role",
+		TargetType: "tool",
+		TargetID:   toolName,
+		Metadata:   metadata(map[string]string{"role_id": roleID}),
+	})
+	return toolRole, nil
+}
+
+func (s *Service) DenyToolUser(ctx context.Context, guildID, actorID, toolName, userID string) (store.GuildToolUser, error) {
+	toolName = normalizeToolName(toolName)
+	userID = strings.TrimSpace(userID)
+	if toolName == "" {
+		return store.GuildToolUser{}, fmt.Errorf("tool name is required")
+	}
+	if userID == "" {
+		return store.GuildToolUser{}, fmt.Errorf("user id is required")
+	}
+	toolUser, err := s.access.DenyToolUser(ctx, guildID, toolName, userID)
+	if err != nil {
+		return store.GuildToolUser{}, err
+	}
+	_ = s.audit.Record(ctx, store.AuditEvent{
+		GuildID:    guildID,
+		ActorID:    actorID,
+		Action:     "admin.tools.deny_user",
+		TargetType: "tool",
+		TargetID:   toolName,
+		Metadata:   metadata(map[string]string{"user_id": userID}),
+	})
+	return toolUser, nil
+}
+
 func (s *Service) RemoveToolRole(ctx context.Context, guildID, actorID, toolName, roleID string) error {
 	toolName = normalizeToolName(toolName)
+	guildID = strings.TrimSpace(guildID)
 	roleID = strings.TrimSpace(roleID)
 	if toolName == "" {
 		return fmt.Errorf("tool name is required")
@@ -764,20 +868,152 @@ func (s *Service) RemoveToolRole(ctx context.Context, guildID, actorID, toolName
 	return nil
 }
 
+func (s *Service) RemoveToolUser(ctx context.Context, guildID, actorID, toolName, userID string) error {
+	toolName = normalizeToolName(toolName)
+	userID = strings.TrimSpace(userID)
+	if toolName == "" {
+		return fmt.Errorf("tool name is required")
+	}
+	if userID == "" {
+		return fmt.Errorf("user id is required")
+	}
+	if err := s.access.RemoveToolUser(ctx, guildID, toolName, userID); err != nil {
+		return err
+	}
+	_ = s.audit.Record(ctx, store.AuditEvent{
+		GuildID:    guildID,
+		ActorID:    actorID,
+		Action:     "admin.tools.remove_user",
+		TargetType: "tool",
+		TargetID:   toolName,
+		Metadata:   metadata(map[string]string{"user_id": userID}),
+	})
+	return nil
+}
+
 func (s *Service) ListToolRoles(ctx context.Context, guildID string) ([]store.GuildToolRole, error) {
 	return s.access.ListToolRoles(ctx, guildID)
 }
 
+func (s *Service) ListToolUsers(ctx context.Context, guildID string) ([]store.GuildToolUser, error) {
+	return s.access.ListToolUsers(ctx, guildID)
+}
+
+func (s *Service) ListToolAccess(ctx context.Context, guildID string) ([]ToolAccessRule, error) {
+	roles, err := s.ListToolRoles(ctx, guildID)
+	if err != nil {
+		return nil, err
+	}
+	users, err := s.ListToolUsers(ctx, guildID)
+	if err != nil {
+		return nil, err
+	}
+	rules := make([]ToolAccessRule, 0, len(roles)+len(users))
+	for _, role := range roles {
+		rules = append(rules, ToolAccessRule{ToolName: role.ToolName, SubjectType: "role", SubjectID: role.RoleID, Rule: normalizeToolAccessRule(role.Rule)})
+	}
+	for _, user := range users {
+		rules = append(rules, ToolAccessRule{ToolName: user.ToolName, SubjectType: "user", SubjectID: user.UserID, Rule: normalizeToolAccessRule(user.Rule)})
+	}
+	sort.Slice(rules, func(i, j int) bool {
+		if rules[i].ToolName != rules[j].ToolName {
+			return rules[i].ToolName < rules[j].ToolName
+		}
+		if rules[i].SubjectType != rules[j].SubjectType {
+			return rules[i].SubjectType < rules[j].SubjectType
+		}
+		if rules[i].Rule != rules[j].Rule {
+			return rules[i].Rule < rules[j].Rule
+		}
+		return rules[i].SubjectID < rules[j].SubjectID
+	})
+	return rules, nil
+}
+
+func (s *Service) ClearPermissionAccess(ctx context.Context, guildID, actorID, permission string) (PermissionAccessClearResult, error) {
+	permission = strings.TrimSpace(permission)
+	if !allowedUserPermissionName(permission) {
+		return PermissionAccessClearResult{}, fmt.Errorf("unsupported permission %q", permission)
+	}
+	removedRoles, err := s.access.RemoveRolePermissionMappings(ctx, guildID, permission)
+	if err != nil {
+		return PermissionAccessClearResult{}, err
+	}
+	removedUsers, err := s.access.RemoveUserPermissionMappings(ctx, guildID, permission)
+	if err != nil {
+		return PermissionAccessClearResult{}, err
+	}
+	_ = s.audit.Record(ctx, store.AuditEvent{
+		GuildID:    guildID,
+		ActorID:    actorID,
+		Action:     "admin.permissions.open",
+		TargetType: "permission",
+		TargetID:   permission,
+		Metadata: metadata(map[string]string{
+			"removed_role_rules": strconv.FormatInt(removedRoles, 10),
+			"removed_user_rules": strconv.FormatInt(removedUsers, 10),
+		}),
+	})
+	return PermissionAccessClearResult{Permission: permission, RemovedRoleRules: removedRoles, RemovedUserRules: removedUsers}, nil
+}
+
+func (s *Service) ClearToolAccess(ctx context.Context, guildID, actorID, toolName string) (ToolAccessClearResult, error) {
+	toolName = normalizeToolName(toolName)
+	if toolName == "" {
+		return ToolAccessClearResult{}, fmt.Errorf("tool name is required")
+	}
+	removedRoles, err := s.access.RemoveToolRolesByTool(ctx, guildID, toolName)
+	if err != nil {
+		return ToolAccessClearResult{}, err
+	}
+	removedUsers, err := s.access.RemoveToolUsersByTool(ctx, guildID, toolName)
+	if err != nil {
+		return ToolAccessClearResult{}, err
+	}
+	_ = s.audit.Record(ctx, store.AuditEvent{
+		GuildID:    guildID,
+		ActorID:    actorID,
+		Action:     "admin.tools.open",
+		TargetType: "tool",
+		TargetID:   toolName,
+		Metadata: metadata(map[string]string{
+			"removed_role_rules": strconv.FormatInt(removedRoles, 10),
+			"removed_user_rules": strconv.FormatInt(removedUsers, 10),
+		}),
+	})
+	return ToolAccessClearResult{ToolName: toolName, RemovedRoleRules: removedRoles, RemovedUserRules: removedUsers}, nil
+}
+
 func (s *Service) ToolRoleAccess(ctx context.Context, guildID string, roleIDs []string) (ToolRoleAccess, error) {
+	return s.ToolUserRoleAccess(ctx, guildID, "", roleIDs)
+}
+
+func (s *Service) ToolUserRoleAccess(ctx context.Context, guildID, userID string, roleIDs []string) (ToolRoleAccess, error) {
 	restricted, err := s.access.RestrictedToolNames(ctx, guildID)
 	if err != nil {
 		return ToolRoleAccess{}, err
 	}
-	allowed, err := s.access.ToolNamesForRoles(ctx, guildID, roleIDs)
+	roleAllowed, err := s.access.ToolNamesForRoles(ctx, guildID, roleIDs)
 	if err != nil {
 		return ToolRoleAccess{}, err
 	}
-	return ToolRoleAccess{AllowedTools: allowed, RestrictedTools: restricted}, nil
+	userAllowed, err := s.access.ToolNamesForUser(ctx, guildID, strings.TrimSpace(userID))
+	if err != nil {
+		return ToolRoleAccess{}, err
+	}
+	roleDenied, err := s.access.DeniedToolNamesForRoles(ctx, guildID, roleIDs)
+	if err != nil {
+		return ToolRoleAccess{}, err
+	}
+	userDenied, err := s.access.DeniedToolNamesForUser(ctx, guildID, strings.TrimSpace(userID))
+	if err != nil {
+		return ToolRoleAccess{}, err
+	}
+	return ToolRoleAccess{
+		AllowedTools:    distinctSortedStrings(roleAllowed, userAllowed),
+		DeniedTools:     distinctSortedStrings(roleDenied, userDenied),
+		RestrictedTools: restricted,
+	}, nil
 }
 
 func (s *Service) SetChannelRule(ctx context.Context, guildID, actorID, channelID, rule string) (store.GuildChannelRule, error) {
@@ -1187,6 +1423,34 @@ func allowedUserPermissionName(permission string) bool {
 
 func normalizeToolName(value string) string {
 	return strings.ToLower(strings.TrimSpace(value))
+}
+
+func normalizeToolAccessRule(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "deny":
+		return "deny"
+	default:
+		return "allow"
+	}
+}
+
+func distinctSortedStrings(groups ...[]string) []string {
+	seen := map[string]struct{}{}
+	for _, group := range groups {
+		for _, value := range group {
+			value = strings.TrimSpace(value)
+			if value == "" {
+				continue
+			}
+			seen[value] = struct{}{}
+		}
+	}
+	values := make([]string, 0, len(seen))
+	for value := range seen {
+		values = append(values, value)
+	}
+	sort.Strings(values)
+	return values
 }
 
 func IsPermissionNameAllowed(permission string) bool {

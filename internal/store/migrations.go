@@ -456,6 +456,7 @@ var migrations = []Migration{
 				guild_id TEXT NOT NULL,
 				tool_name TEXT NOT NULL,
 				role_id TEXT NOT NULL,
+				rule TEXT NOT NULL DEFAULT 'allow',
 				created_at DATETIME NOT NULL,
 				updated_at DATETIME NOT NULL,
 				UNIQUE(guild_id, tool_name, role_id)
@@ -463,6 +464,7 @@ var migrations = []Migration{
 			`CREATE INDEX IF NOT EXISTS idx_guild_tool_roles_guild_id ON guild_tool_roles(guild_id)`,
 			`CREATE INDEX IF NOT EXISTS idx_guild_tool_roles_tool_name ON guild_tool_roles(tool_name)`,
 			`CREATE INDEX IF NOT EXISTS idx_guild_tool_roles_role_id ON guild_tool_roles(role_id)`,
+			`CREATE INDEX IF NOT EXISTS idx_guild_tool_roles_rule ON guild_tool_roles(rule)`,
 		},
 	},
 	{
@@ -1438,7 +1440,51 @@ var migrations = []Migration{
 						SELECT 1 FROM guild_features existing
 						WHERE existing.guild_id = assistant.guild_id
 							AND existing.feature_id = 'image_generation'
-					)`,
+			)`,
+		},
+	},
+	{
+		Version: 33,
+		Name:    "guild_tool_user_access",
+		SQL: []string{
+			`CREATE TABLE IF NOT EXISTS guild_tool_users (
+				id INTEGER PRIMARY KEY AUTOINCREMENT,
+				guild_id TEXT NOT NULL,
+				tool_name TEXT NOT NULL,
+				user_id TEXT NOT NULL,
+				rule TEXT NOT NULL DEFAULT 'allow',
+				created_at DATETIME NOT NULL,
+				updated_at DATETIME NOT NULL,
+				UNIQUE(guild_id, tool_name, user_id)
+			)`,
+			`CREATE INDEX IF NOT EXISTS idx_guild_tool_users_guild_id ON guild_tool_users(guild_id)`,
+			`CREATE INDEX IF NOT EXISTS idx_guild_tool_users_tool_name ON guild_tool_users(tool_name)`,
+			`CREATE INDEX IF NOT EXISTS idx_guild_tool_users_user_id ON guild_tool_users(user_id)`,
+			`CREATE INDEX IF NOT EXISTS idx_guild_tool_users_rule ON guild_tool_users(rule)`,
+		},
+	},
+	{
+		Version: 34,
+		Name:    "runtime_status",
+		SQL: []string{
+			`CREATE TABLE IF NOT EXISTS runtime_statuses (
+				key TEXT PRIMARY KEY,
+				disabled INTEGER NOT NULL DEFAULT 0,
+				message TEXT NOT NULL DEFAULT '',
+				updated_by TEXT NOT NULL DEFAULT '',
+				created_at DATETIME NOT NULL,
+				updated_at DATETIME NOT NULL
+			)`,
+		},
+	},
+	{
+		Version: 35,
+		Name:    "tool_access_deny_rules",
+		SQL: []string{
+			`ALTER TABLE guild_tool_roles ADD COLUMN rule TEXT NOT NULL DEFAULT 'allow'`,
+			`ALTER TABLE guild_tool_users ADD COLUMN rule TEXT NOT NULL DEFAULT 'allow'`,
+			`CREATE INDEX IF NOT EXISTS idx_guild_tool_roles_rule ON guild_tool_roles(rule)`,
+			`CREATE INDEX IF NOT EXISTS idx_guild_tool_users_rule ON guild_tool_users(rule)`,
 		},
 	},
 }

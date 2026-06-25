@@ -27,6 +27,7 @@ import (
 	"github.com/sn0w/panda2/internal/queue"
 	"github.com/sn0w/panda2/internal/ratelimit"
 	"github.com/sn0w/panda2/internal/repository"
+	"github.com/sn0w/panda2/internal/runtimecontrol"
 	"github.com/sn0w/panda2/internal/scheduler"
 	"github.com/sn0w/panda2/internal/store"
 	"github.com/sn0w/panda2/internal/tools"
@@ -89,6 +90,8 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 	musicRepo := repository.NewMusicRepository(dataStore.DB)
 	featureRepo := repository.NewFeatureRepository(dataStore.DB)
 	composedRepo := repository.NewComposedToolRepository(dataStore.DB)
+	runtimeStatuses := repository.NewRuntimeStatusRepository(dataStore.DB)
+	runtimeService := runtimecontrol.NewService(runtimeStatuses)
 	featureService := features.NewService(featureRepo)
 	openRouter := llm.NewOpenRouterClient(llm.OpenRouterConfig{
 		APIKey:                         cfg.OpenRouterAPIKey,
@@ -191,6 +194,7 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 			FailureRedirect: installResultURL(cfg.PublicAppURL, "/install/failed/"),
 		})
 	router := commands.NewRouter(adminService, assistantService, opsService, ratelimit.New(cfg.UserRateLimit, cfg.UserRateLimitWindow)).
+		WithRuntimeStatus(runtimeService).
 		WithComposedService(composedService).
 		WithAttachmentReader(attachments).
 		WithScheduler(schedulerService).
@@ -234,6 +238,7 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 		logger: logger,
 		store:  dataStore,
 		httpServer: pandahttp.New(cfg, dataStore).
+			WithRuntimeStatus(runtimeService).
 			WithDiscordWebhookHandler(installService).
 			WithInstallHandler(installService).
 			WithBillingService(billingService).

@@ -28,6 +28,7 @@ import (
 	"github.com/sn0w/panda2/internal/features"
 	"github.com/sn0w/panda2/internal/ratelimit"
 	"github.com/sn0w/panda2/internal/repository"
+	"github.com/sn0w/panda2/internal/runtimecontrol"
 	"github.com/sn0w/panda2/internal/store"
 	"github.com/sn0w/panda2/internal/urlutil"
 )
@@ -40,6 +41,7 @@ type Server struct {
 	install        InstallHandler
 	billing        *billing.Service
 	guilds         *repository.GuildRepository
+	runtime        *runtimecontrol.Service
 	paymentLimiter *ratelimit.Limiter
 	adminAuth      adminAuthStore
 }
@@ -125,6 +127,11 @@ func (s *Server) WithGuildRepository(guilds *repository.GuildRepository) *Server
 	return s
 }
 
+func (s *Server) WithRuntimeStatus(service *runtimecontrol.Service) *Server {
+	s.runtime = service
+	return s
+}
+
 func (s *Server) Listen(addr string) error {
 	return s.app.Listen(addr)
 }
@@ -191,6 +198,8 @@ func (s *Server) routes() {
 	s.app.Get("/discord/install/callback", s.discordInstallCallback)
 	s.app.Post("/admin/auth/challenge", s.createAdminAuthChallenge)
 	s.app.Post("/admin/auth/sessions", s.createAdminSession)
+	s.app.Get("/admin/runtime", s.getAdminRuntimeStatus)
+	s.app.Post("/admin/runtime", s.updateAdminRuntimeStatus)
 	s.app.Get("/admin/coupons", s.listAdminCoupons)
 	s.app.Post("/admin/coupons", s.createAdminCoupon)
 	s.app.Post("/admin/coupons/:coupon/revoke", s.revokeAdminCoupon)
@@ -614,6 +623,20 @@ type adminSessionResponse struct {
 	ExpiresAt    time.Time `json:"expires_at"`
 }
 
+type adminRuntimeStatusResponse struct {
+	Disabled         bool      `json:"disabled"`
+	Message          string    `json:"message"`
+	DefaultMessage   string    `json:"default_message"`
+	EffectiveMessage string    `json:"effective_message"`
+	UpdatedBy        string    `json:"updated_by"`
+	UpdatedAt        time.Time `json:"updated_at"`
+}
+
+type updateAdminRuntimeStatusRequest struct {
+	Disabled bool   `json:"disabled"`
+	Message  string `json:"message"`
+}
+
 type createAdminCouponRequest struct {
 	Plan             string `json:"plan"`
 	DiscountLamports int64  `json:"discount_lamports"`
@@ -743,6 +766,57 @@ func (s *Server) createAdminSession(c *fiber.Ctx) error {
 		Wallet:       wallet,
 		ExpiresAt:    expiresAt,
 	})
+}
+
+func (s *Server) getAdminRuntimeStatus(c *fiber.Ctx) error {
+	if _, denied := s.requireAdmin(c); denied != nil {
+		return denied
+	}
+	if s.runtime == nil {
+		return c.SendStatus(fiber.StatusServiceUnavailable)
+	}
+	status, err := s.runtime.Status(c.Context())
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(map[string]string{"error": "runtime_status_failed"})
+	}
+	return c.JSON(adminRuntimeStatusView(status))
+}
+
+func (s *Server) updateAdminRuntimeStatus(c *fiber.Ctx) error {
+	session, denied := s.requireAdmin(c)
+	if denied != nil {
+		return denied
+	}
+	if s.runtime == nil {
+		return c.SendStatus(fiber.StatusServiceUnavailable)
+	}
+	var request updateAdminRuntimeStatusRequest
+	if err := c.BodyParser(&request); err != nil {
+		return c.SendStatus(fiber.StatusBadRequest)
+	}
+	status, err := s.runtime.SetStatus(c.Context(), runtimecontrol.SetStatusRequest{
+		Disabled: request.Disabled,
+		Message:  request.Message,
+		Actor:    "treasury_wallet:" + session.Wallet,
+	})
+	if err != nil {
+		if errors.Is(err, runtimecontrol.ErrMessageTooLong) {
+			return c.Status(fiber.StatusBadRequest).JSON(map[string]string{"error": "maintenance_message_too_long"})
+		}
+		return c.Status(fiber.StatusInternalServerError).JSON(map[string]string{"error": "runtime_status_failed"})
+	}
+	return c.JSON(adminRuntimeStatusView(status))
+}
+
+func adminRuntimeStatusView(status runtimecontrol.Status) adminRuntimeStatusResponse {
+	return adminRuntimeStatusResponse{
+		Disabled:         status.Disabled,
+		Message:          status.Message,
+		DefaultMessage:   runtimecontrol.DefaultMaintenanceMessage,
+		EffectiveMessage: status.EffectiveMessage,
+		UpdatedBy:        status.UpdatedBy,
+		UpdatedAt:        status.UpdatedAt.UTC(),
+	}
 }
 
 func (s *Server) listAdminCoupons(c *fiber.Ctx) error {

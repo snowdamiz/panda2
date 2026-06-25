@@ -27,6 +27,7 @@ import (
 	"github.com/sn0w/panda2/internal/polls"
 	"github.com/sn0w/panda2/internal/ratelimit"
 	"github.com/sn0w/panda2/internal/repository"
+	"github.com/sn0w/panda2/internal/runtimecontrol"
 	"github.com/sn0w/panda2/internal/scheduler"
 	"github.com/sn0w/panda2/internal/security"
 	"github.com/sn0w/panda2/internal/store"
@@ -55,6 +56,7 @@ type Router struct {
 	rateLimit   *ratelimit.Limiter
 	features    *features.Service
 	install     FeatureInstallIntentCreator
+	runtime     *runtimecontrol.Service
 }
 
 type ThreadManager interface {
@@ -220,6 +222,11 @@ func (r *Router) WithFeatureInstallIntents(creator FeatureInstallIntentCreator) 
 	return r
 }
 
+func (r *Router) WithRuntimeStatus(service *runtimecontrol.Service) *Router {
+	r.runtime = service
+	return r
+}
+
 func (r *Router) CommitResponseUsage(ctx context.Context, response Response) error {
 	if r == nil || r.billing == nil {
 		return nil
@@ -264,6 +271,11 @@ func (r *Router) finishResponseUsage(ctx context.Context, response Response, com
 }
 
 func (r *Router) Handle(ctx context.Context, request Request) Response {
+	if !maintenanceExempt(request) {
+		if response := r.maintenanceResponse(ctx); response.Content != "" {
+			return response
+		}
+	}
 	switch strings.ToLower(request.Command) {
 	case "ping":
 		return Response{Content: "pong", Ephemeral: true, Presentation: Presentation{Title: "Panda is online", Accent: AccentSuccess}}
@@ -428,6 +440,9 @@ func (r *Router) HandleNaturalMessageStream(ctx context.Context, request Request
 	message := strings.TrimSpace(firstNonEmpty(request.Options["message"], request.Options["question"]))
 	if message == "" {
 		return Response{}
+	}
+	if response := r.maintenanceResponse(ctx); response.Content != "" {
+		return response
 	}
 	if !r.canHandleNaturalMessage(ctx, request) {
 		return Response{}
@@ -871,13 +886,41 @@ func (r *Router) handleAdmin(ctx context.Context, request Request) Response {
 	}
 }
 
-func roleDisplay(roleID, roleName string) string {
-	roleID = strings.TrimSpace(roleID)
+func roleDisplay(_ string, roleName string) string {
 	roleName = strings.TrimSpace(roleName)
 	if roleName == "" {
-		return fmt.Sprintf("`%s`", roleID)
+		return "the selected role"
 	}
-	return fmt.Sprintf("`%s` (`%s`)", roleName, roleID)
+	return discordDisplayLabel(roleName)
+}
+
+func (r *Router) roleDisplay(ctx context.Context, request Request, roleID, roleName string) string {
+	if r != nil && r.tools != nil {
+		return r.tools.DiscordRoleDisplay(ctx, request.GuildID, request.UserID, request.RequestID, roleID, roleName)
+	}
+	return roleDisplay(roleID, roleName)
+}
+
+func (r *Router) userDisplay(ctx context.Context, request Request, userID, username string) string {
+	if r != nil && r.tools != nil {
+		return r.tools.DiscordUserDisplay(ctx, request.GuildID, request.UserID, request.RequestID, userID, username)
+	}
+	return userMention(userID, username)
+}
+
+func (r *Router) channelDisplay(ctx context.Context, request Request, channelID, channelName string) string {
+	if r != nil && r.tools != nil {
+		return r.tools.DiscordChannelDisplay(ctx, request.GuildID, request.UserID, request.RequestID, channelID, channelName)
+	}
+	return channelDisplay(channelID, channelName)
+}
+
+func discordDisplayLabel(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	return "`" + strings.ReplaceAll(value, "`", "'") + "`"
 }
 
 func (r *Router) handleAdminRoleProfile(ctx context.Context, request Request) Response {
@@ -888,7 +931,7 @@ func (r *Router) handleAdminRoleProfile(ctx context.Context, request Request) Re
 		if err != nil {
 			return Response{Content: "Role profile lookup failed.", Ephemeral: true}
 		}
-		return Response{Content: renderRoleProfiles(roles), Ephemeral: true}
+		return Response{Content: r.renderRoleProfiles(ctx, request, roles), Ephemeral: true}
 	case "set", "add":
 		if denied := r.ensureGuildControl(ctx, request, "Only the Panda owner, server owner or administrator, or the current Panda admin role or user can set Panda role profiles."); denied.Content != "" {
 			return denied
@@ -900,7 +943,7 @@ func (r *Router) handleAdminRoleProfile(ctx context.Context, request Request) Re
 		if _, err := r.admin.ApplyRoleProfile(ctx, request.GuildID, request.UserID, roleID, profile); err != nil {
 			return Response{Content: "Role profile could not be saved.", Ephemeral: true}
 		}
-		return Response{Content: fmt.Sprintf("%s is now a Panda %s role.", roleDisplay(roleID, roleName), admin.RoleProfileLabel(profile)), Ephemeral: true}
+		return Response{Content: fmt.Sprintf("%s is now a Panda %s role.", r.roleDisplay(ctx, request, roleID, roleName), admin.RoleProfileLabel(profile)), Ephemeral: true}
 	case "remove", "unset":
 		if denied := r.ensureGuildControl(ctx, request, "Only the Panda owner, server owner or administrator, or the current Panda admin role or user can remove Panda role profiles."); denied.Content != "" {
 			return denied
@@ -915,7 +958,7 @@ func (r *Router) handleAdminRoleProfile(ctx context.Context, request Request) Re
 			}
 			return Response{Content: "Role profile could not be removed.", Ephemeral: true}
 		}
-		return Response{Content: fmt.Sprintf("Removed the Panda %s profile from %s.", admin.RoleProfileLabel(profile), roleDisplay(roleID, roleName)), Ephemeral: true}
+		return Response{Content: fmt.Sprintf("Removed the Panda %s profile from %s.", admin.RoleProfileLabel(profile), r.roleDisplay(ctx, request, roleID, roleName)), Ephemeral: true}
 	default:
 		return Response{Content: "`action` must be `list`, `set`, or `remove`.", Ephemeral: true}
 	}
@@ -933,14 +976,14 @@ func roleProfileOptions(request Request) (string, string, string, Response) {
 	return profile, roleID, request.Options["role_name"], Response{}
 }
 
-func renderRoleProfiles(roles []store.GuildRole) string {
+func (r *Router) renderRoleProfiles(ctx context.Context, request Request, roles []store.GuildRole) string {
 	adminRoles := roleIDsForPermission(roles, admin.PermissionAdminBadge)
 	moderatorRoles := roleIDsForPermission(roles, admin.PermissionModerationUse)
 	var builder strings.Builder
 	builder.WriteString("Panda role profiles:\n")
-	builder.WriteString(roleProfileLine("admin", adminRoles))
+	builder.WriteString(r.roleProfileLine(ctx, request, "admin", adminRoles))
 	builder.WriteString("\n")
-	builder.WriteString(roleProfileLine("moderator", moderatorRoles))
+	builder.WriteString(r.roleProfileLine(ctx, request, "moderator", moderatorRoles))
 	builder.WriteString("\n\nModerator roles include `assistant.use` and `moderation.use`.")
 	return builder.String()
 }
@@ -962,13 +1005,13 @@ func roleIDsForPermission(roles []store.GuildRole, permission string) []string {
 	return ids
 }
 
-func roleProfileLine(profile string, roleIDs []string) string {
+func (r *Router) roleProfileLine(ctx context.Context, request Request, profile string, roleIDs []string) string {
 	if len(roleIDs) == 0 {
 		return fmt.Sprintf("- %s: not configured", profile)
 	}
 	values := make([]string, 0, len(roleIDs))
 	for _, roleID := range roleIDs {
-		values = append(values, fmt.Sprintf("`%s`", roleID))
+		values = append(values, r.roleDisplay(ctx, request, roleID, ""))
 	}
 	return fmt.Sprintf("- %s: %s", profile, strings.Join(values, ", "))
 }
@@ -981,7 +1024,7 @@ func (r *Router) handleAdminUserProfile(ctx context.Context, request Request) Re
 		if err != nil {
 			return Response{Content: "User profile lookup failed.", Ephemeral: true}
 		}
-		return Response{Content: renderUserProfiles(users), Ephemeral: true}
+		return Response{Content: r.renderUserProfiles(ctx, request, users), Ephemeral: true}
 	case "set", "add":
 		if denied := r.ensureGuildControl(ctx, request, "Only the Panda owner, server owner or administrator, or the current Panda admin role or user can set Panda user profiles."); denied.Content != "" {
 			return denied
@@ -993,7 +1036,7 @@ func (r *Router) handleAdminUserProfile(ctx context.Context, request Request) Re
 		if _, err := r.admin.ApplyUserProfile(ctx, request.GuildID, request.UserID, userID, profile); err != nil {
 			return Response{Content: "User profile could not be saved.", Ephemeral: true}
 		}
-		return Response{Content: fmt.Sprintf("%s is now a Panda %s user.", userMention(userID, username), admin.RoleProfileLabel(profile)), Ephemeral: true}
+		return Response{Content: fmt.Sprintf("%s is now a Panda %s user.", r.userDisplay(ctx, request, userID, username), admin.RoleProfileLabel(profile)), Ephemeral: true}
 	case "remove", "unset":
 		if denied := r.ensureGuildControl(ctx, request, "Only the Panda owner, server owner or administrator, or the current Panda admin role or user can remove Panda user profiles."); denied.Content != "" {
 			return denied
@@ -1008,7 +1051,7 @@ func (r *Router) handleAdminUserProfile(ctx context.Context, request Request) Re
 			}
 			return Response{Content: "User profile could not be removed.", Ephemeral: true}
 		}
-		return Response{Content: fmt.Sprintf("Removed the Panda %s profile from %s.", admin.RoleProfileLabel(profile), userMention(userID, username)), Ephemeral: true}
+		return Response{Content: fmt.Sprintf("Removed the Panda %s profile from %s.", admin.RoleProfileLabel(profile), r.userDisplay(ctx, request, userID, username)), Ephemeral: true}
 	default:
 		return Response{Content: "`action` must be `list`, `set`, or `remove`.", Ephemeral: true}
 	}
@@ -1026,14 +1069,14 @@ func userProfileOptions(request Request) (string, string, string, Response) {
 	return profile, userID, firstNonEmpty(request.Options["member_user_name"], request.Options["user_name"]), Response{}
 }
 
-func renderUserProfiles(users []store.GuildUserPermission) string {
+func (r *Router) renderUserProfiles(ctx context.Context, request Request, users []store.GuildUserPermission) string {
 	adminUsers := userIDsForPermission(users, admin.PermissionAdminBadge)
 	moderatorUsers := userIDsForPermission(users, admin.PermissionModerationUse)
 	var builder strings.Builder
 	builder.WriteString("Panda user profiles:\n")
-	builder.WriteString(userProfileLine("admin", adminUsers))
+	builder.WriteString(r.userProfileLine(ctx, request, "admin", adminUsers))
 	builder.WriteString("\n")
-	builder.WriteString(userProfileLine("moderator", moderatorUsers))
+	builder.WriteString(r.userProfileLine(ctx, request, "moderator", moderatorUsers))
 	builder.WriteString("\n\nModerator users include `assistant.use` and `moderation.use`.")
 	return builder.String()
 }
@@ -1055,13 +1098,13 @@ func userIDsForPermission(users []store.GuildUserPermission, permission string) 
 	return ids
 }
 
-func userProfileLine(profile string, userIDs []string) string {
+func (r *Router) userProfileLine(ctx context.Context, request Request, profile string, userIDs []string) string {
 	if len(userIDs) == 0 {
 		return fmt.Sprintf("- %s: not configured", profile)
 	}
 	values := make([]string, 0, len(userIDs))
 	for _, userID := range userIDs {
-		values = append(values, fmt.Sprintf("`%s`", userID))
+		values = append(values, r.userDisplay(ctx, request, userID, ""))
 	}
 	return fmt.Sprintf("- %s: %s", profile, strings.Join(values, ", "))
 }
@@ -1084,13 +1127,13 @@ func (r *Router) handleAdminMemberRole(ctx context.Context, request Request) Res
 		if err := r.memberRoles.AddMemberRole(ctx, memberRequest); err != nil {
 			return Response{Content: "Discord role could not be assigned. Check Panda's Manage Roles permission and role hierarchy.", Ephemeral: true}
 		}
-		return Response{Content: fmt.Sprintf("Assigned %s to %s.", roleDisplay(memberRequest.RoleID, request.Options["role_name"]), userMention(memberRequest.UserID, request.Options["member_user_name"])), Ephemeral: true}
+		return Response{Content: fmt.Sprintf("Assigned %s to %s.", r.roleDisplay(ctx, request, memberRequest.RoleID, request.Options["role_name"]), r.userDisplay(ctx, request, memberRequest.UserID, request.Options["member_user_name"])), Ephemeral: true}
 	case "remove", "unassign", "unset":
 		memberRequest.Reason = "Panda admin member-role remove"
 		if err := r.memberRoles.RemoveMemberRole(ctx, memberRequest); err != nil {
 			return Response{Content: "Discord role could not be removed. Check Panda's Manage Roles permission and role hierarchy.", Ephemeral: true}
 		}
-		return Response{Content: fmt.Sprintf("Removed %s from %s.", roleDisplay(memberRequest.RoleID, request.Options["role_name"]), userMention(memberRequest.UserID, request.Options["member_user_name"])), Ephemeral: true}
+		return Response{Content: fmt.Sprintf("Removed %s from %s.", r.roleDisplay(ctx, request, memberRequest.RoleID, request.Options["role_name"]), r.userDisplay(ctx, request, memberRequest.UserID, request.Options["member_user_name"])), Ephemeral: true}
 	default:
 		return Response{Content: "`action` must be `add` or `remove`.", Ephemeral: true}
 	}
@@ -1109,12 +1152,11 @@ func memberRoleOptions(request Request) (MemberRoleRequest, Response) {
 }
 
 func userMention(userID, username string) string {
-	userID = strings.TrimSpace(userID)
 	username = strings.TrimSpace(username)
 	if username == "" {
-		return fmt.Sprintf("`%s`", userID)
+		return "the selected user"
 	}
-	return fmt.Sprintf("`%s` (`%s`)", username, userID)
+	return discordDisplayLabel(username)
 }
 
 func normalizeDiscordUserID(value string) string {
@@ -1137,42 +1179,191 @@ func (r *Router) handleAdminToolAccess(ctx context.Context, request Request) Res
 	action := strings.ToLower(strings.TrimSpace(firstNonEmpty(request.Options["action"], "list")))
 	toolName := strings.ToLower(strings.TrimSpace(firstNonEmpty(request.Options["tool_name"], request.Options["tool"])))
 	roleID := strings.TrimSpace(firstNonEmpty(request.Options["role_id"], request.Options["role"]))
+	userID := normalizeDiscordUserID(firstNonEmpty(request.Options["member_user_id"], firstNonEmpty(request.Options["user_id"], firstNonEmpty(request.Options["member"], request.Options["user"]))))
+	targetType := strings.ToLower(strings.TrimSpace(firstNonEmpty(request.Options["target_type"], request.Options["subject_type"])))
+	if targetType == "member" {
+		targetType = "user"
+	}
 	switch action {
 	case "list", "":
-		roles, err := r.admin.ListToolRoles(ctx, request.GuildID)
+		rules, err := r.admin.ListToolAccess(ctx, request.GuildID)
 		if err != nil {
 			return Response{Content: "Tool access lookup failed.", Ephemeral: true}
 		}
-		if len(roles) == 0 {
-			return Response{Content: "No role-specific tool access rules are configured. Native tools use their normal permission policy; composed tools are admin-only until a role is allowed.", Ephemeral: true}
+		if len(rules) == 0 {
+			return Response{Content: "No user- or role-specific tool access rules are configured. Native tools use their normal permission policy; composed tools are admin-only until a role or user is allowed.", Ephemeral: true}
 		}
 		lines := []string{"Tool access rules:"}
-		for _, role := range roles {
-			lines = append(lines, fmt.Sprintf("- `%s` -> `%s`", role.ToolName, role.RoleID))
+		for _, rule := range rules {
+			lines = append(lines, fmt.Sprintf("- `%s` %s -> %s", rule.ToolName, rule.Rule, r.toolAccessRuleTargetDisplay(ctx, request, rule)))
 		}
 		return Response{Content: strings.Join(lines, "\n"), Ephemeral: true}
 	case "add", "allow":
-		if toolName == "" || roleID == "" {
-			return Response{Content: "Provide `tool_name` and `role` to allow a role to use a tool.", Ephemeral: true}
+		if toolName == "" {
+			return Response{Content: "Provide `tool_name` and a `role` or `user` to allow tool access.", Ephemeral: true}
 		}
-		toolRole, err := r.admin.AddToolRole(ctx, request.GuildID, request.UserID, toolName, roleID)
+		target, denied := adminToolTarget(roleID, userID, targetType)
+		if denied.Content != "" {
+			return denied
+		}
+		if target.kind == "user" {
+			toolUser, err := r.admin.AddToolUser(ctx, request.GuildID, request.UserID, toolName, target.id)
+			if err != nil {
+				return toolAccessWriteError(err)
+			}
+			return Response{Content: fmt.Sprintf("Allowed %s to use `%s`.", r.userDisplay(ctx, request, toolUser.UserID, firstNonEmpty(request.Options["member_user_name"], request.Options["user_name"])), toolUser.ToolName), Ephemeral: true}
+		}
+		toolRole, err := r.admin.AddToolRole(ctx, request.GuildID, request.UserID, toolName, target.id)
 		if err != nil {
-			return Response{Content: "Tool access could not be saved.", Ephemeral: true}
+			return toolAccessWriteError(err)
 		}
-		return Response{Content: fmt.Sprintf("Allowed %s to use `%s`.", roleDisplay(toolRole.RoleID, request.Options["role_name"]), toolRole.ToolName), Ephemeral: true}
-	case "remove", "deny":
-		if toolName == "" || roleID == "" {
-			return Response{Content: "Provide `tool_name` and `role` to remove tool access.", Ephemeral: true}
+		return Response{Content: fmt.Sprintf("Allowed %s to use `%s`.", r.roleDisplay(ctx, request, toolRole.RoleID, request.Options["role_name"]), toolRole.ToolName), Ephemeral: true}
+	case "deny", "block", "disallow", "disable":
+		if toolName == "" {
+			return Response{Content: "Provide `tool_name` and a `role` or `user` to deny tool access.", Ephemeral: true}
 		}
-		if err := r.admin.RemoveToolRole(ctx, request.GuildID, request.UserID, toolName, roleID); err != nil {
+		target, denied := adminToolTarget(roleID, userID, targetType)
+		if denied.Content != "" {
+			return denied
+		}
+		if target.kind == "user" {
+			toolUser, err := r.admin.DenyToolUser(ctx, request.GuildID, request.UserID, toolName, target.id)
+			if err != nil {
+				return toolAccessWriteError(err)
+			}
+			return Response{Content: fmt.Sprintf("Denied %s from `%s`.", r.userDisplay(ctx, request, toolUser.UserID, firstNonEmpty(request.Options["member_user_name"], request.Options["user_name"])), toolUser.ToolName), Ephemeral: true}
+		}
+		toolRole, err := r.admin.DenyToolRole(ctx, request.GuildID, request.UserID, toolName, target.id)
+		if err != nil {
+			return toolAccessWriteError(err)
+		}
+		return Response{Content: fmt.Sprintf("Denied %s from `%s`.", r.roleDisplay(ctx, request, toolRole.RoleID, request.Options["role_name"]), toolRole.ToolName), Ephemeral: true}
+	case "remove":
+		if toolName == "" {
+			return Response{Content: "Provide `tool_name` and a `role` or `user` to remove tool access.", Ephemeral: true}
+		}
+		target, denied := adminToolTarget(roleID, userID, targetType)
+		if denied.Content != "" {
+			return denied
+		}
+		if target.kind == "user" {
+			if err := r.admin.RemoveToolUser(ctx, request.GuildID, request.UserID, toolName, target.id); err != nil {
+				if errors.Is(err, repository.ErrNotFound) {
+					return Response{Content: "That tool access rule was not found.", Ephemeral: true}
+				}
+				return Response{Content: "Tool access could not be removed.", Ephemeral: true}
+			}
+			return Response{Content: fmt.Sprintf("Removed %s from `%s`.", r.userDisplay(ctx, request, target.id, firstNonEmpty(request.Options["member_user_name"], request.Options["user_name"])), toolName), Ephemeral: true}
+		}
+		if err := r.admin.RemoveToolRole(ctx, request.GuildID, request.UserID, toolName, target.id); err != nil {
 			if errors.Is(err, repository.ErrNotFound) {
 				return Response{Content: "That tool access rule was not found.", Ephemeral: true}
 			}
 			return Response{Content: "Tool access could not be removed.", Ephemeral: true}
 		}
-		return Response{Content: fmt.Sprintf("Removed %s from `%s`.", roleDisplay(roleID, request.Options["role_name"]), toolName), Ephemeral: true}
+		return Response{Content: fmt.Sprintf("Removed %s from `%s`.", r.roleDisplay(ctx, request, target.id, request.Options["role_name"]), toolName), Ephemeral: true}
+	case "open", "public", "everyone", "allow_everyone":
+		toolNames, permissions, err := r.adminToolAccessOpenTargets(toolName, firstNonEmpty(request.Options["tool_group"], request.Options["group"]))
+		if err != nil {
+			return Response{Content: err.Error(), Ephemeral: true}
+		}
+		var removedPermissionRules int64
+		var removedToolRules int64
+		for _, permission := range permissions {
+			result, err := r.admin.ClearPermissionAccess(ctx, request.GuildID, request.UserID, permission)
+			if err != nil {
+				return Response{Content: "Permission access could not be opened.", Ephemeral: true}
+			}
+			removedPermissionRules += result.RemovedRoleRules + result.RemovedUserRules
+		}
+		for _, toolName := range toolNames {
+			result, err := r.admin.ClearToolAccess(ctx, request.GuildID, request.UserID, toolName)
+			if err != nil {
+				return Response{Content: "Tool access could not be opened.", Ephemeral: true}
+			}
+			removedToolRules += result.RemovedRoleRules + result.RemovedUserRules
+		}
+		return Response{Content: fmt.Sprintf("Opened `%s` to everyone. Cleared %d permission rule(s) and %d tool access rule(s).", strings.Join(toolNames, "`, `"), removedPermissionRules, removedToolRules), Ephemeral: true}
 	default:
-		return Response{Content: "`action` must be `list`, `add`, or `remove`.", Ephemeral: true}
+		return Response{Content: "`action` must be `list`, `add`, `deny`, `remove`, or `open`.", Ephemeral: true}
+	}
+}
+
+type adminToolAccessTarget struct {
+	kind string
+	id   string
+}
+
+func adminToolTarget(roleID, userID, targetType string) (adminToolAccessTarget, Response) {
+	roleID = strings.TrimSpace(roleID)
+	userID = strings.TrimSpace(userID)
+	switch targetType {
+	case "role":
+		if roleID == "" {
+			return adminToolAccessTarget{}, Response{Content: "Provide `role` for role-specific tool access.", Ephemeral: true}
+		}
+		return adminToolAccessTarget{kind: "role", id: roleID}, Response{}
+	case "user":
+		if userID == "" {
+			return adminToolAccessTarget{}, Response{Content: "Provide `user` for user-specific tool access.", Ephemeral: true}
+		}
+		return adminToolAccessTarget{kind: "user", id: userID}, Response{}
+	case "":
+		if roleID != "" && userID != "" {
+			return adminToolAccessTarget{}, Response{Content: "Provide either `role` or `user` for tool access, not both.", Ephemeral: true}
+		}
+		if userID != "" {
+			return adminToolAccessTarget{kind: "user", id: userID}, Response{}
+		}
+		if roleID != "" {
+			return adminToolAccessTarget{kind: "role", id: roleID}, Response{}
+		}
+		return adminToolAccessTarget{}, Response{Content: "Provide a `role` or `user` for tool access.", Ephemeral: true}
+	default:
+		return adminToolAccessTarget{}, Response{Content: "`target_type` must be `role` or `user`.", Ephemeral: true}
+	}
+}
+
+func splitConfirmationCSV(value string) []string {
+	fields := strings.Split(value, ",")
+	result := make([]string, 0, len(fields))
+	seen := map[string]struct{}{}
+	for _, field := range fields {
+		field = strings.TrimSpace(field)
+		if field == "" {
+			continue
+		}
+		if _, ok := seen[field]; ok {
+			continue
+		}
+		seen[field] = struct{}{}
+		result = append(result, field)
+	}
+	return result
+}
+
+func (r *Router) adminToolAccessOpenTargets(toolName, group string) ([]string, []string, error) {
+	if r.tools == nil {
+		return nil, nil, fmt.Errorf("Tool access resolver is not configured.")
+	}
+	return r.tools.ToolAccessOpenTargets(toolName, group)
+}
+
+func toolAccessWriteError(err error) Response {
+	if errors.Is(err, admin.ErrToolAccessEveryoneRole) {
+		return Response{Content: err.Error(), Ephemeral: true}
+	}
+	return Response{Content: "Tool access could not be saved.", Ephemeral: true}
+}
+
+func (r *Router) toolAccessRuleTargetDisplay(ctx context.Context, request Request, rule admin.ToolAccessRule) string {
+	switch strings.ToLower(strings.TrimSpace(rule.SubjectType)) {
+	case "user", "member":
+		return r.userDisplay(ctx, request, rule.SubjectID, "")
+	case "role":
+		return r.roleDisplay(ctx, request, rule.SubjectID, "")
+	default:
+		return "the selected target"
 	}
 }
 
@@ -1185,37 +1376,37 @@ func (r *Router) handleAdminChannelAccess(ctx context.Context, request Request) 
 		if err != nil {
 			return Response{Content: "Channel access lookup failed.", Ephemeral: true}
 		}
-		return Response{Content: renderChannelRules(rules), Ephemeral: true}
+		return Response{Content: r.renderChannelRules(ctx, request, rules), Ephemeral: true}
 	case "allow", "add":
 		if channelID == "" {
 			return Response{Content: "Choose a `channel` to allow Panda assistant use there.", Ephemeral: true}
 		}
 		if dryRunRequested(request) {
-			return dryRunResponse("Panda assistant use would be allowed in %s.", channelDisplay(channelID, channelName))
+			return dryRunResponse("Panda assistant use would be allowed in %s.", r.channelDisplay(ctx, request, channelID, channelName))
 		}
 		rule, err := r.admin.SetChannelRule(ctx, request.GuildID, request.UserID, channelID, "allow")
 		if err != nil {
 			return Response{Content: "Channel access rule could not be saved.", Ephemeral: true}
 		}
-		return Response{Content: fmt.Sprintf("Allowed Panda assistant use in %s. Because an allow rule exists, other channels need their own allow rule unless the user is an admin.", channelDisplay(rule.ChannelID, channelName)), Ephemeral: true}
+		return Response{Content: fmt.Sprintf("Allowed Panda assistant use in %s. Because an allow rule exists, other channels need their own allow rule unless the user is an admin.", r.channelDisplay(ctx, request, rule.ChannelID, channelName)), Ephemeral: true}
 	case "deny", "block":
 		if channelID == "" {
 			return Response{Content: "Choose a `channel` to deny Panda assistant use there.", Ephemeral: true}
 		}
 		if dryRunRequested(request) {
-			return dryRunResponse("Panda assistant use would be denied in %s.", channelDisplay(channelID, channelName))
+			return dryRunResponse("Panda assistant use would be denied in %s.", r.channelDisplay(ctx, request, channelID, channelName))
 		}
 		rule, err := r.admin.SetChannelRule(ctx, request.GuildID, request.UserID, channelID, "deny")
 		if err != nil {
 			return Response{Content: "Channel access rule could not be saved.", Ephemeral: true}
 		}
-		return Response{Content: fmt.Sprintf("Denied Panda assistant use in %s.", channelDisplay(rule.ChannelID, channelName)), Ephemeral: true}
+		return Response{Content: fmt.Sprintf("Denied Panda assistant use in %s.", r.channelDisplay(ctx, request, rule.ChannelID, channelName)), Ephemeral: true}
 	case "remove", "clear":
 		if channelID == "" {
 			return Response{Content: "Choose a `channel` to remove from Panda channel access rules.", Ephemeral: true}
 		}
 		if dryRunRequested(request) {
-			return dryRunResponse("The Panda channel access rule for %s would be removed.", channelDisplay(channelID, channelName))
+			return dryRunResponse("The Panda channel access rule for %s would be removed.", r.channelDisplay(ctx, request, channelID, channelName))
 		}
 		if err := r.admin.RemoveChannelRule(ctx, request.GuildID, request.UserID, channelID); err != nil {
 			if errors.Is(err, repository.ErrNotFound) {
@@ -1223,7 +1414,7 @@ func (r *Router) handleAdminChannelAccess(ctx context.Context, request Request) 
 			}
 			return Response{Content: "Channel access rule could not be removed.", Ephemeral: true}
 		}
-		return Response{Content: fmt.Sprintf("Removed Panda channel access rule for %s.", channelDisplay(channelID, channelName)), Ephemeral: true}
+		return Response{Content: fmt.Sprintf("Removed Panda channel access rule for %s.", r.channelDisplay(ctx, request, channelID, channelName)), Ephemeral: true}
 	default:
 		return Response{Content: "`action` must be `list`, `allow`, `deny`, or `remove`.", Ephemeral: true}
 	}
@@ -1247,12 +1438,12 @@ func channelDisplay(channelID, channelName string) string {
 	channelID = normalizeChannelID(channelID)
 	channelName = strings.TrimPrefix(strings.TrimSpace(channelName), "#")
 	if channelName != "" {
-		return fmt.Sprintf("`#%s` (`%s`)", channelName, channelID)
+		return discordDisplayLabel("#" + channelName)
 	}
-	return fmt.Sprintf("`%s`", channelID)
+	return "the selected channel"
 }
 
-func renderChannelRules(rules []store.GuildChannelRule) string {
+func (r *Router) renderChannelRules(ctx context.Context, request Request, rules []store.GuildChannelRule) string {
 	if len(rules) == 0 {
 		return "No channel access rules are configured. Panda assistant use is available in every channel where Discord permissions allow it."
 	}
@@ -1269,7 +1460,7 @@ func renderChannelRules(rules []store.GuildChannelRule) string {
 	}
 	lines := []string{header}
 	for _, rule := range rules {
-		lines = append(lines, fmt.Sprintf("- `%s` %s", rule.Rule, channelDisplay(rule.ChannelID, "")))
+		lines = append(lines, fmt.Sprintf("- `%s` %s", rule.Rule, r.channelDisplay(ctx, request, rule.ChannelID, "")))
 	}
 	if hasAllow {
 		lines = append(lines, "Only allowed channels can use Panda assistant features unless the user is an admin.")
@@ -1605,6 +1796,9 @@ func (r *Router) HandleBackgroundTask(ctx context.Context, task BackgroundTask) 
 		ChannelID: task.ChannelID,
 		UserID:    task.UserID,
 	}
+	if response := r.maintenanceResponse(ctx); response.Content != "" {
+		return response
+	}
 	if denied := r.ensureFeatureEnabled(ctx, request, features.AssistantChat); denied.Content != "" {
 		return denied
 	}
@@ -1747,7 +1941,7 @@ func (r *Router) HandleToolConfirmation(ctx context.Context, request ToolConfirm
 		if _, err := r.admin.AddRolePermission(ctx, request.Request.GuildID, request.Request.UserID, roleID, permission); err != nil {
 			return Response{Content: "Role permission could not be saved.", Ephemeral: true}
 		}
-		return Response{Content: fmt.Sprintf("Granted `%s` to role `%s`.", permission, roleID), Ephemeral: true}
+		return Response{Content: fmt.Sprintf("Granted `%s` to %s.", permission, r.roleDisplay(ctx, request.Request, roleID, request.Options["role_display"])), Ephemeral: true}
 	case toolActionRolePermissionRemove:
 		if denied := r.ensureToolConfirmationPermission(ctx, request.Request, r.admin.CanWriteConfig, "You do not have permission to manage role permissions."); denied.Content != "" {
 			return denied
@@ -1760,7 +1954,7 @@ func (r *Router) HandleToolConfirmation(ctx context.Context, request ToolConfirm
 		if err := r.admin.RemoveRolePermission(ctx, request.Request.GuildID, request.Request.UserID, roleID, permission); err != nil {
 			return toolConfirmationError(err, "Role permission could not be removed.", "That role permission was not found.")
 		}
-		return Response{Content: fmt.Sprintf("Removed `%s` from role `%s`.", permission, roleID), Ephemeral: true}
+		return Response{Content: fmt.Sprintf("Removed `%s` from %s.", permission, r.roleDisplay(ctx, request.Request, roleID, request.Options["role_display"])), Ephemeral: true}
 	case toolActionRoleProfileAdd:
 		if denied := r.ensureGuildControl(ctx, request.Request, "Only the Panda owner, server owner or administrator, or the current Panda admin role or user can set Panda role profiles."); denied.Content != "" {
 			return denied
@@ -1773,7 +1967,7 @@ func (r *Router) HandleToolConfirmation(ctx context.Context, request ToolConfirm
 		if _, err := r.admin.ApplyRoleProfile(ctx, request.Request.GuildID, request.Request.UserID, roleID, profile); err != nil {
 			return Response{Content: "Role profile could not be saved.", Ephemeral: true}
 		}
-		return Response{Content: fmt.Sprintf("Role `%s` is now a Panda %s role.", roleID, admin.RoleProfileLabel(profile)), Ephemeral: true}
+		return Response{Content: fmt.Sprintf("%s is now a Panda %s role.", r.roleDisplay(ctx, request.Request, roleID, request.Options["role_display"]), admin.RoleProfileLabel(profile)), Ephemeral: true}
 	case toolActionRoleProfileRemove:
 		if denied := r.ensureGuildControl(ctx, request.Request, "Only the Panda owner, server owner or administrator, or the current Panda admin role or user can remove Panda role profiles."); denied.Content != "" {
 			return denied
@@ -1786,7 +1980,7 @@ func (r *Router) HandleToolConfirmation(ctx context.Context, request ToolConfirm
 		if err := r.admin.RemoveRoleProfile(ctx, request.Request.GuildID, request.Request.UserID, roleID, profile); err != nil {
 			return toolConfirmationError(err, "Role profile could not be removed.", "That role profile was not configured for this role.")
 		}
-		return Response{Content: fmt.Sprintf("Removed the Panda %s profile from role `%s`.", admin.RoleProfileLabel(profile), roleID), Ephemeral: true}
+		return Response{Content: fmt.Sprintf("Removed the Panda %s profile from %s.", admin.RoleProfileLabel(profile), r.roleDisplay(ctx, request.Request, roleID, request.Options["role_display"])), Ephemeral: true}
 	case toolActionUserPermissionAdd:
 		if denied := r.ensureToolConfirmationPermission(ctx, request.Request, r.admin.CanWriteConfig, "You do not have permission to manage user permissions."); denied.Content != "" {
 			return denied
@@ -1799,7 +1993,7 @@ func (r *Router) HandleToolConfirmation(ctx context.Context, request ToolConfirm
 		if _, err := r.admin.AddUserPermission(ctx, request.Request.GuildID, request.Request.UserID, userID, permission); err != nil {
 			return Response{Content: "User permission could not be saved.", Ephemeral: true}
 		}
-		return Response{Content: fmt.Sprintf("Granted `%s` to user `%s`.", permission, userID), Ephemeral: true}
+		return Response{Content: fmt.Sprintf("Granted `%s` to %s.", permission, r.userDisplay(ctx, request.Request, userID, request.Options["user_display"])), Ephemeral: true}
 	case toolActionUserPermissionRemove:
 		if denied := r.ensureToolConfirmationPermission(ctx, request.Request, r.admin.CanWriteConfig, "You do not have permission to manage user permissions."); denied.Content != "" {
 			return denied
@@ -1812,7 +2006,7 @@ func (r *Router) HandleToolConfirmation(ctx context.Context, request ToolConfirm
 		if err := r.admin.RemoveUserPermission(ctx, request.Request.GuildID, request.Request.UserID, userID, permission); err != nil {
 			return toolConfirmationError(err, "User permission could not be removed.", "That user permission was not found.")
 		}
-		return Response{Content: fmt.Sprintf("Removed `%s` from user `%s`.", permission, userID), Ephemeral: true}
+		return Response{Content: fmt.Sprintf("Removed `%s` from %s.", permission, r.userDisplay(ctx, request.Request, userID, request.Options["user_display"])), Ephemeral: true}
 	case toolActionUserProfileAdd:
 		if denied := r.ensureGuildControl(ctx, request.Request, "Only the Panda owner, server owner or administrator, or the current Panda admin role or user can set Panda user profiles."); denied.Content != "" {
 			return denied
@@ -1825,7 +2019,7 @@ func (r *Router) HandleToolConfirmation(ctx context.Context, request ToolConfirm
 		if _, err := r.admin.ApplyUserProfile(ctx, request.Request.GuildID, request.Request.UserID, userID, profile); err != nil {
 			return Response{Content: "User profile could not be saved.", Ephemeral: true}
 		}
-		return Response{Content: fmt.Sprintf("User `%s` is now a Panda %s user.", userID, admin.RoleProfileLabel(profile)), Ephemeral: true}
+		return Response{Content: fmt.Sprintf("%s is now a Panda %s user.", r.userDisplay(ctx, request.Request, userID, request.Options["user_display"]), admin.RoleProfileLabel(profile)), Ephemeral: true}
 	case toolActionUserProfileRemove:
 		if denied := r.ensureGuildControl(ctx, request.Request, "Only the Panda owner, server owner or administrator, or the current Panda admin role or user can remove Panda user profiles."); denied.Content != "" {
 			return denied
@@ -1838,7 +2032,7 @@ func (r *Router) HandleToolConfirmation(ctx context.Context, request ToolConfirm
 		if err := r.admin.RemoveUserProfile(ctx, request.Request.GuildID, request.Request.UserID, userID, profile); err != nil {
 			return toolConfirmationError(err, "User profile could not be removed.", "That user profile was not configured for this user.")
 		}
-		return Response{Content: fmt.Sprintf("Removed the Panda %s profile from user `%s`.", admin.RoleProfileLabel(profile), userID), Ephemeral: true}
+		return Response{Content: fmt.Sprintf("Removed the Panda %s profile from %s.", admin.RoleProfileLabel(profile), r.userDisplay(ctx, request.Request, userID, request.Options["user_display"])), Ephemeral: true}
 	case toolActionDiscordRoleCreate:
 		if denied := r.ensureToolConfirmationPermission(ctx, request.Request, r.admin.CanWriteConfig, "You do not have permission to create Discord roles."); denied.Content != "" {
 			return denied
@@ -1859,7 +2053,7 @@ func (r *Router) HandleToolConfirmation(ctx context.Context, request ToolConfirm
 		if err != nil {
 			return discordRoleCreateErrorResponse(err)
 		}
-		return Response{Content: fmt.Sprintf("Created Discord role `%s` (`%s`).", role.Name, role.ID), Ephemeral: true}
+		return Response{Content: fmt.Sprintf("Created Discord role `%s`.", role.Name), Ephemeral: true}
 	case toolActionDiscordPollCreate:
 		return r.handleDiscordPollConfirmation(ctx, request)
 	case toolActionDiscordWriteExecute:
@@ -1885,32 +2079,83 @@ func (r *Router) HandleToolConfirmation(ctx context.Context, request ToolConfirm
 			if err := r.memberRoles.AddMemberRole(ctx, memberRequest); err != nil {
 				return Response{Content: "Discord role could not be assigned. Check Panda's Manage Roles permission and role hierarchy.", Ephemeral: true}
 			}
-			return Response{Content: fmt.Sprintf("Assigned role `%s` to user `%s`.", memberRequest.RoleID, memberRequest.UserID), Ephemeral: true}
+			return Response{Content: fmt.Sprintf("Assigned %s to %s.", r.roleDisplay(ctx, request.Request, memberRequest.RoleID, request.Options["role_display"]), r.userDisplay(ctx, request.Request, memberRequest.UserID, request.Options["user_display"])), Ephemeral: true}
 		}
 		memberRequest.Reason = "Panda natural-language member-role remove"
 		if err := r.memberRoles.RemoveMemberRole(ctx, memberRequest); err != nil {
 			return Response{Content: "Discord role could not be removed. Check Panda's Manage Roles permission and role hierarchy.", Ephemeral: true}
 		}
-		return Response{Content: fmt.Sprintf("Removed role `%s` from user `%s`.", memberRequest.RoleID, memberRequest.UserID), Ephemeral: true}
-	case toolActionToolAccessAdd, toolActionToolAccessRemove:
+		return Response{Content: fmt.Sprintf("Removed %s from %s.", r.roleDisplay(ctx, request.Request, memberRequest.RoleID, request.Options["role_display"]), r.userDisplay(ctx, request.Request, memberRequest.UserID, request.Options["user_display"])), Ephemeral: true}
+	case toolActionToolAccessAdd, toolActionToolAccessRemove, toolActionToolAccessDeny:
 		if denied := r.ensureToolConfirmationPermission(ctx, request.Request, r.admin.CanWriteConfig, "You do not have permission to manage tool access."); denied.Content != "" {
 			return denied
 		}
 		toolName := strings.TrimSpace(request.Options["tool_name"])
 		roleID := strings.TrimSpace(request.Options["role_id"])
-		if toolName == "" || roleID == "" {
+		userID := strings.TrimSpace(request.Options["user_id"])
+		if toolName == "" || (roleID == "" && userID == "") || (roleID != "" && userID != "") {
 			return Response{Content: "That tool-access confirmation is invalid.", Ephemeral: true}
 		}
 		if request.Action == toolActionToolAccessAdd {
-			if _, err := r.admin.AddToolRole(ctx, request.Request.GuildID, request.Request.UserID, toolName, roleID); err != nil {
-				return Response{Content: "Tool access could not be saved.", Ephemeral: true}
+			if userID != "" {
+				if _, err := r.admin.AddToolUser(ctx, request.Request.GuildID, request.Request.UserID, toolName, userID); err != nil {
+					return toolAccessWriteError(err)
+				}
+				return Response{Content: fmt.Sprintf("Allowed %s to use `%s`.", r.userDisplay(ctx, request.Request, userID, request.Options["user_display"]), toolName), Ephemeral: true}
 			}
-			return Response{Content: fmt.Sprintf("Allowed `%s` for role `%s`.", toolName, roleID), Ephemeral: true}
+			if _, err := r.admin.AddToolRole(ctx, request.Request.GuildID, request.Request.UserID, toolName, roleID); err != nil {
+				return toolAccessWriteError(err)
+			}
+			return Response{Content: fmt.Sprintf("Allowed %s to use `%s`.", r.roleDisplay(ctx, request.Request, roleID, request.Options["role_display"]), toolName), Ephemeral: true}
+		}
+		if request.Action == toolActionToolAccessDeny {
+			if userID != "" {
+				if _, err := r.admin.DenyToolUser(ctx, request.Request.GuildID, request.Request.UserID, toolName, userID); err != nil {
+					return toolAccessWriteError(err)
+				}
+				return Response{Content: fmt.Sprintf("Denied %s from `%s`.", r.userDisplay(ctx, request.Request, userID, request.Options["user_display"]), toolName), Ephemeral: true}
+			}
+			if _, err := r.admin.DenyToolRole(ctx, request.Request.GuildID, request.Request.UserID, toolName, roleID); err != nil {
+				return toolAccessWriteError(err)
+			}
+			return Response{Content: fmt.Sprintf("Denied %s from `%s`.", r.roleDisplay(ctx, request.Request, roleID, request.Options["role_display"]), toolName), Ephemeral: true}
+		}
+		if userID != "" {
+			if err := r.admin.RemoveToolUser(ctx, request.Request.GuildID, request.Request.UserID, toolName, userID); err != nil {
+				return toolConfirmationError(err, "Tool access could not be removed.", "That tool access rule was not found.")
+			}
+			return Response{Content: fmt.Sprintf("Removed %s from `%s`.", r.userDisplay(ctx, request.Request, userID, request.Options["user_display"]), toolName), Ephemeral: true}
 		}
 		if err := r.admin.RemoveToolRole(ctx, request.Request.GuildID, request.Request.UserID, toolName, roleID); err != nil {
 			return toolConfirmationError(err, "Tool access could not be removed.", "That tool access rule was not found.")
 		}
-		return Response{Content: fmt.Sprintf("Removed `%s` access for role `%s`.", toolName, roleID), Ephemeral: true}
+		return Response{Content: fmt.Sprintf("Removed %s from `%s`.", r.roleDisplay(ctx, request.Request, roleID, request.Options["role_display"]), toolName), Ephemeral: true}
+	case toolActionToolAccessOpen:
+		if denied := r.ensureToolConfirmationPermission(ctx, request.Request, r.admin.CanWriteConfig, "You do not have permission to manage tool access."); denied.Content != "" {
+			return denied
+		}
+		toolNames := splitConfirmationCSV(request.Options["tool_names"])
+		permissions := splitConfirmationCSV(request.Options["permissions"])
+		if len(toolNames) == 0 {
+			return Response{Content: "That tool-access confirmation is invalid.", Ephemeral: true}
+		}
+		var removedPermissionRules int64
+		var removedToolRules int64
+		for _, permission := range permissions {
+			result, err := r.admin.ClearPermissionAccess(ctx, request.Request.GuildID, request.Request.UserID, permission)
+			if err != nil {
+				return Response{Content: "Permission access could not be opened.", Ephemeral: true}
+			}
+			removedPermissionRules += result.RemovedRoleRules + result.RemovedUserRules
+		}
+		for _, toolName := range toolNames {
+			result, err := r.admin.ClearToolAccess(ctx, request.Request.GuildID, request.Request.UserID, toolName)
+			if err != nil {
+				return Response{Content: "Tool access could not be opened.", Ephemeral: true}
+			}
+			removedToolRules += result.RemovedRoleRules + result.RemovedUserRules
+		}
+		return Response{Content: fmt.Sprintf("Opened `%s` to everyone. Cleared %d permission rule(s) and %d tool access rule(s).", strings.Join(toolNames, "`, `"), removedPermissionRules, removedToolRules), Ephemeral: true}
 	case toolActionChannelRuleSet:
 		if denied := r.ensureToolConfirmationPermission(ctx, request.Request, r.admin.CanWriteConfig, "You do not have permission to manage channel rules."); denied.Content != "" {
 			return denied
@@ -1924,7 +2169,7 @@ func (r *Router) HandleToolConfirmation(ctx context.Context, request ToolConfirm
 		if err != nil {
 			return Response{Content: "Channel rule could not be saved.", Ephemeral: true}
 		}
-		return Response{Content: fmt.Sprintf("Set `%s` channel access rule for `%s`.", saved.Rule, saved.ChannelID), Ephemeral: true}
+		return Response{Content: fmt.Sprintf("Set `%s` channel access rule for %s.", saved.Rule, r.channelDisplay(ctx, request.Request, saved.ChannelID, request.Options["channel_display"])), Ephemeral: true}
 	case toolActionChannelRuleRemove:
 		if denied := r.ensureToolConfirmationPermission(ctx, request.Request, r.admin.CanWriteConfig, "You do not have permission to manage channel rules."); denied.Content != "" {
 			return denied
@@ -1936,7 +2181,7 @@ func (r *Router) HandleToolConfirmation(ctx context.Context, request ToolConfirm
 		if err := r.admin.RemoveChannelRule(ctx, request.Request.GuildID, request.Request.UserID, channelID); err != nil {
 			return toolConfirmationError(err, "Channel rule could not be removed.", "That channel rule was not found.")
 		}
-		return Response{Content: fmt.Sprintf("Removed channel access rule for `%s`.", channelID), Ephemeral: true}
+		return Response{Content: fmt.Sprintf("Removed channel access rule for %s.", r.channelDisplay(ctx, request.Request, channelID, request.Options["channel_display"])), Ephemeral: true}
 	case toolActionComposedToolApprove:
 		if denied := r.ensureToolConfirmationPermission(ctx, request.Request, r.admin.CanApproveComposedTool, "You do not have permission to approve composed tools."); denied.Content != "" {
 			return denied
@@ -2275,6 +2520,38 @@ func (r *Router) ensureAssistantAllowed(ctx context.Context, request Request) Re
 	return Response{}
 }
 
+func (r *Router) maintenanceResponse(ctx context.Context) Response {
+	if r == nil || r.runtime == nil {
+		return Response{}
+	}
+	status, err := r.runtime.Status(ctx)
+	if err != nil {
+		slog.Warn("runtime status lookup failed", slog.Any("err", err))
+		return Response{
+			Content:   "Panda maintenance status could not be checked. Please try again later.",
+			Ephemeral: true,
+			Presentation: Presentation{
+				Title:  "Maintenance status unavailable",
+				Accent: AccentWarning,
+			},
+		}
+	}
+	if !status.Disabled {
+		return Response{}
+	}
+	return Response{
+		Content: status.EffectiveMessage,
+		Presentation: Presentation{
+			Title:  "Maintenance in progress",
+			Accent: AccentInfo,
+		},
+	}
+}
+
+func maintenanceExempt(request Request) bool {
+	return strings.EqualFold(strings.TrimSpace(request.Command), "ops") && request.IsOwner
+}
+
 func (r *Router) ensureThreadsAllowed(ctx context.Context, request Request) Response {
 	if denied := r.ensureFeatureEnabled(ctx, request, features.Threads); denied.Content != "" {
 		return denied
@@ -2380,6 +2657,7 @@ func assistantAccessRequest(request Request) admin.AssistantAccessRequest {
 
 type toolFilter struct {
 	allowed                 map[string]struct{}
+	denied                  map[string]struct{}
 	restricted              map[string]struct{}
 	requireExplicitComposed bool
 }
@@ -2393,12 +2671,13 @@ func (r *Router) toolFilter(ctx context.Context, request Request) toolFilter {
 	if err != nil || hasControl {
 		return toolFilter{}
 	}
-	roles, err := r.admin.ToolRoleAccess(ctx, request.GuildID, request.RoleIDs)
+	roles, err := r.admin.ToolUserRoleAccess(ctx, request.GuildID, request.UserID, request.RoleIDs)
 	if err != nil {
 		return toolFilter{allowed: map[string]struct{}{}, restricted: map[string]struct{}{}, requireExplicitComposed: true}
 	}
 	return toolFilter{
 		allowed:                 namesToSet(roles.AllowedTools),
+		denied:                  namesToSet(roles.DeniedTools),
 		restricted:              namesToSet(roles.RestrictedTools),
 		requireExplicitComposed: true,
 	}
@@ -2411,6 +2690,7 @@ func (r *Router) toolAccess(ctx context.Context, request Request, policy string)
 		Policy:                       policy,
 		Permissions:                  r.allowedToolPermissions(ctx, request),
 		AllowedTools:                 filter.allowed,
+		DeniedTools:                  filter.denied,
 		RestrictedTools:              filter.restricted,
 		EnabledFeatures:              enabledFeatures,
 		FeatureGateActive:            featureGateActive,

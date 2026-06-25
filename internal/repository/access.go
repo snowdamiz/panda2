@@ -3,6 +3,7 @@ package repository
 import (
 	"context"
 	"errors"
+	"sort"
 	"time"
 
 	"github.com/sn0w/panda2/internal/store"
@@ -82,6 +83,16 @@ func (r *AccessRepository) RemoveRolePermission(ctx context.Context, guildID, ro
 	return nil
 }
 
+func (r *AccessRepository) RemoveRolePermissionMappings(ctx context.Context, guildID, permission string) (int64, error) {
+	result := r.db.WithContext(ctx).
+		Where("guild_id = ? AND permission = ?", guildID, permission).
+		Delete(&store.GuildRole{})
+	if result.Error != nil {
+		return 0, result.Error
+	}
+	return result.RowsAffected, nil
+}
+
 func (r *AccessRepository) ListRolePermissions(ctx context.Context, guildID string) ([]store.GuildRole, error) {
 	var roles []store.GuildRole
 	err := r.db.WithContext(ctx).
@@ -148,6 +159,16 @@ func (r *AccessRepository) RemoveUserPermission(ctx context.Context, guildID, us
 	return nil
 }
 
+func (r *AccessRepository) RemoveUserPermissionMappings(ctx context.Context, guildID, permission string) (int64, error) {
+	result := r.db.WithContext(ctx).
+		Where("guild_id = ? AND permission = ?", guildID, permission).
+		Delete(&store.GuildUserPermission{})
+	if result.Error != nil {
+		return 0, result.Error
+	}
+	return result.RowsAffected, nil
+}
+
 func (r *AccessRepository) ListUserPermissions(ctx context.Context, guildID string) ([]store.GuildUserPermission, error) {
 	var users []store.GuildUserPermission
 	err := r.db.WithContext(ctx).
@@ -179,11 +200,24 @@ func (r *AccessRepository) UserHasPermission(ctx context.Context, guildID, userI
 }
 
 func (r *AccessRepository) AddToolRole(ctx context.Context, guildID, toolName, roleID string) (store.GuildToolRole, error) {
+	return r.setToolRoleRule(ctx, guildID, toolName, roleID, "allow")
+}
+
+func (r *AccessRepository) DenyToolRole(ctx context.Context, guildID, toolName, roleID string) (store.GuildToolRole, error) {
+	return r.setToolRoleRule(ctx, guildID, toolName, roleID, "deny")
+}
+
+func (r *AccessRepository) setToolRoleRule(ctx context.Context, guildID, toolName, roleID, rule string) (store.GuildToolRole, error) {
 	now := time.Now().UTC()
 	var toolRole store.GuildToolRole
 	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		err := tx.Where("guild_id = ? AND tool_name = ? AND role_id = ?", guildID, toolName, roleID).First(&toolRole).Error
 		if err == nil {
+			if err := tx.Model(&toolRole).Updates(map[string]any{"rule": rule, "updated_at": now}).Error; err != nil {
+				return err
+			}
+			toolRole.Rule = rule
+			toolRole.UpdatedAt = now
 			return nil
 		}
 		if !errors.Is(err, gorm.ErrRecordNotFound) {
@@ -193,6 +227,7 @@ func (r *AccessRepository) AddToolRole(ctx context.Context, guildID, toolName, r
 			GuildID:   guildID,
 			ToolName:  toolName,
 			RoleID:    roleID,
+			Rule:      rule,
 			CreatedAt: now,
 			UpdatedAt: now,
 		}
@@ -214,24 +249,114 @@ func (r *AccessRepository) RemoveToolRole(ctx context.Context, guildID, toolName
 	return nil
 }
 
+func (r *AccessRepository) RemoveToolRolesByTool(ctx context.Context, guildID, toolName string) (int64, error) {
+	result := r.db.WithContext(ctx).
+		Where("guild_id = ? AND tool_name = ?", guildID, toolName).
+		Delete(&store.GuildToolRole{})
+	if result.Error != nil {
+		return 0, result.Error
+	}
+	return result.RowsAffected, nil
+}
+
 func (r *AccessRepository) ListToolRoles(ctx context.Context, guildID string) ([]store.GuildToolRole, error) {
 	var roles []store.GuildToolRole
 	err := r.db.WithContext(ctx).
 		Where("guild_id = ?", guildID).
-		Order("tool_name ASC, role_id ASC").
+		Order("tool_name ASC, rule ASC, role_id ASC").
 		Find(&roles).Error
 	return roles, err
 }
 
-func (r *AccessRepository) RestrictedToolNames(ctx context.Context, guildID string) ([]string, error) {
-	var names []string
+func (r *AccessRepository) AddToolUser(ctx context.Context, guildID, toolName, userID string) (store.GuildToolUser, error) {
+	return r.setToolUserRule(ctx, guildID, toolName, userID, "allow")
+}
+
+func (r *AccessRepository) DenyToolUser(ctx context.Context, guildID, toolName, userID string) (store.GuildToolUser, error) {
+	return r.setToolUserRule(ctx, guildID, toolName, userID, "deny")
+}
+
+func (r *AccessRepository) setToolUserRule(ctx context.Context, guildID, toolName, userID, rule string) (store.GuildToolUser, error) {
+	now := time.Now().UTC()
+	var toolUser store.GuildToolUser
+	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		err := tx.Where("guild_id = ? AND tool_name = ? AND user_id = ?", guildID, toolName, userID).First(&toolUser).Error
+		if err == nil {
+			if err := tx.Model(&toolUser).Updates(map[string]any{"rule": rule, "updated_at": now}).Error; err != nil {
+				return err
+			}
+			toolUser.Rule = rule
+			toolUser.UpdatedAt = now
+			return nil
+		}
+		if !errors.Is(err, gorm.ErrRecordNotFound) {
+			return err
+		}
+		toolUser = store.GuildToolUser{
+			GuildID:   guildID,
+			ToolName:  toolName,
+			UserID:    userID,
+			Rule:      rule,
+			CreatedAt: now,
+			UpdatedAt: now,
+		}
+		return tx.Create(&toolUser).Error
+	})
+	return toolUser, err
+}
+
+func (r *AccessRepository) RemoveToolUser(ctx context.Context, guildID, toolName, userID string) error {
+	result := r.db.WithContext(ctx).
+		Where("guild_id = ? AND tool_name = ? AND user_id = ?", guildID, toolName, userID).
+		Delete(&store.GuildToolUser{})
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (r *AccessRepository) RemoveToolUsersByTool(ctx context.Context, guildID, toolName string) (int64, error) {
+	result := r.db.WithContext(ctx).
+		Where("guild_id = ? AND tool_name = ?", guildID, toolName).
+		Delete(&store.GuildToolUser{})
+	if result.Error != nil {
+		return 0, result.Error
+	}
+	return result.RowsAffected, nil
+}
+
+func (r *AccessRepository) ListToolUsers(ctx context.Context, guildID string) ([]store.GuildToolUser, error) {
+	var users []store.GuildToolUser
 	err := r.db.WithContext(ctx).
-		Model(&store.GuildToolRole{}).
 		Where("guild_id = ?", guildID).
+		Order("tool_name ASC, rule ASC, user_id ASC").
+		Find(&users).Error
+	return users, err
+}
+
+func (r *AccessRepository) RestrictedToolNames(ctx context.Context, guildID string) ([]string, error) {
+	var roleNames []string
+	if err := r.db.WithContext(ctx).
+		Model(&store.GuildToolRole{}).
+		Where("guild_id = ? AND rule = ?", guildID, "allow").
 		Distinct("tool_name").
 		Order("tool_name ASC").
-		Pluck("tool_name", &names).Error
-	return names, err
+		Pluck("tool_name", &roleNames).Error; err != nil {
+		return nil, err
+	}
+	var userNames []string
+	if err := r.db.WithContext(ctx).
+		Model(&store.GuildToolUser{}).
+		Where("guild_id = ? AND rule = ?", guildID, "allow").
+		Distinct("tool_name").
+		Order("tool_name ASC").
+		Pluck("tool_name", &userNames).Error; err != nil {
+		return nil, err
+	}
+	return distinctSortedToolNames(roleNames, userNames), nil
 }
 
 func (r *AccessRepository) ToolNamesForRoles(ctx context.Context, guildID string, roleIDs []string) ([]string, error) {
@@ -241,11 +366,71 @@ func (r *AccessRepository) ToolNamesForRoles(ctx context.Context, guildID string
 	var names []string
 	err := r.db.WithContext(ctx).
 		Model(&store.GuildToolRole{}).
-		Where("guild_id = ? AND role_id IN ?", guildID, roleIDs).
+		Where("guild_id = ? AND rule = ? AND role_id IN ?", guildID, "allow", roleIDs).
 		Distinct("tool_name").
 		Order("tool_name ASC").
 		Pluck("tool_name", &names).Error
 	return names, err
+}
+
+func (r *AccessRepository) DeniedToolNamesForRoles(ctx context.Context, guildID string, roleIDs []string) ([]string, error) {
+	if len(roleIDs) == 0 {
+		return nil, nil
+	}
+	var names []string
+	err := r.db.WithContext(ctx).
+		Model(&store.GuildToolRole{}).
+		Where("guild_id = ? AND rule = ? AND role_id IN ?", guildID, "deny", roleIDs).
+		Distinct("tool_name").
+		Order("tool_name ASC").
+		Pluck("tool_name", &names).Error
+	return names, err
+}
+
+func (r *AccessRepository) ToolNamesForUser(ctx context.Context, guildID, userID string) ([]string, error) {
+	if userID == "" {
+		return nil, nil
+	}
+	var names []string
+	err := r.db.WithContext(ctx).
+		Model(&store.GuildToolUser{}).
+		Where("guild_id = ? AND rule = ? AND user_id = ?", guildID, "allow", userID).
+		Distinct("tool_name").
+		Order("tool_name ASC").
+		Pluck("tool_name", &names).Error
+	return names, err
+}
+
+func (r *AccessRepository) DeniedToolNamesForUser(ctx context.Context, guildID, userID string) ([]string, error) {
+	if userID == "" {
+		return nil, nil
+	}
+	var names []string
+	err := r.db.WithContext(ctx).
+		Model(&store.GuildToolUser{}).
+		Where("guild_id = ? AND rule = ? AND user_id = ?", guildID, "deny", userID).
+		Distinct("tool_name").
+		Order("tool_name ASC").
+		Pluck("tool_name", &names).Error
+	return names, err
+}
+
+func distinctSortedToolNames(groups ...[]string) []string {
+	seen := map[string]struct{}{}
+	for _, group := range groups {
+		for _, name := range group {
+			if name == "" {
+				continue
+			}
+			seen[name] = struct{}{}
+		}
+	}
+	names := make([]string, 0, len(seen))
+	for name := range seen {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
 }
 
 func (r *AccessRepository) SetChannelRule(ctx context.Context, guildID, channelID, rule string) (store.GuildChannelRule, error) {

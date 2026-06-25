@@ -3,6 +3,7 @@ import { shortWalletAddress } from './account';
 import { createWalletOption } from './wallet-options';
 import { CouponsPanel } from './admin-coupons';
 import { GuildsPanel } from './admin-guilds';
+import { RuntimePanel } from './admin-runtime';
 import {
   AdminSessionManager,
   adminSessionExpiredEvent,
@@ -61,7 +62,9 @@ class AdminConsole {
     this.nodes.tabPanels.forEach((panel) => {
       const key = panel.dataset.adminTab;
       if (!key) return;
-      const instance = key === 'guilds'
+      const instance = key === 'runtime'
+        ? RuntimePanel.fromRoot(panel, ctx)
+        : key === 'guilds'
         ? GuildsPanel.fromRoot(panel, ctx)
         : key === 'coupons'
           ? CouponsPanel.fromRoot(panel, ctx)
@@ -192,7 +195,7 @@ class AdminConsole {
     this.nodes.walletList.querySelectorAll<HTMLButtonElement>('button').forEach((button) => {
       button.disabled = busy;
     });
-    this.nodes.dashboard.querySelectorAll<HTMLButtonElement | HTMLInputElement | HTMLSelectElement>('button, input, select').forEach((control) => {
+    this.nodes.dashboard.querySelectorAll<HTMLButtonElement | HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>('button, input, select, textarea').forEach((control) => {
       if (control === this.nodes.lockButton) return;
       if (this.nodes.tabButtons.includes(control as HTMLButtonElement)) return;
       control.disabled = busy;

@@ -115,8 +115,15 @@ type AdminOperations interface {
 	ApplyUserProfile(ctx context.Context, guildID, actorID, userID, profile string) ([]store.GuildUserPermission, error)
 	RemoveUserProfile(ctx context.Context, guildID, actorID, userID, profile string) error
 	AddToolRole(ctx context.Context, guildID, actorID, toolName, roleID string) (store.GuildToolRole, error)
+	DenyToolRole(ctx context.Context, guildID, actorID, toolName, roleID string) (store.GuildToolRole, error)
 	RemoveToolRole(ctx context.Context, guildID, actorID, toolName, roleID string) error
 	ListToolRoles(ctx context.Context, guildID string) ([]store.GuildToolRole, error)
+	AddToolUser(ctx context.Context, guildID, actorID, toolName, userID string) (store.GuildToolUser, error)
+	DenyToolUser(ctx context.Context, guildID, actorID, toolName, userID string) (store.GuildToolUser, error)
+	RemoveToolUser(ctx context.Context, guildID, actorID, toolName, userID string) error
+	ListToolUsers(ctx context.Context, guildID string) ([]store.GuildToolUser, error)
+	ClearPermissionAccess(ctx context.Context, guildID, actorID, permission string) (admin.PermissionAccessClearResult, error)
+	ClearToolAccess(ctx context.Context, guildID, actorID, toolName string) (admin.ToolAccessClearResult, error)
 	SetChannelRule(ctx context.Context, guildID, actorID, channelID, rule string) (store.GuildChannelRule, error)
 	RemoveChannelRule(ctx context.Context, guildID, actorID, channelID string) error
 	ListChannelRules(ctx context.Context, guildID string) ([]store.GuildChannelRule, error)
@@ -1804,7 +1811,7 @@ func (e *Executor) manageRolePermission(ctx context.Context, request ExecutionRe
 		if err != nil {
 			return nil, err
 		}
-		return map[string]any{"result": map[string]any{"roles": rolePermissionPayloads(roles)}}, nil
+		return map[string]any{"result": map[string]any{"roles": e.rolePermissionPayloads(ctx, request, roles)}}, nil
 	case "add":
 		roleID, err := e.roleIDArgument(ctx, request, args)
 		if err != nil {
@@ -1814,17 +1821,19 @@ func (e *Executor) manageRolePermission(ctx context.Context, request ExecutionRe
 			return nil, fmt.Errorf("role_id is required")
 		}
 		if hasProfile {
-			preview := map[string]any{"role_id": roleID, "profile": profile}
+			confirmationArgs := e.roleConfirmationArguments(ctx, request, roleID, roleNameArgument(args), map[string]any{"profile": profile})
+			preview := displayPreview(confirmationArgs, "role_display", "role", "profile")
 			if boolArgument(args, "dry_run") {
 				return dryRunToolResult("role_profile.add", preview), nil
 			}
-			return confirmationRequired("role_profile.add", preview), nil
+			return confirmationRequiredWithArguments("role_profile.add", preview, confirmationArgs), nil
 		}
-		preview := map[string]any{"role_id": roleID, "permission": permission}
+		confirmationArgs := e.roleConfirmationArguments(ctx, request, roleID, roleNameArgument(args), map[string]any{"permission": permission})
+		preview := displayPreview(confirmationArgs, "role_display", "role", "permission")
 		if boolArgument(args, "dry_run") {
 			return dryRunToolResult("role_permission.add", preview), nil
 		}
-		return confirmationRequired("role_permission.add", preview), nil
+		return confirmationRequiredWithArguments("role_permission.add", preview, confirmationArgs), nil
 	case "remove":
 		roleID, err := e.roleIDArgument(ctx, request, args)
 		if err != nil {
@@ -1834,17 +1843,19 @@ func (e *Executor) manageRolePermission(ctx context.Context, request ExecutionRe
 			return nil, fmt.Errorf("role_id is required")
 		}
 		if hasProfile {
-			preview := map[string]any{"role_id": roleID, "profile": profile}
+			confirmationArgs := e.roleConfirmationArguments(ctx, request, roleID, roleNameArgument(args), map[string]any{"profile": profile})
+			preview := displayPreview(confirmationArgs, "role_display", "role", "profile")
 			if boolArgument(args, "dry_run") {
 				return dryRunToolResult("role_profile.remove", preview), nil
 			}
-			return confirmationRequired("role_profile.remove", preview), nil
+			return confirmationRequiredWithArguments("role_profile.remove", preview, confirmationArgs), nil
 		}
-		preview := map[string]any{"role_id": roleID, "permission": permission}
+		confirmationArgs := e.roleConfirmationArguments(ctx, request, roleID, roleNameArgument(args), map[string]any{"permission": permission})
+		preview := displayPreview(confirmationArgs, "role_display", "role", "permission")
 		if boolArgument(args, "dry_run") {
 			return dryRunToolResult("role_permission.remove", preview), nil
 		}
-		return confirmationRequired("role_permission.remove", preview), nil
+		return confirmationRequiredWithArguments("role_permission.remove", preview, confirmationArgs), nil
 	default:
 		return nil, fmt.Errorf("action must be list, add, or remove")
 	}
@@ -1873,41 +1884,51 @@ func (e *Executor) manageUserPermission(ctx context.Context, request ExecutionRe
 		if err != nil {
 			return nil, err
 		}
-		return map[string]any{"result": map[string]any{"users": userPermissionPayloads(users)}}, nil
+		return map[string]any{"result": map[string]any{"users": e.userPermissionPayloads(ctx, request, users)}}, nil
 	case "add":
-		userID := userIDArgument(args)
+		userID, err := e.userIDArgument(ctx, request, args)
+		if err != nil {
+			return nil, err
+		}
 		if userID == "" {
 			return nil, fmt.Errorf("user_id is required")
 		}
 		if hasProfile {
-			preview := map[string]any{"user_id": userID, "profile": profile}
+			confirmationArgs := e.userConfirmationArguments(ctx, request, userID, userNameArgument(args), map[string]any{"profile": profile})
+			preview := displayPreview(confirmationArgs, "user_display", "user", "profile")
 			if boolArgument(args, "dry_run") {
 				return dryRunToolResult("user_profile.add", preview), nil
 			}
-			return confirmationRequired("user_profile.add", preview), nil
+			return confirmationRequiredWithArguments("user_profile.add", preview, confirmationArgs), nil
 		}
-		preview := map[string]any{"user_id": userID, "permission": permission}
+		confirmationArgs := e.userConfirmationArguments(ctx, request, userID, userNameArgument(args), map[string]any{"permission": permission})
+		preview := displayPreview(confirmationArgs, "user_display", "user", "permission")
 		if boolArgument(args, "dry_run") {
 			return dryRunToolResult("user_permission.add", preview), nil
 		}
-		return confirmationRequired("user_permission.add", preview), nil
+		return confirmationRequiredWithArguments("user_permission.add", preview, confirmationArgs), nil
 	case "remove":
-		userID := userIDArgument(args)
+		userID, err := e.userIDArgument(ctx, request, args)
+		if err != nil {
+			return nil, err
+		}
 		if userID == "" {
 			return nil, fmt.Errorf("user_id is required")
 		}
 		if hasProfile {
-			preview := map[string]any{"user_id": userID, "profile": profile}
+			confirmationArgs := e.userConfirmationArguments(ctx, request, userID, userNameArgument(args), map[string]any{"profile": profile})
+			preview := displayPreview(confirmationArgs, "user_display", "user", "profile")
 			if boolArgument(args, "dry_run") {
 				return dryRunToolResult("user_profile.remove", preview), nil
 			}
-			return confirmationRequired("user_profile.remove", preview), nil
+			return confirmationRequiredWithArguments("user_profile.remove", preview, confirmationArgs), nil
 		}
-		preview := map[string]any{"user_id": userID, "permission": permission}
+		confirmationArgs := e.userConfirmationArguments(ctx, request, userID, userNameArgument(args), map[string]any{"permission": permission})
+		preview := displayPreview(confirmationArgs, "user_display", "user", "permission")
 		if boolArgument(args, "dry_run") {
 			return dryRunToolResult("user_permission.remove", preview), nil
 		}
-		return confirmationRequired("user_permission.remove", preview), nil
+		return confirmationRequiredWithArguments("user_permission.remove", preview, confirmationArgs), nil
 	default:
 		return nil, fmt.Errorf("action must be list, add, or remove")
 	}
@@ -1922,7 +1943,10 @@ func (e *Executor) manageMemberRole(ctx context.Context, request ExecutionReques
 		return nil, err
 	}
 	action := strings.ToLower(firstNonEmpty(stringArgument(args, "action"), "add"))
-	userID := userIDArgument(args)
+	userID, err := e.userIDArgument(ctx, request, args)
+	if err != nil {
+		return nil, err
+	}
 	roleID, err := e.roleIDArgument(ctx, request, args)
 	if err != nil {
 		return nil, err
@@ -1935,17 +1959,19 @@ func (e *Executor) manageMemberRole(ctx context.Context, request ExecutionReques
 	}
 	switch action {
 	case "add", "assign", "set":
-		preview := map[string]any{"user_id": userID, "role_id": roleID}
+		confirmationArgs := e.memberRoleConfirmationArguments(ctx, request, userID, roleID, userNameArgument(args), roleNameArgument(args))
+		preview := memberRolePreview(confirmationArgs)
 		if boolArgument(args, "dry_run") {
 			return dryRunToolResult("member_role.add", preview), nil
 		}
-		return confirmationRequired("member_role.add", preview), nil
+		return confirmationRequiredWithArguments("member_role.add", preview, confirmationArgs), nil
 	case "remove", "unassign", "unset":
-		preview := map[string]any{"user_id": userID, "role_id": roleID}
+		confirmationArgs := e.memberRoleConfirmationArguments(ctx, request, userID, roleID, userNameArgument(args), roleNameArgument(args))
+		preview := memberRolePreview(confirmationArgs)
 		if boolArgument(args, "dry_run") {
 			return dryRunToolResult("member_role.remove", preview), nil
 		}
-		return confirmationRequired("member_role.remove", preview), nil
+		return confirmationRequiredWithArguments("member_role.remove", preview, confirmationArgs), nil
 	default:
 		return nil, fmt.Errorf("action must be add or remove")
 	}
@@ -2069,21 +2095,349 @@ func discordIDArgument(value string) string {
 	return value
 }
 
-func userIDArgument(args map[string]any) string {
-	for _, name := range []string{"user_id", "member_user_id", "user", "member"} {
+func (e *Executor) userIDArgument(ctx context.Context, request ExecutionRequest, args map[string]any) (string, error) {
+	for _, name := range []string{"user_id", "member_user_id"} {
 		value := strings.TrimSpace(stringArgument(args, name))
 		if userID := discordIDArgument(value); userID != "" {
-			return userID
+			return userID, nil
 		}
 		if value != "" {
-			return value
+			if strings.HasPrefix(strings.TrimSpace(value), "@") {
+				return e.lookupUserID(ctx, request, value)
+			}
+			return value, nil
+		}
+	}
+	for _, name := range []string{"user", "member"} {
+		value := strings.TrimSpace(stringArgument(args, name))
+		if userID := discordIDArgument(value); userID != "" {
+			return userID, nil
+		}
+		if value != "" {
+			return e.lookupUserID(ctx, request, value)
+		}
+	}
+	userName := firstNonEmpty(stringArgument(args, "user_name"), stringArgument(args, "member_user_name"))
+	if userID := discordIDArgument(userName); userID != "" {
+		return userID, nil
+	}
+	userName = strings.TrimSpace(userName)
+	if userName == "" {
+		return "", nil
+	}
+	return e.lookupUserID(ctx, request, userName)
+}
+
+func (e *Executor) lookupUserID(ctx context.Context, request ExecutionRequest, userName string) (string, error) {
+	userName = strings.TrimSpace(strings.TrimPrefix(userName, "@"))
+	if userName == "" {
+		return "", nil
+	}
+	if e.discord == nil {
+		return "", fmt.Errorf("user_id is required because Discord member lookup is not configured")
+	}
+	payload, err := e.discord.ExecuteDiscordTool(ctx, DiscordToolRequest{
+		ToolName:  "discord.list_members",
+		GuildID:   request.GuildID,
+		ActorID:   request.ActorID,
+		RequestID: request.RequestID,
+		Arguments: map[string]any{"guild_id": request.GuildID, "limit": 100},
+	})
+	if err != nil {
+		return "", err
+	}
+	return userIDFromListMembersPayload(payload, userName)
+}
+
+func userIDFromListMembersPayload(payload any, userName string) (string, error) {
+	payloadMap, ok := payload.(map[string]any)
+	if !ok {
+		return "", fmt.Errorf("Discord member lookup returned an unexpected shape")
+	}
+	membersValue, ok := payloadMap["members"]
+	if !ok {
+		return "", fmt.Errorf("Discord member lookup returned no members")
+	}
+	target := normalizeDiscordLookupName(userName)
+	var matches []string
+	visitMember := func(member map[string]any) {
+		user, _ := member["user"].(map[string]any)
+		candidates := []string{
+			fmt.Sprint(member["nick"]),
+			fmt.Sprint(user["username"]),
+			fmt.Sprint(user["global_name"]),
+			fmt.Sprint(user["effective"]),
+		}
+		for _, candidate := range candidates {
+			if normalizeDiscordLookupName(candidate) == target {
+				matches = append(matches, strings.TrimSpace(fmt.Sprint(user["id"])))
+				return
+			}
+		}
+	}
+	switch members := membersValue.(type) {
+	case []map[string]any:
+		for _, member := range members {
+			visitMember(member)
+		}
+	case []any:
+		for _, value := range members {
+			member, ok := value.(map[string]any)
+			if ok {
+				visitMember(member)
+			}
+		}
+	default:
+		return "", fmt.Errorf("Discord member lookup returned an unexpected shape")
+	}
+	cleaned := make([]string, 0, len(matches))
+	for _, match := range matches {
+		if id := discordIDArgument(match); id != "" {
+			cleaned = append(cleaned, id)
+		}
+	}
+	if len(cleaned) == 0 {
+		return "", fmt.Errorf("user %q was not found", userName)
+	}
+	if len(cleaned) > 1 {
+		return "", fmt.Errorf("user name %q is ambiguous", userName)
+	}
+	return cleaned[0], nil
+}
+
+func normalizeDiscordLookupName(value string) string {
+	return strings.ToLower(strings.TrimSpace(strings.TrimPrefix(value, "@")))
+}
+
+func roleNameArgument(args map[string]any) string {
+	value := firstNonEmpty(stringArgument(args, "role_name"), stringArgument(args, "role"))
+	if discordIDArgument(value) != "" {
+		return ""
+	}
+	return strings.TrimSpace(strings.TrimPrefix(value, "@"))
+}
+
+func userNameArgument(args map[string]any) string {
+	for _, name := range []string{"member_user_name", "user_name", "member", "user"} {
+		value := strings.TrimSpace(stringArgument(args, name))
+		if value == "" || discordIDArgument(value) != "" {
+			continue
+		}
+		return strings.TrimSpace(strings.TrimPrefix(value, "@"))
+	}
+	return ""
+}
+
+func channelNameArgument(args map[string]any) string {
+	value := firstNonEmpty(stringArgument(args, "channel_name"), stringArgument(args, "channel"))
+	if discordIDArgument(value) != "" {
+		return ""
+	}
+	return strings.TrimSpace(strings.TrimPrefix(value, "#"))
+}
+
+func displayPreview(arguments map[string]any, displayKey, outputKey string, extraKeys ...string) map[string]any {
+	preview := map[string]any{
+		outputKey: previewString(arguments, displayKey),
+	}
+	for _, key := range extraKeys {
+		if value := previewString(arguments, key); value != "" {
+			preview[key] = value
+		}
+	}
+	return preview
+}
+
+func memberRolePreview(arguments map[string]any) map[string]any {
+	return map[string]any{
+		"user": previewString(arguments, "user_display"),
+		"role": previewString(arguments, "role_display"),
+	}
+}
+
+func (e *Executor) roleConfirmationArguments(ctx context.Context, request ExecutionRequest, roleID, roleName string, extras map[string]any) map[string]any {
+	values := map[string]any{
+		"role_id":      strings.TrimSpace(roleID),
+		"role_display": e.DiscordRoleDisplay(ctx, request.GuildID, request.ActorID, request.RequestID, roleID, roleName),
+	}
+	for key, value := range extras {
+		values[key] = value
+	}
+	return values
+}
+
+func (e *Executor) userConfirmationArguments(ctx context.Context, request ExecutionRequest, userID, username string, extras map[string]any) map[string]any {
+	values := map[string]any{
+		"user_id":      strings.TrimSpace(userID),
+		"user_display": e.DiscordUserDisplay(ctx, request.GuildID, request.ActorID, request.RequestID, userID, username),
+	}
+	for key, value := range extras {
+		values[key] = value
+	}
+	return values
+}
+
+func (e *Executor) channelConfirmationArguments(ctx context.Context, request ExecutionRequest, channelID, channelName string, extras map[string]any) map[string]any {
+	values := map[string]any{
+		"channel_id":      strings.TrimSpace(channelID),
+		"channel_display": e.DiscordChannelDisplay(ctx, request.GuildID, request.ActorID, request.RequestID, channelID, channelName),
+	}
+	for key, value := range extras {
+		values[key] = value
+	}
+	return values
+}
+
+func (e *Executor) memberRoleConfirmationArguments(ctx context.Context, request ExecutionRequest, userID, roleID, username, roleName string) map[string]any {
+	values := e.userConfirmationArguments(ctx, request, userID, username, nil)
+	for key, value := range e.roleConfirmationArguments(ctx, request, roleID, roleName, nil) {
+		values[key] = value
+	}
+	return values
+}
+
+func (e *Executor) DiscordRoleDisplay(ctx context.Context, guildID, actorID, requestID, roleID, roleName string) string {
+	roleName = strings.TrimSpace(strings.TrimPrefix(roleName, "@"))
+	if roleName == "" && strings.TrimSpace(roleID) == strings.TrimSpace(guildID) && strings.TrimSpace(guildID) != "" {
+		roleName = "@everyone"
+	}
+	if roleName == "" {
+		roleName = e.lookupDiscordRoleName(ctx, guildID, actorID, requestID, roleID)
+	}
+	if roleName == "" {
+		return "the selected role"
+	}
+	return discordDisplayLabel(roleName)
+}
+
+func (e *Executor) DiscordUserDisplay(ctx context.Context, guildID, actorID, requestID, userID, username string) string {
+	username = strings.TrimSpace(strings.TrimPrefix(username, "@"))
+	if username == "" {
+		username = e.lookupDiscordUserName(ctx, guildID, actorID, requestID, userID)
+	}
+	if username == "" {
+		return "the selected user"
+	}
+	return discordDisplayLabel(username)
+}
+
+func (e *Executor) DiscordChannelDisplay(ctx context.Context, guildID, actorID, requestID, channelID, channelName string) string {
+	channelName = strings.TrimSpace(strings.TrimPrefix(channelName, "#"))
+	if channelName == "" {
+		channelName = e.lookupDiscordChannelName(ctx, guildID, actorID, requestID, channelID)
+	}
+	if channelName == "" {
+		return "the selected channel"
+	}
+	return discordDisplayLabel("#" + channelName)
+}
+
+func (e *Executor) lookupDiscordRoleName(ctx context.Context, guildID, actorID, requestID, roleID string) string {
+	if e == nil || e.discord == nil || strings.TrimSpace(guildID) == "" || discordIDArgument(roleID) == "" {
+		return ""
+	}
+	payload, err := e.discord.ExecuteDiscordTool(ctx, DiscordToolRequest{
+		ToolName:  "discord.get_role",
+		GuildID:   guildID,
+		ActorID:   actorID,
+		RequestID: requestID,
+		Arguments: map[string]any{"guild_id": guildID, "role_id": roleID},
+	})
+	if err != nil {
+		return ""
+	}
+	return payloadNestedString(payload, "role", "name")
+}
+
+func (e *Executor) lookupDiscordUserName(ctx context.Context, guildID, actorID, requestID, userID string) string {
+	if e == nil || e.discord == nil || strings.TrimSpace(guildID) == "" || discordIDArgument(userID) == "" {
+		return ""
+	}
+	payload, err := e.discord.ExecuteDiscordTool(ctx, DiscordToolRequest{
+		ToolName:  "discord.get_member",
+		GuildID:   guildID,
+		ActorID:   actorID,
+		RequestID: requestID,
+		Arguments: map[string]any{"guild_id": guildID, "user_id": userID},
+	})
+	if err != nil {
+		return ""
+	}
+	return memberDisplayNameFromPayload(payload)
+}
+
+func (e *Executor) lookupDiscordChannelName(ctx context.Context, guildID, actorID, requestID, channelID string) string {
+	if e == nil || e.discord == nil || discordIDArgument(channelID) == "" {
+		return ""
+	}
+	payload, err := e.discord.ExecuteDiscordTool(ctx, DiscordToolRequest{
+		ToolName:  "discord.get_channel",
+		GuildID:   guildID,
+		ActorID:   actorID,
+		RequestID: requestID,
+		Arguments: map[string]any{"channel_id": channelID},
+	})
+	if err != nil {
+		return ""
+	}
+	return payloadNestedString(payload, "channel", "name")
+}
+
+func memberDisplayNameFromPayload(payload any) string {
+	member := payloadNestedMap(payload, "member")
+	if member == nil {
+		return ""
+	}
+	if name := strings.TrimSpace(fmt.Sprint(member["nick"])); name != "" && name != "<nil>" {
+		return name
+	}
+	user, _ := member["user"].(map[string]any)
+	for _, key := range []string{"effective", "global_name", "username"} {
+		if name := strings.TrimSpace(fmt.Sprint(user[key])); name != "" && name != "<nil>" {
+			return name
 		}
 	}
 	return ""
 }
 
-func normalizeDiscordLookupName(value string) string {
-	return strings.ToLower(strings.TrimSpace(strings.TrimPrefix(value, "@")))
+func payloadNestedString(payload any, path ...string) string {
+	current := payload
+	for _, key := range path {
+		values, ok := current.(map[string]any)
+		if !ok {
+			return ""
+		}
+		current = values[key]
+	}
+	if current == nil {
+		return ""
+	}
+	value := strings.TrimSpace(fmt.Sprint(current))
+	if value == "<nil>" {
+		return ""
+	}
+	return value
+}
+
+func payloadNestedMap(payload any, path ...string) map[string]any {
+	current := payload
+	for _, key := range path {
+		values, ok := current.(map[string]any)
+		if !ok {
+			return nil
+		}
+		current = values[key]
+	}
+	values, _ := current.(map[string]any)
+	return values
+}
+
+func discordDisplayLabel(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	return "`" + strings.ReplaceAll(value, "`", "'") + "`"
 }
 
 func (e *Executor) manageToolAccess(ctx context.Context, request ExecutionRequest, arguments string) (any, error) {
@@ -2097,41 +2451,421 @@ func (e *Executor) manageToolAccess(ctx context.Context, request ExecutionReques
 	action := strings.ToLower(stringArgument(args, "action"))
 	toolName := firstNonEmpty(stringArgument(args, "tool_name"), stringArgument(args, "tool"))
 	switch action {
-	case "list":
+	case "list", "status", "who":
 		roles, err := e.adminOps.ListToolRoles(ctx, request.GuildID)
 		if err != nil {
 			return nil, err
 		}
-		return map[string]any{"result": map[string]any{"tools": toolRolePayloads(roles)}}, nil
-	case "add", "allow":
-		roleID, err := e.roleIDArgument(ctx, request, args)
+		users, err := e.adminOps.ListToolUsers(ctx, request.GuildID)
 		if err != nil {
 			return nil, err
 		}
-		if toolName == "" || roleID == "" {
-			return nil, fmt.Errorf("tool_name and role_id are required")
+		result := map[string]any{
+			"tools":      e.toolAccessPayloads(ctx, request, roles, users),
+			"role_rules": e.toolRolePayloads(ctx, request, roles),
+			"user_rules": e.toolUserPayloads(ctx, request, users),
 		}
-		preview := map[string]any{"tool_name": toolName, "role_id": roleID}
+		selection, selectionErr := e.toolAccessSelection(args, toolName)
+		if selectionErr == nil && len(selection.toolNames) > 0 {
+			status, err := e.toolAccessStatus(ctx, request, selection, roles, users)
+			if err != nil {
+				return nil, err
+			}
+			result["selected_tools"] = selection.toolNames
+			result["selected_permissions"] = selection.permissions
+			result["effective_access"] = status
+		} else if toolName != "" || strings.TrimSpace(stringArgument(args, "tool_group")) != "" {
+			return nil, selectionErr
+		}
+		return map[string]any{"result": result}, nil
+	case "open", "public", "everyone", "allow_everyone":
+		selection, err := e.toolAccessSelection(args, toolName)
+		if err != nil {
+			return nil, err
+		}
+		if len(selection.toolNames) == 0 {
+			return nil, fmt.Errorf("tool_name or tool_group is required")
+		}
+		preview := map[string]any{
+			"access":      "everyone",
+			"tool_names":  strings.Join(selection.toolNames, ","),
+			"permissions": strings.Join(selection.permissions, ","),
+			"note":        "Opening a tool to everyone clears matching Panda permission mappings for registered native tools and tool-specific allowlist rules for every selected tool. Feature gates, runtime configuration, quotas, and Discord-side permissions still apply.",
+		}
+		if boolArgument(args, "dry_run") {
+			return dryRunToolResult("tool_access.open", preview), nil
+		}
+		return confirmationRequired("tool_access.open", preview), nil
+	case "add", "allow":
+		toolName, err = e.singleToolAccessName(toolName)
+		if err != nil {
+			return nil, err
+		}
+		target, err := e.toolAccessTargetArgument(ctx, request, args)
+		if err != nil {
+			return nil, err
+		}
+		if target.kind == "role" && strings.TrimSpace(request.GuildID) != "" && target.id == strings.TrimSpace(request.GuildID) {
+			return nil, admin.ErrToolAccessEveryoneRole
+		}
+		if toolName == "" || target.id == "" {
+			return nil, fmt.Errorf("tool_name and role_id or user_id are required")
+		}
+		confirmationArgs := toolAccessConfirmationValues(toolName, target)
+		preview := toolAccessPreview(toolName, target)
 		if boolArgument(args, "dry_run") {
 			return dryRunToolResult("tool_access.add", preview), nil
 		}
-		return confirmationRequired("tool_access.add", preview), nil
-	case "remove", "deny":
-		roleID, err := e.roleIDArgument(ctx, request, args)
+		return confirmationRequiredWithArguments("tool_access.add", preview, confirmationArgs), nil
+	case "deny", "block", "disallow", "disable":
+		toolName, err = e.singleToolAccessName(toolName)
 		if err != nil {
 			return nil, err
 		}
-		if toolName == "" || roleID == "" {
-			return nil, fmt.Errorf("tool_name and role_id are required")
+		target, err := e.toolAccessTargetArgument(ctx, request, args)
+		if err != nil {
+			return nil, err
 		}
-		preview := map[string]any{"tool_name": toolName, "role_id": roleID}
+		if target.kind == "role" && strings.TrimSpace(request.GuildID) != "" && target.id == strings.TrimSpace(request.GuildID) {
+			return nil, admin.ErrToolAccessEveryoneRole
+		}
+		if toolName == "" || target.id == "" {
+			return nil, fmt.Errorf("tool_name and role_id or user_id are required")
+		}
+		confirmationArgs := toolAccessConfirmationValues(toolName, target)
+		preview := toolAccessPreview(toolName, target)
+		if boolArgument(args, "dry_run") {
+			return dryRunToolResult("tool_access.deny", preview), nil
+		}
+		return confirmationRequiredWithArguments("tool_access.deny", preview, confirmationArgs), nil
+	case "remove":
+		toolName, err = e.singleToolAccessName(toolName)
+		if err != nil {
+			return nil, err
+		}
+		target, err := e.toolAccessTargetArgument(ctx, request, args)
+		if err != nil {
+			return nil, err
+		}
+		if toolName == "" || target.id == "" {
+			return nil, fmt.Errorf("tool_name and role_id or user_id are required")
+		}
+		confirmationArgs := toolAccessConfirmationValues(toolName, target)
+		preview := toolAccessPreview(toolName, target)
 		if boolArgument(args, "dry_run") {
 			return dryRunToolResult("tool_access.remove", preview), nil
 		}
-		return confirmationRequired("tool_access.remove", preview), nil
+		return confirmationRequiredWithArguments("tool_access.remove", preview, confirmationArgs), nil
 	default:
-		return nil, fmt.Errorf("action must be list, add, or remove")
+		return nil, fmt.Errorf("action must be list, status, add, remove, or open")
 	}
+}
+
+type toolAccessTarget struct {
+	kind    string
+	id      string
+	display string
+}
+
+func (e *Executor) toolAccessTargetArgument(ctx context.Context, request ExecutionRequest, args map[string]any) (toolAccessTarget, error) {
+	targetType := strings.ToLower(strings.TrimSpace(firstNonEmpty(stringArgument(args, "target_type"), stringArgument(args, "subject_type"))))
+	if targetType == "member" {
+		targetType = "user"
+	}
+	roleProvided := toolAccessRoleProvided(args)
+	userProvided := toolAccessUserProvided(args)
+	switch targetType {
+	case "role":
+		roleID, err := e.roleIDArgument(ctx, request, args)
+		return toolAccessTarget{kind: "role", id: roleID, display: e.DiscordRoleDisplay(ctx, request.GuildID, request.ActorID, request.RequestID, roleID, roleNameArgument(args))}, err
+	case "user":
+		userID, err := e.userIDArgument(ctx, request, args)
+		return toolAccessTarget{kind: "user", id: userID, display: e.DiscordUserDisplay(ctx, request.GuildID, request.ActorID, request.RequestID, userID, userNameArgument(args))}, err
+	case "":
+		if roleProvided && userProvided {
+			return toolAccessTarget{}, fmt.Errorf("provide either a role or a user for tool access, not both")
+		}
+		if userProvided {
+			userID, err := e.userIDArgument(ctx, request, args)
+			return toolAccessTarget{kind: "user", id: userID, display: e.DiscordUserDisplay(ctx, request.GuildID, request.ActorID, request.RequestID, userID, userNameArgument(args))}, err
+		}
+		roleID, err := e.roleIDArgument(ctx, request, args)
+		return toolAccessTarget{kind: "role", id: roleID, display: e.DiscordRoleDisplay(ctx, request.GuildID, request.ActorID, request.RequestID, roleID, roleNameArgument(args))}, err
+	default:
+		return toolAccessTarget{}, fmt.Errorf("target_type must be role or user")
+	}
+}
+
+func toolAccessRoleProvided(args map[string]any) bool {
+	for _, name := range []string{"role_id", "role", "role_name"} {
+		if strings.TrimSpace(stringArgument(args, name)) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+func toolAccessUserProvided(args map[string]any) bool {
+	for _, name := range []string{"user_id", "member_user_id", "user", "member", "user_name", "member_user_name"} {
+		if strings.TrimSpace(stringArgument(args, name)) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+func toolAccessPreview(toolName string, target toolAccessTarget) map[string]any {
+	preview := map[string]any{
+		"tool_name":   toolName,
+		"target_type": target.kind,
+		"target":      target.display,
+	}
+	return preview
+}
+
+func toolAccessConfirmationValues(toolName string, target toolAccessTarget) map[string]any {
+	values := map[string]any{
+		"tool_name":   toolName,
+		"target_type": target.kind,
+	}
+	switch target.kind {
+	case "user":
+		values["user_id"] = target.id
+		values["user_display"] = target.display
+	default:
+		values["role_id"] = target.id
+		values["role_display"] = target.display
+	}
+	return values
+}
+
+type toolAccessSelection struct {
+	toolNames   []string
+	permissions []string
+}
+
+func (e *Executor) singleToolAccessName(toolName string) (string, error) {
+	toolName = strings.TrimSpace(toolName)
+	if imageGenerationToolAlias(toolName) {
+		toolName = "panda.generate_image"
+	} else if imageInspectionToolAlias(toolName) {
+		toolName = "panda.inspect_image"
+	}
+	if toolName == "" {
+		return "", nil
+	}
+	selection, err := e.toolSelectionForNames(toolName)
+	if err != nil {
+		return "", err
+	}
+	if len(selection.toolNames) != 1 {
+		return "", fmt.Errorf("tool_name must identify one tool")
+	}
+	return selection.toolNames[0], nil
+}
+
+func (e *Executor) ToolAccessOpenTargets(toolName, group string) ([]string, []string, error) {
+	args := map[string]any{}
+	if strings.TrimSpace(group) != "" {
+		args["tool_group"] = group
+	}
+	selection, err := e.toolAccessSelection(args, toolName)
+	if err != nil {
+		return nil, nil, err
+	}
+	if len(selection.toolNames) == 0 {
+		return nil, nil, fmt.Errorf("tool_name or tool_group is required")
+	}
+	return append([]string{}, selection.toolNames...), append([]string{}, selection.permissions...), nil
+}
+
+func (e *Executor) toolAccessSelection(args map[string]any, toolName string) (toolAccessSelection, error) {
+	group := strings.TrimSpace(firstNonEmpty(stringArgument(args, "tool_group"), stringArgument(args, "group")))
+	if group == "" && imageToolGroupAlias(toolName) {
+		group = "image_tools"
+		toolName = ""
+	}
+	if group != "" {
+		switch normalizedAccessAlias(group) {
+		case "imagetools", "images", "imagegeneration", "image":
+			return e.toolSelectionForNames("panda.generate_image", "panda.inspect_image")
+		default:
+			return toolAccessSelection{}, fmt.Errorf("unsupported tool_group %q", group)
+		}
+	}
+	toolName = strings.TrimSpace(toolName)
+	if toolName == "" {
+		return toolAccessSelection{}, nil
+	}
+	return e.toolSelectionForNames(toolName)
+}
+
+func (e *Executor) toolSelectionForNames(names ...string) (toolAccessSelection, error) {
+	selection := toolAccessSelection{}
+	seenTools := map[string]struct{}{}
+	seenPermissions := map[string]struct{}{}
+	for _, name := range names {
+		definition, known, err := e.canonicalToolDefinition(name)
+		if err != nil {
+			return toolAccessSelection{}, err
+		}
+		if _, ok := seenTools[definition.Name]; !ok {
+			selection.toolNames = append(selection.toolNames, definition.Name)
+			seenTools[definition.Name] = struct{}{}
+		}
+		if known {
+			permission := strings.TrimSpace(definition.RequiredPermission)
+			if permission == "" {
+				continue
+			}
+			if _, ok := seenPermissions[permission]; !ok {
+				selection.permissions = append(selection.permissions, permission)
+				seenPermissions[permission] = struct{}{}
+			}
+		}
+	}
+	sort.Strings(selection.toolNames)
+	sort.Strings(selection.permissions)
+	return selection, nil
+}
+
+func (e *Executor) canonicalToolDefinition(name string) (Definition, bool, error) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return Definition{}, false, fmt.Errorf("tool name is required")
+	}
+	if e.registry == nil {
+		return Definition{Name: normalizeToolName(name)}, false, nil
+	}
+	if definition, ok := e.registry.Get(name); ok {
+		return definition, true, nil
+	}
+	return Definition{Name: normalizeToolName(name)}, false, nil
+}
+
+func imageToolGroupAlias(value string) bool {
+	switch normalizedAccessAlias(value) {
+	case "imagetools", "images", "imagegeneration", "image", "imagegenerationtool", "imagetool":
+		return true
+	default:
+		return false
+	}
+}
+
+func imageGenerationToolAlias(value string) bool {
+	switch normalizedAccessAlias(value) {
+	case "generateimage", "imagegeneration", "imagegenerationtool", "generativeimage", "pandagenerateimage":
+		return true
+	default:
+		return false
+	}
+}
+
+func imageInspectionToolAlias(value string) bool {
+	switch normalizedAccessAlias(value) {
+	case "inspectimage", "imageinspection", "imageinspectiontool", "analyzeimage", "imageanalysis":
+		return true
+	default:
+		return false
+	}
+}
+
+func normalizedAccessAlias(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	value = strings.ReplaceAll(value, "_", "")
+	value = strings.ReplaceAll(value, "-", "")
+	value = strings.ReplaceAll(value, " ", "")
+	value = strings.TrimPrefix(value, "panda")
+	return value
+}
+
+func (e *Executor) toolAccessStatus(ctx context.Context, request ExecutionRequest, selection toolAccessSelection, roles []store.GuildToolRole, users []store.GuildToolUser) ([]map[string]any, error) {
+	rolePermissions, err := e.adminOps.ListRolePermissions(ctx, request.GuildID)
+	if err != nil {
+		return nil, err
+	}
+	userPermissions, err := e.adminOps.ListUserPermissions(ctx, request.GuildID)
+	if err != nil {
+		return nil, err
+	}
+	status := make([]map[string]any, 0, len(selection.toolNames))
+	for _, toolName := range selection.toolNames {
+		permission := e.requiredPermissionForTool(toolName)
+		permissionRoleRules := e.rolePermissionPayloads(ctx, request, filterRolePermissions(rolePermissions, permission))
+		permissionUserRules := e.userPermissionPayloads(ctx, request, filterUserPermissions(userPermissions, permission))
+		toolRoleRules := e.toolRoleStatusPayloads(ctx, request, filterToolRoles(roles, toolName))
+		toolUserRules := e.toolUserPayloads(ctx, request, filterToolUsers(users, toolName))
+		status = append(status, map[string]any{
+			"tool_name":                   toolName,
+			"required_permission":         permission,
+			"permission_open_to_everyone": len(permissionRoleRules) == 0 && len(permissionUserRules) == 0,
+			"tool_open_to_everyone":       len(toolRoleRules) == 0 && len(toolUserRules) == 0,
+			"open_to_everyone":            len(permissionRoleRules) == 0 && len(permissionUserRules) == 0 && len(toolRoleRules) == 0 && len(toolUserRules) == 0,
+			"permission_role_rules":       permissionRoleRules,
+			"permission_user_rules":       permissionUserRules,
+			"tool_role_rules":             toolRoleRules,
+			"tool_user_rules":             toolUserRules,
+			"notes":                       "Effective access requires passing the Panda permission gate and the tool-specific allowlist gate. If both gates are open, everyone with normal assistant access, enabled features, quota, runtime configuration, and Discord-side permissions can use the tool.",
+		})
+	}
+	return status, nil
+}
+
+func (e *Executor) requiredPermissionForTool(toolName string) string {
+	if e.registry == nil {
+		return ""
+	}
+	definition, ok := e.registry.Get(toolName)
+	if !ok {
+		return ""
+	}
+	return strings.TrimSpace(definition.RequiredPermission)
+}
+
+func filterRolePermissions(roles []store.GuildRole, permission string) []store.GuildRole {
+	if permission == "" {
+		return nil
+	}
+	filtered := make([]store.GuildRole, 0, len(roles))
+	for _, role := range roles {
+		if role.Permission == permission {
+			filtered = append(filtered, role)
+		}
+	}
+	return filtered
+}
+
+func filterUserPermissions(users []store.GuildUserPermission, permission string) []store.GuildUserPermission {
+	if permission == "" {
+		return nil
+	}
+	filtered := make([]store.GuildUserPermission, 0, len(users))
+	for _, user := range users {
+		if user.Permission == permission {
+			filtered = append(filtered, user)
+		}
+	}
+	return filtered
+}
+
+func filterToolRoles(roles []store.GuildToolRole, toolName string) []store.GuildToolRole {
+	filtered := make([]store.GuildToolRole, 0, len(roles))
+	for _, role := range roles {
+		if role.ToolName == toolName {
+			filtered = append(filtered, role)
+		}
+	}
+	return filtered
+}
+
+func filterToolUsers(users []store.GuildToolUser, toolName string) []store.GuildToolUser {
+	filtered := make([]store.GuildToolUser, 0, len(users))
+	for _, user := range users {
+		if user.ToolName == toolName {
+			filtered = append(filtered, user)
+		}
+	}
+	return filtered
 }
 
 func (e *Executor) manageComposedTool(ctx context.Context, request ExecutionRequest, arguments string) (any, error) {
@@ -2366,7 +3100,7 @@ func (e *Executor) manageChannelRule(ctx context.Context, request ExecutionReque
 		if err != nil {
 			return nil, err
 		}
-		return map[string]any{"result": map[string]any{"rules": channelRulePayloads(rules)}}, nil
+		return map[string]any{"result": map[string]any{"rules": e.channelRulePayloads(ctx, request, rules)}}, nil
 	case "allow", "deny":
 		channelID, err := e.channelIDArgument(ctx, request, args)
 		if err != nil {
@@ -2375,11 +3109,12 @@ func (e *Executor) manageChannelRule(ctx context.Context, request ExecutionReque
 		if channelID == "" {
 			return nil, fmt.Errorf("channel_id is required")
 		}
-		preview := map[string]any{"channel_id": channelID, "rule": action}
+		confirmationArgs := e.channelConfirmationArguments(ctx, request, channelID, channelNameArgument(args), map[string]any{"rule": action})
+		preview := displayPreview(confirmationArgs, "channel_display", "channel", "rule")
 		if boolArgument(args, "dry_run") {
 			return dryRunToolResult("channel_rule."+action, preview), nil
 		}
-		return confirmationRequired("channel_rule.set", preview), nil
+		return confirmationRequiredWithArguments("channel_rule.set", preview, confirmationArgs), nil
 	case "remove":
 		channelID, err := e.channelIDArgument(ctx, request, args)
 		if err != nil {
@@ -2388,11 +3123,12 @@ func (e *Executor) manageChannelRule(ctx context.Context, request ExecutionReque
 		if channelID == "" {
 			return nil, fmt.Errorf("channel_id is required")
 		}
-		preview := map[string]any{"channel_id": channelID}
+		confirmationArgs := e.channelConfirmationArguments(ctx, request, channelID, channelNameArgument(args), nil)
+		preview := displayPreview(confirmationArgs, "channel_display", "channel")
 		if boolArgument(args, "dry_run") {
 			return dryRunToolResult("channel_rule.remove", preview), nil
 		}
-		return confirmationRequired("channel_rule.remove", preview), nil
+		return confirmationRequiredWithArguments("channel_rule.remove", preview, confirmationArgs), nil
 	default:
 		return nil, fmt.Errorf("action must be list, allow, deny, or remove")
 	}
@@ -3019,17 +3755,17 @@ func confirmationArguments(action string, preview map[string]any) map[string]str
 	case "budget_limit.remove":
 		return stringArguments(preview, "scope", "subject_id")
 	case "role_permission.add":
-		return stringArguments(preview, "role_id", "permission")
+		return stringArgumentsWithOptional(preview, []string{"role_id", "permission"}, "role_display")
 	case "role_permission.remove":
-		return stringArguments(preview, "role_id", "permission")
+		return stringArgumentsWithOptional(preview, []string{"role_id", "permission"}, "role_display")
 	case "role_profile.add", "role_profile.remove":
-		return stringArguments(preview, "role_id", "profile")
+		return stringArgumentsWithOptional(preview, []string{"role_id", "profile"}, "role_display")
 	case "user_permission.add":
-		return stringArguments(preview, "user_id", "permission")
+		return stringArgumentsWithOptional(preview, []string{"user_id", "permission"}, "user_display")
 	case "user_permission.remove":
-		return stringArguments(preview, "user_id", "permission")
+		return stringArgumentsWithOptional(preview, []string{"user_id", "permission"}, "user_display")
 	case "user_profile.add", "user_profile.remove":
-		return stringArguments(preview, "user_id", "profile")
+		return stringArgumentsWithOptional(preview, []string{"user_id", "profile"}, "user_display")
 	case "discord_role.create":
 		return stringArguments(preview, "name")
 	case "discord_poll.create":
@@ -3037,13 +3773,15 @@ func confirmationArguments(action string, preview map[string]any) map[string]str
 	case "discord_write.execute":
 		return discordWriteConfirmationArguments(preview)
 	case "member_role.add", "member_role.remove":
-		return stringArguments(preview, "user_id", "role_id")
-	case "tool_access.add", "tool_access.remove":
-		return stringArguments(preview, "tool_name", "role_id")
+		return stringArgumentsWithOptional(preview, []string{"user_id", "role_id"}, "user_display", "role_display")
+	case "tool_access.add", "tool_access.remove", "tool_access.deny":
+		return toolAccessConfirmationArguments(preview)
+	case "tool_access.open":
+		return toolAccessOpenConfirmationArguments(preview)
 	case "channel_rule.set":
-		return stringArguments(preview, "channel_id", "rule")
+		return stringArgumentsWithOptional(preview, []string{"channel_id", "rule"}, "channel_display")
 	case "channel_rule.remove":
-		return stringArguments(preview, "channel_id")
+		return stringArgumentsWithOptional(preview, []string{"channel_id"}, "channel_display")
 	case "composed_tool.approve", "composed_tool.rollback":
 		return stringArguments(preview, "tool_name", "version")
 	case "composed_tool.delete":
@@ -3053,6 +3791,52 @@ func confirmationArguments(action string, preview map[string]any) map[string]str
 	default:
 		return nil
 	}
+}
+
+func toolAccessOpenConfirmationArguments(preview map[string]any) map[string]string {
+	toolNames := previewString(preview, "tool_names")
+	if toolNames == "" {
+		return nil
+	}
+	return map[string]string{
+		"tool_names":  toolNames,
+		"permissions": previewString(preview, "permissions"),
+	}
+}
+
+func toolAccessConfirmationArguments(preview map[string]any) map[string]string {
+	toolName := previewString(preview, "tool_name")
+	if toolName == "" {
+		return nil
+	}
+	targetType := strings.ToLower(previewString(preview, "target_type"))
+	roleID := previewString(preview, "role_id")
+	userID := previewString(preview, "user_id")
+	roleDisplay := previewString(preview, "role_display")
+	userDisplay := previewString(preview, "user_display")
+	switch {
+	case targetType == "user" && userID != "":
+		return map[string]string{"tool_name": toolName, "target_type": "user", "user_id": userID, "user_display": userDisplay}
+	case targetType == "role" && roleID != "":
+		return map[string]string{"tool_name": toolName, "target_type": "role", "role_id": roleID, "role_display": roleDisplay}
+	case userID != "" && roleID == "":
+		return map[string]string{"tool_name": toolName, "target_type": "user", "user_id": userID, "user_display": userDisplay}
+	case roleID != "" && userID == "":
+		return map[string]string{"tool_name": toolName, "target_type": "role", "role_id": roleID, "role_display": roleDisplay}
+	default:
+		return nil
+	}
+}
+
+func previewString(values map[string]any, name string) string {
+	if values == nil {
+		return ""
+	}
+	value, ok := values[name]
+	if !ok || value == nil {
+		return ""
+	}
+	return strings.TrimSpace(fmt.Sprint(value))
 }
 
 func discordWriteConfirmationArguments(preview map[string]any) map[string]string {
@@ -3115,21 +3899,21 @@ func confirmationCopy(action string, arguments map[string]string) (string, strin
 	case "budget_limit.remove":
 		return fmt.Sprintf("Panda prepared removal of the `%s` budget limit for `%s`.", arguments["scope"], firstNonEmpty(arguments["subject_id"], "global")), "Remove limit"
 	case "role_permission.add":
-		return fmt.Sprintf("Panda prepared grant of `%s` to role `%s`.", arguments["permission"], arguments["role_id"]), "Grant permission"
+		return fmt.Sprintf("Panda prepared grant of `%s` to %s.", arguments["permission"], roleConfirmationDisplay(arguments)), "Grant permission"
 	case "role_permission.remove":
-		return fmt.Sprintf("Panda prepared removal of `%s` from role `%s`.", arguments["permission"], arguments["role_id"]), "Remove permission"
+		return fmt.Sprintf("Panda prepared removal of `%s` from %s.", arguments["permission"], roleConfirmationDisplay(arguments)), "Remove permission"
 	case "role_profile.add":
-		return fmt.Sprintf("Panda prepared the `%s` profile for role `%s`.", arguments["profile"], arguments["role_id"]), "Set role profile"
+		return fmt.Sprintf("Panda prepared the `%s` profile for %s.", arguments["profile"], roleConfirmationDisplay(arguments)), "Set role profile"
 	case "role_profile.remove":
-		return fmt.Sprintf("Panda prepared removal of the `%s` profile from role `%s`.", arguments["profile"], arguments["role_id"]), "Remove role profile"
+		return fmt.Sprintf("Panda prepared removal of the `%s` profile from %s.", arguments["profile"], roleConfirmationDisplay(arguments)), "Remove role profile"
 	case "user_permission.add":
-		return fmt.Sprintf("Panda prepared grant of `%s` to user `%s`.", arguments["permission"], arguments["user_id"]), "Grant user permission"
+		return fmt.Sprintf("Panda prepared grant of `%s` to %s.", arguments["permission"], userConfirmationDisplay(arguments)), "Grant user permission"
 	case "user_permission.remove":
-		return fmt.Sprintf("Panda prepared removal of `%s` from user `%s`.", arguments["permission"], arguments["user_id"]), "Remove user permission"
+		return fmt.Sprintf("Panda prepared removal of `%s` from %s.", arguments["permission"], userConfirmationDisplay(arguments)), "Remove user permission"
 	case "user_profile.add":
-		return fmt.Sprintf("Panda prepared the `%s` profile for user `%s`.", arguments["profile"], arguments["user_id"]), "Set user profile"
+		return fmt.Sprintf("Panda prepared the `%s` profile for %s.", arguments["profile"], userConfirmationDisplay(arguments)), "Set user profile"
 	case "user_profile.remove":
-		return fmt.Sprintf("Panda prepared removal of the `%s` profile from user `%s`.", arguments["profile"], arguments["user_id"]), "Remove user profile"
+		return fmt.Sprintf("Panda prepared removal of the `%s` profile from %s.", arguments["profile"], userConfirmationDisplay(arguments)), "Remove user profile"
 	case "discord_role.create":
 		return fmt.Sprintf("Panda prepared creation of Discord role `%s`.", arguments["name"]), "Create role"
 	case "discord_poll.create":
@@ -3137,17 +3921,21 @@ func confirmationCopy(action string, arguments map[string]string) (string, strin
 	case "discord_write.execute":
 		return fmt.Sprintf("Panda prepared `%s`.", arguments["tool_name"]), "Confirm write"
 	case "member_role.add":
-		return fmt.Sprintf("Panda prepared assignment of role `%s` to user `%s`.", arguments["role_id"], arguments["user_id"]), "Assign role"
+		return fmt.Sprintf("Panda prepared assignment of %s to %s.", roleConfirmationDisplay(arguments), userConfirmationDisplay(arguments)), "Assign role"
 	case "member_role.remove":
-		return fmt.Sprintf("Panda prepared removal of role `%s` from user `%s`.", arguments["role_id"], arguments["user_id"]), "Remove role"
+		return fmt.Sprintf("Panda prepared removal of %s from %s.", roleConfirmationDisplay(arguments), userConfirmationDisplay(arguments)), "Remove role"
 	case "tool_access.add":
-		return fmt.Sprintf("Panda prepared tool access for `%s` on role `%s`.", arguments["tool_name"], arguments["role_id"]), "Allow tool"
+		return fmt.Sprintf("Panda prepared tool access for `%s` on %s.", arguments["tool_name"], toolAccessConfirmationTarget(arguments)), "Allow tool"
 	case "tool_access.remove":
-		return fmt.Sprintf("Panda prepared removal of tool access for `%s` from role `%s`.", arguments["tool_name"], arguments["role_id"]), "Remove tool access"
+		return fmt.Sprintf("Panda prepared removal of tool access for `%s` from %s.", arguments["tool_name"], toolAccessConfirmationTarget(arguments)), "Remove tool access"
+	case "tool_access.deny":
+		return fmt.Sprintf("Panda prepared denial of tool access for `%s` on %s.", arguments["tool_name"], toolAccessConfirmationTarget(arguments)), "Deny tool access"
+	case "tool_access.open":
+		return fmt.Sprintf("Panda prepared opening %s to everyone.", toolAccessOpenToolList(arguments["tool_names"])), "Open tool access"
 	case "channel_rule.set":
-		return fmt.Sprintf("Panda prepared `%s` channel access rule for `%s`.", arguments["rule"], arguments["channel_id"]), "Set rule"
+		return fmt.Sprintf("Panda prepared `%s` channel access rule for %s.", arguments["rule"], channelConfirmationDisplay(arguments)), "Set rule"
 	case "channel_rule.remove":
-		return fmt.Sprintf("Panda prepared removal of the channel access rule for `%s`.", arguments["channel_id"]), "Remove rule"
+		return fmt.Sprintf("Panda prepared removal of the channel access rule for %s.", channelConfirmationDisplay(arguments)), "Remove rule"
 	case "composed_tool.approve":
 		return fmt.Sprintf("Panda prepared approval of `%s` version `%s`.", arguments["tool_name"], arguments["version"]), "Approve tool"
 	case "composed_tool.rollback":
@@ -3165,6 +3953,66 @@ func confirmationCopy(action string, arguments map[string]string) (string, strin
 	default:
 		return "", ""
 	}
+}
+
+func toolAccessOpenToolList(value string) string {
+	tools := strings.Split(value, ",")
+	quoted := make([]string, 0, len(tools))
+	for _, toolName := range tools {
+		toolName = strings.TrimSpace(toolName)
+		if toolName == "" {
+			continue
+		}
+		quoted = append(quoted, fmt.Sprintf("`%s`", toolName))
+	}
+	if len(quoted) == 0 {
+		return "the requested tool"
+	}
+	return strings.Join(quoted, ", ")
+}
+
+func toolAccessConfirmationTarget(arguments map[string]string) string {
+	if strings.TrimSpace(arguments["user_id"]) != "" {
+		return userConfirmationDisplay(arguments)
+	}
+	if strings.TrimSpace(arguments["role_id"]) != "" {
+		return roleConfirmationDisplay(arguments)
+	}
+	return "the requested target"
+}
+
+func roleConfirmationDisplay(arguments map[string]string) string {
+	if display := strings.TrimSpace(arguments["role_display"]); display != "" {
+		return display
+	}
+	return "the selected role"
+}
+
+func userConfirmationDisplay(arguments map[string]string) string {
+	if display := strings.TrimSpace(arguments["user_display"]); display != "" {
+		return display
+	}
+	return "the selected user"
+}
+
+func channelConfirmationDisplay(arguments map[string]string) string {
+	if display := strings.TrimSpace(arguments["channel_display"]); display != "" {
+		return display
+	}
+	return "the selected channel"
+}
+
+func stringArgumentsWithOptional(values map[string]any, required []string, optional ...string) map[string]string {
+	result := stringArguments(values, required...)
+	if result == nil {
+		return nil
+	}
+	for _, name := range optional {
+		if value := previewString(values, name); value != "" {
+			result[name] = value
+		}
+	}
+	return result
 }
 
 func stringArguments(values map[string]any, names ...string) map[string]string {
@@ -3436,62 +4284,124 @@ func knowledgeSearchPayloads(results []repository.KnowledgeSearchResult) []map[s
 	return payloads
 }
 
-func rolePermissionPayload(role store.GuildRole) map[string]any {
+func (e *Executor) rolePermissionPayload(ctx context.Context, request ExecutionRequest, role store.GuildRole) map[string]any {
 	return map[string]any{
-		"role_id":    role.RoleID,
+		"role":       e.DiscordRoleDisplay(ctx, request.GuildID, request.ActorID, request.RequestID, role.RoleID, ""),
 		"permission": role.Permission,
 	}
 }
 
-func rolePermissionPayloads(roles []store.GuildRole) []map[string]any {
+func (e *Executor) rolePermissionPayloads(ctx context.Context, request ExecutionRequest, roles []store.GuildRole) []map[string]any {
 	payloads := make([]map[string]any, 0, len(roles))
 	for _, role := range roles {
-		payloads = append(payloads, rolePermissionPayload(role))
+		payloads = append(payloads, e.rolePermissionPayload(ctx, request, role))
 	}
 	return payloads
 }
 
-func userPermissionPayload(user store.GuildUserPermission) map[string]any {
+func (e *Executor) userPermissionPayload(ctx context.Context, request ExecutionRequest, user store.GuildUserPermission) map[string]any {
 	return map[string]any{
-		"user_id":    user.UserID,
+		"user":       e.DiscordUserDisplay(ctx, request.GuildID, request.ActorID, request.RequestID, user.UserID, ""),
 		"permission": user.Permission,
 	}
 }
 
-func userPermissionPayloads(users []store.GuildUserPermission) []map[string]any {
+func (e *Executor) userPermissionPayloads(ctx context.Context, request ExecutionRequest, users []store.GuildUserPermission) []map[string]any {
 	payloads := make([]map[string]any, 0, len(users))
 	for _, user := range users {
-		payloads = append(payloads, userPermissionPayload(user))
+		payloads = append(payloads, e.userPermissionPayload(ctx, request, user))
 	}
 	return payloads
 }
 
-func toolRolePayload(role store.GuildToolRole) map[string]any {
+func (e *Executor) toolRolePayload(ctx context.Context, request ExecutionRequest, role store.GuildToolRole) map[string]any {
+	display := e.DiscordRoleDisplay(ctx, request.GuildID, request.ActorID, request.RequestID, role.RoleID, "")
 	return map[string]any{
-		"tool_name": role.ToolName,
-		"role_id":   role.RoleID,
+		"tool_name":    role.ToolName,
+		"target_type":  "role",
+		"target":       display,
+		"subject_type": "role",
+		"subject":      display,
+		"rule":         normalizeToolRule(role.Rule),
 	}
 }
 
-func toolRolePayloads(roles []store.GuildToolRole) []map[string]any {
+func normalizeToolRule(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "deny":
+		return "deny"
+	default:
+		return "allow"
+	}
+}
+
+func (e *Executor) toolRolePayloads(ctx context.Context, request ExecutionRequest, roles []store.GuildToolRole) []map[string]any {
 	payloads := make([]map[string]any, 0, len(roles))
 	for _, role := range roles {
-		payloads = append(payloads, toolRolePayload(role))
+		payloads = append(payloads, e.toolRolePayload(ctx, request, role))
 	}
 	return payloads
 }
 
-func channelRulePayload(rule store.GuildChannelRule) map[string]any {
+func (e *Executor) toolRoleStatusPayloads(ctx context.Context, request ExecutionRequest, roles []store.GuildToolRole) []map[string]any {
+	payloads := make([]map[string]any, 0, len(roles))
+	guildID := strings.TrimSpace(request.GuildID)
+	for _, role := range roles {
+		payload := e.toolRolePayload(ctx, request, role)
+		if guildID != "" && strings.TrimSpace(role.RoleID) == guildID {
+			payload["is_everyone_role"] = true
+			payload["valid_target"] = false
+			payload["notes"] = "The guild ID is Discord's @everyone role; Panda no longer treats it as a valid tool-access target. Use action=open to make the tool available to everyone, or remove this legacy rule."
+		} else {
+			payload["valid_target"] = true
+		}
+		payloads = append(payloads, payload)
+	}
+	return payloads
+}
+
+func (e *Executor) toolUserPayload(ctx context.Context, request ExecutionRequest, user store.GuildToolUser) map[string]any {
+	display := e.DiscordUserDisplay(ctx, request.GuildID, request.ActorID, request.RequestID, user.UserID, "")
 	return map[string]any{
-		"channel_id": rule.ChannelID,
-		"rule":       rule.Rule,
+		"tool_name":    user.ToolName,
+		"target_type":  "user",
+		"target":       display,
+		"subject_type": "user",
+		"subject":      display,
+		"rule":         normalizeToolRule(user.Rule),
 	}
 }
 
-func channelRulePayloads(rules []store.GuildChannelRule) []map[string]any {
+func (e *Executor) toolUserPayloads(ctx context.Context, request ExecutionRequest, users []store.GuildToolUser) []map[string]any {
+	payloads := make([]map[string]any, 0, len(users))
+	for _, user := range users {
+		payloads = append(payloads, e.toolUserPayload(ctx, request, user))
+	}
+	return payloads
+}
+
+func (e *Executor) toolAccessPayloads(ctx context.Context, request ExecutionRequest, roles []store.GuildToolRole, users []store.GuildToolUser) []map[string]any {
+	payloads := make([]map[string]any, 0, len(roles)+len(users))
+	for _, role := range roles {
+		payloads = append(payloads, e.toolRolePayload(ctx, request, role))
+	}
+	for _, user := range users {
+		payloads = append(payloads, e.toolUserPayload(ctx, request, user))
+	}
+	return payloads
+}
+
+func (e *Executor) channelRulePayload(ctx context.Context, request ExecutionRequest, rule store.GuildChannelRule) map[string]any {
+	return map[string]any{
+		"channel": e.DiscordChannelDisplay(ctx, request.GuildID, request.ActorID, request.RequestID, rule.ChannelID, ""),
+		"rule":    rule.Rule,
+	}
+}
+
+func (e *Executor) channelRulePayloads(ctx context.Context, request ExecutionRequest, rules []store.GuildChannelRule) []map[string]any {
 	payloads := make([]map[string]any, 0, len(rules))
 	for _, rule := range rules {
-		payloads = append(payloads, channelRulePayload(rule))
+		payloads = append(payloads, e.channelRulePayload(ctx, request, rule))
 	}
 	return payloads
 }

@@ -73,6 +73,40 @@ func TestGuildConfigEnsureDefaultCreatesWithoutRecordNotFoundLog(t *testing.T) {
 	}
 }
 
+func TestRuntimeStatusDefaultsAndUpdate(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(ctx, "file::memory:?cache=shared")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer db.Close()
+
+	repo := NewRuntimeStatusRepository(db.DB)
+	status, err := repo.Get(ctx)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if status.Key != RuntimeStatusGlobalKey || status.Disabled || status.Message != "" || status.UpdatedBy != "" {
+		t.Fatalf("unexpected default runtime status: %+v", status)
+	}
+
+	updated, err := repo.Update(ctx, true, "Panda is napping.", "treasury_wallet:test")
+	if err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+	if !updated.Disabled || updated.Message != "Panda is napping." || updated.UpdatedBy != "treasury_wallet:test" {
+		t.Fatalf("unexpected updated runtime status: %+v", updated)
+	}
+
+	again, err := repo.Get(ctx)
+	if err != nil {
+		t.Fatalf("Get again: %v", err)
+	}
+	if again.Key != RuntimeStatusGlobalKey || !again.Disabled || again.Message != updated.Message {
+		t.Fatalf("expected persisted runtime status, got %+v", again)
+	}
+}
+
 func TestGuildMissingReadDoesNotLogRecordNotFound(t *testing.T) {
 	ctx := context.Background()
 	db, logs, cleanup := newRepositoryGormWithLogBuffer(t)

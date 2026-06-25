@@ -30,6 +30,10 @@ const (
 	toolConfirmationOpMemberRoleRemove     = "mr"
 	toolConfirmationOpToolAccessAdd        = "ta"
 	toolConfirmationOpToolAccessRemove     = "tr"
+	toolConfirmationOpToolAccessDeny       = "td"
+	toolConfirmationOpToolUserAccessAdd    = "tu"
+	toolConfirmationOpToolUserAccessRemove = "tv"
+	toolConfirmationOpToolUserAccessDeny   = "tw"
 	toolConfirmationOpChannelRuleSet       = "cs"
 	toolConfirmationOpChannelRuleRemove    = "cr"
 	toolConfirmationOpComposedToolApprove  = "ca"
@@ -52,6 +56,8 @@ const (
 	toolActionMemberRoleRemove             = "member_role.remove"
 	toolActionToolAccessAdd                = "tool_access.add"
 	toolActionToolAccessRemove             = "tool_access.remove"
+	toolActionToolAccessDeny               = "tool_access.deny"
+	toolActionToolAccessOpen               = "tool_access.open"
 	toolActionChannelRuleSet               = "channel_rule.set"
 	toolActionChannelRuleRemove            = "channel_rule.remove"
 	toolActionComposedToolApprove          = "composed_tool.approve"
@@ -141,6 +147,7 @@ func pendingToolConfirmationAction(action string) bool {
 	switch action {
 	case toolActionDiscordPollCreate,
 		toolActionDiscordRoleCreate,
+		toolActionToolAccessOpen,
 		toolActionDiscordWriteExecute:
 		return true
 	default:
@@ -293,6 +300,34 @@ func RequestFromToolConfirmationID(id string, base Request) (ToolConfirmationReq
 		request.Action = toolActionToolAccessRemove
 		request.Options["tool_name"] = decodeToolConfirmationPart(parts[3])
 		request.Options["role_id"] = decodeToolConfirmationPart(parts[4])
+	case toolConfirmationOpToolAccessDeny:
+		if len(parts) != 5 {
+			return ToolConfirmationRequest{}, false
+		}
+		request.Action = toolActionToolAccessDeny
+		request.Options["tool_name"] = decodeToolConfirmationPart(parts[3])
+		request.Options["role_id"] = decodeToolConfirmationPart(parts[4])
+	case toolConfirmationOpToolUserAccessAdd:
+		if len(parts) != 5 {
+			return ToolConfirmationRequest{}, false
+		}
+		request.Action = toolActionToolAccessAdd
+		request.Options["tool_name"] = decodeToolConfirmationPart(parts[3])
+		request.Options["user_id"] = decodeToolConfirmationPart(parts[4])
+	case toolConfirmationOpToolUserAccessRemove:
+		if len(parts) != 5 {
+			return ToolConfirmationRequest{}, false
+		}
+		request.Action = toolActionToolAccessRemove
+		request.Options["tool_name"] = decodeToolConfirmationPart(parts[3])
+		request.Options["user_id"] = decodeToolConfirmationPart(parts[4])
+	case toolConfirmationOpToolUserAccessDeny:
+		if len(parts) != 5 {
+			return ToolConfirmationRequest{}, false
+		}
+		request.Action = toolActionToolAccessDeny
+		request.Options["tool_name"] = decodeToolConfirmationPart(parts[3])
+		request.Options["user_id"] = decodeToolConfirmationPart(parts[4])
 	case toolConfirmationOpChannelRuleSet:
 		if len(parts) != 5 {
 			return ToolConfirmationRequest{}, false
@@ -477,16 +512,43 @@ func toolConfirmationID(userID, action string, arguments map[string]string) stri
 		prefix[1] = toolConfirmationOpMemberRoleRemove
 		return strings.Join(append(prefix, encodeToolConfirmationPart(arguments["user_id"]), encodeToolConfirmationPart(arguments["role_id"])), ":")
 	case toolActionToolAccessAdd:
-		if strings.TrimSpace(arguments["tool_name"]) == "" || strings.TrimSpace(arguments["role_id"]) == "" {
+		if strings.TrimSpace(arguments["tool_name"]) == "" {
+			return ""
+		}
+		if userID := strings.TrimSpace(arguments["user_id"]); userID != "" {
+			prefix[1] = toolConfirmationOpToolUserAccessAdd
+			return strings.Join(append(prefix, encodeToolConfirmationPart(arguments["tool_name"]), encodeToolConfirmationPart(userID)), ":")
+		}
+		if strings.TrimSpace(arguments["role_id"]) == "" {
 			return ""
 		}
 		prefix[1] = toolConfirmationOpToolAccessAdd
 		return strings.Join(append(prefix, encodeToolConfirmationPart(arguments["tool_name"]), encodeToolConfirmationPart(arguments["role_id"])), ":")
 	case toolActionToolAccessRemove:
-		if strings.TrimSpace(arguments["tool_name"]) == "" || strings.TrimSpace(arguments["role_id"]) == "" {
+		if strings.TrimSpace(arguments["tool_name"]) == "" {
+			return ""
+		}
+		if userID := strings.TrimSpace(arguments["user_id"]); userID != "" {
+			prefix[1] = toolConfirmationOpToolUserAccessRemove
+			return strings.Join(append(prefix, encodeToolConfirmationPart(arguments["tool_name"]), encodeToolConfirmationPart(userID)), ":")
+		}
+		if strings.TrimSpace(arguments["role_id"]) == "" {
 			return ""
 		}
 		prefix[1] = toolConfirmationOpToolAccessRemove
+		return strings.Join(append(prefix, encodeToolConfirmationPart(arguments["tool_name"]), encodeToolConfirmationPart(arguments["role_id"])), ":")
+	case toolActionToolAccessDeny:
+		if strings.TrimSpace(arguments["tool_name"]) == "" {
+			return ""
+		}
+		if userID := strings.TrimSpace(arguments["user_id"]); userID != "" {
+			prefix[1] = toolConfirmationOpToolUserAccessDeny
+			return strings.Join(append(prefix, encodeToolConfirmationPart(arguments["tool_name"]), encodeToolConfirmationPart(userID)), ":")
+		}
+		if strings.TrimSpace(arguments["role_id"]) == "" {
+			return ""
+		}
+		prefix[1] = toolConfirmationOpToolAccessDeny
 		return strings.Join(append(prefix, encodeToolConfirmationPart(arguments["tool_name"]), encodeToolConfirmationPart(arguments["role_id"])), ":")
 	case toolActionChannelRuleSet:
 		if strings.TrimSpace(arguments["channel_id"]) == "" || strings.TrimSpace(arguments["rule"]) == "" {

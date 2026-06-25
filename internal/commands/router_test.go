@@ -26,6 +26,7 @@ import (
 	"github.com/sn0w/panda2/internal/queue"
 	"github.com/sn0w/panda2/internal/ratelimit"
 	"github.com/sn0w/panda2/internal/repository"
+	"github.com/sn0w/panda2/internal/runtimecontrol"
 	"github.com/sn0w/panda2/internal/scheduler"
 	"github.com/sn0w/panda2/internal/store"
 	"github.com/sn0w/panda2/internal/tools"
@@ -78,6 +79,7 @@ type fakeFeatureInstallCreator struct {
 
 type fakeCommandDiscordProvider struct {
 	requests []tools.DiscordToolRequest
+	result   any
 }
 
 type fakeAttachmentReader struct {
@@ -185,6 +187,9 @@ func (f *fakeCommandDiscordProvider) ExecuteDiscordTool(_ context.Context, reque
 			"channel_id": request.Arguments["channel_id"],
 			"poll":       request.Arguments,
 		}, nil
+	}
+	if f.result != nil {
+		return f.result, nil
 	}
 	return map[string]any{
 		"tool":      request.ToolName,
@@ -360,6 +365,20 @@ func attachFeatureService(t *testing.T, router *Router) *repository.FeatureRepos
 	repo := repository.NewFeatureRepository(db.DB)
 	router.WithFeatureService(features.NewService(repo))
 	return repo
+}
+
+func attachRuntimeStatus(t *testing.T, router *Router) *runtimecontrol.Service {
+	t.Helper()
+	ctx := context.Background()
+	dsn := "file:" + strings.NewReplacer("/", "_", " ", "_").Replace(t.Name()) + "_runtime?mode=memory&cache=shared"
+	db, err := store.Open(ctx, dsn)
+	if err != nil {
+		t.Fatalf("open runtime store: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	service := runtimecontrol.NewService(repository.NewRuntimeStatusRepository(db.DB))
+	router.WithRuntimeStatus(service)
+	return service
 }
 
 func containsString(values []string, want string) bool {
@@ -740,7 +759,7 @@ func TestAdminRoleProfileConfiguresDelegatedAdminRole(t *testing.T) {
 			"role_name": "MOD",
 		},
 	})
-	if !profile.Ephemeral || !strings.Contains(profile.Content, "`MOD` (`role-mod`) is now a Panda admin role") {
+	if !profile.Ephemeral || !strings.Contains(profile.Content, "`MOD` is now a Panda admin role") || strings.Contains(profile.Content, "role-mod") {
 		t.Fatalf("expected role profile command to configure admin role, got %+v", profile)
 	}
 
@@ -783,7 +802,7 @@ func TestAdminUserProfileConfiguresDelegatedAdminUser(t *testing.T) {
 			"member_user_name": "Mod Person",
 		},
 	})
-	if !profile.Ephemeral || !strings.Contains(profile.Content, "`Mod Person` (`user-mod`) is now a Panda admin user") {
+	if !profile.Ephemeral || !strings.Contains(profile.Content, "`Mod Person` is now a Panda admin user") || strings.Contains(profile.Content, "user-mod") {
 		t.Fatalf("expected user profile command to configure admin user, got %+v", profile)
 	}
 
@@ -804,7 +823,7 @@ func TestAdminUserProfileConfiguresDelegatedAdminUser(t *testing.T) {
 	}
 
 	list := router.Handle(ctx, Request{Command: "admin", Subcommand: "user", GuildID: "guild-1", UserID: "owner", IsGuildAdmin: true, Options: map[string]string{"action": "list"}})
-	if !strings.Contains(list.Content, "admin: `user-mod`") {
+	if !strings.Contains(list.Content, "admin: the selected user") || strings.Contains(list.Content, "user-mod") {
 		t.Fatalf("expected user profile list to include delegated admin user, got %+v", list)
 	}
 }
@@ -871,7 +890,7 @@ func TestAdminChannelAccessAllowListsAssistantUse(t *testing.T) {
 		IsGuildAdmin: true,
 		Options:      map[string]string{"action": "list"},
 	})
-	if !strings.Contains(list.Content, "allow-list active") || !strings.Contains(list.Content, "channel-allowed") {
+	if !strings.Contains(list.Content, "allow-list active") || strings.Contains(list.Content, "channel-allowed") {
 		t.Fatalf("expected allow-list details, got %+v", list)
 	}
 
@@ -969,7 +988,7 @@ func TestAdminRoleProfileConfiguresModeratorRole(t *testing.T) {
 			"role_name": "Pickle",
 		},
 	})
-	if !response.Ephemeral || !strings.Contains(response.Content, "`Pickle` (`role-pickle`) is now a Panda moderator role") {
+	if !response.Ephemeral || !strings.Contains(response.Content, "`Pickle` is now a Panda moderator role") || strings.Contains(response.Content, "role-pickle") {
 		t.Fatalf("expected moderator role profile response, got %+v", response)
 	}
 	allowed, err := router.admin.CanUseModeration(ctx, admin.AssistantAccessRequest{GuildID: "guild-1", RoleIDs: []string{"role-pickle"}})
@@ -977,7 +996,7 @@ func TestAdminRoleProfileConfiguresModeratorRole(t *testing.T) {
 		t.Fatalf("expected Pickle role to grant moderation, allowed=%t err=%v", allowed, err)
 	}
 	list := router.Handle(ctx, Request{Command: "admin", Subcommand: "role", GuildID: "guild-1", UserID: "owner", IsGuildAdmin: true, Options: map[string]string{"action": "list"}})
-	if !strings.Contains(list.Content, "moderator: `role-pickle`") {
+	if !strings.Contains(list.Content, "moderator: the selected role") || strings.Contains(list.Content, "role-pickle") {
 		t.Fatalf("expected role profile list to include moderator role, got %+v", list)
 	}
 }
@@ -996,21 +1015,21 @@ func TestAdminRoleProfileCanReuseSameRoleForAdminAndModerator(t *testing.T) {
 	adminRequest := ownerRequest
 	adminRequest.Options = map[string]string{"action": "set", "profile": "admin", "role_id": "role-staff"}
 	adminResponse := router.Handle(ctx, adminRequest)
-	if !adminResponse.Ephemeral || !strings.Contains(adminResponse.Content, "`role-staff` is now a Panda admin role") {
+	if !adminResponse.Ephemeral || !strings.Contains(adminResponse.Content, "the selected role is now a Panda admin role") || strings.Contains(adminResponse.Content, "role-staff") {
 		t.Fatalf("expected admin role profile response, got %+v", adminResponse)
 	}
 
 	modRequest := ownerRequest
 	modRequest.Options = map[string]string{"action": "set", "profile": "moderator", "role_id": "role-staff"}
 	modResponse := router.Handle(ctx, modRequest)
-	if !modResponse.Ephemeral || !strings.Contains(modResponse.Content, "`role-staff` is now a Panda moderator role") {
+	if !modResponse.Ephemeral || !strings.Contains(modResponse.Content, "the selected role is now a Panda moderator role") || strings.Contains(modResponse.Content, "role-staff") {
 		t.Fatalf("expected moderator role profile response, got %+v", modResponse)
 	}
 
 	listRequest := ownerRequest
 	listRequest.Options = map[string]string{"action": "list"}
 	list := router.Handle(ctx, listRequest)
-	for _, want := range []string{"admin: `role-staff`", "moderator: `role-staff`"} {
+	for _, want := range []string{"admin: the selected role", "moderator: the selected role"} {
 		if !strings.Contains(list.Content, want) {
 			t.Fatalf("expected combined role profile list to include %q, got %+v", want, list)
 		}
@@ -1062,7 +1081,7 @@ func TestAdminMemberRoleAssignsDiscordRole(t *testing.T) {
 			"role_name":        "Pickle",
 		},
 	})
-	if !response.Ephemeral || !strings.Contains(response.Content, "Assigned `Pickle` (`role-pickle`) to `Snow` (`user-target`)") {
+	if !response.Ephemeral || !strings.Contains(response.Content, "Assigned `Pickle` to `Snow`") || strings.Contains(response.Content, "role-pickle") || strings.Contains(response.Content, "user-target") {
 		t.Fatalf("unexpected member-role response: %+v", response)
 	}
 	if len(manager.adds) != 1 || manager.adds[0].GuildID != "guild-1" || manager.adds[0].UserID != "user-target" || manager.adds[0].RoleID != "role-pickle" {
@@ -1087,7 +1106,7 @@ func TestAdminToolConfiguresRoleToolAccess(t *testing.T) {
 			"role_name": "Searchers",
 		},
 	})
-	if !add.Ephemeral || !strings.Contains(add.Content, "Allowed `Searchers` (`role-search`) to use `web.search`") {
+	if !add.Ephemeral || !strings.Contains(add.Content, "Allowed `Searchers` to use `web.search`") || strings.Contains(add.Content, "role-search") {
 		t.Fatalf("unexpected add response: %+v", add)
 	}
 
@@ -1099,7 +1118,7 @@ func TestAdminToolConfiguresRoleToolAccess(t *testing.T) {
 		IsGuildAdmin: true,
 		Options:      map[string]string{"action": "list"},
 	})
-	if !strings.Contains(list.Content, "`web.search` -> `role-search`") {
+	if !strings.Contains(list.Content, "`web.search` allow -> the selected role") || strings.Contains(list.Content, "role-search") {
 		t.Fatalf("unexpected list response: %+v", list)
 	}
 
@@ -1115,8 +1134,145 @@ func TestAdminToolConfiguresRoleToolAccess(t *testing.T) {
 			"role_id":   "role-search",
 		},
 	})
-	if !strings.Contains(remove.Content, "Removed `role-search` from `web.search`") {
+	if !strings.Contains(remove.Content, "Removed the selected role from `web.search`") || strings.Contains(remove.Content, "role-search") {
 		t.Fatalf("unexpected remove response: %+v", remove)
+	}
+}
+
+func TestAdminToolRejectsEveryoneRoleAndOpensTools(t *testing.T) {
+	ctx := context.Background()
+	router := newTestRouter(t, &fakeLLM{}, 5)
+
+	rejected := router.Handle(ctx, Request{
+		Command:      "admin",
+		Subcommand:   "tool",
+		GuildID:      "guild-1",
+		UserID:       "admin",
+		IsGuildAdmin: true,
+		Options: map[string]string{
+			"action":    "add",
+			"tool_name": "panda.generate_image",
+			"role_id":   "guild-1",
+		},
+	})
+	if !rejected.Ephemeral || !strings.Contains(rejected.Content, "tool access cannot target @everyone as a role") {
+		t.Fatalf("unexpected @everyone rejection response: %+v", rejected)
+	}
+
+	if _, err := router.admin.AddRolePermission(ctx, "guild-1", "admin", "role-image", admin.PermissionAssistantImageGeneration); err != nil {
+		t.Fatalf("AddRolePermission: %v", err)
+	}
+	if _, err := router.admin.AddToolRole(ctx, "guild-1", "admin", "panda.generate_image", "role-image"); err != nil {
+		t.Fatalf("AddToolRole: %v", err)
+	}
+	opened := router.Handle(ctx, Request{
+		Command:      "admin",
+		Subcommand:   "tool",
+		GuildID:      "guild-1",
+		UserID:       "admin",
+		IsGuildAdmin: true,
+		Options: map[string]string{
+			"action":     "open",
+			"tool_group": "image_tools",
+		},
+	})
+	if !opened.Ephemeral || !strings.Contains(opened.Content, "Opened `panda.generate_image`, `panda.inspect_image` to everyone") {
+		t.Fatalf("unexpected open response: %+v", opened)
+	}
+
+	if _, err := router.admin.AddRolePermission(ctx, "guild-1", "admin", "role-search", admin.PermissionAssistantWebSearch); err != nil {
+		t.Fatalf("AddRolePermission web search: %v", err)
+	}
+	if _, err := router.admin.AddToolRole(ctx, "guild-1", "admin", "web.search", "role-search"); err != nil {
+		t.Fatalf("AddToolRole web search: %v", err)
+	}
+	openedWeb := router.Handle(ctx, Request{
+		Command:      "admin",
+		Subcommand:   "tool",
+		GuildID:      "guild-1",
+		UserID:       "admin",
+		IsGuildAdmin: true,
+		Options: map[string]string{
+			"action":    "open",
+			"tool_name": "web_search",
+		},
+	})
+	if !openedWeb.Ephemeral || !strings.Contains(openedWeb.Content, "Opened `web.search` to everyone") {
+		t.Fatalf("unexpected web open response: %+v", openedWeb)
+	}
+	if !strings.Contains(openedWeb.Content, "Cleared 1 permission rule(s) and 1 tool access rule(s)") {
+		t.Fatalf("expected web open to clear permission and tool restrictions: %+v", openedWeb)
+	}
+
+	if _, err := router.admin.AddToolRole(ctx, "guild-1", "admin", "welcome_builder", "role-builder"); err != nil {
+		t.Fatalf("AddToolRole composed: %v", err)
+	}
+	openedComposed := router.Handle(ctx, Request{
+		Command:      "admin",
+		Subcommand:   "tool",
+		GuildID:      "guild-1",
+		UserID:       "admin",
+		IsGuildAdmin: true,
+		Options: map[string]string{
+			"action":    "open",
+			"tool_name": "welcome_builder",
+		},
+	})
+	if !openedComposed.Ephemeral || !strings.Contains(openedComposed.Content, "Opened `welcome_builder` to everyone") {
+		t.Fatalf("unexpected composed open response: %+v", openedComposed)
+	}
+	if !strings.Contains(openedComposed.Content, "Cleared 0 permission rule(s) and 1 tool access rule(s)") {
+		t.Fatalf("expected composed open to clear only tool restrictions: %+v", openedComposed)
+	}
+}
+
+func TestAdminToolConfiguresUserToolAccess(t *testing.T) {
+	ctx := context.Background()
+	router := newTestRouter(t, &fakeLLM{}, 5)
+
+	add := router.Handle(ctx, Request{
+		Command:      "admin",
+		Subcommand:   "tool",
+		GuildID:      "guild-1",
+		UserID:       "admin",
+		IsGuildAdmin: true,
+		Options: map[string]string{
+			"action":           "add",
+			"tool_name":        "panda.generate_image",
+			"member_user_id":   "user-artist",
+			"member_user_name": "Artist",
+		},
+	})
+	if !add.Ephemeral || !strings.Contains(add.Content, "Allowed `Artist` to use `panda.generate_image`") || strings.Contains(add.Content, "user-artist") {
+		t.Fatalf("unexpected user add response: %+v", add)
+	}
+
+	list := router.Handle(ctx, Request{
+		Command:      "admin",
+		Subcommand:   "tool",
+		GuildID:      "guild-1",
+		UserID:       "admin",
+		IsGuildAdmin: true,
+		Options:      map[string]string{"action": "list"},
+	})
+	if !strings.Contains(list.Content, "`panda.generate_image` allow -> the selected user") || strings.Contains(list.Content, "user-artist") {
+		t.Fatalf("unexpected user list response: %+v", list)
+	}
+
+	remove := router.Handle(ctx, Request{
+		Command:      "admin",
+		Subcommand:   "tool",
+		GuildID:      "guild-1",
+		UserID:       "admin",
+		IsGuildAdmin: true,
+		Options: map[string]string{
+			"action":    "remove",
+			"tool_name": "panda.generate_image",
+			"user_id":   "user-artist",
+		},
+	})
+	if !strings.Contains(remove.Content, "Removed the selected user from `panda.generate_image`") || strings.Contains(remove.Content, "user-artist") {
+		t.Fatalf("unexpected user remove response: %+v", remove)
 	}
 }
 
@@ -1807,11 +1963,113 @@ func TestHandleToolConfirmationAssignsMemberRole(t *testing.T) {
 		Action:  toolActionMemberRoleAdd,
 		Options: map[string]string{"user_id": "user-target", "role_id": "role-pickle"},
 	})
-	if !response.Ephemeral || !strings.Contains(response.Content, "Assigned role `role-pickle` to user `user-target`") {
+	if !response.Ephemeral || !strings.Contains(response.Content, "Assigned the selected role to the selected user") || strings.Contains(response.Content, "role-pickle") || strings.Contains(response.Content, "user-target") {
 		t.Fatalf("unexpected member role confirmation response: %+v", response)
 	}
 	if len(manager.adds) != 1 || manager.adds[0].UserID != "user-target" || manager.adds[0].RoleID != "role-pickle" {
 		t.Fatalf("unexpected member role manager calls: %+v", manager.adds)
+	}
+}
+
+func TestHandleToolConfirmationAppliesUserToolAccess(t *testing.T) {
+	router := newTestRouter(t, &fakeLLM{}, 20)
+
+	response := router.HandleToolConfirmation(context.Background(), ToolConfirmationRequest{
+		Request: Request{
+			GuildID:      "guild-1",
+			UserID:       "admin",
+			IsGuildAdmin: true,
+		},
+		Action:  toolActionToolAccessAdd,
+		Options: map[string]string{"tool_name": "panda.generate_image", "user_id": "user-artist"},
+	})
+	if !response.Ephemeral || !strings.Contains(response.Content, "Allowed the selected user to use `panda.generate_image`") || strings.Contains(response.Content, "user-artist") {
+		t.Fatalf("unexpected user tool access confirmation response: %+v", response)
+	}
+
+	access, err := router.admin.ToolUserRoleAccess(context.Background(), "guild-1", "user-artist", nil)
+	if err != nil {
+		t.Fatalf("ToolUserRoleAccess: %v", err)
+	}
+	if len(access.AllowedTools) != 1 || access.AllowedTools[0] != "panda.generate_image" {
+		t.Fatalf("expected user tool access, got %+v", access)
+	}
+}
+
+func TestHandleToolConfirmationDeniesUserToolAccessWithoutExistingAllow(t *testing.T) {
+	router := newTestRouter(t, &fakeLLM{}, 20)
+
+	response := router.HandleToolConfirmation(context.Background(), ToolConfirmationRequest{
+		Request: Request{
+			GuildID:      "guild-1",
+			UserID:       "admin",
+			IsGuildAdmin: true,
+		},
+		Action:  toolActionToolAccessDeny,
+		Options: map[string]string{"tool_name": "panda.generate_image", "user_id": "user-xer0"},
+	})
+	if !response.Ephemeral || !strings.Contains(response.Content, "Denied the selected user from `panda.generate_image`") || strings.Contains(response.Content, "user-xer0") {
+		t.Fatalf("unexpected user tool deny confirmation response: %+v", response)
+	}
+
+	access, err := router.admin.ToolUserRoleAccess(context.Background(), "guild-1", "user-xer0", nil)
+	if err != nil {
+		t.Fatalf("ToolUserRoleAccess: %v", err)
+	}
+	if len(access.AllowedTools) != 0 || len(access.DeniedTools) != 1 || access.DeniedTools[0] != "panda.generate_image" {
+		t.Fatalf("expected direct user deny without allow, got %+v", access)
+	}
+}
+
+func TestHandleToolConfirmationOpensImageToolAccess(t *testing.T) {
+	ctx := context.Background()
+	router := newTestRouter(t, &fakeLLM{}, 20)
+
+	if _, err := router.admin.AddRolePermission(ctx, "guild-1", "admin", "role-image", admin.PermissionAssistantImageGeneration); err != nil {
+		t.Fatalf("AddRolePermission: %v", err)
+	}
+	if _, err := router.admin.AddUserPermission(ctx, "guild-1", "admin", "user-image", admin.PermissionAssistantImageGeneration); err != nil {
+		t.Fatalf("AddUserPermission: %v", err)
+	}
+	if _, err := router.admin.AddToolRole(ctx, "guild-1", "admin", "panda.generate_image", "role-image"); err != nil {
+		t.Fatalf("AddToolRole generate: %v", err)
+	}
+	if _, err := router.admin.AddToolUser(ctx, "guild-1", "admin", "panda.inspect_image", "user-image"); err != nil {
+		t.Fatalf("AddToolUser inspect: %v", err)
+	}
+
+	response := router.HandleToolConfirmation(ctx, ToolConfirmationRequest{
+		Request: Request{
+			GuildID:      "guild-1",
+			UserID:       "admin",
+			IsGuildAdmin: true,
+		},
+		Action: toolActionToolAccessOpen,
+		Options: map[string]string{
+			"tool_names":  "panda.generate_image,panda.inspect_image",
+			"permissions": admin.PermissionAssistantImageGeneration,
+		},
+	})
+	if !response.Ephemeral || !strings.Contains(response.Content, "Opened `panda.generate_image`, `panda.inspect_image` to everyone") {
+		t.Fatalf("unexpected open tool access confirmation response: %+v", response)
+	}
+	if !strings.Contains(response.Content, "Cleared 2 permission rule(s) and 2 tool access rule(s)") {
+		t.Fatalf("unexpected clear counts: %+v", response)
+	}
+	rolePermissions, err := router.admin.ListRolePermissions(ctx, "guild-1")
+	if err != nil {
+		t.Fatalf("ListRolePermissions: %v", err)
+	}
+	userPermissions, err := router.admin.ListUserPermissions(ctx, "guild-1")
+	if err != nil {
+		t.Fatalf("ListUserPermissions: %v", err)
+	}
+	toolRules, err := router.admin.ListToolAccess(ctx, "guild-1")
+	if err != nil {
+		t.Fatalf("ListToolAccess: %v", err)
+	}
+	if len(rolePermissions) != 0 || len(userPermissions) != 0 || len(toolRules) != 0 {
+		t.Fatalf("expected open image access to clear gates, roles=%+v users=%+v tools=%+v", rolePermissions, userPermissions, toolRules)
 	}
 }
 
@@ -1887,6 +2145,129 @@ func TestNaturalMemberRoleAssignmentRendersConfirmationThroughAgentTool(t *testi
 	}
 	if names := requestToolNames(client.requests[0]); !names["panda_manage_member_role"] {
 		t.Fatalf("expected member-role workflow to be available, got %+v", names)
+	}
+}
+
+func TestNaturalUserToolAccessRendersConfirmationThroughAgentTool(t *testing.T) {
+	client := &fakeLLM{responses: []llm.ChatResponse{
+		{ToolCalls: []llm.ToolCall{{
+			ID:   "call-tool-user-access",
+			Type: "function",
+			Function: llm.ToolCallFunction{
+				Name:      "panda_manage_tool_access",
+				Arguments: `{"action":"remove","tool_name":"panda.generate_image","user_id":"user-target"}`,
+			},
+		}}},
+		{Content: "Prepared user tool access removal."},
+	}}
+	router := newTestRouter(t, client, 20)
+
+	response := router.HandleNaturalMessage(context.Background(), Request{
+		GuildID:      "guild-1",
+		ChannelID:    "channel-1",
+		UserID:       "admin",
+		IsGuildAdmin: true,
+		Options:      map[string]string{"message": "panda remove user-target from image tool access", "bot_mentioned": "true"},
+	})
+	if response.Confirmation == nil || response.Confirmation.ConfirmLabel != "Remove tool access" {
+		t.Fatalf("expected user tool access confirmation, got %+v", response)
+	}
+	confirmationRequest, ok := RequestFromToolConfirmationID(response.Confirmation.ID, Request{UserID: "admin"})
+	if !ok || confirmationRequest.Action != toolActionToolAccessRemove || confirmationRequest.Options["tool_name"] != "panda.generate_image" || confirmationRequest.Options["user_id"] != "user-target" {
+		t.Fatalf("unexpected user tool access confirmation id: request=%+v ok=%t", confirmationRequest, ok)
+	}
+	if len(client.requests) != 2 {
+		t.Fatalf("expected streamed user tool access call and final response, got %d", len(client.requests))
+	}
+	if names := requestToolNames(client.requests[0]); !names["panda_manage_tool_access"] {
+		t.Fatalf("expected tool access workflow to be available, got %+v", names)
+	}
+}
+
+func TestNaturalDenyNamedUserToolAccessResolvesMember(t *testing.T) {
+	client := &fakeLLM{responses: []llm.ChatResponse{
+		{ToolCalls: []llm.ToolCall{{
+			ID:   "call-deny-tool-user-access",
+			Type: "function",
+			Function: llm.ToolCallFunction{
+				Name:      "panda_manage_tool_access",
+				Arguments: `{"action":"deny","tool_name":"image generation tool","user":"@xer0"}`,
+			},
+		}}},
+		{Content: "Prepared user tool access denial."},
+	}}
+	provider := &fakeCommandDiscordProvider{
+		result: map[string]any{"members": []map[string]any{{
+			"user": map[string]any{
+				"id":          "100000000000000999",
+				"username":    "xer0",
+				"global_name": "xer0",
+				"effective":   "xer0",
+			},
+		}}},
+	}
+	router := newTestRouter(t, client, 20, func(executor *tools.Executor) {
+		executor.WithDiscordToolProvider(provider)
+	})
+
+	response := router.HandleNaturalMessage(context.Background(), Request{
+		GuildID:      "guild-1",
+		ChannelID:    "channel-1",
+		UserID:       "admin",
+		IsGuildAdmin: true,
+		Options:      map[string]string{"message": "panda dont allow @xer0 to use image generation tool", "bot_mentioned": "true"},
+	})
+	if response.Confirmation == nil || response.Confirmation.ConfirmLabel != "Deny tool access" {
+		t.Fatalf("expected deny tool access confirmation, got %+v", response)
+	}
+	confirmationRequest, ok := RequestFromToolConfirmationID(response.Confirmation.ID, Request{UserID: "admin"})
+	if !ok || confirmationRequest.Action != toolActionToolAccessDeny || confirmationRequest.Options["tool_name"] != "panda.generate_image" || confirmationRequest.Options["user_id"] != "100000000000000999" {
+		t.Fatalf("unexpected deny tool access confirmation id: request=%+v ok=%t", confirmationRequest, ok)
+	}
+	if len(provider.requests) != 1 || provider.requests[0].ToolName != "discord.list_members" {
+		t.Fatalf("expected Discord member lookup, got %+v", provider.requests)
+	}
+}
+
+func TestNaturalOpenImageToolAccessRendersConfirmationThroughAgentTool(t *testing.T) {
+	client := &fakeLLM{responses: []llm.ChatResponse{
+		{ToolCalls: []llm.ToolCall{{
+			ID:   "call-open-image-tool-access",
+			Type: "function",
+			Function: llm.ToolCallFunction{
+				Name:      "panda_manage_tool_access",
+				Arguments: `{"action":"open","tool_group":"image_tools"}`,
+			},
+		}}},
+		{Content: "Prepared opening image tools to everyone."},
+	}}
+	router := newTestRouter(t, client, 20)
+
+	response := router.HandleNaturalMessage(context.Background(), Request{
+		GuildID:      "guild-1",
+		ChannelID:    "channel-1",
+		UserID:       "admin",
+		IsGuildAdmin: true,
+		Options:      map[string]string{"message": "panda allow everyone to be able to use image tools", "bot_mentioned": "true"},
+	})
+	if response.Confirmation == nil || response.Confirmation.ConfirmLabel != "Open tool access" {
+		t.Fatalf("expected open tool access confirmation, got %+v", response)
+	}
+	confirmationRequest, ok := RequestFromToolConfirmationID(response.Confirmation.ID, Request{UserID: "admin"})
+	if !ok || confirmationRequest.Action != toolActionToolAccessOpen {
+		t.Fatalf("unexpected open tool access confirmation id: request=%+v ok=%t", confirmationRequest, ok)
+	}
+	if toolNames := confirmationRequest.Options["tool_names"]; !strings.Contains(toolNames, "panda.generate_image") || !strings.Contains(toolNames, "panda.inspect_image") {
+		t.Fatalf("expected image tool group expansion in confirmation options, got %+v", confirmationRequest.Options)
+	}
+	if confirmationRequest.Options["permissions"] != admin.PermissionAssistantImageGeneration {
+		t.Fatalf("expected image permission in confirmation options, got %+v", confirmationRequest.Options)
+	}
+	if len(client.requests) != 2 {
+		t.Fatalf("expected streamed open tool access call and final response, got %d", len(client.requests))
+	}
+	if names := requestToolNames(client.requests[0]); !names["panda_manage_tool_access"] {
+		t.Fatalf("expected tool access workflow to be available, got %+v", names)
 	}
 }
 
@@ -2041,7 +2422,7 @@ func TestHandleToolConfirmationCreatesDiscordRole(t *testing.T) {
 		Action:  toolActionDiscordRoleCreate,
 		Options: map[string]string{"name": "test"},
 	})
-	if !response.Ephemeral || !strings.Contains(response.Content, "Created Discord role `test` (`role-test`)") {
+	if !response.Ephemeral || !strings.Contains(response.Content, "Created Discord role `test`") || strings.Contains(response.Content, "role-test") {
 		t.Fatalf("unexpected role creation response: %+v", response)
 	}
 	if len(manager.creates) != 1 || manager.creates[0].Name != "test" || manager.creates[0].GuildID != "guild-1" {
@@ -3802,6 +4183,70 @@ func TestNaturalMessageDoesNotRespondWhenGateDeclines(t *testing.T) {
 	}
 	if len(client.requests) != 1 {
 		t.Fatalf("expected only streamed natural chat request, got %d", len(client.requests))
+	}
+}
+
+func TestMaintenanceModeShortCircuitsUserFacingResponses(t *testing.T) {
+	ctx := context.Background()
+	client := &fakeLLM{response: llm.ChatResponse{Content: "model should not answer"}}
+	router := newTestRouter(t, client, 5)
+	service := attachRuntimeStatus(t, router)
+	if _, err := service.SetStatus(ctx, runtimecontrol.SetStatusRequest{
+		Disabled: true,
+		Message:  "Panda is sleeping for maintenance.",
+		Actor:    "test",
+	}); err != nil {
+		t.Fatalf("SetStatus: %v", err)
+	}
+
+	command := router.Handle(ctx, Request{
+		Command:   "ask",
+		GuildID:   "guild-1",
+		ChannelID: "channel-1",
+		UserID:    "user-1",
+		Options:   map[string]string{"question": "hi"},
+	})
+	if command.Content != "Panda is sleeping for maintenance." {
+		t.Fatalf("expected maintenance command response, got %+v", command)
+	}
+
+	natural := router.HandleNaturalMessage(ctx, Request{
+		GuildID:   "guild-1",
+		ChannelID: "channel-1",
+		UserID:    "user-1",
+		Options:   map[string]string{"message": "Panda can you help?", "bot_mentioned": "true"},
+	})
+	if natural.Content != "Panda is sleeping for maintenance." {
+		t.Fatalf("expected maintenance natural response, got %+v", natural)
+	}
+
+	background := router.HandleBackgroundTask(ctx, BackgroundTask{
+		RequestID: "request-1",
+		Command:   "summarize",
+		GuildID:   "guild-1",
+		ChannelID: "channel-1",
+		UserID:    "user-1",
+		Input:     "long text",
+	})
+	if background.Content != "Panda is sleeping for maintenance." {
+		t.Fatalf("expected maintenance background response, got %+v", background)
+	}
+	if len(client.requests) != 0 {
+		t.Fatalf("maintenance mode should not call LLM, got %d requests", len(client.requests))
+	}
+}
+
+func TestMaintenanceModeLeavesOwnerOpsAvailable(t *testing.T) {
+	ctx := context.Background()
+	router := newTestRouter(t, &fakeLLM{}, 5)
+	service := attachRuntimeStatus(t, router)
+	if _, err := service.SetStatus(ctx, runtimecontrol.SetStatusRequest{Disabled: true, Actor: "test"}); err != nil {
+		t.Fatalf("SetStatus: %v", err)
+	}
+
+	response := router.Handle(ctx, Request{Command: "ops", Subcommand: "health", UserID: "owner", IsOwner: true})
+	if !response.Ephemeral || !strings.Contains(response.Content, "sqlite=ok") {
+		t.Fatalf("expected owner ops to stay available, got %+v", response)
 	}
 }
 

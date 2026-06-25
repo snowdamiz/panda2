@@ -82,6 +82,13 @@ func TestOpenRunsMigrationsAndPragmas(t *testing.T) {
 		t.Fatalf("expected guild_tool_roles table, got %d", tableCount)
 	}
 
+	if err := store.DB.Raw("SELECT COUNT(*) FROM sqlite_master WHERE name = 'guild_tool_users'").Scan(&tableCount).Error; err != nil {
+		t.Fatalf("guild tool users table lookup failed: %v", err)
+	}
+	if tableCount != 1 {
+		t.Fatalf("expected guild_tool_users table, got %d", tableCount)
+	}
+
 	if err := store.DB.Raw("SELECT COUNT(*) FROM sqlite_master WHERE name = 'guild_user_permissions'").Scan(&tableCount).Error; err != nil {
 		t.Fatalf("guild user permissions table lookup failed: %v", err)
 	}
@@ -105,7 +112,7 @@ func TestOpenRunsMigrationsAndPragmas(t *testing.T) {
 		t.Fatalf("expected guilds.feature_flags to be removed, got %d", tableCount)
 	}
 
-	for _, table := range []string{"schedules", "alert_rules", "feedback_targets", "music_queue_items", "music_playlists"} {
+	for _, table := range []string{"schedules", "alert_rules", "feedback_targets", "music_queue_items", "music_playlists", "runtime_statuses"} {
 		if err := store.DB.Raw("SELECT COUNT(*) FROM sqlite_master WHERE name = ?", table).Scan(&tableCount).Error; err != nil {
 			t.Fatalf("%s table lookup failed: %v", table, err)
 		}
