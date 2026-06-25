@@ -71,6 +71,27 @@ func TestFFmpegOpusArgsUseDirectHTTPHeadersAndFastEncode(t *testing.T) {
 	}
 }
 
+func TestShouldStreamDirectOnlyForTrueDirectSources(t *testing.T) {
+	if shouldStreamDirect(Track{
+		URL:       "https://www.youtube.com/watch?v=track-1",
+		Query:     "test track",
+		StreamURL: "https://rr1---sn.example.googlevideo.com/videoplayback?expire=1",
+	}) {
+		t.Fatal("resolved tracks with public lookup URLs should stream through yt-dlp at playback time")
+	}
+	if !shouldStreamDirect(Track{
+		URL:       "https://media.example.test/audio.opus",
+		StreamURL: "https://media.example.test/audio.opus",
+	}) {
+		t.Fatal("matching direct media URL should stream directly")
+	}
+	if !shouldStreamDirect(Track{
+		StreamURL: "https://media.example.test/audio.opus",
+	}) {
+		t.Fatal("track with only a direct stream URL should stream directly")
+	}
+}
+
 func writeTestExecutable(t *testing.T, name string, jsonOutput string) string {
 	t.Helper()
 	dir := t.TempDir()

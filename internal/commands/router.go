@@ -112,7 +112,7 @@ const baseHelpMessage = "### Panda Help\n\n" +
 	"**Billing key entry**\n" +
 	"- Use `/billing action:activate api_key:<key>` for one-time activation keys so secrets stay out of normal chat.\n\n" +
 	"**Music**\n" +
-	"- Join a voice channel, then say `Panda play <song>`.\n" +
+	"- Say `Panda play <song> in <voice channel>`, or join a voice channel and say `Panda play <song>`.\n" +
 	"- Natural controls: `skip and play <song>`, `pause`, `resume`, `skip`, `stop`, `queue`, `clear queue`, `now playing`.\n\n" +
 	"**Message actions**\n" +
 	"- Use **Explain with Panda** or **Summarize with Panda** from a message's **Apps** menu.\n" +
@@ -337,7 +337,7 @@ func elevatedHelpMessage(access helpAccess) string {
 
 	if access.config || access.soul {
 		builder.WriteString("\n\n**Admin setup through chat**\n")
-		builder.WriteString("- Ask Panda to set admin/moderator roles, allowed channels, tool access, prompt, or personality.\n")
+		builder.WriteString("- Ask Panda to set admin/moderator users or roles, channel restrictions, tool access, prompt, or personality.\n")
 		builder.WriteString("- Panda can inspect settings, ask for missing choices, and prepare confirmations in chat.\n")
 		if access.soul {
 			builder.WriteString("- Personality/tone changes can be brainstormed first, then saved when you explicitly ask.\n")
@@ -846,6 +846,8 @@ func (r *Router) handleAdmin(ctx context.Context, request Request) Response {
 	switch subcommand {
 	case "role":
 		return r.handleAdminRoleProfile(ctx, request)
+	case "user", "member":
+		return r.handleAdminUserProfile(ctx, request)
 	case "member-role", "member_role":
 		return r.handleAdminMemberRole(ctx, request)
 	case "tool":
@@ -900,7 +902,7 @@ func (r *Router) handleAdminRoleProfile(ctx context.Context, request Request) Re
 		}
 		return Response{Content: renderRoleProfiles(roles), Ephemeral: true}
 	case "set", "add":
-		if denied := r.ensureGuildControl(ctx, request, "Only the Panda owner, server owner or administrator, or the current Panda admin role can set Panda role profiles."); denied.Content != "" {
+		if denied := r.ensureGuildControl(ctx, request, "Only the Panda owner, server owner or administrator, or the current Panda admin role or user can set Panda role profiles."); denied.Content != "" {
 			return denied
 		}
 		profile, roleID, roleName, response := roleProfileOptions(request)
@@ -912,7 +914,7 @@ func (r *Router) handleAdminRoleProfile(ctx context.Context, request Request) Re
 		}
 		return Response{Content: fmt.Sprintf("%s is now a Panda %s role.", roleDisplay(roleID, roleName), admin.RoleProfileLabel(profile)), Ephemeral: true}
 	case "remove", "unset":
-		if denied := r.ensureGuildControl(ctx, request, "Only the Panda owner, server owner or administrator, or the current Panda admin role can remove Panda role profiles."); denied.Content != "" {
+		if denied := r.ensureGuildControl(ctx, request, "Only the Panda owner, server owner or administrator, or the current Panda admin role or user can remove Panda role profiles."); denied.Content != "" {
 			return denied
 		}
 		profile, roleID, roleName, response := roleProfileOptions(request)
@@ -983,8 +985,101 @@ func roleProfileLine(profile string, roleIDs []string) string {
 	return fmt.Sprintf("- %s: %s", profile, strings.Join(values, ", "))
 }
 
+func (r *Router) handleAdminUserProfile(ctx context.Context, request Request) Response {
+	action := strings.ToLower(strings.TrimSpace(firstNonEmpty(request.Options["action"], "list")))
+	switch action {
+	case "list", "":
+		users, err := r.admin.ListUserPermissions(ctx, request.GuildID)
+		if err != nil {
+			return Response{Content: "User profile lookup failed.", Ephemeral: true}
+		}
+		return Response{Content: renderUserProfiles(users), Ephemeral: true}
+	case "set", "add":
+		if denied := r.ensureGuildControl(ctx, request, "Only the Panda owner, server owner or administrator, or the current Panda admin role or user can set Panda user profiles."); denied.Content != "" {
+			return denied
+		}
+		profile, userID, username, response := userProfileOptions(request)
+		if response.Content != "" {
+			return response
+		}
+		if _, err := r.admin.ApplyUserProfile(ctx, request.GuildID, request.UserID, userID, profile); err != nil {
+			return Response{Content: "User profile could not be saved.", Ephemeral: true}
+		}
+		return Response{Content: fmt.Sprintf("%s is now a Panda %s user.", userMention(userID, username), admin.RoleProfileLabel(profile)), Ephemeral: true}
+	case "remove", "unset":
+		if denied := r.ensureGuildControl(ctx, request, "Only the Panda owner, server owner or administrator, or the current Panda admin role or user can remove Panda user profiles."); denied.Content != "" {
+			return denied
+		}
+		profile, userID, username, response := userProfileOptions(request)
+		if response.Content != "" {
+			return response
+		}
+		if err := r.admin.RemoveUserProfile(ctx, request.GuildID, request.UserID, userID, profile); err != nil {
+			if errors.Is(err, repository.ErrNotFound) {
+				return Response{Content: "That user profile was not configured for this user.", Ephemeral: true}
+			}
+			return Response{Content: "User profile could not be removed.", Ephemeral: true}
+		}
+		return Response{Content: fmt.Sprintf("Removed the Panda %s profile from %s.", admin.RoleProfileLabel(profile), userMention(userID, username)), Ephemeral: true}
+	default:
+		return Response{Content: "`action` must be `list`, `set`, or `remove`.", Ephemeral: true}
+	}
+}
+
+func userProfileOptions(request Request) (string, string, string, Response) {
+	profile, ok := admin.NormalizeRoleProfile(request.Options["profile"])
+	if !ok {
+		return "", "", "", Response{Content: "`profile` must be `admin` or `moderator`.", Ephemeral: true}
+	}
+	userID := normalizeDiscordUserID(firstNonEmpty(request.Options["member_user_id"], firstNonEmpty(request.Options["user_id"], firstNonEmpty(request.Options["member"], request.Options["user"]))))
+	if userID == "" {
+		return "", "", "", Response{Content: "Choose a Discord user.", Ephemeral: true}
+	}
+	return profile, userID, firstNonEmpty(request.Options["member_user_name"], request.Options["user_name"]), Response{}
+}
+
+func renderUserProfiles(users []store.GuildUserPermission) string {
+	adminUsers := userIDsForPermission(users, admin.PermissionAdminBadge)
+	moderatorUsers := userIDsForPermission(users, admin.PermissionModerationUse)
+	var builder strings.Builder
+	builder.WriteString("Panda user profiles:\n")
+	builder.WriteString(userProfileLine("admin", adminUsers))
+	builder.WriteString("\n")
+	builder.WriteString(userProfileLine("moderator", moderatorUsers))
+	builder.WriteString("\n\nModerator users include `assistant.use` and `moderation.use`.")
+	return builder.String()
+}
+
+func userIDsForPermission(users []store.GuildUserPermission, permission string) []string {
+	seen := map[string]struct{}{}
+	var ids []string
+	for _, user := range users {
+		if user.Permission != permission {
+			continue
+		}
+		if _, ok := seen[user.UserID]; ok {
+			continue
+		}
+		seen[user.UserID] = struct{}{}
+		ids = append(ids, user.UserID)
+	}
+	sort.Strings(ids)
+	return ids
+}
+
+func userProfileLine(profile string, userIDs []string) string {
+	if len(userIDs) == 0 {
+		return fmt.Sprintf("- %s: not configured", profile)
+	}
+	values := make([]string, 0, len(userIDs))
+	for _, userID := range userIDs {
+		values = append(values, fmt.Sprintf("`%s`", userID))
+	}
+	return fmt.Sprintf("- %s: %s", profile, strings.Join(values, ", "))
+}
+
 func (r *Router) handleAdminMemberRole(ctx context.Context, request Request) Response {
-	if denied := r.ensureGuildControl(ctx, request, "Only the Panda owner, server owner or administrator, or the current Panda admin role can assign Discord roles."); denied.Content != "" {
+	if denied := r.ensureGuildControl(ctx, request, "Only the Panda owner, server owner or administrator, or the current Panda admin role or user can assign Discord roles."); denied.Content != "" {
 		return denied
 	}
 	if r.memberRoles == nil {
@@ -1014,7 +1109,7 @@ func (r *Router) handleAdminMemberRole(ctx context.Context, request Request) Res
 }
 
 func memberRoleOptions(request Request) (MemberRoleRequest, Response) {
-	userID := strings.TrimSpace(firstNonEmpty(request.Options["member_user_id"], firstNonEmpty(request.Options["user_id"], request.Options["user"])))
+	userID := normalizeDiscordUserID(firstNonEmpty(request.Options["member_user_id"], firstNonEmpty(request.Options["user_id"], request.Options["user"])))
 	roleID := strings.TrimSpace(firstNonEmpty(request.Options["role_id"], request.Options["role"]))
 	if userID == "" {
 		return MemberRoleRequest{}, Response{Content: "Choose a Discord user.", Ephemeral: true}
@@ -1032,6 +1127,22 @@ func userMention(userID, username string) string {
 		return fmt.Sprintf("`%s`", userID)
 	}
 	return fmt.Sprintf("`%s` (`%s`)", username, userID)
+}
+
+func normalizeDiscordUserID(value string) string {
+	value = strings.TrimSpace(value)
+	trimmed := strings.TrimPrefix(value, "<@")
+	trimmed = strings.TrimPrefix(trimmed, "!")
+	trimmed = strings.TrimSuffix(trimmed, ">")
+	if trimmed == "" {
+		return ""
+	}
+	for _, char := range trimmed {
+		if char < '0' || char > '9' {
+			return value
+		}
+	}
+	return trimmed
 }
 
 func (r *Router) handleAdminToolAccess(ctx context.Context, request Request) Response {
@@ -1155,7 +1266,7 @@ func channelDisplay(channelID, channelName string) string {
 
 func renderChannelRules(rules []store.GuildChannelRule) string {
 	if len(rules) == 0 {
-		return "No channel access rules are configured. Panda assistant use is available in any channel where Discord permissions allow it."
+		return "No channel access rules are configured. Panda assistant use is available in every channel where Discord permissions allow it."
 	}
 	hasAllow := false
 	for _, rule := range rules {
@@ -1683,7 +1794,7 @@ func (r *Router) HandleToolConfirmation(ctx context.Context, request ToolConfirm
 		}
 		return Response{Content: fmt.Sprintf("Removed `%s` from role `%s`.", permission, roleID), Ephemeral: true}
 	case toolActionRoleProfileAdd:
-		if denied := r.ensureGuildControl(ctx, request.Request, "Only the Panda owner, server owner or administrator, or the current Panda admin role can set Panda role profiles."); denied.Content != "" {
+		if denied := r.ensureGuildControl(ctx, request.Request, "Only the Panda owner, server owner or administrator, or the current Panda admin role or user can set Panda role profiles."); denied.Content != "" {
 			return denied
 		}
 		roleID := strings.TrimSpace(request.Options["role_id"])
@@ -1696,7 +1807,7 @@ func (r *Router) HandleToolConfirmation(ctx context.Context, request ToolConfirm
 		}
 		return Response{Content: fmt.Sprintf("Role `%s` is now a Panda %s role.", roleID, admin.RoleProfileLabel(profile)), Ephemeral: true}
 	case toolActionRoleProfileRemove:
-		if denied := r.ensureGuildControl(ctx, request.Request, "Only the Panda owner, server owner or administrator, or the current Panda admin role can remove Panda role profiles."); denied.Content != "" {
+		if denied := r.ensureGuildControl(ctx, request.Request, "Only the Panda owner, server owner or administrator, or the current Panda admin role or user can remove Panda role profiles."); denied.Content != "" {
 			return denied
 		}
 		roleID := strings.TrimSpace(request.Options["role_id"])
@@ -1708,6 +1819,58 @@ func (r *Router) HandleToolConfirmation(ctx context.Context, request ToolConfirm
 			return toolConfirmationError(err, "Role profile could not be removed.", "That role profile was not configured for this role.")
 		}
 		return Response{Content: fmt.Sprintf("Removed the Panda %s profile from role `%s`.", admin.RoleProfileLabel(profile), roleID), Ephemeral: true}
+	case toolActionUserPermissionAdd:
+		if denied := r.ensureToolConfirmationPermission(ctx, request.Request, r.admin.CanWriteConfig, "You do not have permission to manage user permissions."); denied.Content != "" {
+			return denied
+		}
+		userID := normalizeDiscordUserID(request.Options["user_id"])
+		permission := strings.TrimSpace(request.Options["permission"])
+		if userID == "" || !admin.IsUserPermissionNameAllowed(permission) {
+			return Response{Content: "That user-permission confirmation is invalid.", Ephemeral: true}
+		}
+		if _, err := r.admin.AddUserPermission(ctx, request.Request.GuildID, request.Request.UserID, userID, permission); err != nil {
+			return Response{Content: "User permission could not be saved.", Ephemeral: true}
+		}
+		return Response{Content: fmt.Sprintf("Granted `%s` to user `%s`.", permission, userID), Ephemeral: true}
+	case toolActionUserPermissionRemove:
+		if denied := r.ensureToolConfirmationPermission(ctx, request.Request, r.admin.CanWriteConfig, "You do not have permission to manage user permissions."); denied.Content != "" {
+			return denied
+		}
+		userID := normalizeDiscordUserID(request.Options["user_id"])
+		permission := strings.TrimSpace(request.Options["permission"])
+		if userID == "" || !admin.IsUserPermissionNameAllowed(permission) {
+			return Response{Content: "That user-permission confirmation is invalid.", Ephemeral: true}
+		}
+		if err := r.admin.RemoveUserPermission(ctx, request.Request.GuildID, request.Request.UserID, userID, permission); err != nil {
+			return toolConfirmationError(err, "User permission could not be removed.", "That user permission was not found.")
+		}
+		return Response{Content: fmt.Sprintf("Removed `%s` from user `%s`.", permission, userID), Ephemeral: true}
+	case toolActionUserProfileAdd:
+		if denied := r.ensureGuildControl(ctx, request.Request, "Only the Panda owner, server owner or administrator, or the current Panda admin role or user can set Panda user profiles."); denied.Content != "" {
+			return denied
+		}
+		userID := normalizeDiscordUserID(request.Options["user_id"])
+		profile, ok := admin.NormalizeRoleProfile(request.Options["profile"])
+		if userID == "" || !ok {
+			return Response{Content: "That user-profile confirmation is invalid.", Ephemeral: true}
+		}
+		if _, err := r.admin.ApplyUserProfile(ctx, request.Request.GuildID, request.Request.UserID, userID, profile); err != nil {
+			return Response{Content: "User profile could not be saved.", Ephemeral: true}
+		}
+		return Response{Content: fmt.Sprintf("User `%s` is now a Panda %s user.", userID, admin.RoleProfileLabel(profile)), Ephemeral: true}
+	case toolActionUserProfileRemove:
+		if denied := r.ensureGuildControl(ctx, request.Request, "Only the Panda owner, server owner or administrator, or the current Panda admin role or user can remove Panda user profiles."); denied.Content != "" {
+			return denied
+		}
+		userID := normalizeDiscordUserID(request.Options["user_id"])
+		profile, ok := admin.NormalizeRoleProfile(request.Options["profile"])
+		if userID == "" || !ok {
+			return Response{Content: "That user-profile confirmation is invalid.", Ephemeral: true}
+		}
+		if err := r.admin.RemoveUserProfile(ctx, request.Request.GuildID, request.Request.UserID, userID, profile); err != nil {
+			return toolConfirmationError(err, "User profile could not be removed.", "That user profile was not configured for this user.")
+		}
+		return Response{Content: fmt.Sprintf("Removed the Panda %s profile from user `%s`.", admin.RoleProfileLabel(profile), userID), Ephemeral: true}
 	case toolActionDiscordRoleCreate:
 		if denied := r.ensureToolConfirmationPermission(ctx, request.Request, r.admin.CanWriteConfig, "You do not have permission to create Discord roles."); denied.Content != "" {
 			return denied
@@ -1734,7 +1897,7 @@ func (r *Router) HandleToolConfirmation(ctx context.Context, request ToolConfirm
 	case toolActionDiscordWriteExecute:
 		return r.handleDiscordWriteConfirmation(ctx, request)
 	case toolActionMemberRoleAdd, toolActionMemberRoleRemove:
-		if denied := r.ensureGuildControl(ctx, request.Request, "Only the Panda owner, server owner or administrator, or the current Panda admin role can assign Discord roles."); denied.Content != "" {
+		if denied := r.ensureGuildControl(ctx, request.Request, "Only the Panda owner, server owner or administrator, or the current Panda admin role or user can assign Discord roles."); denied.Content != "" {
 			return denied
 		}
 		if r.memberRoles == nil {
@@ -1742,7 +1905,7 @@ func (r *Router) HandleToolConfirmation(ctx context.Context, request ToolConfirm
 		}
 		memberRequest := MemberRoleRequest{
 			GuildID: request.Request.GuildID,
-			UserID:  strings.TrimSpace(request.Options["user_id"]),
+			UserID:  normalizeDiscordUserID(request.Options["user_id"]),
 			RoleID:  strings.TrimSpace(request.Options["role_id"]),
 			ActorID: request.Request.UserID,
 		}
@@ -1885,6 +2048,10 @@ func toolConfirmationFeature(action string) string {
 		toolActionRolePermissionRemove,
 		toolActionRoleProfileAdd,
 		toolActionRoleProfileRemove,
+		toolActionUserPermissionAdd,
+		toolActionUserPermissionRemove,
+		toolActionUserProfileAdd,
+		toolActionUserProfileRemove,
 		toolActionToolAccessAdd,
 		toolActionToolAccessRemove,
 		toolActionChannelRuleSet,
@@ -2486,14 +2653,23 @@ func (r *Router) responseFromAssistantAnswer(ctx context.Context, request Reques
 		ThreadName: threadName,
 	}
 	if answer.Card != nil {
-		response.Content = firstNonEmpty(answer.Card.Content, response.Content)
-		response.Presentation = presentationFromAssistantCard(answer.Card)
-		response.Actions = actionsFromAssistantCard(answer.Card)
+		cardResponse := responseFromAssistantCard(answer.Card)
+		if answer.Card.Standalone && strings.TrimSpace(answer.Content) != "" {
+			response = cardResponse
+			response.ThreadID = threadID
+			response.ThreadName = threadName
+			response.Followups = append(response.Followups, Response{Content: answer.Content})
+		} else {
+			response.Content = firstNonEmpty(response.Content, answer.Card.Content)
+			response.Presentation = cardResponse.Presentation
+			response.Actions = cardResponse.Actions
+		}
 	}
 	pendingConfirmations := answerConfirmations(answer)
 	if confirmations := ToolConfirmationsFromAssistant(request.UserID, pendingConfirmations); len(confirmations) > 0 {
 		response.Confirmations = confirmations
 		response.Confirmation = &response.Confirmations[0]
+		response.Content = stripRawConfirmationPayload(response.Content)
 		response.Content = appendConfirmationNotices(response.Content, confirmationSummaries(pendingConfirmations), len(confirmations))
 		response.Presentation = Presentation{Title: "Confirmation required", Accent: AccentWarning}
 		if confirmationsContainDanger(confirmations) {
@@ -2501,24 +2677,47 @@ func (r *Router) responseFromAssistantAnswer(ctx context.Context, request Reques
 		}
 		return response
 	}
-	if r.feedback != nil && assistantFeedbackEligible(answer, response.Content) {
-		target, err := r.feedback.CreateTarget(ctx, feedback.TargetRequest{
-			GuildID:   request.GuildID,
-			ChannelID: request.ChannelID,
-			UserID:    request.UserID,
-			Command:   firstNonEmpty(request.Command, "assistant"),
-			Content:   response.Content,
-			Metadata: map[string]string{
-				"request_id":      request.RequestID,
-				"thread_id":       threadID,
-				"used_web_search": strconv.FormatBool(answer.UsedWebSearch),
-			},
-		})
-		if err == nil && target.ID != 0 {
-			response.Feedback = &FeedbackControls{TargetID: target.ID}
+	if r.feedback != nil {
+		if len(response.Followups) > 0 {
+			followup := &response.Followups[len(response.Followups)-1]
+			r.attachAssistantFeedback(ctx, request, answer, threadID, followup, followup.Content)
+		} else {
+			r.attachAssistantFeedback(ctx, request, answer, threadID, &response, response.Content)
 		}
 	}
 	return response
+}
+
+func responseFromAssistantCard(card *assistant.ToolCard) Response {
+	if card == nil {
+		return Response{}
+	}
+	return Response{
+		Content:      card.Content,
+		Presentation: presentationFromAssistantCard(card),
+		Actions:      actionsFromAssistantCard(card),
+	}
+}
+
+func (r *Router) attachAssistantFeedback(ctx context.Context, request Request, answer assistant.AskResponse, threadID string, response *Response, content string) {
+	if r == nil || r.feedback == nil || response == nil || !assistantFeedbackEligible(answer, content) {
+		return
+	}
+	target, err := r.feedback.CreateTarget(ctx, feedback.TargetRequest{
+		GuildID:   request.GuildID,
+		ChannelID: request.ChannelID,
+		UserID:    request.UserID,
+		Command:   firstNonEmpty(request.Command, "assistant"),
+		Content:   content,
+		Metadata: map[string]string{
+			"request_id":      request.RequestID,
+			"thread_id":       threadID,
+			"used_web_search": strconv.FormatBool(answer.UsedWebSearch),
+		},
+	})
+	if err == nil && target.ID != 0 {
+		response.Feedback = &FeedbackControls{TargetID: target.ID}
+	}
 }
 
 func answerConfirmations(answer assistant.AskResponse) []assistant.InteractionConfirmation {
@@ -2664,6 +2863,53 @@ func appendConfirmationNotices(content string, summaries []string, confirmationC
 		return content + "Press each confirmation button you want to apply."
 	}
 	return content + "Press the confirmation button to continue."
+}
+
+func stripRawConfirmationPayload(content string) string {
+	trimmed := strings.TrimSpace(content)
+	if trimmed == "" || !strings.HasPrefix(trimmed, "{") || !strings.Contains(trimmed, "confirmation_required") {
+		return content
+	}
+	var payload any
+	if err := json.Unmarshal([]byte(trimmed), &payload); err != nil {
+		return content
+	}
+	if payloadHasConfirmationRequired(payload) {
+		return ""
+	}
+	return content
+}
+
+func payloadHasConfirmationRequired(value any) bool {
+	switch typed := value.(type) {
+	case map[string]any:
+		for key, child := range typed {
+			if key == "confirmation_required" && jsonTruthy(child) {
+				return true
+			}
+			if payloadHasConfirmationRequired(child) {
+				return true
+			}
+		}
+	case []any:
+		for _, child := range typed {
+			if payloadHasConfirmationRequired(child) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func jsonTruthy(value any) bool {
+	switch typed := value.(type) {
+	case bool:
+		return typed
+	case string:
+		return truthyOption(typed)
+	default:
+		return false
+	}
 }
 
 func (r *Router) ensureToolConfirmationPermission(ctx context.Context, request Request, check func(context.Context, admin.AssistantAccessRequest) (bool, error), denial string) Response {

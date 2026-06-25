@@ -119,14 +119,17 @@ func (y *YTDLP) Stream(ctx context.Context, track Track) (OpusFrameProvider, err
 		return nil, err
 	}
 	directSource := strings.TrimSpace(track.StreamURL)
-	source := strings.TrimSpace(firstNonEmpty(directSource, track.URL, track.Query))
+	source := strings.TrimSpace(firstNonEmpty(track.URL, track.Query, directSource))
 	if source == "" {
 		return nil, ErrMissingSong
 	}
-	if directSource != "" {
+	if shouldStreamDirect(track) {
 		return y.streamDirect(ctx, tools, directSource, track.StreamHeaders)
 	}
+	return y.streamViaYTDLP(ctx, tools, source)
+}
 
+func (y *YTDLP) streamViaYTDLP(ctx context.Context, tools ToolPaths, source string) (OpusFrameProvider, error) {
 	streamCtx, cancel := context.WithCancel(ctx)
 	ytdlpCmd := exec.CommandContext(streamCtx, tools.YTDLPPath,
 		"--no-playlist",
@@ -174,6 +177,15 @@ func (y *YTDLP) Stream(ctx context.Context, track Track) (OpusFrameProvider, err
 		ffmpegErr: &ffmpegErr,
 		logger:    y.logger,
 	}, nil
+}
+
+func shouldStreamDirect(track Track) bool {
+	directSource := strings.TrimSpace(track.StreamURL)
+	if directSource == "" {
+		return false
+	}
+	playbackLookupSource := strings.TrimSpace(firstNonEmpty(track.URL, track.Query))
+	return playbackLookupSource == "" || playbackLookupSource == directSource
 }
 
 func (y *YTDLP) streamDirect(ctx context.Context, tools ToolPaths, source string, headers map[string]string) (OpusFrameProvider, error) {

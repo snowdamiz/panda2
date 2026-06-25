@@ -1360,6 +1360,24 @@ var migrations = []Migration{
 			`ALTER TABLE guild_configs_rebuilt RENAME TO guild_configs`,
 		},
 	},
+	{
+		Version: 30,
+		Name:    "guild_user_permissions",
+		SQL: []string{
+			`CREATE TABLE IF NOT EXISTS guild_user_permissions (
+				id INTEGER PRIMARY KEY AUTOINCREMENT,
+				guild_id TEXT NOT NULL,
+				user_id TEXT NOT NULL,
+				permission TEXT NOT NULL,
+				created_at DATETIME NOT NULL,
+				updated_at DATETIME NOT NULL,
+				UNIQUE(guild_id, user_id, permission)
+			)`,
+			`CREATE INDEX IF NOT EXISTS idx_guild_user_permissions_guild_id ON guild_user_permissions(guild_id)`,
+			`CREATE INDEX IF NOT EXISTS idx_guild_user_permissions_user_id ON guild_user_permissions(user_id)`,
+			`CREATE INDEX IF NOT EXISTS idx_guild_user_permissions_permission ON guild_user_permissions(permission)`,
+		},
+	},
 }
 
 func RunMigrations(db *gorm.DB) error {

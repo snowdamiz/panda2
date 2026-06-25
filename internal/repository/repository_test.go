@@ -178,6 +178,24 @@ func TestBillingUsageReservationCreatesInitialPeriodWithoutRecordNotFoundLog(t *
 	}
 }
 
+func TestMusicEnsureSettingsCreatesWithoutRecordNotFoundLog(t *testing.T) {
+	ctx := context.Background()
+	db, logs, cleanup := newRepositoryGormWithLogBuffer(t)
+	defer cleanup()
+
+	repo := NewMusicRepository(db)
+	settings, err := repo.EnsureSettings(ctx, "guild-1")
+	if err != nil {
+		t.Fatalf("EnsureSettings: %v", err)
+	}
+	if settings.GuildID != "guild-1" || settings.LoopMode != "off" || settings.DefaultVolume != 100 {
+		t.Fatalf("unexpected music settings defaults: %+v", settings)
+	}
+	if strings.Contains(logs.String(), "record not found") {
+		t.Fatalf("initial music settings creation should not be logged as record not found:\n%s", logs.String())
+	}
+}
+
 func newBillingRepositoryWithLogBuffer(t *testing.T) (*BillingRepository, *bytes.Buffer, func()) {
 	t.Helper()
 	db, logs, cleanup := newRepositoryGormWithLogBuffer(t)

@@ -296,12 +296,18 @@ func (b *Bot) onGuildVoiceStateUpdate(event *events.GuildVoiceStateUpdate) {
 	if event.VoiceState.ChannelID != nil {
 		channelID = event.VoiceState.ChannelID.String()
 	}
+	metadata := map[string]string{
+		"username":       event.Member.User.Username,
+		"effective_name": event.Member.EffectiveName(),
+		"user_is_bot":    fmt.Sprintf("%t", event.Member.User.Bot),
+	}
 	b.recordDiscordEvent(context.Background(), store.DiscordEvent{
 		GuildID:   event.VoiceState.GuildID.String(),
 		ChannelID: channelID,
 		UserID:    event.VoiceState.UserID.String(),
-		EventType: "voice_state_update",
+		EventType: composed.EventVoiceStateUpdated,
 		Summary:   "Voice state updated",
+		Metadata:  metadataJSON(metadata),
 	})
 }
 

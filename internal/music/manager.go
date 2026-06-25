@@ -578,11 +578,20 @@ func (p *guildPlayer) enqueue(ctx context.Context, track Track, voiceChannelID s
 	p.session = session
 	p.voiceChannelID = session.ChannelID()
 	p.mu.Unlock()
-	go p.run()
-	return trackResponse("Connected to voice", fmt.Sprintf("Joined <#%s> and started buffering **%s**.", voiceChannelID, trackTitle(track)), track), nil
+	started := make(chan error, 1)
+	go p.run(started)
+	select {
+	case err := <-started:
+		if err != nil {
+			return Response{}, err
+		}
+	case <-ctx.Done():
+		return Response{}, ctx.Err()
+	}
+	return trackResponse("Connected to voice", fmt.Sprintf("Joined <#%s> and started **%s**.", voiceChannelID, trackTitle(track)), track), nil
 }
 
-func (p *guildPlayer) run() {
+func (p *guildPlayer) run(firstStart chan<- error) {
 	defer p.manager.removePlayer(p.guildID, p)
 	defer p.closeSession(context.Background())
 
@@ -598,7 +607,8 @@ func (p *guildPlayer) run() {
 		p.skipVotes = map[string]struct{}{}
 		p.mu.Unlock()
 
-		err := p.playTrack(ctx, track)
+		err := p.playTrack(ctx, track, firstStart)
+		firstStart = nil
 		cancel()
 
 		p.mu.Lock()
@@ -666,9 +676,10 @@ func (p *guildPlayer) nextTrack() (Track, bool) {
 	}
 }
 
-func (p *guildPlayer) playTrack(ctx context.Context, track Track) error {
+func (p *guildPlayer) playTrack(ctx context.Context, track Track, started chan<- error) error {
 	stream, err := p.manager.streamer.Stream(ctx, track)
 	if err != nil {
+		signalPlaybackStart(started, err)
 		return err
 	}
 	provider := newBufferedOpusProvider(stream, playbackBufferFrames, playbackPrebufferFrames)
@@ -676,6 +687,7 @@ func (p *guildPlayer) playTrack(ctx context.Context, track Track) error {
 
 	session := p.currentSession()
 	if session == nil {
+		signalPlaybackStart(started, ErrTrackStreamFailed)
 		return ErrTrackStreamFailed
 	}
 
@@ -683,9 +695,12 @@ func (p *guildPlayer) playTrack(ctx context.Context, track Track) error {
 	err = provider.WaitReady(readyCtx)
 	cancel()
 	if err != nil {
-		return fmt.Errorf("%w: audio prebuffer failed with %d frame(s) ready: %v", ErrTrackStreamFailed, provider.BufferedFrames(), err)
+		err = fmt.Errorf("%w: audio prebuffer failed with %d frame(s) ready: %v", ErrTrackStreamFailed, provider.BufferedFrames(), err)
+		signalPlaybackStart(started, err)
+		return err
 	}
 	p.manager.logger.Info("music playback buffered", slog.String("guild_id", p.guildID), slog.String("track", track.Title), slog.Int("buffered_frames", provider.BufferedFrames()))
+	signalPlaybackStart(started, nil)
 
 	speaking := false
 	writtenFrames := 0
@@ -754,6 +769,16 @@ func (p *guildPlayer) playTrack(ctx context.Context, track Track) error {
 		if time.Since(nextFrame) > 3*frameDuration {
 			nextFrame = time.Now().Add(frameDuration)
 		}
+	}
+}
+
+func signalPlaybackStart(started chan<- error, err error) {
+	if started == nil {
+		return
+	}
+	select {
+	case started <- err:
+	default:
 	}
 }
 

@@ -145,7 +145,7 @@ export const workflowSteps = [
     number: '2',
     title: 'Configure access',
     body:
-      'Admins map roles, allowed channels, web search, memory consent, knowledge sources, and response behavior from Discord.',
+      'Admins map roles, channel restrictions, web search, memory consent, knowledge sources, and response behavior from Discord.',
     icon: 'nodes',
   },
   {

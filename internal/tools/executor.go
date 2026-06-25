@@ -98,6 +98,11 @@ type AdminOperations interface {
 	ListRolePermissions(ctx context.Context, guildID string) ([]store.GuildRole, error)
 	ApplyRoleProfile(ctx context.Context, guildID, actorID, roleID, profile string) ([]store.GuildRole, error)
 	RemoveRoleProfile(ctx context.Context, guildID, actorID, roleID, profile string) error
+	AddUserPermission(ctx context.Context, guildID, actorID, userID, permission string) (store.GuildUserPermission, error)
+	RemoveUserPermission(ctx context.Context, guildID, actorID, userID, permission string) error
+	ListUserPermissions(ctx context.Context, guildID string) ([]store.GuildUserPermission, error)
+	ApplyUserProfile(ctx context.Context, guildID, actorID, userID, profile string) ([]store.GuildUserPermission, error)
+	RemoveUserProfile(ctx context.Context, guildID, actorID, userID, profile string) error
 	AddToolRole(ctx context.Context, guildID, actorID, toolName, roleID string) (store.GuildToolRole, error)
 	RemoveToolRole(ctx context.Context, guildID, actorID, toolName, roleID string) error
 	ListToolRoles(ctx context.Context, guildID string) ([]store.GuildToolRole, error)
@@ -186,24 +191,26 @@ type DynamicExecutionRequest struct {
 }
 
 type ComposedToolManagementRequest struct {
-	GuildID         string
-	SourceChannelID string
-	ActorID         string
-	RequestID       string
-	InvocationType  string
-	Access          ToolAccess
-	Action          string
-	ToolName        string
-	Version         int
-	Text            string
-	SpecJSON        string
-	RoleID          string
-	RoleName        string
-	ChannelID       string
-	ChannelName     string
-	WelcomeText     string
-	Input           map[string]any
-	DryRun          bool
+	GuildID          string
+	SourceChannelID  string
+	ActorID          string
+	RequestID        string
+	InvocationType   string
+	Access           ToolAccess
+	Action           string
+	ToolName         string
+	Version          int
+	Text             string
+	SpecJSON         string
+	RoleID           string
+	RoleName         string
+	ChannelID        string
+	ChannelName      string
+	VoiceChannelID   string
+	VoiceChannelName string
+	WelcomeText      string
+	Input            map[string]any
+	DryRun           bool
 }
 
 type ScheduleManagementRequest struct {
@@ -470,6 +477,8 @@ func (e *Executor) Execute(ctx context.Context, request ExecutionRequest) (Execu
 		payload, err = e.manageKnowledge(toolCtx, request, arguments)
 	case "panda.manage_role_permission":
 		payload, err = e.manageRolePermission(toolCtx, request, arguments)
+	case "panda.manage_user_permission":
+		payload, err = e.manageUserPermission(toolCtx, request, arguments)
 	case "panda.manage_member_role":
 		payload, err = e.manageMemberRole(toolCtx, request, arguments)
 	case "panda.manage_discord_role":
@@ -1397,6 +1406,69 @@ func (e *Executor) manageRolePermission(ctx context.Context, request ExecutionRe
 	}
 }
 
+func (e *Executor) manageUserPermission(ctx context.Context, request ExecutionRequest, arguments string) (any, error) {
+	if e.adminOps == nil {
+		return nil, fmt.Errorf("admin operations are not configured")
+	}
+	args, err := parseArguments(arguments)
+	if err != nil {
+		return nil, err
+	}
+	action := strings.ToLower(stringArgument(args, "action"))
+	profile, hasProfile := admin.NormalizeRoleProfile(stringArgument(args, "profile"))
+	permission := strings.TrimSpace(stringArgument(args, "permission"))
+	if !hasProfile {
+		permission = firstNonEmpty(permission, admin.PermissionAssistantUse)
+	}
+	if !hasProfile && !admin.IsUserPermissionNameAllowed(permission) {
+		return nil, fmt.Errorf("unsupported permission")
+	}
+	switch action {
+	case "list":
+		users, err := e.adminOps.ListUserPermissions(ctx, request.GuildID)
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{"result": map[string]any{"users": userPermissionPayloads(users)}}, nil
+	case "add":
+		userID := userIDArgument(args)
+		if userID == "" {
+			return nil, fmt.Errorf("user_id is required")
+		}
+		if hasProfile {
+			preview := map[string]any{"user_id": userID, "profile": profile}
+			if boolArgument(args, "dry_run") {
+				return dryRunToolResult("user_profile.add", preview), nil
+			}
+			return confirmationRequired("user_profile.add", preview), nil
+		}
+		preview := map[string]any{"user_id": userID, "permission": permission}
+		if boolArgument(args, "dry_run") {
+			return dryRunToolResult("user_permission.add", preview), nil
+		}
+		return confirmationRequired("user_permission.add", preview), nil
+	case "remove":
+		userID := userIDArgument(args)
+		if userID == "" {
+			return nil, fmt.Errorf("user_id is required")
+		}
+		if hasProfile {
+			preview := map[string]any{"user_id": userID, "profile": profile}
+			if boolArgument(args, "dry_run") {
+				return dryRunToolResult("user_profile.remove", preview), nil
+			}
+			return confirmationRequired("user_profile.remove", preview), nil
+		}
+		preview := map[string]any{"user_id": userID, "permission": permission}
+		if boolArgument(args, "dry_run") {
+			return dryRunToolResult("user_permission.remove", preview), nil
+		}
+		return confirmationRequired("user_permission.remove", preview), nil
+	default:
+		return nil, fmt.Errorf("action must be list, add, or remove")
+	}
+}
+
 func (e *Executor) manageMemberRole(ctx context.Context, request ExecutionRequest, arguments string) (any, error) {
 	if e.discord == nil {
 		return nil, fmt.Errorf("discord tool provider is not configured")
@@ -1406,7 +1478,7 @@ func (e *Executor) manageMemberRole(ctx context.Context, request ExecutionReques
 		return nil, err
 	}
 	action := strings.ToLower(firstNonEmpty(stringArgument(args, "action"), "add"))
-	userID := stringArgument(args, "user_id")
+	userID := userIDArgument(args)
 	roleID, err := e.roleIDArgument(ctx, request, args)
 	if err != nil {
 		return nil, err
@@ -1539,6 +1611,7 @@ func discordIDArgument(value string) string {
 	value = strings.TrimSpace(value)
 	value = strings.TrimPrefix(value, "<@&")
 	value = strings.TrimPrefix(value, "<@")
+	value = strings.TrimPrefix(value, "!")
 	value = strings.TrimPrefix(value, "<#")
 	value = strings.TrimSuffix(value, ">")
 	if value == "" {
@@ -1550,6 +1623,19 @@ func discordIDArgument(value string) string {
 		}
 	}
 	return value
+}
+
+func userIDArgument(args map[string]any) string {
+	for _, name := range []string{"user_id", "member_user_id", "user", "member"} {
+		value := strings.TrimSpace(stringArgument(args, name))
+		if userID := discordIDArgument(value); userID != "" {
+			return userID
+		}
+		if value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func normalizeDiscordLookupName(value string) string {
@@ -1626,24 +1712,26 @@ func (e *Executor) manageComposedTool(ctx context.Context, request ExecutionRequ
 		return nil, err
 	}
 	return e.composed.ManageComposedTool(ctx, ComposedToolManagementRequest{
-		GuildID:         request.GuildID,
-		SourceChannelID: request.ChannelID,
-		ActorID:         request.ActorID,
-		RequestID:       request.RequestID,
-		InvocationType:  request.InvocationType,
-		Access:          request.Access,
-		Action:          action,
-		ToolName:        firstNonEmpty(stringArgument(args, "tool_name"), stringArgument(args, "tool")),
-		Version:         intArgument(args, "version", 0),
-		Text:            firstNonEmpty(stringArgument(args, "request"), stringArgument(args, "description")),
-		SpecJSON:        stringArgument(args, "spec_json"),
-		RoleID:          stringArgument(args, "role_id"),
-		RoleName:        stringArgument(args, "role_name"),
-		ChannelID:       stringArgument(args, "channel_id"),
-		ChannelName:     stringArgument(args, "channel_name"),
-		WelcomeText:     stringArgument(args, "welcome_text"),
-		Input:           input,
-		DryRun:          boolArgument(args, "dry_run") || action == "preview" || action == "simulate",
+		GuildID:          request.GuildID,
+		SourceChannelID:  request.ChannelID,
+		ActorID:          request.ActorID,
+		RequestID:        request.RequestID,
+		InvocationType:   request.InvocationType,
+		Access:           request.Access,
+		Action:           action,
+		ToolName:         firstNonEmpty(stringArgument(args, "tool_name"), stringArgument(args, "tool")),
+		Version:          intArgument(args, "version", 0),
+		Text:             firstNonEmpty(stringArgument(args, "request"), stringArgument(args, "description")),
+		SpecJSON:         stringArgument(args, "spec_json"),
+		RoleID:           stringArgument(args, "role_id"),
+		RoleName:         stringArgument(args, "role_name"),
+		ChannelID:        stringArgument(args, "channel_id"),
+		ChannelName:      stringArgument(args, "channel_name"),
+		VoiceChannelID:   stringArgument(args, "voice_channel_id"),
+		VoiceChannelName: firstNonEmpty(stringArgument(args, "voice_channel_name"), stringArgument(args, "voice_channel")),
+		WelcomeText:      stringArgument(args, "welcome_text"),
+		Input:            input,
+		DryRun:           boolArgument(args, "dry_run") || action == "preview" || action == "simulate",
 	})
 }
 
@@ -1729,10 +1817,14 @@ func (e *Executor) manageMusic(ctx context.Context, request ExecutionRequest, ar
 			return nil, err
 		}
 	}
+	voiceChannelID, err := e.musicVoiceChannelIDArgument(ctx, request, args)
+	if err != nil {
+		return nil, err
+	}
 	return e.music.ManageMusic(ctx, MusicManagementRequest{
 		GuildID:        request.GuildID,
 		ChannelID:      request.ChannelID,
-		VoiceChannelID: request.VoiceChannelID,
+		VoiceChannelID: voiceChannelID,
 		ActorID:        request.ActorID,
 		RequestID:      request.RequestID,
 		InvocationType: request.InvocationType,
@@ -1748,6 +1840,48 @@ func (e *Executor) manageMusic(ctx context.Context, request ExecutionRequest, ar
 		To:             intArgument(args, "to", 0),
 		Volume:         intArgument(args, "volume", 0),
 	})
+}
+
+func (e *Executor) musicVoiceChannelIDArgument(ctx context.Context, request ExecutionRequest, args map[string]any) (string, error) {
+	for _, name := range []string{"voice_channel_id", "target_voice_channel_id"} {
+		value := strings.TrimSpace(stringArgument(args, name))
+		if value == "" {
+			continue
+		}
+		voiceChannelID := discordIDArgument(value)
+		if voiceChannelID == "" {
+			return "", fmt.Errorf("%s must be a Discord voice channel ID or mention", name)
+		}
+		return voiceChannelID, nil
+	}
+	voiceChannelName := firstNonEmpty(
+		stringArgument(args, "voice_channel_name"),
+		firstNonEmpty(
+			stringArgument(args, "voice_channel"),
+			firstNonEmpty(stringArgument(args, "target_voice_channel"), stringArgument(args, "vc")),
+		),
+	)
+	if voiceChannelID := discordIDArgument(voiceChannelName); voiceChannelID != "" {
+		return voiceChannelID, nil
+	}
+	voiceChannelName = strings.TrimSpace(strings.TrimPrefix(voiceChannelName, "#"))
+	if voiceChannelName == "" {
+		return request.VoiceChannelID, nil
+	}
+	if e.discord == nil {
+		return "", fmt.Errorf("voice_channel_id is required because Discord voice channel lookup is not configured")
+	}
+	payload, err := e.discord.ExecuteDiscordTool(ctx, DiscordToolRequest{
+		ToolName:  "discord.list_channels",
+		GuildID:   request.GuildID,
+		ActorID:   request.ActorID,
+		RequestID: request.RequestID,
+		Arguments: map[string]any{"guild_id": request.GuildID},
+	})
+	if err != nil {
+		return "", err
+	}
+	return voiceChannelIDFromListChannelsPayload(payload, voiceChannelName)
 }
 
 func (e *Executor) musicEntitlementAvailable(ctx context.Context, guildID string) error {
@@ -1849,6 +1983,14 @@ func (e *Executor) channelIDArgument(ctx context.Context, request ExecutionReque
 }
 
 func channelIDFromListChannelsPayload(payload any, channelName string) (string, error) {
+	return channelIDFromListChannelsPayloadMatching(payload, channelName, nil, "channel")
+}
+
+func voiceChannelIDFromListChannelsPayload(payload any, channelName string) (string, error) {
+	return channelIDFromListChannelsPayloadMatching(payload, channelName, isVoiceChannelPayload, "voice channel")
+}
+
+func channelIDFromListChannelsPayloadMatching(payload any, channelName string, include func(map[string]any) bool, label string) (string, error) {
 	payloadMap, ok := payload.(map[string]any)
 	if !ok {
 		return "", fmt.Errorf("Discord channel lookup returned an unexpected shape")
@@ -1862,6 +2004,9 @@ func channelIDFromListChannelsPayload(payload any, channelName string) (string, 
 	switch channels := channelsValue.(type) {
 	case []map[string]any:
 		for _, channel := range channels {
+			if include != nil && !include(channel) {
+				continue
+			}
 			if normalizeDiscordLookupName(fmt.Sprint(channel["name"])) == target {
 				matches = append(matches, strings.TrimSpace(fmt.Sprint(channel["id"])))
 			}
@@ -1869,6 +2014,9 @@ func channelIDFromListChannelsPayload(payload any, channelName string) (string, 
 	case []any:
 		for _, value := range channels {
 			channel, ok := value.(map[string]any)
+			if ok && include != nil && !include(channel) {
+				continue
+			}
 			if ok && normalizeDiscordLookupName(fmt.Sprint(channel["name"])) == target {
 				matches = append(matches, strings.TrimSpace(fmt.Sprint(channel["id"])))
 			}
@@ -1883,12 +2031,22 @@ func channelIDFromListChannelsPayload(payload any, channelName string) (string, 
 		}
 	}
 	if len(cleaned) == 0 {
-		return "", fmt.Errorf("channel %q was not found", channelName)
+		return "", fmt.Errorf("%s %q was not found", label, channelName)
 	}
 	if len(cleaned) > 1 {
-		return "", fmt.Errorf("channel name %q is ambiguous", channelName)
+		return "", fmt.Errorf("%s name %q is ambiguous", label, channelName)
 	}
 	return cleaned[0], nil
+}
+
+func isVoiceChannelPayload(channel map[string]any) bool {
+	channelType := strings.ToLower(strings.TrimSpace(fmt.Sprint(channel["type"])))
+	switch channelType {
+	case "2", "13", "voice", "stage", "guildvoice", "guildstagevoice", "guild_voice", "guild_stage_voice", "guild voice", "guild stage voice":
+		return true
+	default:
+		return false
+	}
 }
 
 func (e *Executor) draftModeratorNote(arguments string) (any, error) {
@@ -2265,7 +2423,7 @@ func (e *Executor) canExecute(name string) bool {
 		return e.attachments != nil
 	case "read_config":
 		return e.configs != nil
-	case "manage_memory_consent", "panda.usage_report", "panda.manage_soul", "panda.manage_prompt", "panda.manage_budget_limit", "panda.manage_knowledge", "panda.manage_role_permission", "panda.manage_tool_access", "panda.manage_channel_rule":
+	case "manage_memory_consent", "panda.usage_report", "panda.manage_soul", "panda.manage_prompt", "panda.manage_budget_limit", "panda.manage_knowledge", "panda.manage_role_permission", "panda.manage_user_permission", "panda.manage_tool_access", "panda.manage_channel_rule":
 		return e.adminOps != nil
 	case "panda.manage_member_role":
 		return e.discord != nil
@@ -2412,6 +2570,12 @@ func confirmationArguments(action string, preview map[string]any) map[string]str
 		return stringArguments(preview, "role_id", "permission")
 	case "role_profile.add", "role_profile.remove":
 		return stringArguments(preview, "role_id", "profile")
+	case "user_permission.add":
+		return stringArguments(preview, "user_id", "permission")
+	case "user_permission.remove":
+		return stringArguments(preview, "user_id", "permission")
+	case "user_profile.add", "user_profile.remove":
+		return stringArguments(preview, "user_id", "profile")
 	case "discord_role.create":
 		return stringArguments(preview, "name")
 	case "discord_poll.create":
@@ -2502,6 +2666,14 @@ func confirmationCopy(action string, arguments map[string]string) (string, strin
 		return fmt.Sprintf("Panda prepared the `%s` profile for role `%s`.", arguments["profile"], arguments["role_id"]), "Set role profile"
 	case "role_profile.remove":
 		return fmt.Sprintf("Panda prepared removal of the `%s` profile from role `%s`.", arguments["profile"], arguments["role_id"]), "Remove role profile"
+	case "user_permission.add":
+		return fmt.Sprintf("Panda prepared grant of `%s` to user `%s`.", arguments["permission"], arguments["user_id"]), "Grant user permission"
+	case "user_permission.remove":
+		return fmt.Sprintf("Panda prepared removal of `%s` from user `%s`.", arguments["permission"], arguments["user_id"]), "Remove user permission"
+	case "user_profile.add":
+		return fmt.Sprintf("Panda prepared the `%s` profile for user `%s`.", arguments["profile"], arguments["user_id"]), "Set user profile"
+	case "user_profile.remove":
+		return fmt.Sprintf("Panda prepared removal of the `%s` profile from user `%s`.", arguments["profile"], arguments["user_id"]), "Remove user profile"
 	case "discord_role.create":
 		return fmt.Sprintf("Panda prepared creation of Discord role `%s`.", arguments["name"]), "Create role"
 	case "discord_poll.create":
@@ -2784,6 +2956,21 @@ func rolePermissionPayloads(roles []store.GuildRole) []map[string]any {
 	payloads := make([]map[string]any, 0, len(roles))
 	for _, role := range roles {
 		payloads = append(payloads, rolePermissionPayload(role))
+	}
+	return payloads
+}
+
+func userPermissionPayload(user store.GuildUserPermission) map[string]any {
+	return map[string]any{
+		"user_id":    user.UserID,
+		"permission": user.Permission,
+	}
+}
+
+func userPermissionPayloads(users []store.GuildUserPermission) []map[string]any {
+	payloads := make([]map[string]any, 0, len(users))
+	for _, user := range users {
+		payloads = append(payloads, userPermissionPayload(user))
 	}
 	return payloads
 }

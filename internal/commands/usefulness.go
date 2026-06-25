@@ -33,7 +33,7 @@ func (r *Router) adminPermissionForSubcommand(subcommand string) (func(context.C
 	case "feedback":
 		return r.admin.CanReadUsage, "You do not have permission to read Panda feedback trends."
 	default:
-		return r.admin.CanWriteConfig, "Only the Panda owner, server owner or administrator, or a delegated config role can use that admin command."
+		return r.admin.CanWriteConfig, "Only the Panda owner, server owner or administrator, or a delegated config role or user can use that admin command."
 	}
 }
 
@@ -43,7 +43,7 @@ func adminFeatureForSubcommand(subcommand string) string {
 		return ""
 	case "", "status", "setup", "behavior", "prompt", "soul", "billing", "enable", "disable", "alerts", "alert":
 		return features.AdminSetup
-	case "role", "tool", "channel", "channels":
+	case "role", "user", "member", "tool", "channel", "channels":
 		return features.AdminAccessControl
 	case "member-role", "member_role":
 		return features.DiscordRoleManagement
@@ -281,6 +281,7 @@ func (r *Router) handleAdminStatus(ctx context.Context, request Request) Respons
 		return Response{Content: "Status lookup failed.", Ephemeral: true}
 	}
 	roles, _ := r.admin.ListRolePermissions(ctx, request.GuildID)
+	users, _ := r.admin.ListUserPermissions(ctx, request.GuildID)
 	channelRules, _ := r.admin.ListChannelRules(ctx, request.GuildID)
 	toolRoles, _ := r.admin.ListToolRoles(ctx, request.GuildID)
 	budgets, _ := r.admin.ListBudgetLimits(ctx, request.GuildID)
@@ -346,6 +347,7 @@ func (r *Router) handleAdminStatus(ctx context.Context, request Request) Respons
 		fmt.Sprintf("- discord: `%s`", discordStatus),
 		fmt.Sprintf("- AI service: `%s`", aiServiceStatus),
 		fmt.Sprintf("- role mappings: `%d`", len(roles)),
+		fmt.Sprintf("- user mappings: `%d`", len(users)),
 		fmt.Sprintf("- tool role grants: `%d`", len(toolRoles)),
 		fmt.Sprintf("- channel rules: `%d`", len(channelRules)),
 		fmt.Sprintf("- budget limits: `%d`", len(budgets)),
@@ -355,7 +357,7 @@ func (r *Router) handleAdminStatus(ctx context.Context, request Request) Respons
 		fmt.Sprintf("- schedules: active `%d`, paused `%d`, failed `%d`", scheduleStats.Active, scheduleStats.Paused, scheduleStats.FailedRuns),
 		fmt.Sprintf("- alert packs: `%d` configured", len(alertRules)),
 	}
-	warnings := adminStatusWarnings(config, roles, channelRules, scheduleStats, alertRules)
+	warnings := adminStatusWarnings(config, roles, users, channelRules, scheduleStats, alertRules)
 	if r.setup != nil {
 		if runtime, err := r.setup.CheckSetup(ctx, request.GuildID, request.ChannelID); err == nil {
 			if !runtime.DiscordConfigured {
@@ -731,14 +733,6 @@ func (r *Router) handleAdminSetup(ctx context.Context, request Request) Response
 			}
 		}
 	}
-	if channelID := strings.TrimSpace(request.Options["channel_id"]); channelID != "" {
-		actions = append(actions, "allowed channel")
-		if !dryRun {
-			if _, err := r.admin.SetChannelRule(ctx, request.GuildID, request.UserID, channelID, "allow"); err != nil {
-				return Response{Content: "Default channel could not be configured.", Ephemeral: true}
-			}
-		}
-	}
 	status := r.handleAdminStatus(ctx, request)
 	prefix := "Setup checklist"
 	if len(actions) > 0 {
@@ -920,13 +914,13 @@ func scheduleMutationError(err error, fallback string) Response {
 	return Response{Content: fallback, Ephemeral: true}
 }
 
-func adminStatusWarnings(config store.GuildConfig, roles []store.GuildRole, channelRules []store.GuildChannelRule, stats repository.ScheduleStats, alerts []store.AlertRule) []string {
+func adminStatusWarnings(config store.GuildConfig, roles []store.GuildRole, users []store.GuildUserPermission, channelRules []store.GuildChannelRule, stats repository.ScheduleStats, alerts []store.AlertRule) []string {
 	var warnings []string
 	if !config.AssistantEnabled {
 		warnings = append(warnings, "Assistant responses are disabled.")
 	}
-	if len(roleIDsForPermission(roles, admin.PermissionAdminBadge)) == 0 {
-		warnings = append(warnings, "No Panda admin role is configured; only server admins/owners can manage Panda.")
+	if len(roleIDsForPermission(roles, admin.PermissionAdminBadge)) == 0 && len(userIDsForPermission(users, admin.PermissionAdminBadge)) == 0 {
+		warnings = append(warnings, "No Panda admin role or user is configured; only server admins/owners can manage Panda.")
 	}
 	hasAllow := false
 	for _, rule := range channelRules {
@@ -935,8 +929,8 @@ func adminStatusWarnings(config store.GuildConfig, roles []store.GuildRole, chan
 			break
 		}
 	}
-	if !hasAllow {
-		warnings = append(warnings, "No allow-listed assistant channels are configured.")
+	if hasAllow {
+		warnings = append(warnings, "Channel allow-list mode is active; non-admin assistant use is limited to allowed channels.")
 	}
 	if stats.FailedRuns > 0 {
 		warnings = append(warnings, fmt.Sprintf("%d schedule(s) have recent failed runs.", stats.FailedRuns))

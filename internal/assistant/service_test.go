@@ -303,10 +303,11 @@ func TestChatNaturalMessageStreamsGateAndStripsMarker(t *testing.T) {
 	respondStarted := 0
 
 	response, err := service.ChatNaturalMessage(ctx, AskRequest{
-		GuildID:   "guild-1",
-		UserID:    "user-1",
-		ChannelID: "channel-1",
-		Question:  "Panda is the deploy window Friday?",
+		GuildID:      "guild-1",
+		UserID:       "user-1",
+		ChannelID:    "channel-1",
+		Question:     "Panda is the deploy window Friday?",
+		BotMentioned: true,
 	}, func() {
 		respondStarted++
 	})
@@ -325,6 +326,9 @@ func TestChatNaturalMessageStreamsGateAndStripsMarker(t *testing.T) {
 	joined := joinMessages(client.requests[0].Messages)
 	if !strings.Contains(joined, "Natural Discord response gate") || !strings.Contains(joined, naturalRespondMarker) || !strings.Contains(joined, naturalIgnoreMarker) {
 		t.Fatalf("natural response gate missing from request:\n%s", joined)
+	}
+	if !strings.Contains(joined, "Bot mentioned: true") || !strings.Contains(joined, "tagging Panda is not required") || !strings.Contains(joined, "natural language") {
+		t.Fatalf("direct mention guidance missing from request:\n%s", joined)
 	}
 	if client.requests[0].ResponseFormat != nil {
 		t.Fatalf("natural streamed chat should not use classifier response format: %+v", client.requests[0].ResponseFormat)
@@ -356,6 +360,45 @@ func TestChatNaturalMessageCanDecline(t *testing.T) {
 	}
 	if len(client.requests) != 1 {
 		t.Fatalf("expected one response-model request, got %d", len(client.requests))
+	}
+}
+
+func TestChatNaturalMessageDeclinesWhenPandaIsDiscussedNotAddressed(t *testing.T) {
+	ctx := context.Background()
+	client := &fakeClient{response: llm.ChatResponse{Content: naturalIgnoreMarker}}
+	service, _ := newTestService(t, client)
+	respondStarted := 0
+
+	response, err := service.ChatNaturalMessage(ctx, AskRequest{
+		GuildID:      "guild-1",
+		UserID:       "user-1",
+		ChannelID:    "channel-1",
+		Question:     "I think Panda is jumping into conversations too often.",
+		BotMentioned: true,
+	}, func() {
+		respondStarted++
+	})
+	if err != nil {
+		t.Fatalf("ChatNaturalMessage: %v", err)
+	}
+	if !response.Silent || response.Content != "" {
+		t.Fatalf("expected silent natural response, got %+v", response)
+	}
+	if respondStarted != 0 {
+		t.Fatalf("declined about-Panda message should not start response indicator, got %d", respondStarted)
+	}
+	if len(client.requests) != 1 {
+		t.Fatalf("expected one response-model request, got %d", len(client.requests))
+	}
+	joined := joinMessages(client.requests[0].Messages)
+	for _, want := range []string{
+		"Mentioning Panda/the bot by name is not enough",
+		"talking about Panda instead of to Panda",
+		"Bot mention is only a wake signal",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("natural response gate should include %q, got:\n%s", want, joined)
+		}
 	}
 }
 
@@ -1226,6 +1269,142 @@ func TestAskExecutesMultipleToolCallsFromOneModelTurn(t *testing.T) {
 	for _, want := range []string{"call-music-skip", "call-music-play", `"action":"skip"`, `"action":"play"`, "bmxxing by mgk"} {
 		if !strings.Contains(finalMessages, want) {
 			t.Fatalf("final request should include %s from batched tool results, got %s", want, finalMessages)
+		}
+	}
+}
+
+func TestAskCompletesSerializedMixedToolRounds(t *testing.T) {
+	ctx := context.Background()
+	sourceURL := "https://www.nba.com/game/lal-vs-bos-0022500001/box-score"
+	client := &fakeClient{responses: []llm.ChatResponse{
+		{
+			Model: "fixture/model",
+			ToolCalls: []llm.ToolCall{{
+				ID:   "call-music-stop",
+				Type: "function",
+				Function: llm.ToolCallFunction{
+					Name:      "panda_manage_music",
+					Arguments: `{"action":"stop"}`,
+				},
+			}},
+		},
+		{
+			Model: "fixture/model",
+			ToolCalls: []llm.ToolCall{{
+				ID:   "call-web-last-game",
+				Type: "function",
+				Function: llm.ToolCallFunction{
+					Name:      "web_search",
+					Arguments: `{"query":"last NBA game final score","limit":1}`,
+				},
+			}},
+		},
+		{
+			Model: "fixture/model",
+			ToolCalls: []llm.ToolCall{{
+				ID:   "call-web-winner",
+				Type: "function",
+				Function: llm.ToolCallFunction{
+					Name:      "web_search",
+					Arguments: `{"query":"who won the last NBA game","limit":1}`,
+				},
+			}},
+		},
+		{
+			Model: "fixture/model",
+			ToolCalls: []llm.ToolCall{{
+				ID:   "call-web-score",
+				Type: "function",
+				Function: llm.ToolCallFunction{
+					Name:      "web_search",
+					Arguments: `{"query":"last NBA game score box score","limit":1}`,
+				},
+			}},
+		},
+		{
+			Model: "fixture/model",
+			ToolCalls: []llm.ToolCall{{
+				ID:   "call-web-recap",
+				Type: "function",
+				Function: llm.ToolCallFunction{
+					Name:      "web_search",
+					Arguments: `{"query":"latest NBA game recap final","limit":1}`,
+				},
+			}},
+		},
+		{
+			Model:   "fixture/model",
+			Content: "Stopped playback and left voice. The Celtics beat the Lakers 118-112 in the last NBA game.",
+		},
+	}}
+	service, db := newTestService(t, client)
+	configs := repository.NewGuildConfigRepository(db.DB)
+	registry, err := tools.NewDefaultRegistry()
+	if err != nil {
+		t.Fatalf("NewDefaultRegistry: %v", err)
+	}
+	musicManager := &fakeAssistantMusicManager{}
+	service.WithToolExecutor(tools.NewExecutor(registry, nil, configs).
+		WithMusicManager(musicManager).
+		WithWebSearcher(fakeAssistantWebSearch{
+			response: websearch.Response{
+				Provider: "brave_search",
+				Query:    "last NBA game final score",
+				Results: []websearch.Result{{
+					Title:       "NBA Latest Result",
+					URL:         sourceURL,
+					Description: "The Celtics beat the Lakers 118-112.",
+					Source:      "NBA",
+				}},
+			},
+		}))
+
+	if _, err := configs.EnsureDefault(ctx, "guild-1"); err != nil {
+		t.Fatalf("EnsureDefault: %v", err)
+	}
+	if _, err := configs.UpdateBehaviorSettings(ctx, "guild-1", map[string]any{"tool_policy": tools.ToolPolicyAssistive}); err != nil {
+		t.Fatalf("UpdateBehaviorSettings: %v", err)
+	}
+
+	response, err := service.Ask(ctx, AskRequest{
+		GuildID:        "guild-1",
+		UserID:         "user-1",
+		ChannelID:      "channel-1",
+		VoiceChannelID: "voice-1",
+		Question:       "stop playing, leave vc, and tell me who played in the last NBA game, who won, and what the score was",
+		AllowedPermissions: map[string]struct{}{
+			admin.PermissionAssistantUse:       {},
+			admin.PermissionAssistantWebSearch: {},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Ask: %v", err)
+	}
+	if len(client.requests) != 6 {
+		t.Fatalf("expected five serialized tool rounds and one final answer request, got %d", len(client.requests))
+	}
+	if len(musicManager.requests) != 1 || musicManager.requests[0].Action != "stop" {
+		t.Fatalf("expected one stop music request, got %+v", musicManager.requests)
+	}
+	if response.Card == nil || response.Card.Title != "music stop" {
+		t.Fatalf("expected music card to remain attached, got %+v", response.Card)
+	}
+	if !response.Card.Standalone || response.Card.Content != "stop" {
+		t.Fatalf("expected mixed-tool music card to remain as a standalone card, got %+v", response.Card)
+	}
+	if !strings.Contains(response.Content, "Stopped playback and left voice.") || !strings.Contains(response.Content, "Celtics beat the Lakers 118-112") {
+		t.Fatalf("final answer text should not be replaced by the music card: %q", response.Content)
+	}
+	if !strings.Contains(response.Content, sourceURL) {
+		t.Fatalf("expected web source link to be appended to mixed-tool answer: %q", response.Content)
+	}
+	if !response.UsedWebSearch {
+		t.Fatalf("mixed web search response should be marked for feedback eligibility: %+v", response)
+	}
+	finalMessages := joinMessages(client.requests[5].Messages)
+	for _, want := range []string{"call-music-stop", "call-web-last-game", "call-web-winner", "call-web-score", "call-web-recap", "NBA Latest Result"} {
+		if !strings.Contains(finalMessages, want) {
+			t.Fatalf("final request should include %s from serialized tool results, got %s", want, finalMessages)
 		}
 	}
 }

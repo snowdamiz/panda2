@@ -32,6 +32,7 @@ type Response struct {
 	ThreadName    string
 	Presentation  Presentation
 	Actions       []Action
+	Followups     []Response
 	Confirmation  *Confirmation
 	Confirmations []Confirmation
 	Modal         *Modal

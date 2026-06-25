@@ -112,6 +112,72 @@ func (r *AccessRepository) AnyRoleHasPermission(ctx context.Context, guildID str
 	return count > 0, err
 }
 
+func (r *AccessRepository) AddUserPermission(ctx context.Context, guildID, userID, permission string) (store.GuildUserPermission, error) {
+	now := time.Now().UTC()
+	var userPermission store.GuildUserPermission
+	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		err := tx.Where("guild_id = ? AND user_id = ? AND permission = ?", guildID, userID, permission).First(&userPermission).Error
+		if err == nil {
+			return nil
+		}
+		if !errors.Is(err, gorm.ErrRecordNotFound) {
+			return err
+		}
+		userPermission = store.GuildUserPermission{
+			GuildID:    guildID,
+			UserID:     userID,
+			Permission: permission,
+			CreatedAt:  now,
+			UpdatedAt:  now,
+		}
+		return tx.Create(&userPermission).Error
+	})
+	return userPermission, err
+}
+
+func (r *AccessRepository) RemoveUserPermission(ctx context.Context, guildID, userID, permission string) error {
+	result := r.db.WithContext(ctx).
+		Where("guild_id = ? AND user_id = ? AND permission = ?", guildID, userID, permission).
+		Delete(&store.GuildUserPermission{})
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (r *AccessRepository) ListUserPermissions(ctx context.Context, guildID string) ([]store.GuildUserPermission, error) {
+	var users []store.GuildUserPermission
+	err := r.db.WithContext(ctx).
+		Where("guild_id = ?", guildID).
+		Order("permission ASC, user_id ASC").
+		Find(&users).Error
+	return users, err
+}
+
+func (r *AccessRepository) HasUserPermissionMappings(ctx context.Context, guildID, permission string) (bool, error) {
+	var count int64
+	err := r.db.WithContext(ctx).
+		Model(&store.GuildUserPermission{}).
+		Where("guild_id = ? AND permission = ?", guildID, permission).
+		Count(&count).Error
+	return count > 0, err
+}
+
+func (r *AccessRepository) UserHasPermission(ctx context.Context, guildID, userID, permission string) (bool, error) {
+	if userID == "" {
+		return false, nil
+	}
+	var count int64
+	err := r.db.WithContext(ctx).
+		Model(&store.GuildUserPermission{}).
+		Where("guild_id = ? AND user_id = ? AND permission = ?", guildID, userID, permission).
+		Count(&count).Error
+	return count > 0, err
+}
+
 func (r *AccessRepository) AddToolRole(ctx context.Context, guildID, toolName, roleID string) (store.GuildToolRole, error) {
 	now := time.Now().UTC()
 	var toolRole store.GuildToolRole

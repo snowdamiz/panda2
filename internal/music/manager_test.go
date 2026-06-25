@@ -2,6 +2,7 @@ package music
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -59,6 +60,22 @@ func (eofStreamer) Stream(context.Context, Track) (OpusFrameProvider, error) {
 	return eofOpusFrameProvider{}, nil
 }
 
+type failingStreamer struct {
+	err error
+}
+
+func (s failingStreamer) Stream(context.Context, Track) (OpusFrameProvider, error) {
+	return nil, s.err
+}
+
+type frameStreamer struct {
+	count int
+}
+
+func (s frameStreamer) Stream(context.Context, Track) (OpusFrameProvider, error) {
+	return &frameOpusFrameProvider{remaining: s.count}, nil
+}
+
 type eofOpusFrameProvider struct{}
 
 func (eofOpusFrameProvider) ProvideOpusFrame() ([]byte, error) {
@@ -66,6 +83,20 @@ func (eofOpusFrameProvider) ProvideOpusFrame() ([]byte, error) {
 }
 
 func (eofOpusFrameProvider) Close() {}
+
+type frameOpusFrameProvider struct {
+	remaining int
+}
+
+func (p *frameOpusFrameProvider) ProvideOpusFrame() ([]byte, error) {
+	if p.remaining <= 0 {
+		return nil, io.EOF
+	}
+	p.remaining--
+	return []byte{0x01, 0x02, 0x03}, nil
+}
+
+func (p *frameOpusFrameProvider) Close() {}
 
 type fakeVoiceConnector struct {
 	mu       sync.Mutex
@@ -329,6 +360,68 @@ func TestQueuedTrackDropsTransientStreamURL(t *testing.T) {
 	}
 	if player.queueItems[0].StreamURL != "" || player.queueItems[0].StreamHeaders != nil {
 		t.Fatalf("expected transient stream data to be dropped for delayed queue item, got %+v", player.queueItems[0])
+	}
+}
+
+func TestPlayWaitsForInitialPrebufferSuccess(t *testing.T) {
+	manager := NewManager(
+		fakeResolver{track: Track{Title: "ready track"}},
+		frameStreamer{count: playbackPrebufferFrames},
+		&fakeVoiceConnector{},
+		nil,
+	)
+
+	response, err := manager.Handle(context.Background(), Request{
+		GuildID:        "guild-1",
+		TextChannelID:  "channel-1",
+		UserID:         "user-1",
+		VoiceChannelID: "voice-1",
+		Intent: Intent{
+			Action: ActionPlay,
+			Query:  "ready track",
+		},
+	})
+	if err != nil {
+		t.Fatalf("play: %v", err)
+	}
+	if response.Title != "Connected to voice" || !strings.Contains(response.Content, "started **ready track**") {
+		t.Fatalf("expected response after startup prebuffer, got %+v", response)
+	}
+}
+
+func TestPlayReturnsInitialPrebufferFailure(t *testing.T) {
+	streamErr := fmt.Errorf("%w: ffmpeg: exit status 1", ErrTrackStreamFailed)
+	connector := &fakeVoiceConnector{}
+	manager := NewManager(
+		fakeResolver{track: Track{Title: "blocked track"}},
+		failingStreamer{err: streamErr},
+		connector,
+		nil,
+	)
+
+	response, err := manager.Handle(context.Background(), Request{
+		GuildID:        "guild-1",
+		TextChannelID:  "channel-1",
+		UserID:         "user-1",
+		VoiceChannelID: "voice-1",
+		Intent: Intent{
+			Action: ActionPlay,
+			Query:  "blocked track",
+		},
+	})
+	if !errors.Is(err, ErrTrackStreamFailed) {
+		t.Fatalf("expected track stream failure, got response=%+v err=%v", response, err)
+	}
+	if response.Content != "" || response.Title != "" {
+		t.Fatalf("failed startup should not return a success response: %+v", response)
+	}
+	if len(connector.sessions) != 1 {
+		t.Fatalf("expected one voice session attempt, got %+v", connector.sessions)
+	}
+	select {
+	case <-connector.sessions[0].closedCh:
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("expected failed startup to close the voice session")
 	}
 }
 

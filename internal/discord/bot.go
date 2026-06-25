@@ -585,6 +585,10 @@ func (b *Bot) respondToInteraction(event *events.ApplicationCommandInteractionCr
 	}
 	if err := b.createInteractionFollowups(b.client.ApplicationID, event.Token(), response, chunks, 1); err != nil {
 		b.logger.Warn("failed to send command followup", slog.Any("err", err), slog.String("request_id", requestID), slog.String("command", request.Command))
+		return
+	}
+	if err := b.createResponseFollowups(b.client.ApplicationID, event.Token(), response.Followups); err != nil {
+		b.logger.Warn("failed to send command response followup", slog.Any("err", err), slog.String("request_id", requestID), slog.String("command", request.Command))
 	}
 }
 
@@ -1084,7 +1088,10 @@ func (b *Bot) updateInteractionResponse(applicationID snowflake.ID, token string
 	if err != nil {
 		return err
 	}
-	return b.createInteractionFollowups(applicationID, token, response, chunks, 1)
+	if err := b.createInteractionFollowups(applicationID, token, response, chunks, 1); err != nil {
+		return err
+	}
+	return b.createResponseFollowups(applicationID, token, response.Followups)
 }
 
 func (b *Bot) createInteractionFollowups(applicationID snowflake.ID, token string, response commands.Response, chunks []string, start int) error {
@@ -1101,19 +1108,48 @@ func (b *Bot) createInteractionFollowups(applicationID snowflake.ID, token strin
 	return nil
 }
 
+func (b *Bot) createResponseFollowups(applicationID snowflake.ID, token string, responses []commands.Response) error {
+	for _, response := range responses {
+		if hasDirectChannelResponsePayload(response) {
+			chunks := splitDiscordContent(response.Content)
+			for index, chunk := range chunks {
+				_, err := b.client.Rest.CreateFollowupMessage(
+					applicationID,
+					token,
+					messageCreateFromResponsePart(response, chunk, index == len(chunks)-1),
+				)
+				if err != nil {
+					return err
+				}
+			}
+		}
+		if err := b.createResponseFollowups(applicationID, token, response.Followups); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (b *Bot) sendChannelResponse(channelID snowflake.ID, response commands.Response, reference ...*disgoDiscord.MessageReference) error {
 	var replyReference *disgoDiscord.MessageReference
 	if len(reference) > 0 {
 		replyReference = reference[0]
 	}
-	chunks := splitDiscordContent(response.Content)
-	for index, chunk := range chunks {
-		chunkReference := replyReference
-		if index > 0 {
-			chunkReference = nil
+	if hasDirectChannelResponsePayload(response) {
+		chunks := splitDiscordContent(response.Content)
+		for index, chunk := range chunks {
+			chunkReference := replyReference
+			if index > 0 {
+				chunkReference = nil
+			}
+			message := channelMessageCreateFromResponsePartWithReference(response, chunk, index == len(chunks)-1, chunkReference)
+			if _, err := b.client.Rest.CreateMessage(channelID, message); err != nil {
+				return err
+			}
 		}
-		message := channelMessageCreateFromResponsePartWithReference(response, chunk, index == len(chunks)-1, chunkReference)
-		if _, err := b.client.Rest.CreateMessage(channelID, message); err != nil {
+	}
+	for _, followup := range response.Followups {
+		if err := b.sendChannelResponse(channelID, followup); err != nil {
 			return err
 		}
 	}
@@ -1638,7 +1674,25 @@ func (b *Bot) preflightNaturalMessageReply(request commands.Request) error {
 }
 
 func hasChannelResponsePayload(response commands.Response) bool {
-	return strings.TrimSpace(response.Content) != "" || response.Poll != nil
+	if hasDirectChannelResponsePayload(response) {
+		return true
+	}
+	for _, followup := range response.Followups {
+		if hasChannelResponsePayload(followup) {
+			return true
+		}
+	}
+	return false
+}
+
+func hasDirectChannelResponsePayload(response commands.Response) bool {
+	return strings.TrimSpace(response.Content) != "" ||
+		response.Poll != nil ||
+		presentationHasExplicitDisplay(response.Presentation) ||
+		len(response.Actions) > 0 ||
+		len(response.Confirmations) > 0 ||
+		response.Confirmation != nil ||
+		response.Feedback != nil
 }
 
 func containsCapabilityAntiPattern(content, pattern string) bool {
@@ -1921,6 +1975,9 @@ func attachmentContentType(attachment disgoDiscord.Attachment) string {
 }
 
 func (b *Bot) isGuildAdmin(event *events.ApplicationCommandInteractionCreate) bool {
+	if b.isBotOwner(event.User().ID) {
+		return true
+	}
 	if memberIsGuildAdmin(event.Member()) {
 		return true
 	}
@@ -1929,6 +1986,9 @@ func (b *Bot) isGuildAdmin(event *events.ApplicationCommandInteractionCreate) bo
 }
 
 func (b *Bot) isComponentGuildAdmin(event *events.ComponentInteractionCreate) bool {
+	if b.isBotOwner(event.User().ID) {
+		return true
+	}
 	if memberIsGuildAdmin(event.Member()) {
 		return true
 	}
@@ -1937,6 +1997,9 @@ func (b *Bot) isComponentGuildAdmin(event *events.ComponentInteractionCreate) bo
 }
 
 func (b *Bot) isModalGuildAdmin(event *events.ModalSubmitInteractionCreate) bool {
+	if b.isBotOwner(event.User().ID) {
+		return true
+	}
 	if memberIsGuildAdmin(event.Member()) {
 		return true
 	}
@@ -1948,11 +2011,18 @@ func (b *Bot) isMessageGuildAdmin(event *events.MessageCreate, userID snowflake.
 	if event == nil {
 		return false
 	}
+	if b.isBotOwner(userID) {
+		return true
+	}
 	if guildID := messageEventGuildID(event); guildID != nil && memberHasAdministratorRole(event.Message.Member, *guildID, b.messageRole) {
 		return true
 	}
 	guild, ok := event.Guild()
 	return b.userOwnsEventGuild(userID, guild, ok, messageEventGuildID(event))
+}
+
+func (b *Bot) isBotOwner(userID snowflake.ID) bool {
+	return b != nil && b.cfg.IsOwner(userID.String())
 }
 
 func (b *Bot) messageRole(guildID, roleID snowflake.ID) (disgoDiscord.Role, bool) {

@@ -21,6 +21,10 @@ const (
 	toolConfirmationOpRolePermissionRemove = "rr"
 	toolConfirmationOpRoleProfileAdd       = "ra"
 	toolConfirmationOpRoleProfileRemove    = "rp"
+	toolConfirmationOpUserPermissionAdd    = "us"
+	toolConfirmationOpUserPermissionRemove = "ur"
+	toolConfirmationOpUserProfileAdd       = "ua"
+	toolConfirmationOpUserProfileRemove    = "up"
 	toolConfirmationOpDiscordRoleCreate    = "rc"
 	toolConfirmationOpMemberRoleAdd        = "ma"
 	toolConfirmationOpMemberRoleRemove     = "mr"
@@ -39,6 +43,10 @@ const (
 	toolActionRolePermissionRemove         = "role_permission.remove"
 	toolActionRoleProfileAdd               = "role_profile.add"
 	toolActionRoleProfileRemove            = "role_profile.remove"
+	toolActionUserPermissionAdd            = "user_permission.add"
+	toolActionUserPermissionRemove         = "user_permission.remove"
+	toolActionUserProfileAdd               = "user_profile.add"
+	toolActionUserProfileRemove            = "user_profile.remove"
 	toolActionDiscordRoleCreate            = "discord_role.create"
 	toolActionMemberRoleAdd                = "member_role.add"
 	toolActionMemberRoleRemove             = "member_role.remove"
@@ -223,6 +231,34 @@ func RequestFromToolConfirmationID(id string, base Request) (ToolConfirmationReq
 		request.Action = toolActionRoleProfileAdd
 		request.Options["role_id"] = decodeToolConfirmationPart(parts[3])
 		request.Options["profile"] = decodeToolConfirmationPart(parts[4])
+	case toolConfirmationOpUserPermissionAdd:
+		if len(parts) != 5 {
+			return ToolConfirmationRequest{}, false
+		}
+		request.Action = toolActionUserPermissionAdd
+		request.Options["user_id"] = decodeToolConfirmationPart(parts[3])
+		request.Options["permission"] = decodeToolConfirmationPart(parts[4])
+	case toolConfirmationOpUserPermissionRemove:
+		if len(parts) != 5 {
+			return ToolConfirmationRequest{}, false
+		}
+		request.Action = toolActionUserPermissionRemove
+		request.Options["user_id"] = decodeToolConfirmationPart(parts[3])
+		request.Options["permission"] = decodeToolConfirmationPart(parts[4])
+	case toolConfirmationOpUserProfileRemove:
+		if len(parts) != 5 {
+			return ToolConfirmationRequest{}, false
+		}
+		request.Action = toolActionUserProfileRemove
+		request.Options["user_id"] = decodeToolConfirmationPart(parts[3])
+		request.Options["profile"] = decodeToolConfirmationPart(parts[4])
+	case toolConfirmationOpUserProfileAdd:
+		if len(parts) != 5 {
+			return ToolConfirmationRequest{}, false
+		}
+		request.Action = toolActionUserProfileAdd
+		request.Options["user_id"] = decodeToolConfirmationPart(parts[3])
+		request.Options["profile"] = decodeToolConfirmationPart(parts[4])
 	case toolConfirmationOpDiscordRoleCreate:
 		if len(parts) != 4 {
 			return ToolConfirmationRequest{}, false
@@ -398,6 +434,30 @@ func toolConfirmationID(userID, action string, arguments map[string]string) stri
 		}
 		prefix[1] = toolConfirmationOpRoleProfileAdd
 		return strings.Join(append(prefix, encodeToolConfirmationPart(arguments["role_id"]), encodeToolConfirmationPart(arguments["profile"])), ":")
+	case toolActionUserPermissionAdd:
+		if strings.TrimSpace(arguments["user_id"]) == "" || strings.TrimSpace(arguments["permission"]) == "" {
+			return ""
+		}
+		prefix[1] = toolConfirmationOpUserPermissionAdd
+		return strings.Join(append(prefix, encodeToolConfirmationPart(arguments["user_id"]), encodeToolConfirmationPart(arguments["permission"])), ":")
+	case toolActionUserPermissionRemove:
+		if strings.TrimSpace(arguments["user_id"]) == "" || strings.TrimSpace(arguments["permission"]) == "" {
+			return ""
+		}
+		prefix[1] = toolConfirmationOpUserPermissionRemove
+		return strings.Join(append(prefix, encodeToolConfirmationPart(arguments["user_id"]), encodeToolConfirmationPart(arguments["permission"])), ":")
+	case toolActionUserProfileRemove:
+		if strings.TrimSpace(arguments["user_id"]) == "" || strings.TrimSpace(arguments["profile"]) == "" {
+			return ""
+		}
+		prefix[1] = toolConfirmationOpUserProfileRemove
+		return strings.Join(append(prefix, encodeToolConfirmationPart(arguments["user_id"]), encodeToolConfirmationPart(arguments["profile"])), ":")
+	case toolActionUserProfileAdd:
+		if strings.TrimSpace(arguments["user_id"]) == "" || strings.TrimSpace(arguments["profile"]) == "" {
+			return ""
+		}
+		prefix[1] = toolConfirmationOpUserProfileAdd
+		return strings.Join(append(prefix, encodeToolConfirmationPart(arguments["user_id"]), encodeToolConfirmationPart(arguments["profile"])), ":")
 	case toolActionDiscordRoleCreate:
 		if strings.TrimSpace(arguments["name"]) == "" {
 			return ""

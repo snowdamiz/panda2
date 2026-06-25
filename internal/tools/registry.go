@@ -439,7 +439,7 @@ func DefaultDefinitions() []Definition {
 		},
 		{
 			Name:                  "panda.manage_music",
-			Description:           "Play music, inspect the queue, and control playback from natural-language music requests. Use this for requests like play, pause, resume, skip, stop, queue, now playing, loop, shuffle, playlist, and volume. For requests like 'skip this and play X', use one skip_play action with query X instead of separate skip and play calls.",
+			Description:           "Play music, inspect the queue, and control playback from natural-language music requests. Use this for requests like play, pause, resume, skip, stop, queue, now playing, loop, shuffle, playlist, and volume. Include voice_channel_id or voice_channel_name when the user names or mentions a target voice channel; otherwise playback uses the requester's current voice channel when available. For requests like 'skip this and play X', use one skip_play action with query X instead of separate skip and play calls.",
 			RequiredPermission:    admin.PermissionAssistantUse,
 			FeatureID:             features.Music,
 			ToolClass:             ToolClassWorkflow,
@@ -486,6 +486,7 @@ func DefaultDefinitions() []Definition {
 		adminWrite("panda.manage_budget_limit", "Set, remove, or list Panda budget limits for a guild, channel, or user.", []string{"action"}),
 		knowledgeAdminWrite("panda.manage_knowledge", "List, add, search, or delete server knowledge documents.", []string{"action"}),
 		rolePermissionManagementTool(),
+		userPermissionManagementTool(),
 		adminDiscordWrite(features.DiscordRoleManagement, "panda.manage_member_role", "Prepare confirmed Discord member role assignment changes.", []string{"action"}, "MANAGE_ROLES"),
 		adminDiscordWrite(features.DiscordRoleManagement, "panda.manage_discord_role", "Prepare confirmed creation of a brand-new Discord server role with no elevated permissions.", []string{"action"}, "MANAGE_ROLES"),
 		toolAccessManagementTool(),
@@ -633,6 +634,12 @@ func rolePermissionManagementTool() Definition {
 	return definition
 }
 
+func userPermissionManagementTool() Definition {
+	definition := adminWrite("panda.manage_user_permission", "Grant, remove, or list Panda permission names and profiles for Discord users directly, without changing Discord roles.", []string{"action"})
+	definition.InputSchema = userPermissionManagementSchema()
+	return definition
+}
+
 func toolAccessManagementTool() Definition {
 	definition := adminWrite("panda.manage_tool_access", "Allow, remove, or list role access to native or composed Panda tools.", []string{"action"})
 	definition.InputSchema = toolAccessManagementSchema()
@@ -690,6 +697,21 @@ func rolePermissionManagementSchema() json.RawMessage {
 	})
 }
 
+func userPermissionManagementSchema() json.RawMessage {
+	return schemaWithProperties([]string{"action"}, map[string]any{
+		"action":           map[string]string{"type": "string", "description": "Action: list, add, or remove."},
+		"profile":          map[string]string{"type": "string", "description": "Panda user profile: admin or moderator. Use admin to grant Panda admin directly to one Discord user."},
+		"permission":       map[string]string{"type": "string", "description": "Specific Panda permission name when not using a profile."},
+		"user_id":          map[string]string{"type": "string", "description": "Discord user ID or user mention."},
+		"user":             map[string]string{"type": "string", "description": "Discord user ID or user mention."},
+		"member_user_id":   map[string]string{"type": "string", "description": "Alias for user_id."},
+		"member":           map[string]string{"type": "string", "description": "Discord member user ID or mention."},
+		"user_name":        map[string]string{"type": "string", "description": "Optional Discord username for display only; user IDs or mentions are required for writes."},
+		"member_user_name": map[string]string{"type": "string", "description": "Alias for user_name."},
+		"dry_run":          map[string]string{"type": "boolean"},
+	})
+}
+
 func toolAccessManagementSchema() json.RawMessage {
 	return schemaWithProperties([]string{"action"}, map[string]any{
 		"action":    map[string]string{"type": "string", "description": "Action: list, add/allow, or remove/deny."},
@@ -723,22 +745,25 @@ func composedToolManagementSchema() json.RawMessage {
 	return schemaWithProperties([]string{"action"}, map[string]any{
 		"action": map[string]any{
 			"type":        "string",
-			"description": "Action: preview, draft, list, show, approve, pause, resume, disable, archive, run, simulate, export, or rollback.",
+			"description": "Action: preview, draft, list, show, approve, pause, resume, disable, archive, run, simulate, export, or rollback. Use draft when an admin asks to set up a new composed automation; draft returns structured approval metadata for the Discord approval button.",
 		},
-		"tool_name":    map[string]string{"type": "string", "description": "Composed tool name."},
-		"tool":         map[string]string{"type": "string", "description": "Alias for tool_name."},
-		"version":      map[string]any{"type": "integer", "minimum": 1},
-		"request":      map[string]string{"type": "string", "description": "Natural-language composed-tool or automation request for draft/preview. Use this when an admin asks Panda to set up a new event-triggered workflow."},
-		"description":  map[string]string{"type": "string", "description": "Alias for request."},
-		"spec_json":    map[string]string{"type": "string", "description": "Complete composed-tool spec JSON for draft/preview."},
-		"role_id":      map[string]string{"type": "string"},
-		"role_name":    map[string]string{"type": "string", "description": "Role name to resolve for role-triggered automations."},
-		"channel_id":   map[string]string{"type": "string"},
-		"channel_name": map[string]string{"type": "string", "description": "Channel name to resolve for message-sending automations."},
-		"welcome_text": map[string]string{"type": "string", "description": "Optional message template for welcome-style automations."},
-		"input":        map[string]string{"type": "object", "description": "Input object for run/simulate."},
-		"input_json":   map[string]string{"type": "string", "description": "JSON object input for run/simulate."},
-		"dry_run":      map[string]string{"type": "boolean"},
+		"tool_name":          map[string]string{"type": "string", "description": "Composed tool name."},
+		"tool":               map[string]string{"type": "string", "description": "Alias for tool_name."},
+		"version":            map[string]any{"type": "integer", "minimum": 1},
+		"request":            map[string]string{"type": "string", "description": "Natural-language composed-tool or automation request for draft/preview. Use this when an admin asks Panda to set up a new event-triggered workflow."},
+		"description":        map[string]string{"type": "string", "description": "Alias for request."},
+		"spec_json":          map[string]string{"type": "string", "description": "Complete composed-tool spec JSON for draft/preview."},
+		"role_id":            map[string]string{"type": "string"},
+		"role_name":          map[string]string{"type": "string", "description": "Role name to resolve for role-triggered automations."},
+		"channel_id":         map[string]string{"type": "string"},
+		"channel_name":       map[string]string{"type": "string", "description": "Channel name to resolve for message-sending automations."},
+		"voice_channel_id":   map[string]string{"type": "string", "description": "Voice/stage channel ID or mention to resolve for voice-triggered music automations."},
+		"voice_channel_name": map[string]string{"type": "string", "description": "Voice/stage channel name to resolve for voice-triggered music automations."},
+		"voice_channel":      map[string]string{"type": "string", "description": "Alias for voice_channel_id or voice_channel_name."},
+		"welcome_text":       map[string]string{"type": "string", "description": "Optional message template for welcome-style automations."},
+		"input":              map[string]string{"type": "object", "description": "Input object for run/simulate."},
+		"input_json":         map[string]string{"type": "string", "description": "JSON object input for run/simulate."},
+		"dry_run":            map[string]string{"type": "boolean"},
 	})
 }
 
@@ -814,14 +839,19 @@ func musicManagementSchema() json.RawMessage {
 			"type":        "string",
 			"description": "Action: play, skip_play, pause, resume, skip, stop, queue, clear, now, controls, loop, shuffle, remove, move, vote_skip, settings, or playlist. Use skip_play with query for 'skip this and play ...' so playback stays in the same voice session.",
 		},
-		"query":    map[string]string{"type": "string", "description": "Song/search query for play or skip_play."},
-		"song":     map[string]string{"type": "string", "description": "Alias for query."},
-		"track":    map[string]string{"type": "string", "description": "Alias for query."},
-		"mode":     map[string]string{"type": "string", "description": "Mode for loop or playlist actions, such as off/track/queue or save/load/list."},
-		"name":     map[string]string{"type": "string", "description": "Playlist name for playlist actions."},
-		"position": map[string]any{"type": "integer", "minimum": 1, "description": "Queue position for remove or move."},
-		"to":       map[string]any{"type": "integer", "minimum": 1, "description": "Destination queue position for move."},
-		"volume":   map[string]any{"type": "integer", "minimum": 1, "maximum": 200, "description": "Default music volume for settings."},
+		"query":                map[string]string{"type": "string", "description": "Song/search query for play or skip_play."},
+		"song":                 map[string]string{"type": "string", "description": "Alias for query."},
+		"track":                map[string]string{"type": "string", "description": "Alias for query."},
+		"voice_channel_id":     map[string]string{"type": "string", "description": "Discord voice/stage channel ID or mention to join for playback when the user names a target VC."},
+		"voice_channel_name":   map[string]string{"type": "string", "description": "Exact Discord voice/stage channel name to join for playback when the user names a target VC."},
+		"voice_channel":        map[string]string{"type": "string", "description": "Alias for the target voice channel ID, mention, or exact name."},
+		"target_voice_channel": map[string]string{"type": "string", "description": "Alias for the target voice channel ID, mention, or exact name."},
+		"vc":                   map[string]string{"type": "string", "description": "Alias for the target voice channel ID, mention, or exact name."},
+		"mode":                 map[string]string{"type": "string", "description": "Mode for loop or playlist actions, such as off/track/queue or save/load/list."},
+		"name":                 map[string]string{"type": "string", "description": "Playlist name for playlist actions."},
+		"position":             map[string]any{"type": "integer", "minimum": 1, "description": "Queue position for remove or move."},
+		"to":                   map[string]any{"type": "integer", "minimum": 1, "description": "Destination queue position for move."},
+		"volume":               map[string]any{"type": "integer", "minimum": 1, "maximum": 200, "description": "Default music volume for settings."},
 	})
 }
 

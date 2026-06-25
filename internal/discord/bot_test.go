@@ -240,6 +240,9 @@ func TestMessageMentionsUserUsesMentionsAndContentFallback(t *testing.T) {
 	if !messageMentionsUser(disgoDiscord.Message{Mentions: []disgoDiscord.User{{ID: userID}}}, userID.String()) {
 		t.Fatal("expected explicit mention metadata to match")
 	}
+	if !messageMentionsUser(disgoDiscord.Message{Content: "<@100000000000000001> hello"}, userID.String()) {
+		t.Fatal("expected standard mention content fallback to match")
+	}
 	if !messageMentionsUser(disgoDiscord.Message{Content: "<@!100000000000000001> hello"}, userID.String()) {
 		t.Fatal("expected mention content fallback to match")
 	}
@@ -559,6 +562,26 @@ func TestGuildOwnerCountsAsGuildAdmin(t *testing.T) {
 	}
 	if userOwnsGuildFromREST(getter, guildID, snowflake.MustParse("100000000000000002")) {
 		t.Fatal("expected REST lookup to reject non-owner")
+	}
+}
+
+func TestConfiguredBotOwnerCountsAsPandaGuildAdmin(t *testing.T) {
+	ownerID := snowflake.MustParse("100000000000000001")
+	regularID := snowflake.MustParse("100000000000000002")
+	guildID := snowflake.MustParse("200000000000000001")
+	bot := &Bot{cfg: config.Config{OwnerUserIDs: map[string]struct{}{ownerID.String(): {}}}}
+	event := &events.MessageCreate{GenericMessage: &events.GenericMessage{
+		Message: disgoDiscord.Message{GuildID: &guildID},
+	}}
+
+	if !bot.isBotOwner(ownerID) {
+		t.Fatal("expected configured owner user id to count as bot owner")
+	}
+	if !bot.isMessageGuildAdmin(event, ownerID) {
+		t.Fatal("expected configured bot owner to count as Panda guild admin")
+	}
+	if bot.isMessageGuildAdmin(event, regularID) {
+		t.Fatal("expected unconfigured user to not count as Panda guild admin")
 	}
 }
 

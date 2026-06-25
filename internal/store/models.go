@@ -92,6 +92,15 @@ type GuildRole struct {
 	UpdatedAt  time.Time `gorm:"not null"`
 }
 
+type GuildUserPermission struct {
+	ID         uint      `gorm:"primaryKey"`
+	GuildID    string    `gorm:"index;not null;size:32"`
+	UserID     string    `gorm:"index;not null;size:32"`
+	Permission string    `gorm:"index;not null"`
+	CreatedAt  time.Time `gorm:"not null"`
+	UpdatedAt  time.Time `gorm:"not null"`
+}
+
 type GuildToolRole struct {
 	ID        uint      `gorm:"primaryKey"`
 	GuildID   string    `gorm:"index;not null;size:32"`

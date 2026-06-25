@@ -59,8 +59,8 @@ func musicToolErrorResult(action Action, err error) map[string]any {
 	content := "I couldn't complete that music request. Please try again."
 	switch {
 	case errors.Is(err, ErrMissingVoice):
-		title = "Join a voice channel"
-		content = "Join a voice channel first, then ask me to play it again."
+		title = "Voice channel needed"
+		content = "Tell me which voice channel to join, or join a voice channel first, then ask me to play it again."
 	case errors.Is(err, ErrVoiceConnection):
 		title = "Voice connection failed"
 		content = "Discord voice did not finish setting up the secure media session in time. I cleaned up the failed connection; please try the song again in a moment."

@@ -38,6 +38,7 @@ func TestDefaultRegistryDefinitionsAreValid(t *testing.T) {
 		"discord.timeout_member":       true,
 		"discord.get_audit_logs":       true,
 		"panda.manage_role_permission": true,
+		"panda.manage_user_permission": true,
 		"panda.manage_member_role":     true,
 		"panda.manage_discord_role":    true,
 		"panda.manage_tool_access":     true,
@@ -87,10 +88,13 @@ func TestAdminSetupToolSchemasExposeNaturalLanguageFields(t *testing.T) {
 	}
 
 	assertToolSchemaContains("panda.manage_role_permission", "profile", "role_name", "role")
+	assertToolSchemaContains("panda.manage_user_permission", "profile", "user_id", "member_user_id")
 	assertToolSchemaContains("panda.manage_channel_rule", "channel_name", "channel")
 	assertToolSchemaContains("panda.manage_tool_access", "tool_name", "role_name", "role")
 	assertToolSchemaContains("panda.manage_prompt", "prompt", "instructions")
 	assertToolSchemaContains("panda.manage_soul", "soul")
+	assertToolSchemaContains("panda.manage_music", "voice_channel_id", "voice_channel_name", "voice_channel", "vc")
+	assertToolSchemaContains("panda.manage_composed_tool", "voice_channel_id", "voice_channel_name", "voice_channel")
 }
 
 func assertSchemaRequiredIsArray(t *testing.T, toolName, schemaName string, schema json.RawMessage) {
@@ -362,6 +366,7 @@ func TestRestoredAdminToolsAreKnown(t *testing.T) {
 		"discord_add_reaction",
 		"discord_send_message",
 		"panda_manage_role_permission",
+		"panda_manage_user_permission",
 		"panda_manage_member_role",
 		"panda_manage_discord_role",
 		"panda_manage_tool_access",
@@ -649,7 +654,7 @@ func TestExecutorRunsComposedToolManager(t *testing.T) {
 			Type: "function",
 			Function: llm.ToolCallFunction{
 				Name:      "panda_manage_composed_tool",
-				Arguments: `{"action":"draft","request":"Create a member-join automation","dry_run":true}`,
+				Arguments: `{"action":"draft","request":"Create a member-join automation","voice_channel_name":"bot-test","dry_run":true}`,
 			},
 		},
 	})
@@ -660,7 +665,7 @@ func TestExecutorRunsComposedToolManager(t *testing.T) {
 		t.Fatalf("expected composed manager request, got %d", len(manager.requests))
 	}
 	request := manager.requests[0]
-	if request.Action != "draft" || request.Text != "Create a member-join automation" || !request.DryRun {
+	if request.Action != "draft" || request.Text != "Create a member-join automation" || request.VoiceChannelName != "bot-test" || !request.DryRun {
 		t.Fatalf("unexpected composed manager request: %+v", request)
 	}
 	if !strings.Contains(result.Message.Content, `"action":"draft"`) || !strings.Contains(result.Message.Content, `"dry_run":true`) {
@@ -817,6 +822,84 @@ func TestExecutorRunsMusicManager(t *testing.T) {
 	}
 	if !strings.Contains(result.Message.Content, `"action":"play"`) || !strings.Contains(result.Message.Content, `"query":"lofi rain"`) {
 		t.Fatalf("unexpected music manager result: %+v", result)
+	}
+}
+
+func TestExecutorRunsMusicManagerWithExplicitVoiceChannelID(t *testing.T) {
+	registry, err := NewDefaultRegistry()
+	if err != nil {
+		t.Fatalf("NewDefaultRegistry: %v", err)
+	}
+	manager := &fakeMusicManager{}
+	executor := NewExecutor(registry, nil, nil).WithMusicManager(manager)
+
+	_, err = executor.Execute(context.Background(), ExecutionRequest{
+		GuildID:        "guild-1",
+		ChannelID:      "text-1",
+		VoiceChannelID: "",
+		ActorID:        "user-1",
+		Access:         testAccess(ToolPolicyAssistive, admin.PermissionAssistantUse),
+		Call: llm.ToolCall{
+			ID:   "call-music-manager",
+			Type: "function",
+			Function: llm.ToolCallFunction{
+				Name:      "panda_manage_music",
+				Arguments: `{"action":"play","query":"ocean drive","voice_channel_id":"<#100000000000000222>"}`,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if len(manager.requests) != 1 {
+		t.Fatalf("expected music manager request, got %d", len(manager.requests))
+	}
+	if manager.requests[0].VoiceChannelID != "100000000000000222" {
+		t.Fatalf("expected explicit voice channel target, got %+v", manager.requests[0])
+	}
+}
+
+func TestExecutorRunsMusicManagerWithExplicitVoiceChannelName(t *testing.T) {
+	registry, err := NewDefaultRegistry()
+	if err != nil {
+		t.Fatalf("NewDefaultRegistry: %v", err)
+	}
+	manager := &fakeMusicManager{}
+	provider := &fakeDiscordProvider{result: map[string]any{"channels": []map[string]any{
+		{"id": "100000000000000111", "name": "Lounge", "type": "0"},
+		{"id": "100000000000000222", "name": "Lounge", "type": "2"},
+		{"id": "100000000000000333", "name": "Stage", "type": "13"},
+	}}}
+	executor := NewExecutor(registry, nil, nil).
+		WithDiscordToolProvider(provider).
+		WithMusicManager(manager)
+
+	_, err = executor.Execute(context.Background(), ExecutionRequest{
+		GuildID:        "guild-1",
+		ChannelID:      "text-1",
+		VoiceChannelID: "100000000000000999",
+		ActorID:        "user-1",
+		Access:         testAccess(ToolPolicyAssistive, admin.PermissionAssistantUse),
+		Call: llm.ToolCall{
+			ID:   "call-music-manager",
+			Type: "function",
+			Function: llm.ToolCallFunction{
+				Name:      "panda_manage_music",
+				Arguments: `{"action":"play","query":"ocean drive","voice_channel_name":"lounge"}`,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if len(manager.requests) != 1 {
+		t.Fatalf("expected music manager request, got %d", len(manager.requests))
+	}
+	if manager.requests[0].VoiceChannelID != "100000000000000222" {
+		t.Fatalf("expected resolved voice channel target, got %+v", manager.requests[0])
+	}
+	if len(provider.requests) != 1 || provider.requests[0].ToolName != "discord.list_channels" {
+		t.Fatalf("expected Discord channel lookup, got %+v", provider.requests)
 	}
 }
 
@@ -1469,6 +1552,26 @@ func TestExecutorRoleProfileAndMemberRoleToolsRequireConfirmation(t *testing.T) 
 		t.Fatalf("expected role profile confirmation, got %+v", profile)
 	}
 
+	userProfile, err := executor.Execute(context.Background(), ExecutionRequest{
+		GuildID: "guild-1",
+		ActorID: "admin",
+		Access:  testAccess(ToolPolicyWriteConfirmed, admin.PermissionAdminConfigWrite),
+		Call: llm.ToolCall{
+			ID:   "call-user-profile",
+			Type: "function",
+			Function: llm.ToolCallFunction{
+				Name:      "panda_manage_user_permission",
+				Arguments: `{"action":"add","profile":"admin","user":"<@!100000000000000888>"}`,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Execute user profile: %v", err)
+	}
+	if userProfile.Confirmation == nil || userProfile.Confirmation.Action != "user_profile.add" || userProfile.Confirmation.Arguments["profile"] != "admin" || userProfile.Confirmation.Arguments["user_id"] != "100000000000000888" {
+		t.Fatalf("expected user profile confirmation, got %+v", userProfile.Confirmation)
+	}
+
 	toolAccess, err := executor.Execute(context.Background(), ExecutionRequest{
 		GuildID: "guild-1",
 		ActorID: "admin",
@@ -1627,6 +1730,12 @@ func TestExecutorAdminMutationToolsRequireConfirmation(t *testing.T) {
 			tool:           "panda_manage_role_permission",
 			arguments:      `{"action":"add","role_id":"100000000000000001","permission":"assistant.web_search"}`,
 			expectedAction: "role_permission.add",
+		},
+		{
+			name:           "user permission add",
+			tool:           "panda_manage_user_permission",
+			arguments:      `{"action":"add","user_id":"100000000000000002","permission":"admin.badge"}`,
+			expectedAction: "user_permission.add",
 		},
 		{
 			name:           "channel rule allow",

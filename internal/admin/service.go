@@ -491,6 +491,30 @@ func (s *Service) AddRolePermission(ctx context.Context, guildID, actorID, roleI
 	return role, nil
 }
 
+func (s *Service) AddUserPermission(ctx context.Context, guildID, actorID, userID, permission string) (store.GuildUserPermission, error) {
+	permission = firstNonEmpty(strings.TrimSpace(permission), PermissionAssistantUse)
+	if !allowedUserPermissionName(permission) {
+		return store.GuildUserPermission{}, fmt.Errorf("unsupported permission %q", permission)
+	}
+	userID = strings.TrimSpace(userID)
+	if userID == "" {
+		return store.GuildUserPermission{}, fmt.Errorf("user id is required")
+	}
+	userPermission, err := s.access.AddUserPermission(ctx, strings.TrimSpace(guildID), userID, permission)
+	if err != nil {
+		return store.GuildUserPermission{}, err
+	}
+	_ = s.audit.Record(ctx, store.AuditEvent{
+		GuildID:    guildID,
+		ActorID:    actorID,
+		Action:     "admin.users.add",
+		TargetType: "guild_user",
+		TargetID:   userPermission.UserID,
+		Metadata:   metadata(map[string]string{"permission": permission}),
+	})
+	return userPermission, nil
+}
+
 func (s *Service) SetAdminRole(ctx context.Context, guildID, actorID, roleID string) (store.GuildRole, error) {
 	guildID = strings.TrimSpace(guildID)
 	roleID = strings.TrimSpace(roleID)
@@ -548,6 +572,28 @@ func (s *Service) ApplyRoleProfile(ctx context.Context, guildID, actorID, roleID
 	return roles, nil
 }
 
+func (s *Service) ApplyUserProfile(ctx context.Context, guildID, actorID, userID, profile string) ([]store.GuildUserPermission, error) {
+	rawProfile := profile
+	profile, ok := NormalizeRoleProfile(profile)
+	if !ok {
+		return nil, fmt.Errorf("unsupported user profile %q", strings.TrimSpace(rawProfile))
+	}
+	userID = strings.TrimSpace(userID)
+	if userID == "" {
+		return nil, fmt.Errorf("user id is required")
+	}
+	permissions := RoleProfilePermissions(profile)
+	userPermissions := make([]store.GuildUserPermission, 0, len(permissions))
+	for _, permission := range permissions {
+		userPermission, err := s.AddUserPermission(ctx, guildID, actorID, userID, permission)
+		if err != nil {
+			return nil, err
+		}
+		userPermissions = append(userPermissions, userPermission)
+	}
+	return userPermissions, nil
+}
+
 func (s *Service) RemoveRoleProfile(ctx context.Context, guildID, actorID, roleID, profile string) error {
 	rawProfile := profile
 	profile, ok := NormalizeRoleProfile(profile)
@@ -591,6 +637,34 @@ func (s *Service) RemoveRoleProfile(ctx context.Context, guildID, actorID, roleI
 	return nil
 }
 
+func (s *Service) RemoveUserProfile(ctx context.Context, guildID, actorID, userID, profile string) error {
+	rawProfile := profile
+	profile, ok := NormalizeRoleProfile(profile)
+	if !ok {
+		return fmt.Errorf("unsupported user profile %q", strings.TrimSpace(rawProfile))
+	}
+	userID = strings.TrimSpace(userID)
+	if userID == "" {
+		return fmt.Errorf("user id is required")
+	}
+	permissions := RoleProfilePermissions(profile)
+	removed := false
+	for _, permission := range permissions {
+		err := s.RemoveUserPermission(ctx, guildID, actorID, userID, permission)
+		if err == nil {
+			removed = true
+			continue
+		}
+		if !errors.Is(err, repository.ErrNotFound) {
+			return err
+		}
+	}
+	if !removed {
+		return repository.ErrNotFound
+	}
+	return nil
+}
+
 func (s *Service) RemoveRolePermission(ctx context.Context, guildID, actorID, roleID, permission string) error {
 	permission = firstNonEmpty(strings.TrimSpace(permission), PermissionAssistantUse)
 	if !allowedPermissionName(permission) {
@@ -610,8 +684,35 @@ func (s *Service) RemoveRolePermission(ctx context.Context, guildID, actorID, ro
 	return nil
 }
 
+func (s *Service) RemoveUserPermission(ctx context.Context, guildID, actorID, userID, permission string) error {
+	permission = firstNonEmpty(strings.TrimSpace(permission), PermissionAssistantUse)
+	if !allowedUserPermissionName(permission) {
+		return fmt.Errorf("unsupported permission %q", permission)
+	}
+	userID = strings.TrimSpace(userID)
+	if userID == "" {
+		return fmt.Errorf("user id is required")
+	}
+	if err := s.access.RemoveUserPermission(ctx, guildID, userID, permission); err != nil {
+		return err
+	}
+	_ = s.audit.Record(ctx, store.AuditEvent{
+		GuildID:    guildID,
+		ActorID:    actorID,
+		Action:     "admin.users.remove",
+		TargetType: "guild_user",
+		TargetID:   userID,
+		Metadata:   metadata(map[string]string{"permission": permission}),
+	})
+	return nil
+}
+
 func (s *Service) ListRolePermissions(ctx context.Context, guildID string) ([]store.GuildRole, error) {
 	return s.access.ListRolePermissions(ctx, guildID)
+}
+
+func (s *Service) ListUserPermissions(ctx context.Context, guildID string) ([]store.GuildUserPermission, error) {
+	return s.access.ListUserPermissions(ctx, guildID)
 }
 
 func (s *Service) AddToolRole(ctx context.Context, guildID, actorID, toolName, roleID string) (store.GuildToolRole, error) {
@@ -793,7 +894,7 @@ func (s *Service) CanUseAssistant(ctx context.Context, request AssistantAccessRe
 		return false, nil
 	}
 
-	return s.canUsePermission(ctx, request.GuildID, request.RoleIDs, PermissionAssistantUse, true)
+	return s.canUsePermission(ctx, request, PermissionAssistantUse, true)
 }
 
 func (s *Service) CanUseModeration(ctx context.Context, request AssistantAccessRequest) (bool, error) {
@@ -804,7 +905,7 @@ func (s *Service) CanUseModeration(ctx context.Context, request AssistantAccessR
 	if request.GuildID == "" {
 		return false, nil
 	}
-	return s.canUsePermission(ctx, request.GuildID, request.RoleIDs, PermissionModerationUse, false)
+	return s.canUsePermission(ctx, request, PermissionModerationUse, false)
 }
 
 func (s *Service) CanUseThreads(ctx context.Context, request AssistantAccessRequest) (bool, error) {
@@ -831,7 +932,7 @@ func (s *Service) CanReadConfig(ctx context.Context, request AssistantAccessRequ
 	if request.GuildID == "" {
 		return false, nil
 	}
-	return s.canUsePermission(ctx, request.GuildID, request.RoleIDs, PermissionAdminConfigRead, false)
+	return s.canUsePermission(ctx, request, PermissionAdminConfigRead, false)
 }
 
 func (s *Service) CanWriteConfig(ctx context.Context, request AssistantAccessRequest) (bool, error) {
@@ -842,7 +943,7 @@ func (s *Service) CanWriteConfig(ctx context.Context, request AssistantAccessReq
 	if request.GuildID == "" {
 		return false, nil
 	}
-	return s.canUsePermission(ctx, request.GuildID, request.RoleIDs, PermissionAdminConfigWrite, false)
+	return s.canUsePermission(ctx, request, PermissionAdminConfigWrite, false)
 }
 
 func (s *Service) CanWriteSoul(ctx context.Context, request AssistantAccessRequest) (bool, error) {
@@ -853,7 +954,7 @@ func (s *Service) CanWriteSoul(ctx context.Context, request AssistantAccessReque
 	if request.GuildID == "" {
 		return false, nil
 	}
-	return s.canUsePermission(ctx, request.GuildID, request.RoleIDs, PermissionAssistantSoulWrite, false)
+	return s.canUsePermission(ctx, request, PermissionAssistantSoulWrite, false)
 }
 
 func (s *Service) CanReadUsage(ctx context.Context, request AssistantAccessRequest) (bool, error) {
@@ -864,7 +965,7 @@ func (s *Service) CanReadUsage(ctx context.Context, request AssistantAccessReque
 	if request.GuildID == "" {
 		return false, nil
 	}
-	return s.canUsePermission(ctx, request.GuildID, request.RoleIDs, PermissionAdminUsageRead, false)
+	return s.canUsePermission(ctx, request, PermissionAdminUsageRead, false)
 }
 
 func (s *Service) CanReadAudit(ctx context.Context, request AssistantAccessRequest) (bool, error) {
@@ -875,7 +976,7 @@ func (s *Service) CanReadAudit(ctx context.Context, request AssistantAccessReque
 	if request.GuildID == "" {
 		return false, nil
 	}
-	return s.canUsePermission(ctx, request.GuildID, request.RoleIDs, PermissionAdminAuditRead, false)
+	return s.canUsePermission(ctx, request, PermissionAdminAuditRead, false)
 }
 
 func (s *Service) CanManageMemory(ctx context.Context, request AssistantAccessRequest) (bool, error) {
@@ -886,7 +987,7 @@ func (s *Service) CanManageMemory(ctx context.Context, request AssistantAccessRe
 	if request.GuildID == "" {
 		return false, nil
 	}
-	return s.canUsePermission(ctx, request.GuildID, request.RoleIDs, PermissionAdminMemoryManage, false)
+	return s.canUsePermission(ctx, request, PermissionAdminMemoryManage, false)
 }
 
 func (s *Service) CanDraftComposedTool(ctx context.Context, request AssistantAccessRequest) (bool, error) {
@@ -897,7 +998,7 @@ func (s *Service) CanDraftComposedTool(ctx context.Context, request AssistantAcc
 	if request.GuildID == "" {
 		return false, nil
 	}
-	return s.canUsePermission(ctx, request.GuildID, request.RoleIDs, PermissionToolComposeDraft, false)
+	return s.canUsePermission(ctx, request, PermissionToolComposeDraft, false)
 }
 
 func (s *Service) CanApproveComposedTool(ctx context.Context, request AssistantAccessRequest) (bool, error) {
@@ -908,7 +1009,7 @@ func (s *Service) CanApproveComposedTool(ctx context.Context, request AssistantA
 	if request.GuildID == "" {
 		return false, nil
 	}
-	return s.canUsePermission(ctx, request.GuildID, request.RoleIDs, PermissionToolComposeApprove, false)
+	return s.canUsePermission(ctx, request, PermissionToolComposeApprove, false)
 }
 
 func (s *Service) CanInvokeComposedTool(ctx context.Context, request AssistantAccessRequest) (bool, error) {
@@ -919,7 +1020,7 @@ func (s *Service) CanInvokeComposedTool(ctx context.Context, request AssistantAc
 	if request.GuildID == "" {
 		return false, nil
 	}
-	return s.canUsePermission(ctx, request.GuildID, request.RoleIDs, PermissionToolComposeInvoke, false)
+	return s.canUsePermission(ctx, request, PermissionToolComposeInvoke, false)
 }
 
 func (s *Service) CanAuditComposedTool(ctx context.Context, request AssistantAccessRequest) (bool, error) {
@@ -930,7 +1031,7 @@ func (s *Service) CanAuditComposedTool(ctx context.Context, request AssistantAcc
 	if request.GuildID == "" {
 		return false, nil
 	}
-	return s.canUsePermission(ctx, request.GuildID, request.RoleIDs, PermissionToolComposeAudit, false)
+	return s.canUsePermission(ctx, request, PermissionToolComposeAudit, false)
 }
 
 func (s *Service) CanUseOwnerOps(_ context.Context, request AssistantAccessRequest) (bool, error) {
@@ -983,7 +1084,7 @@ func (s *Service) canUseOptionalAssistantPermission(ctx context.Context, request
 	if err != nil || hasControl || request.GuildID == "" {
 		return hasControl || request.GuildID == "", err
 	}
-	return s.canUsePermission(ctx, request.GuildID, request.RoleIDs, permission, true)
+	return s.canUsePermission(ctx, request, permission, true)
 }
 
 func (s *Service) HasGuildControl(ctx context.Context, request AssistantAccessRequest) (bool, error) {
@@ -993,6 +1094,12 @@ func (s *Service) HasGuildControl(ctx context.Context, request AssistantAccessRe
 func (s *Service) hasGuildControl(ctx context.Context, request AssistantAccessRequest) (bool, error) {
 	if request.IsOwner || request.IsGuildAdmin {
 		return true, nil
+	}
+	if request.GuildID != "" && request.UserID != "" {
+		allowed, err := s.access.UserHasPermission(ctx, request.GuildID, request.UserID, PermissionAdminBadge)
+		if err != nil || allowed {
+			return allowed, err
+		}
 	}
 	if request.GuildID != "" && len(request.RoleIDs) > 0 {
 		allowed, err := s.access.AnyRoleHasPermission(ctx, request.GuildID, request.RoleIDs, PermissionAdminBadge)
@@ -1010,12 +1117,23 @@ func (s *Service) hasGuildControl(ctx context.Context, request AssistantAccessRe
 	return guild.OwnerUserID == request.UserID || guild.InstalledByUserID == request.UserID, nil
 }
 
-func (s *Service) canUsePermission(ctx context.Context, guildID string, roleIDs []string, permission string, allowWhenUnmapped bool) (bool, error) {
-	hasMappings, err := s.access.HasPermissionMappings(ctx, guildID, permission)
-	if err != nil || !hasMappings {
-		return allowWhenUnmapped && !hasMappings, err
+func (s *Service) canUsePermission(ctx context.Context, request AssistantAccessRequest, permission string, allowWhenUnmapped bool) (bool, error) {
+	hasRoleMappings, err := s.access.HasPermissionMappings(ctx, request.GuildID, permission)
+	if err != nil {
+		return false, err
 	}
-	return s.access.AnyRoleHasPermission(ctx, guildID, roleIDs, permission)
+	hasUserMappings, err := s.access.HasUserPermissionMappings(ctx, request.GuildID, permission)
+	if err != nil {
+		return false, err
+	}
+	if !hasRoleMappings && !hasUserMappings {
+		return allowWhenUnmapped, nil
+	}
+	allowed, err := s.access.UserHasPermission(ctx, request.GuildID, request.UserID, permission)
+	if err != nil || allowed {
+		return allowed, err
+	}
+	return s.access.AnyRoleHasPermission(ctx, request.GuildID, request.RoleIDs, permission)
 }
 
 func allowedToolPolicy(policy string) bool {
@@ -1057,6 +1175,10 @@ func allowedPermissionName(permission string) bool {
 	return IsPermissionNameAllowed(permission)
 }
 
+func allowedUserPermissionName(permission string) bool {
+	return permission == PermissionAdminBadge || allowedPermissionName(permission)
+}
+
 func normalizeToolName(value string) string {
 	return strings.ToLower(strings.TrimSpace(value))
 }
@@ -1069,6 +1191,10 @@ func IsPermissionNameAllowed(permission string) bool {
 		}
 	}
 	return false
+}
+
+func IsUserPermissionNameAllowed(permission string) bool {
+	return allowedUserPermissionName(strings.TrimSpace(permission))
 }
 
 func AllPermissionNames() []string {
