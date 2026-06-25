@@ -240,6 +240,9 @@ func TestMessageMentionsUserUsesMentionsAndContentFallback(t *testing.T) {
 	if !messageMentionsUser(disgoDiscord.Message{Mentions: []disgoDiscord.User{{ID: userID}}}, userID.String()) {
 		t.Fatal("expected explicit mention metadata to match")
 	}
+	if !messageMentionsUser(disgoDiscord.Message{Content: "<@100000000000000001> hello"}, userID.String()) {
+		t.Fatal("expected standard mention content fallback to match")
+	}
 	if !messageMentionsUser(disgoDiscord.Message{Content: "<@!100000000000000001> hello"}, userID.String()) {
 		t.Fatal("expected mention content fallback to match")
 	}
@@ -293,7 +296,7 @@ func TestTypingIndicatorSendsImmediatelyAndRefreshes(t *testing.T) {
 	sender := &fakeTypingSender{}
 	channelID := snowflake.MustParse("100000000000000002")
 
-	stop := startTypingIndicator(context.Background(), sender, nil, channelID, "message-1", 5*time.Millisecond)
+	stop := startTypingIndicator(context.Background(), sender, channelID, 5*time.Millisecond)
 	defer stop()
 
 	deadline := time.Now().Add(100 * time.Millisecond)
@@ -306,7 +309,7 @@ func TestTypingIndicatorSendsImmediatelyAndRefreshes(t *testing.T) {
 }
 
 func TestTypingIndicatorNoopsWithoutSender(t *testing.T) {
-	stop := startTypingIndicator(context.Background(), nil, nil, snowflake.MustParse("100000000000000002"), "message-1", time.Millisecond)
+	stop := startTypingIndicator(context.Background(), nil, snowflake.MustParse("100000000000000002"), time.Millisecond)
 	stop()
 }
 
@@ -376,6 +379,44 @@ func TestQueueBackgroundInteractionStoresPayload(t *testing.T) {
 	}
 	if payload.ApplicationID != applicationID.String() || payload.Token != "token-1" || payload.Task.Command != "summarize" || payload.Task.Input != "long text" {
 		t.Fatalf("unexpected payload: %+v", payload)
+	}
+}
+
+func TestQueueNaturalMessageStoresPayload(t *testing.T) {
+	queue := &fakeInteractionJobQueue{}
+	bot := (&Bot{}).WithJobQueue(queue)
+	guildID := snowflake.MustParse("100000000000000001")
+	channelID := snowflake.MustParse("100000000000000002")
+	messageID := snowflake.MustParse("100000000000000003")
+	reference := &disgoDiscord.MessageReference{
+		MessageID:       &messageID,
+		ChannelID:       &channelID,
+		GuildID:         &guildID,
+		FailIfNotExists: false,
+	}
+	request := commands.Request{
+		RequestID: "message-1",
+		Options:   map[string]string{"message": "panda help"},
+		GuildID:   guildID.String(),
+		ChannelID: channelID.String(),
+		UserID:    "user-1",
+	}
+
+	if err := bot.queueNaturalMessage(context.Background(), channelID, reference, request); err != nil {
+		t.Fatalf("queueNaturalMessage: %v", err)
+	}
+	if len(queue.jobs) != 1 || queue.jobs[0].Kind != NaturalMessageJobKind || queue.jobs[0].GuildID != guildID.String() {
+		t.Fatalf("unexpected queued jobs: %+v", queue.jobs)
+	}
+	var payload naturalMessageJobPayload
+	if err := json.Unmarshal([]byte(queue.jobs[0].Payload), &payload); err != nil {
+		t.Fatalf("decode natural message payload: %v", err)
+	}
+	if payload.ChannelID != channelID.String() || payload.Request.RequestID != "message-1" || payload.Request.Options["message"] != "panda help" {
+		t.Fatalf("unexpected natural message payload: %+v", payload)
+	}
+	if payload.Reference == nil || payload.Reference.MessageID != messageID.String() || payload.Reference.ChannelID != channelID.String() || payload.Reference.GuildID != guildID.String() {
+		t.Fatalf("unexpected natural message reference: %+v", payload.Reference)
 	}
 }
 
@@ -521,6 +562,26 @@ func TestGuildOwnerCountsAsGuildAdmin(t *testing.T) {
 	}
 	if userOwnsGuildFromREST(getter, guildID, snowflake.MustParse("100000000000000002")) {
 		t.Fatal("expected REST lookup to reject non-owner")
+	}
+}
+
+func TestConfiguredBotOwnerCountsAsPandaGuildAdmin(t *testing.T) {
+	ownerID := snowflake.MustParse("100000000000000001")
+	regularID := snowflake.MustParse("100000000000000002")
+	guildID := snowflake.MustParse("200000000000000001")
+	bot := &Bot{cfg: config.Config{OwnerUserIDs: map[string]struct{}{ownerID.String(): {}}}}
+	event := &events.MessageCreate{GenericMessage: &events.GenericMessage{
+		Message: disgoDiscord.Message{GuildID: &guildID},
+	}}
+
+	if !bot.isBotOwner(ownerID) {
+		t.Fatal("expected configured owner user id to count as bot owner")
+	}
+	if !bot.isMessageGuildAdmin(event, ownerID) {
+		t.Fatal("expected configured bot owner to count as Panda guild admin")
+	}
+	if bot.isMessageGuildAdmin(event, regularID) {
+		t.Fatal("expected unconfigured user to not count as Panda guild admin")
 	}
 }
 

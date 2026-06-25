@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -28,7 +29,10 @@ func Open(ctx context.Context, sqlitePath string) (*Store, error) {
 	}
 
 	db, err := gorm.Open(sqlite.Open(sqlitePath), &gorm.Config{
-		Logger: logger.Default.LogMode(logger.Warn),
+		Logger: logger.New(log.New(os.Stdout, "\r\n", log.LstdFlags), logger.Config{
+			LogLevel:                  logger.Warn,
+			IgnoreRecordNotFoundError: true,
+		}),
 	})
 	if err != nil {
 		return nil, err

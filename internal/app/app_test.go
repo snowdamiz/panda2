@@ -20,21 +20,20 @@ func TestInstallResultURLBuildsLandingRoute(t *testing.T) {
 func TestWorkerHandlesQueuedComposedEventJobs(t *testing.T) {
 	ctx := context.Background()
 	service, err := New(ctx, config.Config{
-		SQLitePath:                t.TempDir() + "/panda.db",
-		Port:                      "8080",
-		OpenRouterBaseURL:         "https://openrouter.ai/api/v1",
-		OpenRouterModel:           "test-model",
-		BraveSearchBaseURL:        "https://api.search.brave.com/res/v1",
-		SolanaPlanLamports:        map[string]int64{},
-		MusicSidecarDir:           t.TempDir(),
-		UserRateLimit:             5,
-		UserRateLimitWindow:       0,
-		OwnerUserIDs:              map[string]struct{}{},
-		Environment:               "development",
-		LogLevel:                  "error",
-		SolanaCluster:             "devnet",
-		SolanaConfirmation:        "finalized",
-		OpenRouterClassifierModel: "test-classifier",
+		SQLitePath:          t.TempDir() + "/panda.db",
+		Port:                "8080",
+		OpenRouterBaseURL:   "https://openrouter.ai/api/v1",
+		OpenRouterModel:     "test-model",
+		BraveSearchBaseURL:  "https://api.search.brave.com/res/v1",
+		SolanaPlanLamports:  map[string]int64{},
+		MusicSidecarDir:     t.TempDir(),
+		UserRateLimit:       5,
+		UserRateLimitWindow: 0,
+		OwnerUserIDs:        map[string]struct{}{},
+		Environment:         "development",
+		LogLevel:            "error",
+		SolanaCluster:       "devnet",
+		SolanaConfirmation:  "finalized",
 	}, slog.Default())
 	if err != nil {
 		t.Fatalf("New: %v", err)

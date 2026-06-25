@@ -2,7 +2,6 @@ package assistant
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -41,12 +40,32 @@ type fakeAssistantDynamicTools struct {
 	tools []llm.Tool
 }
 
+type fakeAssistantMusicManager struct {
+	requests []tools.MusicManagementRequest
+}
+
+type fakeAssistantDiscordProvider struct{}
+
 func (f fakeAssistantDynamicTools) OpenRouterTools(context.Context, tools.DynamicToolListRequest) ([]llm.Tool, error) {
 	return f.tools, nil
 }
 
 func (f fakeAssistantDynamicTools) ExecuteDynamicTool(context.Context, tools.DynamicExecutionRequest) (tools.ExecutionResult, error) {
 	return tools.ExecutionResult{Message: llm.Message{Role: "tool", Content: `{}`}}, nil
+}
+
+func (f fakeAssistantDiscordProvider) ExecuteDiscordTool(context.Context, tools.DiscordToolRequest) (any, error) {
+	return map[string]any{"channels": []map[string]any{}}, nil
+}
+
+func (f *fakeAssistantMusicManager) ManageMusic(_ context.Context, request tools.MusicManagementRequest) (any, error) {
+	f.requests = append(f.requests, request)
+	return map[string]any{"result": map[string]any{
+		"action":  request.Action,
+		"query":   request.Query,
+		"title":   "music " + request.Action,
+		"content": strings.TrimSpace(request.Action + " " + request.Query),
+	}}, nil
 }
 
 func (f *fakeClient) Chat(_ context.Context, request llm.ChatRequest) (llm.ChatResponse, error) {
@@ -72,12 +91,42 @@ func (f *fakeClient) Chat(_ context.Context, request llm.ChatRequest) (llm.ChatR
 	return f.response, f.err
 }
 
-func newTestService(t *testing.T, client *fakeClient) (*Service, *store.Store) {
-	t.Helper()
-	return newTestServiceWithModelConfig(t, client, "openrouter/auto", "", nil)
+func (f *fakeClient) StreamChat(ctx context.Context, request llm.ChatRequest, onDelta llm.ChatStreamHandler) (llm.ChatResponse, error) {
+	response, err := f.Chat(ctx, request)
+	if err != nil {
+		return llm.ChatResponse{}, err
+	}
+	if onDelta != nil {
+		if response.Content != "" {
+			if err := onDelta(llm.ChatStreamDelta{Content: response.Content}); err != nil {
+				return llm.ChatResponse{}, err
+			}
+		}
+		if len(response.ToolCalls) > 0 {
+			if err := onDelta(llm.ChatStreamDelta{HasToolCall: true}); err != nil {
+				return llm.ChatResponse{}, err
+			}
+		}
+	}
+	return response, nil
 }
 
-func newTestServiceWithModelConfig(t *testing.T, client *fakeClient, defaultModel, classifierModel string, fallbackModels []string) (*Service, *store.Store) {
+func TestCleanupAssistantModelArtifactsRemovesBareToolMarkers(t *testing.T) {
+	content := cleanupAssistantModelArtifacts("SpaceX stock is unavailable [web_search]. Try the private-company valuation instead [web.search†2].")
+	if strings.Contains(content, "web_search") || strings.Contains(content, "web.search") {
+		t.Fatalf("expected web search markers to be removed, got %q", content)
+	}
+	if strings.Contains(content, " ]") || strings.Contains(content, " .") {
+		t.Fatalf("expected punctuation spacing to be cleaned, got %q", content)
+	}
+}
+
+func newTestService(t *testing.T, client *fakeClient) (*Service, *store.Store) {
+	t.Helper()
+	return newTestServiceWithModelConfig(t, client, "openrouter/auto", nil)
+}
+
+func newTestServiceWithModelConfig(t *testing.T, client *fakeClient, defaultModel string, fallbackModels []string) (*Service, *store.Store) {
 	t.Helper()
 	db, err := store.Open(context.Background(), "file::memory:?cache=shared")
 	if err != nil {
@@ -90,7 +139,7 @@ func newTestServiceWithModelConfig(t *testing.T, client *fakeClient, defaultMode
 	knowledge := repository.NewKnowledgeRepository(db.DB)
 	memoryService := memory.NewService(knowledge)
 	conversations := repository.NewConversationRepository(db.DB)
-	return NewService(client, usage, configs, memoryService, conversations, defaultModel, classifierModel, fallbackModels), db
+	return NewService(client, usage, configs, memoryService, conversations, defaultModel, fallbackModels), db
 }
 
 func TestAskUsesGuildPromptAndMemory(t *testing.T) {
@@ -159,6 +208,56 @@ func TestSystemPromptRedactsConfigSecretsAndKeepsMandatorySecretRulesLast(t *tes
 	}
 	if !strings.HasSuffix(prompt, secretSafetyPrompt) {
 		t.Fatalf("mandatory secret rules should be the final system prompt section:\n%s", prompt)
+	}
+}
+
+func TestSystemPromptPrefersChannelLookupToolsBeforeClarifying(t *testing.T) {
+	prompt := systemPrompt(store.GuildConfig{})
+	for _, want := range []string{
+		"Discord lookup/listing tool is available",
+		"use the tool to resolve the exact object before asking for an ID",
+		"lookup returns no match",
+		"lookup returns ambiguous matches",
+		"VC or voice-channel request should resolve with a voice/stage channel match",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("system prompt missing channel lookup instruction %q:\n%s", want, prompt)
+		}
+	}
+}
+
+func TestAskExposesDiscordChannelLookupToolWithLookupInstructions(t *testing.T) {
+	ctx := context.Background()
+	client := &fakeClient{response: llm.ChatResponse{Model: "fixture/model", Content: "ok"}}
+	service, db := newTestService(t, client)
+	configs := repository.NewGuildConfigRepository(db.DB)
+	registry, err := tools.NewDefaultRegistry()
+	if err != nil {
+		t.Fatalf("NewDefaultRegistry: %v", err)
+	}
+	service.WithToolExecutor(tools.NewExecutor(registry, nil, configs).WithDiscordToolProvider(fakeAssistantDiscordProvider{}))
+
+	if _, err := service.Ask(ctx, AskRequest{
+		GuildID:      "guild-1",
+		UserID:       "admin-1",
+		ChannelID:    "channel-1",
+		Question:     "Every time someone enters the named VC, play a song.",
+		IsGuildAdmin: true,
+		AllowedPermissions: map[string]struct{}{
+			admin.PermissionAssistantUse:    {},
+			admin.PermissionAdminConfigRead: {},
+		},
+	}); err != nil {
+		t.Fatalf("Ask: %v", err)
+	}
+	if len(client.requests) != 1 {
+		t.Fatalf("expected one LLM request, got %d", len(client.requests))
+	}
+	if !toolNamePresent(client.requests[0].Tools, "discord_list_channels") {
+		t.Fatalf("expected discord_list_channels tool to be exposed, got %+v", client.requests[0].Tools)
+	}
+	if joined := joinMessages(client.requests[0].Messages); !strings.Contains(joined, "use the tool to resolve the exact object before asking for an ID") {
+		t.Fatalf("channel lookup instruction missing from request:\n%s", joined)
 	}
 }
 
@@ -263,304 +362,159 @@ func TestAskRespectsDisabledGuild(t *testing.T) {
 	}
 }
 
-func TestClassifyNaturalMessageUsesLLMDecision(t *testing.T) {
+func TestChatNaturalMessageStreamsGateAndStripsMarker(t *testing.T) {
 	ctx := context.Background()
-	client := &fakeClient{response: llm.ChatResponse{Model: "fixture/model", Content: `{"respond":true,"prompt":"Is the deploy window Friday?"}`}}
+	client := &fakeClient{response: llm.ChatResponse{Model: "fixture/model", Content: naturalRespondMarker + "\nDeploys are Friday."}}
 	service, _ := newTestService(t, client)
+	respondStarted := 0
 
-	decision, err := service.ClassifyNaturalMessage(ctx, NaturalMessageRequest{
-		GuildID:        "guild-1",
-		UserID:         "user-1",
-		ChannelID:      "channel-1",
-		Content:        "Panda is the deploy window Friday?",
-		BotMentioned:   true,
-		ReplyContent:   "The deploy window moved to Friday.",
-		ReplyMessageID: "message-1",
+	response, err := service.ChatNaturalMessage(ctx, AskRequest{
+		GuildID:      "guild-1",
+		UserID:       "user-1",
+		ChannelID:    "channel-1",
+		Question:     "Panda is the deploy window Friday?",
+		BotMentioned: true,
+	}, func() {
+		respondStarted++
 	})
 	if err != nil {
-		t.Fatalf("ClassifyNaturalMessage: %v", err)
+		t.Fatalf("ChatNaturalMessage: %v", err)
 	}
-	if !decision.Respond || decision.Prompt != "Is the deploy window Friday?" {
-		t.Fatalf("unexpected decision: %+v", decision)
+	if response.Silent || response.Content != "Deploys are Friday." {
+		t.Fatalf("unexpected natural response: %+v", response)
+	}
+	if respondStarted != 1 {
+		t.Fatalf("expected one streamed response start, got %d", respondStarted)
 	}
 	if len(client.requests) != 1 {
-		t.Fatalf("expected one trigger request, got %d", len(client.requests))
-	}
-	if !naturalTriggerRequestHasSchema(client.requests[0]) {
-		t.Fatalf("natural trigger should request strict schema output, got %+v", client.requests[0].ResponseFormat)
+		t.Fatalf("expected one response-model request, got %d", len(client.requests))
 	}
 	joined := joinMessages(client.requests[0].Messages)
-	if !strings.Contains(joined, "Bot mentioned: true") || !strings.Contains(joined, "Reply context") {
-		t.Fatalf("trigger metadata missing from request: %s", joined)
+	if !strings.Contains(joined, "Natural Discord response gate") || !strings.Contains(joined, naturalRespondMarker) || !strings.Contains(joined, naturalIgnoreMarker) {
+		t.Fatalf("natural response gate missing from request:\n%s", joined)
+	}
+	if !strings.Contains(joined, "Bot mentioned: true") || !strings.Contains(joined, "tagging Panda is not required") || !strings.Contains(joined, "natural language") {
+		t.Fatalf("direct mention guidance missing from request:\n%s", joined)
+	}
+	if client.requests[0].ResponseFormat != nil {
+		t.Fatalf("natural streamed chat should not use classifier response format: %+v", client.requests[0].ResponseFormat)
 	}
 }
 
-func TestOperatorClassifierModelIsSeparateFromResponseModel(t *testing.T) {
+func TestChatNaturalMessageCanDecline(t *testing.T) {
 	ctx := context.Background()
-	client := &fakeClient{responses: []llm.ChatResponse{
-		{Content: `{"respond":true,"prompt":"answer this"}`},
-		{Content: "response answer"},
-	}}
-	service, db := newTestServiceWithModelConfig(t, client, "provider/response", "provider/classifier", nil)
-	configs := repository.NewGuildConfigRepository(db.DB)
-
-	if _, err := configs.EnsureDefault(ctx, "guild-1"); err != nil {
-		t.Fatalf("EnsureDefault: %v", err)
-	}
-
-	decision, err := service.ClassifyNaturalMessage(ctx, NaturalMessageRequest{
-		GuildID:   "guild-1",
-		UserID:    "user-1",
-		ChannelID: "channel-1",
-		Content:   "Panda answer this",
-	})
-	if err != nil {
-		t.Fatalf("ClassifyNaturalMessage: %v", err)
-	}
-	if !decision.Respond || decision.Prompt != "answer this" {
-		t.Fatalf("unexpected decision: %+v", decision)
-	}
-
-	response, err := service.Ask(ctx, AskRequest{GuildID: "guild-1", UserID: "user-1", ChannelID: "channel-1", Question: decision.Prompt})
-	if err != nil {
-		t.Fatalf("Ask: %v", err)
-	}
-	if response.Content != "response answer" {
-		t.Fatalf("unexpected response: %+v", response)
-	}
-	if len(client.requests) != 2 {
-		t.Fatalf("expected classifier and response requests, got %d", len(client.requests))
-	}
-	if client.requests[0].Model != "provider/classifier" || client.requests[1].Model != "provider/response" {
-		t.Fatalf("expected separate classifier and response models, got %+v", client.requests)
-	}
-}
-
-func TestNaturalTriggerPromptCoversDirectCapabilityQuestionWithoutMention(t *testing.T) {
-	messages := naturalTriggerMessages(NaturalMessageRequest{
-		Content:      "what can you do panda",
-		BotMentioned: false,
-	})
-	if len(messages) != 2 {
-		t.Fatalf("expected system and user messages, got %+v", messages)
-	}
-	system := messages[0].Content
-	for _, want := range []string{
-		"asks about Panda's capabilities/tools",
-		"Do not require an @mention",
-		"naturally addresses Panda by name",
-		"word Panda appears anywhere",
-		"asks to set up or configure Panda",
-		"panda_manage_music",
-		"panda_manage_reminder",
-		"discord_create_poll",
-		"panda_manage_schedule",
-		"panda_manage_discord_role",
-		"panda_manage_member_role",
-		"panda_manage_role_permission",
-		"existing Discord role",
-		"panda_manage_composed_tool",
-		"event-triggered requests",
-		"Do not use this just because a request mentions a target channel",
-	} {
-		if !strings.Contains(system, want) {
-			t.Fatalf("natural trigger prompt missing %q:\n%s", want, system)
-		}
-	}
-	user := messages[1].Content
-	if !strings.Contains(user, "Bot mentioned: false") || !strings.Contains(user, "what can you do panda") {
-		t.Fatalf("natural trigger input missing direct-address evidence:\n%s", user)
-	}
-}
-
-func TestNaturalPreferredToolChoicesCoverSingleWorkflowTools(t *testing.T) {
-	names := map[string]struct{}{}
-	for _, name := range naturalPreferredToolChoiceNames() {
-		names[name] = struct{}{}
-	}
-	for _, want := range []string{
-		"panda_manage_music",
-		"panda_manage_reminder",
-		"discord_create_poll",
-		"panda_manage_schedule",
-		"panda_manage_discord_role",
-		"panda_manage_member_role",
-		"panda_manage_role_permission",
-		"panda_manage_channel_rule",
-		"panda_manage_tool_access",
-		"panda_manage_composed_tool",
-		"panda_manage_soul",
-		"panda_manage_prompt",
-		"panda_manage_ops",
-	} {
-		if _, ok := names[want]; !ok {
-			t.Fatalf("preferred tool choices missing %q: %+v", want, naturalPreferredToolChoiceNames())
-		}
-	}
-}
-
-func TestClassifyNaturalMessageRetriesInvalidJSON(t *testing.T) {
-	ctx := context.Background()
-	client := &fakeClient{responses: []llm.ChatResponse{
-		{Content: `**Decision** yes, respond`},
-		{Content: `{"respond":true,"prompt":"what can you do"}`},
-	}}
+	client := &fakeClient{response: llm.ChatResponse{Content: naturalIgnoreMarker}}
 	service, _ := newTestService(t, client)
+	respondStarted := 0
 
-	decision, err := service.ClassifyNaturalMessage(ctx, NaturalMessageRequest{
+	response, err := service.ChatNaturalMessage(ctx, AskRequest{
 		GuildID:   "guild-1",
 		UserID:    "user-1",
 		ChannelID: "channel-1",
-		Content:   "what can you do panda",
+		Question:  "red-panda facts are neat",
+	}, func() {
+		respondStarted++
 	})
 	if err != nil {
-		t.Fatalf("ClassifyNaturalMessage: %v", err)
+		t.Fatalf("ChatNaturalMessage: %v", err)
 	}
-	if !decision.Respond || decision.Prompt != "what can you do" {
-		t.Fatalf("unexpected decision: %+v", decision)
+	if !response.Silent || response.Content != "" {
+		t.Fatalf("expected silent natural response, got %+v", response)
 	}
-	if len(client.requests) != 2 {
-		t.Fatalf("expected initial classification and retry, got %d", len(client.requests))
+	if respondStarted != 0 {
+		t.Fatalf("declined message should not start response indicator, got %d", respondStarted)
 	}
-	for index, request := range client.requests {
-		if !naturalTriggerRequestHasSchema(request) {
-			t.Fatalf("natural trigger request %d should request strict schema output, got %+v", index, request.ResponseFormat)
-		}
-	}
-	if !strings.Contains(joinMessages(client.requests[1].Messages), "Your previous response was not strict JSON") {
-		t.Fatalf("retry request missing repair instruction: %+v", client.requests[1])
+	if len(client.requests) != 1 {
+		t.Fatalf("expected one response-model request, got %d", len(client.requests))
 	}
 }
 
-func TestClassifyNaturalMessageCanDecline(t *testing.T) {
+func TestChatNaturalMessageDeclinesWhenPandaIsDiscussedNotAddressed(t *testing.T) {
 	ctx := context.Background()
-	client := &fakeClient{response: llm.ChatResponse{Content: `{"respond":false,"prompt":""}`}}
+	client := &fakeClient{response: llm.ChatResponse{Content: naturalIgnoreMarker}}
 	service, _ := newTestService(t, client)
+	respondStarted := 0
 
-	decision, err := service.ClassifyNaturalMessage(ctx, NaturalMessageRequest{
+	response, err := service.ChatNaturalMessage(ctx, AskRequest{
+		GuildID:      "guild-1",
+		UserID:       "user-1",
+		ChannelID:    "channel-1",
+		Question:     "I think Panda is jumping into conversations too often.",
+		BotMentioned: true,
+	}, func() {
+		respondStarted++
+	})
+	if err != nil {
+		t.Fatalf("ChatNaturalMessage: %v", err)
+	}
+	if !response.Silent || response.Content != "" {
+		t.Fatalf("expected silent natural response, got %+v", response)
+	}
+	if respondStarted != 0 {
+		t.Fatalf("declined about-Panda message should not start response indicator, got %d", respondStarted)
+	}
+	if len(client.requests) != 1 {
+		t.Fatalf("expected one response-model request, got %d", len(client.requests))
+	}
+	joined := joinMessages(client.requests[0].Messages)
+	for _, want := range []string{
+		"Mentioning Panda/the bot by name is not enough",
+		"talking about Panda instead of to Panda",
+		"Bot mention is only a wake signal",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("natural response gate should include %q, got:\n%s", want, joined)
+		}
+	}
+}
+
+func TestChatNaturalMessageRespondMarkerWithoutAnswerIsNotSilent(t *testing.T) {
+	ctx := context.Background()
+	client := &fakeClient{response: llm.ChatResponse{Content: naturalRespondMarker}}
+	service, _ := newTestService(t, client)
+	respondStarted := 0
+
+	response, err := service.ChatNaturalMessage(ctx, AskRequest{
 		GuildID:   "guild-1",
 		UserID:    "user-1",
 		ChannelID: "channel-1",
-		Content:   "ambient channel chatter",
+		Question:  "Panda?",
+	}, func() {
+		respondStarted++
 	})
 	if err != nil {
-		t.Fatalf("ClassifyNaturalMessage: %v", err)
+		t.Fatalf("ChatNaturalMessage: %v", err)
 	}
-	if decision.Respond || decision.Prompt != "" {
-		t.Fatalf("expected declined decision, got %+v", decision)
+	if response.Silent || response.Content != "" {
+		t.Fatalf("marker-only response should be empty but not silent, got %+v", response)
+	}
+	if respondStarted != 1 {
+		t.Fatalf("respond marker should start response indicator once, got %d", respondStarted)
 	}
 }
 
-func naturalTriggerRequestHasSchema(request llm.ChatRequest) bool {
-	if request.ResponseFormat == nil || request.ResponseFormat.Type != "json_schema" || request.ResponseFormat.JSONSchema == nil {
-		return false
-	}
-	if request.ResponseFormat.JSONSchema.Name != "natural_message_decision" || !request.ResponseFormat.JSONSchema.Strict {
-		return false
-	}
-	schema := string(request.ResponseFormat.JSONSchema.Schema)
-	if !(strings.Contains(schema, `"respond"`) &&
-		strings.Contains(schema, `"prompt"`) &&
-		strings.Contains(schema, `"tool_name"`) &&
-		strings.Contains(schema, `"additionalProperties": false`)) {
-		return false
-	}
-	for _, name := range naturalPreferredToolChoiceNames() {
-		if name == "" {
-			continue
-		}
-		if !strings.Contains(schema, `"`+name+`"`) {
-			return false
-		}
-	}
-	return true
-}
+func TestChatNaturalMessageStaysSilentWhenGateIsMalformed(t *testing.T) {
+	ctx := context.Background()
+	client := &fakeClient{response: llm.ChatResponse{Content: "I will answer without the marker."}}
+	service, _ := newTestService(t, client)
+	respondStarted := 0
 
-func TestNaturalPreferredToolChoicesStayInSync(t *testing.T) {
-	names := naturalPreferredToolChoiceNames()
-	if len(names) < 2 || names[0] != "" {
-		t.Fatalf("expected empty default tool choice followed by named choices, got %+v", names)
-	}
-	registry, err := tools.NewDefaultRegistry()
+	response, err := service.ChatNaturalMessage(ctx, AskRequest{
+		GuildID:   "guild-1",
+		UserID:    "user-1",
+		ChannelID: "channel-1",
+		Question:  "Panda what can you do?",
+	}, func() {
+		respondStarted++
+	})
 	if err != nil {
-		t.Fatalf("NewDefaultRegistry: %v", err)
+		t.Fatalf("ChatNaturalMessage: %v", err)
 	}
-	schema := string(naturalTriggerResponseFormat().JSONSchema.Schema)
-	prompt := naturalTriggerMessages(NaturalMessageRequest{Content: "Panda help"})[0].Content
-	seen := map[string]struct{}{}
-	for _, name := range names[1:] {
-		if _, exists := seen[name]; exists {
-			t.Fatalf("duplicate preferred tool choice %q in %+v", name, names)
-		}
-		seen[name] = struct{}{}
-		if got := normalizeNaturalToolChoice(name); got != name {
-			t.Fatalf("preferred tool %q normalizes to %q", name, got)
-		}
-		if _, ok := registry.Get(name); !ok {
-			t.Fatalf("preferred tool %q does not resolve in the default registry", name)
-		}
-		if strings.HasPrefix(name, "panda_") {
-			alias := strings.Replace(name, "panda_", "panda.", 1)
-			if got := normalizeNaturalToolChoice(alias); got != name {
-				t.Fatalf("preferred tool alias %q normalizes to %q, want %q", alias, got, name)
-			}
-		}
-		if strings.HasPrefix(name, "discord_") {
-			alias := strings.Replace(name, "discord_", "discord.", 1)
-			if got := normalizeNaturalToolChoice(alias); got != name {
-				t.Fatalf("preferred tool alias %q normalizes to %q, want %q", alias, got, name)
-			}
-		}
-		if !strings.Contains(schema, `"`+name+`"`) {
-			t.Fatalf("preferred tool %q missing from schema:\n%s", name, schema)
-		}
-		if !strings.Contains(prompt, "`"+name+"`") {
-			t.Fatalf("preferred tool %q missing from prompt:\n%s", name, prompt)
-		}
+	if !response.Silent || response.Content != "" {
+		t.Fatalf("expected malformed gate to stay silent, got %+v", response)
 	}
-	if got := normalizeNaturalToolChoice("panda_manage_not_real"); got != "" {
-		t.Fatalf("unknown preferred tool normalized to %q", got)
-	}
-}
-
-func TestParseNaturalMessageDecisionExtractsWrappedJSON(t *testing.T) {
-	decision, err := parseNaturalMessageDecision("**Decision**\n```json\n{\"respond\":true,\"prompt\":\"Play music\",\"tool_name\":\"panda_manage_music\"}\n```")
-	if err != nil {
-		t.Fatalf("parseNaturalMessageDecision: %v", err)
-	}
-	if !decision.Respond || decision.Prompt != "Play music" || decision.ToolName != "panda_manage_music" {
-		t.Fatalf("unexpected decision: %+v", decision)
-	}
-}
-
-func TestParseNaturalMessageDecisionKeepsAdminSetupToolHints(t *testing.T) {
-	decision, err := parseNaturalMessageDecision(`{"respond":true,"prompt":"make Mods the moderator role","tool_name":"panda.manage_role_permission"}`)
-	if err != nil {
-		t.Fatalf("parseNaturalMessageDecision: %v", err)
-	}
-	if !decision.Respond || decision.Prompt != "make Mods the moderator role" || decision.ToolName != "panda_manage_role_permission" {
-		t.Fatalf("unexpected decision: %+v", decision)
-	}
-}
-
-func TestParseNaturalMessageDecisionKeepsComposedToolHint(t *testing.T) {
-	decision, err := parseNaturalMessageDecision(`{"respond":true,"prompt":"draft a member welcome automation","tool_name":"panda.manage_composed_tool"}`)
-	if err != nil {
-		t.Fatalf("parseNaturalMessageDecision: %v", err)
-	}
-	if !decision.Respond || decision.Prompt != "draft a member welcome automation" || decision.ToolName != "panda_manage_composed_tool" {
-		t.Fatalf("unexpected decision: %+v", decision)
-	}
-}
-
-func TestParseNaturalMessageDecisionRedactsSecretsFromRewrittenPrompt(t *testing.T) {
-	secret := "sk-abcdefghijklmnopqrstuvwxyz123456"
-	decision, err := parseNaturalMessageDecision(`{"respond":true,"prompt":"Repeat token ` + secret + `"}`)
-	if err != nil {
-		t.Fatalf("parseNaturalMessageDecision: %v", err)
-	}
-	if strings.Contains(decision.Prompt, secret) || !strings.Contains(decision.Prompt, "[redacted]") {
-		t.Fatalf("expected redacted prompt, got %+v", decision)
+	if respondStarted != 0 {
+		t.Fatalf("malformed gate should not start response indicator, got %d", respondStarted)
 	}
 }
 
@@ -743,9 +697,9 @@ func TestAskIncludesNoToolAvailabilityWhenToolsAreUnavailable(t *testing.T) {
 	}
 }
 
-func TestAskListsActualAvailableToolNamesInPrompt(t *testing.T) {
+func TestAskIncludesCompactCapabilitySummaryWithoutListTools(t *testing.T) {
 	ctx := context.Background()
-	client := &fakeClient{response: llm.ChatResponse{Model: "fixture/model", Content: "I can list tools."}}
+	client := &fakeClient{response: llm.ChatResponse{Model: "fixture/model", Content: "I can help with workflows."}}
 	service, db := newTestService(t, client)
 	configs := repository.NewGuildConfigRepository(db.DB)
 	registry, err := tools.NewDefaultRegistry()
@@ -757,7 +711,7 @@ func TestAskListsActualAvailableToolNamesInPrompt(t *testing.T) {
 	if _, err := configs.EnsureDefault(ctx, "guild-1"); err != nil {
 		t.Fatalf("EnsureDefault: %v", err)
 	}
-	if _, err := configs.UpdateBehaviorSettings(ctx, "guild-1", map[string]any{"tool_policy": "read_only"}); err != nil {
+	if _, err := configs.UpdateBehaviorSettings(ctx, "guild-1", map[string]any{"tool_policy": tools.ToolPolicyAssistive}); err != nil {
 		t.Fatalf("UpdateBehaviorSettings: %v", err)
 	}
 
@@ -776,11 +730,82 @@ func TestAskListsActualAvailableToolNamesInPrompt(t *testing.T) {
 		t.Fatalf("expected one LLM request, got %d", len(client.requests))
 	}
 	joined := joinMessages(client.requests[0].Messages)
-	if !strings.Contains(joined, "Panda can call only these current function tools") || !strings.Contains(joined, "`panda_list_tools`") {
-		t.Fatalf("actual tool list missing from request: %s", joined)
+	if !toolNamePresent(client.requests[0].Tools, "generate_workflow_json") {
+		t.Fatalf("expected workflow tool in model request, got %+v", client.requests[0].Tools)
+	}
+	if toolNamePresent(client.requests[0].Tools, "panda_list_tools") {
+		t.Fatalf("list-tools meta tool should not be exposed to response model: %+v", client.requests[0].Tools)
+	}
+	for _, want := range []string{"current user-scoped capability overview derived from the actual exposed function tools", "Composed tools", "server automations", "natural user-facing categories", "Mention exact function/tool names only when the user explicitly asks", "Do not present internal listing/debug helpers"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("capability summary missing %q: %s", want, joined)
+		}
+	}
+	if strings.Contains(joined, "`panda_list_tools`") || strings.Contains(joined, "Show the tool inventory") || strings.Contains(joined, "Do not mention tool inventory") {
+		t.Fatalf("capability context should not mention stale inventory/list helper wording: %s", joined)
 	}
 	if strings.Contains(joined, "`image_generation`") || strings.Contains(joined, "`code_execution`") {
 		t.Fatalf("unavailable generic tools should not appear as current tools: %s", joined)
+	}
+}
+
+func TestAskKeepsDirectMusicCommandAfterToolAvailabilityContext(t *testing.T) {
+	ctx := context.Background()
+	client := &fakeClient{response: llm.ChatResponse{Model: "fixture/model", Content: "ok"}}
+	service, db := newTestService(t, client)
+	configs := repository.NewGuildConfigRepository(db.DB)
+	registry, err := tools.NewDefaultRegistry()
+	if err != nil {
+		t.Fatalf("NewDefaultRegistry: %v", err)
+	}
+	service.WithToolExecutor(tools.NewExecutor(registry, nil, configs).WithMusicManager(&fakeAssistantMusicManager{}))
+
+	if _, err := configs.EnsureDefault(ctx, "guild-1"); err != nil {
+		t.Fatalf("EnsureDefault: %v", err)
+	}
+	if _, err := configs.UpdateBehaviorSettings(ctx, "guild-1", map[string]any{"tool_policy": tools.ToolPolicyAssistive}); err != nil {
+		t.Fatalf("UpdateBehaviorSettings: %v", err)
+	}
+
+	_, err = service.Ask(ctx, AskRequest{
+		GuildID:        "guild-1",
+		UserID:         "user-1",
+		ChannelID:      "channel-1",
+		VoiceChannelID: "voice-1",
+		Question:       "play fill my pockets by mgk",
+		AllowedPermissions: map[string]struct{}{
+			admin.PermissionAssistantUse: {},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Ask: %v", err)
+	}
+	if len(client.requests) != 1 {
+		t.Fatalf("expected one LLM request, got %d", len(client.requests))
+	}
+	request := client.requests[0]
+	if !toolNamePresent(request.Tools, "panda_manage_music") {
+		t.Fatalf("expected music tool in model request, got %+v", request.Tools)
+	}
+	if len(request.Messages) == 0 {
+		t.Fatal("expected model messages")
+	}
+	lastMessage := request.Messages[len(request.Messages)-1]
+	if lastMessage.Role != "user" || !strings.Contains(lastMessage.Content, "play fill my pockets by mgk") {
+		t.Fatalf("direct action request should remain the final model message, got role=%q content=%q", lastMessage.Role, lastMessage.Content)
+	}
+	availabilityIndex := -1
+	for index, message := range request.Messages {
+		if strings.Contains(message.Content, "Current user-scoped capability overview") || strings.Contains(message.Content, "current user-scoped capability overview") {
+			availabilityIndex = index
+			break
+		}
+	}
+	if availabilityIndex < 0 {
+		t.Fatalf("expected tool availability context in request, got %s", joinMessages(request.Messages))
+	}
+	if availabilityIndex >= len(request.Messages)-1 {
+		t.Fatalf("tool availability context should appear before the final user command, got messages: %s", joinMessages(request.Messages))
 	}
 }
 
@@ -886,13 +911,16 @@ func TestAskIncludesDisabledFeatureContextWhenFeatureGateActive(t *testing.T) {
 			t.Fatalf("disabled feature context leaked tool name %q: %s", hiddenTool, joined)
 		}
 	}
+	if strings.Contains(joined, "Web search (`web_search`)") {
+		t.Fatalf("web search should not be reported as disabled because it is available by default: %s", joined)
+	}
 }
 
 func TestToolAvailabilityMessageExplainsAdminOnlyPolicyForNormalUsers(t *testing.T) {
 	message := toolAvailabilityMessage([]llm.Tool{{
 		Type: "function",
 		Function: llm.ToolFunction{
-			Name:       "panda_list_tools",
+			Name:       "web_search",
 			Parameters: []byte(`{"type":"object"}`),
 		},
 	}}, tools.ToolAccess{
@@ -908,7 +936,7 @@ func TestToolAvailabilityMessageLabelsAdminAccess(t *testing.T) {
 	message := toolAvailabilityMessage([]llm.Tool{{
 		Type: "function",
 		Function: llm.ToolFunction{
-			Name:       "panda_list_tools",
+			Name:       "read_config",
 			Parameters: []byte(`{"type":"object"}`),
 		},
 	}}, tools.ToolAccess{
@@ -926,29 +954,64 @@ func TestToolAvailabilityMessageLabelsAdminAccess(t *testing.T) {
 	}
 }
 
-func TestAskCapabilityQuestionCanUseListToolsWhenDefaultAdminOnly(t *testing.T) {
-	ctx := context.Background()
-	client := &fakeClient{responses: []llm.ChatResponse{
-		{
-			Model: "fixture/model",
-			ToolCalls: []llm.ToolCall{{
-				ID:   "call-list-tools",
-				Type: "function",
-				Function: llm.ToolCallFunction{
-					Name:      "panda_list_tools",
-					Arguments: `{}`,
-				},
-			}, {
-				ID:   "call-ignored-read-config",
-				Type: "function",
-				Function: llm.ToolCallFunction{
-					Name:      "read_config",
-					Arguments: `{}`,
-				},
-			}},
+func TestToolAvailabilityMessageUsesRichUserScopedCapabilitySections(t *testing.T) {
+	message := toolAvailabilityMessage(testCapabilityTools(
+		"discord_send_message",
+		"discord_add_reaction",
+		"discord_create_poll",
+		"discord_get_poll_answer_voters",
+		"discord_create_thread",
+		"discord_fetch_messages",
+		"discord_channel_activity_summary",
+		"search_knowledge",
+		"summarize_text_file",
+		"web_search",
+		"discord_get_guild",
+		"discord_timeout_member",
+		"discord_create_scheduled_event",
+		"panda_manage_reminder",
+		"panda_manage_music",
+		"generate_workflow_json",
+		"panda_manage_composed_tool",
+		"panda_manage_schedule",
+		"read_config",
+		"panda_manage_soul",
+		"panda_manage_prompt",
+		"panda_manage_tool_access",
+	), tools.ToolAccess{
+		Policy: tools.ToolPolicyAdminOnly,
+		Permissions: map[string]struct{}{
+			admin.PermissionAssistantUse:     {},
+			admin.PermissionAdminConfigWrite: {},
 		},
-		{Model: "fixture/model", Content: "I can inspect my current tool access with panda.list_tools."},
-	}}
+	})
+	for _, want := range []string{
+		"Server channel messages",
+		"Server message management",
+		"Polls",
+		"Native Discord polls from confirmed assistant actions",
+		"Knowledge (caller has admin access)",
+		"Server knowledge search",
+		"Web search",
+		"Current public web answers with source links",
+		"Composed tools",
+		"server automations",
+		"Admin setup (caller has admin access)",
+		"Access controls (caller has admin access)",
+		"do not collapse the answer into one-line categories",
+	} {
+		if !strings.Contains(message, want) {
+			t.Fatalf("rich capability context missing %q:\n%s", want, message)
+		}
+	}
+	if strings.Contains(strings.ToLower(message), "webhook") {
+		t.Fatalf("capability context should not mention webhooks unless webhook tools are exposed:\n%s", message)
+	}
+}
+
+func TestAskCapabilityQuestionAnswersFromCapabilitySummary(t *testing.T) {
+	ctx := context.Background()
+	client := &fakeClient{response: llm.ChatResponse{Model: "fixture/model", Content: "I can help draft and manage workflows here."}}
 	service, db := newTestService(t, client)
 	configs := repository.NewGuildConfigRepository(db.DB)
 	registry, err := tools.NewDefaultRegistry()
@@ -959,6 +1022,9 @@ func TestAskCapabilityQuestionCanUseListToolsWhenDefaultAdminOnly(t *testing.T) 
 
 	if _, err := configs.EnsureDefault(ctx, "guild-1"); err != nil {
 		t.Fatalf("EnsureDefault: %v", err)
+	}
+	if _, err := configs.UpdateBehaviorSettings(ctx, "guild-1", map[string]any{"tool_policy": tools.ToolPolicyAssistive}); err != nil {
+		t.Fatalf("UpdateBehaviorSettings: %v", err)
 	}
 
 	response, err := service.Ask(ctx, AskRequest{
@@ -973,31 +1039,28 @@ func TestAskCapabilityQuestionCanUseListToolsWhenDefaultAdminOnly(t *testing.T) 
 	if err != nil {
 		t.Fatalf("Ask: %v", err)
 	}
-	if response.Content != "I can inspect my current tool access with panda.list_tools." {
+	if response.Content != "I can help draft and manage workflows here." {
 		t.Fatalf("unexpected response: %q", response.Content)
 	}
-	if len(client.requests) != 2 {
-		t.Fatalf("expected tool loop with two LLM requests, got %d", len(client.requests))
+	if len(client.requests) != 1 {
+		t.Fatalf("expected direct capability response without a list-tools round, got %d request(s)", len(client.requests))
 	}
-	if !toolNamePresent(client.requests[0].Tools, "panda_list_tools") {
-		t.Fatalf("expected panda_list_tools in first model request, got %+v", client.requests[0].Tools)
+	if toolNamePresent(client.requests[0].Tools, "panda_list_tools") {
+		t.Fatalf("list-tools meta tool should not be exposed to response model: %+v", client.requests[0].Tools)
 	}
-	joined := joinMessages(client.requests[1].Messages)
-	for _, want := range []string{`"policy":"admin_only"`, `"presentation":"capabilities"`, `"name":"current_capabilities"`, `"count":1`, `"user_tools_notice"`} {
+	joined := joinMessages(client.requests[0].Messages)
+	for _, want := range []string{"current user-scoped capability overview derived from the actual exposed function tools", "Composed tools", "server automations", "do not call a tool only to list capabilities", "treat that history as stale and do not copy it"} {
 		if !strings.Contains(joined, want) {
-			t.Fatalf("expected tool-list result to contain %s, got %s", want, joined)
+			t.Fatalf("expected capability context to contain %s, got %s", want, joined)
 		}
 	}
 }
 
-func TestAskExecutesTextToolCallFallback(t *testing.T) {
+func TestChatFiltersStaleCapabilityHistoryAndRetriesStaleAnswer(t *testing.T) {
 	ctx := context.Background()
 	client := &fakeClient{responses: []llm.ChatResponse{
-		{
-			Model:   "fixture/model",
-			Content: "<tool_call>panda_list_tools\n</tool_call>",
-		},
-		{Model: "fixture/model", Content: "I checked my available tools."},
+		{Model: "fixture/model", Content: "I can:\n\n- **Show the tool inventory** - list all Panda capabilities.\n- **Control music** - play tracks.\n- **Manage reminders** - create reminders."},
+		{Model: "fixture/model", Content: "I can help with Discord actions, server information, admin settings, workflows, music, and reminders."},
 	}}
 	service, db := newTestService(t, client)
 	configs := repository.NewGuildConfigRepository(db.DB)
@@ -1009,6 +1072,93 @@ func TestAskExecutesTextToolCallFallback(t *testing.T) {
 
 	if _, err := configs.EnsureDefault(ctx, "guild-1"); err != nil {
 		t.Fatalf("EnsureDefault: %v", err)
+	}
+	conversation, err := service.conversations.GetOrCreateActive(ctx, repository.ConversationKey{
+		GuildID:     "guild-1",
+		ChannelID:   "channel-1",
+		OwnerUserID: "user-1",
+		Title:       "what can you do",
+	})
+	if err != nil {
+		t.Fatalf("GetOrCreateActive: %v", err)
+	}
+	if err := service.conversations.AppendMessage(ctx, store.AssistantMessage{
+		ConversationID: conversation.ID,
+		GuildID:        "guild-1",
+		ChannelID:      "channel-1",
+		UserID:         "user-1",
+		Role:           "user",
+		ContentPreview: "what can you do",
+	}); err != nil {
+		t.Fatalf("AppendMessage user: %v", err)
+	}
+	if err := service.conversations.AppendMessage(ctx, store.AssistantMessage{
+		ConversationID: conversation.ID,
+		GuildID:        "guild-1",
+		ChannelID:      "channel-1",
+		UserID:         "user-1",
+		Role:           "assistant",
+		ContentPreview: "I can:\n\n- **Show the tool inventory** - list all Panda capabilities.\n- **Control music** - play tracks.\n- **Manage reminders** - create reminders.",
+	}); err != nil {
+		t.Fatalf("AppendMessage assistant: %v", err)
+	}
+
+	response, err := service.Chat(ctx, AskRequest{
+		GuildID:   "guild-1",
+		UserID:    "user-1",
+		ChannelID: "channel-1",
+		Question:  "what can you do",
+		AllowedPermissions: map[string]struct{}{
+			admin.PermissionAssistantUse:     {},
+			admin.PermissionAdminConfigRead:  {},
+			admin.PermissionAdminConfigWrite: {},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Chat: %v", err)
+	}
+	if response.Content != "I can help with Discord actions, server information, admin settings, workflows, music, and reminders." {
+		t.Fatalf("unexpected response: %q", response.Content)
+	}
+	if len(client.requests) != 2 {
+		t.Fatalf("expected stale capability answer retry, got %d request(s)", len(client.requests))
+	}
+	firstRequest := joinMessages(client.requests[0].Messages)
+	for _, forbidden := range []string{"Show the tool inventory", "Do not mention tool inventory"} {
+		if strings.Contains(firstRequest, forbidden) {
+			t.Fatalf("first request should not contain stale inventory wording %q:\n%s", forbidden, firstRequest)
+		}
+	}
+	secondRequest := joinMessages(client.requests[1].Messages)
+	if !strings.Contains(secondRequest, "Regenerate the previous answer") {
+		t.Fatalf("expected stale-answer retry instruction, got:\n%s", secondRequest)
+	}
+	if len(client.requests[0].Tools) == 0 || len(client.requests[1].Tools) != len(client.requests[0].Tools) {
+		t.Fatalf("retry should preserve current tool context, got first=%d second=%d", len(client.requests[0].Tools), len(client.requests[1].Tools))
+	}
+}
+
+func TestAskSuppressesTextToolCallMarkup(t *testing.T) {
+	ctx := context.Background()
+	client := &fakeClient{responses: []llm.ChatResponse{
+		{
+			Model:   "fixture/model",
+			Content: "<tool_call>generate_workflow_json\n<arg_key>workflow</arg_key>\n<arg_value>daily_summary</arg_value>\n</tool_call>",
+		},
+	}}
+	service, db := newTestService(t, client)
+	configs := repository.NewGuildConfigRepository(db.DB)
+	registry, err := tools.NewDefaultRegistry()
+	if err != nil {
+		t.Fatalf("NewDefaultRegistry: %v", err)
+	}
+	service.WithToolExecutor(tools.NewExecutor(registry, nil, configs))
+
+	if _, err := configs.EnsureDefault(ctx, "guild-1"); err != nil {
+		t.Fatalf("EnsureDefault: %v", err)
+	}
+	if _, err := configs.UpdateBehaviorSettings(ctx, "guild-1", map[string]any{"tool_policy": tools.ToolPolicyAssistive}); err != nil {
+		t.Fatalf("UpdateBehaviorSettings: %v", err)
 	}
 
 	response, err := service.Ask(ctx, AskRequest{
@@ -1023,20 +1173,20 @@ func TestAskExecutesTextToolCallFallback(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Ask: %v", err)
 	}
-	if response.Content != "I checked my available tools." {
-		t.Fatalf("unexpected response: %q", response.Content)
+	if strings.Contains(response.Content, "<tool_call>") || strings.Contains(response.Content, "generate_workflow_json") {
+		t.Fatalf("raw text tool call leaked to response: %q", response.Content)
 	}
-	if len(client.requests) != 2 {
-		t.Fatalf("expected text tool-call fallback to run the tool loop, got %d LLM requests", len(client.requests))
+	if !strings.Contains(response.Content, "not available") || !strings.Contains(response.Content, "did not take any action") {
+		t.Fatalf("expected unavailable tool message, got %q", response.Content)
 	}
-	if !toolNamePresent(client.requests[0].Tools, "panda_list_tools") {
-		t.Fatalf("expected panda_list_tools in first model request, got %+v", client.requests[0].Tools)
+	if len(client.requests) != 1 {
+		t.Fatalf("text tool-call markup should not start a tool loop, got %d LLM requests", len(client.requests))
 	}
-	joined := joinMessages(client.requests[1].Messages)
-	for _, want := range []string{"text_tool_call_1", `"presentation":"capabilities"`, `"name":"current_capabilities"`} {
-		if !strings.Contains(joined, want) {
-			t.Fatalf("expected fallback tool execution to add %s to final request, got %s", want, joined)
-		}
+	if !toolNamePresent(client.requests[0].Tools, "generate_workflow_json") {
+		t.Fatalf("expected workflow JSON tool in first model request, got %+v", client.requests[0].Tools)
+	}
+	if toolNamePresent(client.requests[0].Tools, "panda_list_tools") {
+		t.Fatalf("list-tools meta tool should not be exposed to response model: %+v", client.requests[0].Tools)
 	}
 }
 
@@ -1046,11 +1196,11 @@ func TestAskContinuesSequentialToolRoundsWithinOnePrompt(t *testing.T) {
 		{
 			Model: "fixture/model",
 			ToolCalls: []llm.ToolCall{{
-				ID:   "call-list-tools",
+				ID:   "call-generate-workflow",
 				Type: "function",
 				Function: llm.ToolCallFunction{
-					Name:      "panda_list_tools",
-					Arguments: `{}`,
+					Name:      "generate_workflow_json",
+					Arguments: `{"workflow":"setup_check","inputs":{"scope":"server"}}`,
 				},
 			}},
 		},
@@ -1107,14 +1257,225 @@ func TestAskContinuesSequentialToolRoundsWithinOnePrompt(t *testing.T) {
 		t.Fatalf("batched tool call should not be executed or replayed in the next request, got %s", secondMessages)
 	}
 	finalMessages := joinMessages(client.requests[2].Messages)
-	for _, want := range []string{"call-list-tools", "call-read-config", `"policy":"admin_only"`, `"tool_policy"`} {
+	for _, want := range []string{"call-generate-workflow", "call-read-config", `"workflow":"setup_check"`, `"tool_policy"`} {
 		if !strings.Contains(finalMessages, want) {
 			t.Fatalf("final request should include %s from prior tool rounds, got %s", want, finalMessages)
 		}
 	}
 }
 
-func TestAskSuppressesUnavailableTextToolCallFallback(t *testing.T) {
+func TestAskExecutesMultipleToolCallsFromOneModelTurn(t *testing.T) {
+	ctx := context.Background()
+	client := &fakeClient{responses: []llm.ChatResponse{
+		{
+			Model: "fixture/model",
+			ToolCalls: []llm.ToolCall{
+				{
+					ID:   "call-music-skip",
+					Type: "function",
+					Function: llm.ToolCallFunction{
+						Name:      "panda_manage_music",
+						Arguments: `{"action":"skip"}`,
+					},
+				},
+				{
+					ID:   "call-music-play",
+					Type: "function",
+					Function: llm.ToolCallFunction{
+						Name:      "panda_manage_music",
+						Arguments: `{"action":"play","query":"bmxxing by mgk"}`,
+					},
+				},
+			},
+		},
+		{Model: "fixture/model", Content: "Skipped the current song and started bmxxing."},
+	}}
+	service, db := newTestService(t, client)
+	configs := repository.NewGuildConfigRepository(db.DB)
+	registry, err := tools.NewDefaultRegistry()
+	if err != nil {
+		t.Fatalf("NewDefaultRegistry: %v", err)
+	}
+	musicManager := &fakeAssistantMusicManager{}
+	service.WithToolExecutor(tools.NewExecutor(registry, nil, configs).WithMusicManager(musicManager))
+
+	if _, err := configs.EnsureDefault(ctx, "guild-1"); err != nil {
+		t.Fatalf("EnsureDefault: %v", err)
+	}
+	if _, err := configs.UpdateBehaviorSettings(ctx, "guild-1", map[string]any{"tool_policy": tools.ToolPolicyAssistive}); err != nil {
+		t.Fatalf("UpdateBehaviorSettings: %v", err)
+	}
+
+	response, err := service.Ask(ctx, AskRequest{
+		GuildID:        "guild-1",
+		UserID:         "user-1",
+		ChannelID:      "channel-1",
+		VoiceChannelID: "voice-1",
+		Question:       "skip this song and play bmxxing by mgk",
+		AllowedPermissions: map[string]struct{}{
+			admin.PermissionAssistantUse: {},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Ask: %v", err)
+	}
+	if response.Content != "play bmxxing by mgk" || response.Card == nil || response.Card.Title != "music play" {
+		t.Fatalf("expected final music card to come from play tool, got %+v", response)
+	}
+	if len(musicManager.requests) != 2 {
+		t.Fatalf("expected skip and play music requests, got %+v", musicManager.requests)
+	}
+	if musicManager.requests[0].Action != "skip" || musicManager.requests[1].Action != "play" || musicManager.requests[1].Query != "bmxxing by mgk" {
+		t.Fatalf("music requests were not executed in order: %+v", musicManager.requests)
+	}
+	if len(client.requests) != 2 {
+		t.Fatalf("expected tool batch request and final response request, got %d", len(client.requests))
+	}
+	finalMessages := joinMessages(client.requests[1].Messages)
+	for _, want := range []string{"call-music-skip", "call-music-play", `"action":"skip"`, `"action":"play"`, "bmxxing by mgk"} {
+		if !strings.Contains(finalMessages, want) {
+			t.Fatalf("final request should include %s from batched tool results, got %s", want, finalMessages)
+		}
+	}
+}
+
+func TestAskCompletesSerializedMixedToolRounds(t *testing.T) {
+	ctx := context.Background()
+	sourceURL := "https://www.nba.com/game/lal-vs-bos-0022500001/box-score"
+	client := &fakeClient{responses: []llm.ChatResponse{
+		{
+			Model: "fixture/model",
+			ToolCalls: []llm.ToolCall{{
+				ID:   "call-music-stop",
+				Type: "function",
+				Function: llm.ToolCallFunction{
+					Name:      "panda_manage_music",
+					Arguments: `{"action":"stop"}`,
+				},
+			}},
+		},
+		{
+			Model: "fixture/model",
+			ToolCalls: []llm.ToolCall{{
+				ID:   "call-web-last-game",
+				Type: "function",
+				Function: llm.ToolCallFunction{
+					Name:      "web_search",
+					Arguments: `{"query":"last NBA game final score","limit":1}`,
+				},
+			}},
+		},
+		{
+			Model: "fixture/model",
+			ToolCalls: []llm.ToolCall{{
+				ID:   "call-web-winner",
+				Type: "function",
+				Function: llm.ToolCallFunction{
+					Name:      "web_search",
+					Arguments: `{"query":"who won the last NBA game","limit":1}`,
+				},
+			}},
+		},
+		{
+			Model: "fixture/model",
+			ToolCalls: []llm.ToolCall{{
+				ID:   "call-web-score",
+				Type: "function",
+				Function: llm.ToolCallFunction{
+					Name:      "web_search",
+					Arguments: `{"query":"last NBA game score box score","limit":1}`,
+				},
+			}},
+		},
+		{
+			Model: "fixture/model",
+			ToolCalls: []llm.ToolCall{{
+				ID:   "call-web-recap",
+				Type: "function",
+				Function: llm.ToolCallFunction{
+					Name:      "web_search",
+					Arguments: `{"query":"latest NBA game recap final","limit":1}`,
+				},
+			}},
+		},
+		{
+			Model:   "fixture/model",
+			Content: "Stopped playback and left voice. The Celtics beat the Lakers 118-112 in the last NBA game.",
+		},
+	}}
+	service, db := newTestService(t, client)
+	configs := repository.NewGuildConfigRepository(db.DB)
+	registry, err := tools.NewDefaultRegistry()
+	if err != nil {
+		t.Fatalf("NewDefaultRegistry: %v", err)
+	}
+	musicManager := &fakeAssistantMusicManager{}
+	service.WithToolExecutor(tools.NewExecutor(registry, nil, configs).
+		WithMusicManager(musicManager).
+		WithWebSearcher(fakeAssistantWebSearch{
+			response: websearch.Response{
+				Provider: "brave_search",
+				Query:    "last NBA game final score",
+				Results: []websearch.Result{{
+					Title:       "NBA Latest Result",
+					URL:         sourceURL,
+					Description: "The Celtics beat the Lakers 118-112.",
+					Source:      "NBA",
+				}},
+			},
+		}))
+
+	if _, err := configs.EnsureDefault(ctx, "guild-1"); err != nil {
+		t.Fatalf("EnsureDefault: %v", err)
+	}
+	if _, err := configs.UpdateBehaviorSettings(ctx, "guild-1", map[string]any{"tool_policy": tools.ToolPolicyAssistive}); err != nil {
+		t.Fatalf("UpdateBehaviorSettings: %v", err)
+	}
+
+	response, err := service.Ask(ctx, AskRequest{
+		GuildID:        "guild-1",
+		UserID:         "user-1",
+		ChannelID:      "channel-1",
+		VoiceChannelID: "voice-1",
+		Question:       "stop playing, leave vc, and tell me who played in the last NBA game, who won, and what the score was",
+		AllowedPermissions: map[string]struct{}{
+			admin.PermissionAssistantUse:       {},
+			admin.PermissionAssistantWebSearch: {},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Ask: %v", err)
+	}
+	if len(client.requests) != 6 {
+		t.Fatalf("expected five serialized tool rounds and one final answer request, got %d", len(client.requests))
+	}
+	if len(musicManager.requests) != 1 || musicManager.requests[0].Action != "stop" {
+		t.Fatalf("expected one stop music request, got %+v", musicManager.requests)
+	}
+	if response.Card == nil || response.Card.Title != "music stop" {
+		t.Fatalf("expected music card to remain attached, got %+v", response.Card)
+	}
+	if !response.Card.Standalone || response.Card.Content != "stop" {
+		t.Fatalf("expected mixed-tool music card to remain as a standalone card, got %+v", response.Card)
+	}
+	if !strings.Contains(response.Content, "Stopped playback and left voice.") || !strings.Contains(response.Content, "Celtics beat the Lakers 118-112") {
+		t.Fatalf("final answer text should not be replaced by the music card: %q", response.Content)
+	}
+	if !strings.Contains(response.Content, sourceURL) {
+		t.Fatalf("expected web source link to be appended to mixed-tool answer: %q", response.Content)
+	}
+	if !response.UsedWebSearch {
+		t.Fatalf("mixed web search response should be marked for feedback eligibility: %+v", response)
+	}
+	finalMessages := joinMessages(client.requests[5].Messages)
+	for _, want := range []string{"call-music-stop", "call-web-last-game", "call-web-winner", "call-web-score", "call-web-recap", "NBA Latest Result"} {
+		if !strings.Contains(finalMessages, want) {
+			t.Fatalf("final request should include %s from serialized tool results, got %s", want, finalMessages)
+		}
+	}
+}
+
+func TestAskSuppressesUnavailableTextToolCallMarkup(t *testing.T) {
 	ctx := context.Background()
 	client := &fakeClient{response: llm.ChatResponse{
 		Model: "fixture/model",
@@ -1154,7 +1515,7 @@ func TestAskSuppressesUnavailableTextToolCallFallback(t *testing.T) {
 		t.Fatalf("expected unavailable tool message, got %q", response.Content)
 	}
 	if len(client.requests) != 1 {
-		t.Fatalf("unavailable text tool call should not start a tool loop, got %d requests", len(client.requests))
+		t.Fatalf("unavailable text tool-call markup should not start a tool loop, got %d requests", len(client.requests))
 	}
 }
 
@@ -1203,59 +1564,6 @@ func TestAskRejectsUnavailableStructuredToolCall(t *testing.T) {
 	}
 }
 
-func TestParseTextToolCallsParsesOpenRouterFallbackMarkup(t *testing.T) {
-	content := `<tool_call>panda_manage_composed_tool
-<arg_key>action</arg_key>
-<arg_value>draft</arg_value>
-<arg_key>request</arg_key>
-<arg_value>Every time a new user enters the discord server, mention them in a welcome message in channel 1517943356074889276 with a funny greeting</arg_value>
-</tool_call>`
-
-	calls, ok := parseTextToolCalls(content, []llm.Tool{{
-		Type: "function",
-		Function: llm.ToolFunction{
-			Name: "panda_manage_composed_tool",
-		},
-	}})
-	if !ok {
-		t.Fatalf("expected fallback markup to parse")
-	}
-	if len(calls) != 1 {
-		t.Fatalf("expected one tool call, got %d", len(calls))
-	}
-	if calls[0].ID != "text_tool_call_1" || calls[0].Type != "function" || calls[0].Function.Name != "panda_manage_composed_tool" {
-		t.Fatalf("unexpected parsed call: %+v", calls[0])
-	}
-	var args map[string]string
-	if err := json.Unmarshal([]byte(calls[0].Function.Arguments), &args); err != nil {
-		t.Fatalf("parse arguments JSON: %v", err)
-	}
-	if args["action"] != "draft" {
-		t.Fatalf("unexpected action arg: %+v", args)
-	}
-	if !strings.Contains(args["request"], "welcome message in channel 1517943356074889276") {
-		t.Fatalf("unexpected request arg: %+v", args)
-	}
-}
-
-func TestParseTextToolCallsRejectsUnavailableOrMixedContent(t *testing.T) {
-	availableTools := []llm.Tool{{
-		Type: "function",
-		Function: llm.ToolFunction{
-			Name: "panda_list_tools",
-		},
-	}}
-	if _, ok := parseTextToolCalls("<tool_call>panda_manage_composed_tool\n</tool_call>", availableTools); ok {
-		t.Fatal("expected unavailable text tool call to be rejected")
-	}
-	if _, ok := parseTextToolCalls("sure\n<tool_call>panda_list_tools\n</tool_call>", availableTools); ok {
-		t.Fatal("expected mixed prose and text tool call to be rejected")
-	}
-	if _, ok := parseTextToolCalls("<tool_call>panda_list_tools\n</tool_call>\nDone.", availableTools); ok {
-		t.Fatal("expected trailing prose after text tool call to be rejected")
-	}
-}
-
 func TestAskReturnsToolPayloadRejection(t *testing.T) {
 	ctx := context.Background()
 	client := &fakeClient{
@@ -1271,6 +1579,9 @@ func TestAskReturnsToolPayloadRejection(t *testing.T) {
 
 	if _, err := configs.EnsureDefault(ctx, "guild-1"); err != nil {
 		t.Fatalf("EnsureDefault: %v", err)
+	}
+	if _, err := configs.UpdateBehaviorSettings(ctx, "guild-1", map[string]any{"tool_policy": tools.ToolPolicyAssistive}); err != nil {
+		t.Fatalf("UpdateBehaviorSettings: %v", err)
 	}
 
 	_, err = service.Ask(ctx, AskRequest{
@@ -1288,14 +1599,17 @@ func TestAskReturnsToolPayloadRejection(t *testing.T) {
 	if len(client.requests) != 1 {
 		t.Fatalf("expected one tool-bearing request and no no-tool retry, got %d", len(client.requests))
 	}
-	if !toolNamePresent(client.requests[0].Tools, "panda_list_tools") {
-		t.Fatalf("expected first request to include tools, got %+v", client.requests[0].Tools)
+	if !toolNamePresent(client.requests[0].Tools, "generate_workflow_json") {
+		t.Fatalf("expected first request to include workflow tool, got %+v", client.requests[0].Tools)
+	}
+	if toolNamePresent(client.requests[0].Tools, "panda_list_tools") {
+		t.Fatalf("list-tools meta tool should not be exposed to response model: %+v", client.requests[0].Tools)
 	}
 }
 
 func TestToolAccessOwnerOpsPermissionOverridesConfiguredPolicy(t *testing.T) {
 	access := toolAccess(
-		store.GuildConfig{ToolPolicy: tools.ToolPolicyOff, MemoryEnabled: true},
+		store.GuildConfig{ToolPolicy: tools.ToolPolicyReadOnly, MemoryEnabled: true},
 		map[string]struct{}{
 			admin.PermissionAssistantUse: {},
 			admin.PermissionOwnerOps:     {},
@@ -1324,7 +1638,7 @@ func TestAskFallsBackToConfiguredModelOnTransientFailure(t *testing.T) {
 			"provider/fallback": {Model: "provider/fallback", Content: "fallback answer"},
 		},
 	}
-	service, db := newTestServiceWithModelConfig(t, client, "provider/primary", "", []string{"provider/fallback"})
+	service, db := newTestServiceWithModelConfig(t, client, "provider/primary", []string{"provider/fallback"})
 	configs := repository.NewGuildConfigRepository(db.DB)
 	if _, err := configs.EnsureDefault(ctx, "guild-1"); err != nil {
 		t.Fatalf("EnsureDefault: %v", err)
@@ -1352,7 +1666,7 @@ func TestAskDoesNotFallbackOnNonRetryableFailure(t *testing.T) {
 			"provider/fallback": {Content: "should not be used"},
 		},
 	}
-	service, db := newTestServiceWithModelConfig(t, client, "provider/primary", "", []string{"provider/fallback"})
+	service, db := newTestServiceWithModelConfig(t, client, "provider/primary", []string{"provider/fallback"})
 	configs := repository.NewGuildConfigRepository(db.DB)
 	if _, err := configs.EnsureDefault(ctx, "guild-1"); err != nil {
 		t.Fatalf("EnsureDefault: %v", err)
@@ -1444,7 +1758,7 @@ func TestChatWithFallbackRedactsMessageContentAndToolCallArguments(t *testing.T)
 	ctx := context.Background()
 	secret := "sk-abcdefghijklmnopqrstuvwxyz123456"
 	client := &fakeClient{response: llm.ChatResponse{Model: "fixture/model", Content: "ok"}}
-	service := NewService(client, nil, nil, nil, nil, "fixture/model", "", nil)
+	service := NewService(client, nil, nil, nil, nil, "fixture/model", nil)
 
 	_, err := service.chatWithFallback(ctx, store.GuildConfig{}, modelTaskResponse, llm.ChatRequest{
 		Messages: []llm.Message{
@@ -1559,6 +1873,54 @@ func TestAppendWebSearchSourceLinksHonorsExplicitSourceCount(t *testing.T) {
 	}
 }
 
+func TestFinalAssistantResponseSuppressesStandaloneCardEcho(t *testing.T) {
+	card := &ToolCard{
+		Title:      "Connected to voice",
+		Content:    "Joined <#100000000000000222> and started **mgk, Wiz Khalifa - fill my pockets (Official Audio)**.",
+		Accent:     "music",
+		Standalone: true,
+	}
+
+	content := finalAssistantResponseContent(
+		"Joined <#100000000000000222> and started **mgk, Wiz Khalifa - fill my pockets (Official Audio)**.",
+		nil,
+		defaultAppendedWebSourceLinks,
+		card,
+		"panda join bot-test vc and play fill my pockets by mgk",
+	)
+
+	if content != "" {
+		t.Fatalf("standalone card echo should be suppressed, got %q", content)
+	}
+	if !card.Standalone {
+		t.Fatalf("card should remain standalone: %+v", card)
+	}
+}
+
+func TestFinalAssistantResponseKeepsStandaloneCardRemainingAnswer(t *testing.T) {
+	card := &ToolCard{
+		Title:      "Connected to voice",
+		Content:    "Joined <#100000000000000222> and started **mgk, Wiz Khalifa - fill my pockets (Official Audio)**.",
+		Accent:     "music",
+		Standalone: true,
+	}
+
+	content := finalAssistantResponseContent(
+		"SpaceX is privately held, so there is no public SpaceX stock ticker or live public stock price.",
+		nil,
+		defaultAppendedWebSourceLinks,
+		card,
+		"panda join bot-test vc and play fill my pockets by mgk, also find latest spacex stock price",
+	)
+
+	if !strings.Contains(content, "SpaceX is privately held") {
+		t.Fatalf("remaining non-card answer should be preserved, got %q", content)
+	}
+	if !card.Standalone {
+		t.Fatalf("card should remain standalone: %+v", card)
+	}
+}
+
 func TestTitleFromQuestionTruncatesUTF8Safely(t *testing.T) {
 	title := titleFromQuestion("x" + strings.Repeat("界", 30))
 	if !strings.HasSuffix(title, "...") {
@@ -1584,4 +1946,18 @@ func toolNamePresent(toolList []llm.Tool, name string) bool {
 		}
 	}
 	return false
+}
+
+func testCapabilityTools(names ...string) []llm.Tool {
+	result := make([]llm.Tool, 0, len(names))
+	for _, name := range names {
+		result = append(result, llm.Tool{
+			Type: "function",
+			Function: llm.ToolFunction{
+				Name:       name,
+				Parameters: []byte(`{"type":"object"}`),
+			},
+		})
+	}
+	return result
 }

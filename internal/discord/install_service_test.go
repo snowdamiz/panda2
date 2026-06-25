@@ -11,6 +11,9 @@ import (
 	"testing"
 	"time"
 
+	disgoDiscord "github.com/disgoorg/disgo/discord"
+	"github.com/disgoorg/snowflake/v2"
+	"github.com/sn0w/panda2/internal/billing"
 	featurecatalog "github.com/sn0w/panda2/internal/features"
 	"github.com/sn0w/panda2/internal/repository"
 	"github.com/sn0w/panda2/internal/store"
@@ -109,6 +112,53 @@ func TestInstallServiceAcceptsNonOwnerInstallerAsPandaOwner(t *testing.T) {
 		t.Fatalf("unexpected accepted guild: %+v", guild)
 	}
 	assertAuditAction(t, db, "discord.install.authorized")
+}
+
+func TestInstallServiceRecordsGatewayGuildAndStartsTrial(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(ctx, "file::memory:?cache=shared")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer db.Close()
+
+	guilds := repository.NewGuildRepository(db.DB)
+	billingService := billing.NewService(repository.NewBillingRepository(db.DB), billing.Config{})
+	service := NewInstallService(guilds, repository.NewAuditRepository(db.DB)).
+		WithBilling(billingService)
+	joinedAt := time.Date(2026, 6, 24, 19, 0, 0, 0, time.UTC)
+	guildID := snowflake.MustParse("1489749058179432480")
+	ownerID := snowflake.MustParse("100000000000000001")
+
+	if err := service.RecordGatewayGuild(ctx, disgoDiscord.GatewayGuild{
+		RestGuild: disgoDiscord.RestGuild{
+			Guild: disgoDiscord.Guild{
+				ID:              guildID,
+				Name:            "Gateway Guild",
+				OwnerID:         ownerID,
+				PreferredLocale: "en-US",
+				JoinedAt:        joinedAt,
+			},
+		},
+	}); err != nil {
+		t.Fatalf("RecordGatewayGuild: %v", err)
+	}
+
+	guild, ok, err := guilds.Get(ctx, guildID.String())
+	if err != nil || !ok {
+		t.Fatalf("Get guild: ok=%t err=%v", ok, err)
+	}
+	if guild.InstallStatus != repository.GuildInstallStatusActive || guild.OwnerUserID != ownerID.String() || guild.InstalledByUserID != ownerID.String() {
+		t.Fatalf("unexpected observed guild: %+v", guild)
+	}
+
+	entitlement, err := billingService.Resolve(ctx, guildID.String())
+	if err != nil {
+		t.Fatalf("Resolve gateway trial: %v", err)
+	}
+	if entitlement.Plan.Plan != billing.PlanTrial || entitlement.Status != billing.StatusTrialing || !entitlement.CanUsePaidFeatures {
+		t.Fatalf("unexpected gateway trial entitlement: %+v", entitlement)
+	}
 }
 
 func TestInstallServiceDoesNotRestrictChannelsByDefault(t *testing.T) {

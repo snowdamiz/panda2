@@ -12,6 +12,7 @@ import (
 	"github.com/sn0w/panda2/internal/admin"
 	"github.com/sn0w/panda2/internal/billing"
 	contextsvc "github.com/sn0w/panda2/internal/context"
+	"github.com/sn0w/panda2/internal/features"
 	"github.com/sn0w/panda2/internal/llm"
 	"github.com/sn0w/panda2/internal/memory"
 	"github.com/sn0w/panda2/internal/repository"
@@ -37,6 +38,7 @@ func TestDefaultRegistryDefinitionsAreValid(t *testing.T) {
 		"discord.timeout_member":       true,
 		"discord.get_audit_logs":       true,
 		"panda.manage_role_permission": true,
+		"panda.manage_user_permission": true,
 		"panda.manage_member_role":     true,
 		"panda.manage_discord_role":    true,
 		"panda.manage_tool_access":     true,
@@ -86,10 +88,54 @@ func TestAdminSetupToolSchemasExposeNaturalLanguageFields(t *testing.T) {
 	}
 
 	assertToolSchemaContains("panda.manage_role_permission", "profile", "role_name", "role")
+	assertToolSchemaContains("panda.manage_user_permission", "profile", "user_id", "member_user_id")
 	assertToolSchemaContains("panda.manage_channel_rule", "channel_name", "channel")
 	assertToolSchemaContains("panda.manage_tool_access", "tool_name", "role_name", "role")
 	assertToolSchemaContains("panda.manage_prompt", "prompt", "instructions")
 	assertToolSchemaContains("panda.manage_soul", "soul")
+	assertToolSchemaContains("panda.manage_music", "voice_channel_id", "voice_channel_name", "voice_channel", "vc")
+	assertToolSchemaContains("panda.manage_composed_tool", "voice_channel_id", "voice_channel_name", "voice_channel")
+}
+
+func TestChannelAwareToolDescriptionsPreferDiscordChannelLookup(t *testing.T) {
+	registry, err := NewDefaultRegistry()
+	if err != nil {
+		t.Fatalf("NewDefaultRegistry: %v", err)
+	}
+	for _, toolName := range []string{"discord.list_channels", "panda.manage_music", "panda.manage_composed_tool"} {
+		definition, ok := registry.Get(toolName)
+		if !ok {
+			t.Fatalf("tool %s not registered", toolName)
+		}
+		if !strings.Contains(definition.Description, "discord.list_channels") {
+			t.Fatalf("tool %s description should point the model at channel lookup: %q", toolName, definition.Description)
+		}
+	}
+	for _, toolName := range []string{"panda.manage_music", "panda.manage_composed_tool"} {
+		definition, ok := registry.Get(toolName)
+		if !ok {
+			t.Fatalf("tool %s not registered", toolName)
+		}
+		schema := string(definition.InputSchema)
+		if !strings.Contains(schema, "Prefer resolving plain") || !strings.Contains(schema, "voice/stage") {
+			t.Fatalf("tool %s schema missing named VC lookup guidance: %s", toolName, schema)
+		}
+	}
+	composed, ok := registry.Get("panda.manage_composed_tool")
+	if !ok {
+		t.Fatal("panda.manage_composed_tool not registered")
+	}
+	composedSchema := string(composed.InputSchema)
+	if !strings.Contains(composed.Description, "delete, remove") || !strings.Contains(composedSchema, "delete, remove") {
+		t.Fatalf("composed tool should tell the model to delete removals, description=%q schema=%s", composed.Description, composedSchema)
+	}
+	music, ok := registry.Get("panda.manage_music")
+	if !ok {
+		t.Fatal("panda.manage_music not registered")
+	}
+	if !strings.Contains(string(music.InputSchema), "suggestions") {
+		t.Fatalf("music schema should explain ok=false suggestions, got %s", string(music.InputSchema))
+	}
 }
 
 func assertSchemaRequiredIsArray(t *testing.T, toolName, schemaName string, schema json.RawMessage) {
@@ -140,7 +186,7 @@ func TestOpenRouterToolsFiltersByPermission(t *testing.T) {
 		Permissions: map[string]struct{}{admin.PermissionAssistantUse: {}},
 	})
 	names := toolNames(tools)
-	if !names["discord_fetch_message"] || !names["panda_list_tools"] || names["generate_workflow_json"] {
+	if !names["discord_fetch_message"] || names["panda_list_tools"] || names["generate_workflow_json"] {
 		t.Fatalf("unexpected read-only tools: %+v", names)
 	}
 	writeTools := registry.OpenRouterToolsForAccess(ToolAccess{
@@ -177,21 +223,28 @@ func TestOpenRouterToolsFiltersByPermission(t *testing.T) {
 	}
 }
 
-func TestOpenRouterToolsKeepsMetadataAvailableWhenPolicyOff(t *testing.T) {
+func TestOpenRouterToolsNormalizesLegacyOffPolicyToAdminOnly(t *testing.T) {
 	registry, err := NewDefaultRegistry()
 	if err != nil {
 		t.Fatalf("NewDefaultRegistry: %v", err)
 	}
 	tools := registry.OpenRouterToolsForAccess(ToolAccess{
-		Policy:      ToolPolicyOff,
-		Permissions: map[string]struct{}{admin.PermissionAssistantUse: {}},
+		Policy: "off",
+		Permissions: map[string]struct{}{
+			admin.PermissionAssistantUse:       {},
+			admin.PermissionAdminConfigRead:    {},
+			admin.PermissionAdminConfigWrite:   {},
+			admin.PermissionAssistantWebSearch: {},
+		},
 	})
 	names := toolNames(tools)
-	if !names["panda_list_tools"] {
-		t.Fatalf("expected metadata list tool under off policy, got %+v", names)
+	if names["panda_list_tools"] {
+		t.Fatalf("metadata inventory should not be exposed to the response model, got %+v", names)
 	}
-	if names["discord_fetch_message"] || names["generate_workflow_json"] {
-		t.Fatalf("off policy should still hide action tools, got %+v", names)
+	for _, want := range []string{"read_config", "panda_manage_tool_access", "web_search"} {
+		if !names[want] {
+			t.Fatalf("legacy off policy should normalize to admin_only and expose %s to admins, got %+v", want, names)
+		}
 	}
 }
 
@@ -209,8 +262,8 @@ func TestOpenRouterToolsAdminOnlyGatesRegularUsers(t *testing.T) {
 		},
 	})
 	regularNames := toolNames(regularTools)
-	if !regularNames["panda_list_tools"] || !regularNames["web_search"] || regularNames["discord_fetch_message"] {
-		t.Fatalf("admin_only should expose metadata and web search to regular users, got %+v", regularNames)
+	if !regularNames["web_search"] || regularNames["panda_list_tools"] || regularNames["discord_fetch_message"] {
+		t.Fatalf("admin_only should expose web search but hide metadata inventory and broader tools from regular users, got %+v", regularNames)
 	}
 
 	adminTools := registry.OpenRouterToolsForAccess(ToolAccess{
@@ -228,6 +281,28 @@ func TestOpenRouterToolsAdminOnlyGatesRegularUsers(t *testing.T) {
 	}
 }
 
+func TestOpenRouterToolsTreatWebSearchAsDefaultFeature(t *testing.T) {
+	registry, err := NewDefaultRegistry()
+	if err != nil {
+		t.Fatalf("NewDefaultRegistry: %v", err)
+	}
+
+	available := registry.OpenRouterToolsForAccess(ToolAccess{
+		Policy: ToolPolicyAdminOnly,
+		Permissions: map[string]struct{}{
+			admin.PermissionAssistantUse:       {},
+			admin.PermissionAssistantWebSearch: {},
+		},
+		EnabledFeatures: map[string]struct{}{
+			features.AssistantChat: {},
+		},
+		FeatureGateActive: true,
+	})
+	if !toolNames(available)["web_search"] {
+		t.Fatalf("web search should remain available when feature gate omits web_search: %+v", toolNames(available))
+	}
+}
+
 func TestOpenRouterToolsHonorsIncludeInModelContext(t *testing.T) {
 	registry, err := NewDefaultRegistry()
 	if err != nil {
@@ -242,29 +317,28 @@ func TestOpenRouterToolsHonorsIncludeInModelContext(t *testing.T) {
 	}
 }
 
-func TestOpenRouterToolsKeepsBotAdminManagementAvailableWhenPolicyOff(t *testing.T) {
+func TestOpenRouterToolsLegacyOffPolicyDoesNotSuppressAdminTools(t *testing.T) {
 	registry, err := NewDefaultRegistry()
 	if err != nil {
 		t.Fatalf("NewDefaultRegistry: %v", err)
 	}
 	tools := registry.OpenRouterToolsForAccess(ToolAccess{
-		Policy: ToolPolicyOff,
+		Policy: "off",
 		Permissions: map[string]struct{}{
 			admin.PermissionAssistantUse:     {},
+			admin.PermissionAdminAuditRead:   {},
 			admin.PermissionAdminConfigRead:  {},
 			admin.PermissionAdminConfigWrite: {},
 			admin.PermissionAdminUsageRead:   {},
 		},
 	})
 	names := toolNames(tools)
-	for _, want := range []string{"panda_list_tools"} {
-		if !names[want] {
-			t.Fatalf("expected %s under off policy, got %+v", want, names)
-		}
+	if names["panda_list_tools"] {
+		t.Fatalf("metadata inventory should not be exposed under legacy off/admin_only policy, got %+v", names)
 	}
-	for _, hidden := range []string{"read_config", "panda_manage_tool_access", "panda_manage_channel_rule", "panda_usage_report", "generate_workflow_json", "discord_modify_channel_permissions", "discord_send_message"} {
-		if names[hidden] {
-			t.Fatalf("expected %s to stay hidden under off policy, got %+v", hidden, names)
+	for _, want := range []string{"read_config", "panda_manage_tool_access", "panda_manage_channel_rule", "panda_usage_report", "generate_workflow_json", "discord_modify_channel_permissions", "discord_send_message"} {
+		if !names[want] {
+			t.Fatalf("legacy off policy should normalize to admin_only and expose %s to admins, got %+v", want, names)
 		}
 	}
 }
@@ -333,6 +407,7 @@ func TestRestoredAdminToolsAreKnown(t *testing.T) {
 		"discord_add_reaction",
 		"discord_send_message",
 		"panda_manage_role_permission",
+		"panda_manage_user_permission",
 		"panda_manage_member_role",
 		"panda_manage_discord_role",
 		"panda_manage_tool_access",
@@ -620,7 +695,7 @@ func TestExecutorRunsComposedToolManager(t *testing.T) {
 			Type: "function",
 			Function: llm.ToolCallFunction{
 				Name:      "panda_manage_composed_tool",
-				Arguments: `{"action":"draft","request":"Create a member-join automation","dry_run":true}`,
+				Arguments: `{"action":"draft","request":"Create a member-join automation","voice_channel_name":"bot-test","dry_run":true}`,
 			},
 		},
 	})
@@ -631,11 +706,39 @@ func TestExecutorRunsComposedToolManager(t *testing.T) {
 		t.Fatalf("expected composed manager request, got %d", len(manager.requests))
 	}
 	request := manager.requests[0]
-	if request.Action != "draft" || request.Text != "Create a member-join automation" || !request.DryRun {
+	if request.Action != "draft" || request.Text != "Create a member-join automation" || request.VoiceChannelName != "bot-test" || !request.DryRun {
 		t.Fatalf("unexpected composed manager request: %+v", request)
 	}
 	if !strings.Contains(result.Message.Content, `"action":"draft"`) || !strings.Contains(result.Message.Content, `"dry_run":true`) {
 		t.Fatalf("unexpected composed manager result: %+v", result)
+	}
+}
+
+func TestExecutorDeletesComposedToolForRemoveAlias(t *testing.T) {
+	registry, err := NewDefaultRegistry()
+	if err != nil {
+		t.Fatalf("NewDefaultRegistry: %v", err)
+	}
+	manager := &fakeComposedManager{}
+	executor := NewExecutor(registry, nil, nil).WithComposedToolManager(manager)
+	_, err = executor.Execute(context.Background(), ExecutionRequest{
+		GuildID: "guild-1",
+		ActorID: "admin",
+		Access:  testAccess(ToolPolicyWriteConfirmed, admin.PermissionToolComposeApprove),
+		Call: llm.ToolCall{
+			ID:   "call-composed-manager",
+			Type: "function",
+			Function: llm.ToolCallFunction{
+				Name:      "panda_manage_composed_tool",
+				Arguments: `{"action":"remove","tool_name":"play_song_on_voice_join"}`,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if len(manager.requests) != 1 || manager.requests[0].Action != "delete" || manager.requests[0].ToolName != "play_song_on_voice_join" {
+		t.Fatalf("expected remove alias to delete composed tool, got %+v", manager.requests)
 	}
 }
 
@@ -788,6 +891,84 @@ func TestExecutorRunsMusicManager(t *testing.T) {
 	}
 	if !strings.Contains(result.Message.Content, `"action":"play"`) || !strings.Contains(result.Message.Content, `"query":"lofi rain"`) {
 		t.Fatalf("unexpected music manager result: %+v", result)
+	}
+}
+
+func TestExecutorRunsMusicManagerWithExplicitVoiceChannelID(t *testing.T) {
+	registry, err := NewDefaultRegistry()
+	if err != nil {
+		t.Fatalf("NewDefaultRegistry: %v", err)
+	}
+	manager := &fakeMusicManager{}
+	executor := NewExecutor(registry, nil, nil).WithMusicManager(manager)
+
+	_, err = executor.Execute(context.Background(), ExecutionRequest{
+		GuildID:        "guild-1",
+		ChannelID:      "text-1",
+		VoiceChannelID: "",
+		ActorID:        "user-1",
+		Access:         testAccess(ToolPolicyAssistive, admin.PermissionAssistantUse),
+		Call: llm.ToolCall{
+			ID:   "call-music-manager",
+			Type: "function",
+			Function: llm.ToolCallFunction{
+				Name:      "panda_manage_music",
+				Arguments: `{"action":"play","query":"ocean drive","voice_channel_id":"<#100000000000000222>"}`,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if len(manager.requests) != 1 {
+		t.Fatalf("expected music manager request, got %d", len(manager.requests))
+	}
+	if manager.requests[0].VoiceChannelID != "100000000000000222" {
+		t.Fatalf("expected explicit voice channel target, got %+v", manager.requests[0])
+	}
+}
+
+func TestExecutorRunsMusicManagerWithExplicitVoiceChannelName(t *testing.T) {
+	registry, err := NewDefaultRegistry()
+	if err != nil {
+		t.Fatalf("NewDefaultRegistry: %v", err)
+	}
+	manager := &fakeMusicManager{}
+	provider := &fakeDiscordProvider{result: map[string]any{"channels": []map[string]any{
+		{"id": "100000000000000111", "name": "Lounge", "type": "0"},
+		{"id": "100000000000000222", "name": "Lounge", "type": "2"},
+		{"id": "100000000000000333", "name": "Stage", "type": "13"},
+	}}}
+	executor := NewExecutor(registry, nil, nil).
+		WithDiscordToolProvider(provider).
+		WithMusicManager(manager)
+
+	_, err = executor.Execute(context.Background(), ExecutionRequest{
+		GuildID:        "guild-1",
+		ChannelID:      "text-1",
+		VoiceChannelID: "100000000000000999",
+		ActorID:        "user-1",
+		Access:         testAccess(ToolPolicyAssistive, admin.PermissionAssistantUse),
+		Call: llm.ToolCall{
+			ID:   "call-music-manager",
+			Type: "function",
+			Function: llm.ToolCallFunction{
+				Name:      "panda_manage_music",
+				Arguments: `{"action":"play","query":"ocean drive","voice_channel_name":"lounge"}`,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if len(manager.requests) != 1 {
+		t.Fatalf("expected music manager request, got %d", len(manager.requests))
+	}
+	if manager.requests[0].VoiceChannelID != "100000000000000222" {
+		t.Fatalf("expected resolved voice channel target, got %+v", manager.requests[0])
+	}
+	if len(provider.requests) != 1 || provider.requests[0].ToolName != "discord.list_channels" {
+		t.Fatalf("expected Discord channel lookup, got %+v", provider.requests)
 	}
 }
 
@@ -1440,6 +1621,26 @@ func TestExecutorRoleProfileAndMemberRoleToolsRequireConfirmation(t *testing.T) 
 		t.Fatalf("expected role profile confirmation, got %+v", profile)
 	}
 
+	userProfile, err := executor.Execute(context.Background(), ExecutionRequest{
+		GuildID: "guild-1",
+		ActorID: "admin",
+		Access:  testAccess(ToolPolicyWriteConfirmed, admin.PermissionAdminConfigWrite),
+		Call: llm.ToolCall{
+			ID:   "call-user-profile",
+			Type: "function",
+			Function: llm.ToolCallFunction{
+				Name:      "panda_manage_user_permission",
+				Arguments: `{"action":"add","profile":"admin","user":"<@!100000000000000888>"}`,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Execute user profile: %v", err)
+	}
+	if userProfile.Confirmation == nil || userProfile.Confirmation.Action != "user_profile.add" || userProfile.Confirmation.Arguments["profile"] != "admin" || userProfile.Confirmation.Arguments["user_id"] != "100000000000000888" {
+		t.Fatalf("expected user profile confirmation, got %+v", userProfile.Confirmation)
+	}
+
 	toolAccess, err := executor.Execute(context.Background(), ExecutionRequest{
 		GuildID: "guild-1",
 		ActorID: "admin",
@@ -1600,6 +1801,12 @@ func TestExecutorAdminMutationToolsRequireConfirmation(t *testing.T) {
 			expectedAction: "role_permission.add",
 		},
 		{
+			name:           "user permission add",
+			tool:           "panda_manage_user_permission",
+			arguments:      `{"action":"add","user_id":"100000000000000002","permission":"admin.badge"}`,
+			expectedAction: "user_permission.add",
+		},
+		{
 			name:           "channel rule allow",
 			tool:           "panda_manage_channel_rule",
 			arguments:      `{"action":"allow","channel_id":"100000000000000123"}`,
@@ -1757,12 +1964,12 @@ func TestExecutorListToolsHidesAdminToolsFromNormalUsers(t *testing.T) {
 		t.Fatalf("Execute: %v", err)
 	}
 	content := result.Message.Content
-	for _, want := range []string{`"presentation":"capabilities"`, `"name":"answer_from_visible_discord_context"`, `"name":"current_capabilities"`} {
+	for _, want := range []string{`"presentation":"capabilities"`, `"name":"answer_from_visible_discord_context"`, `"label":"Look up server context"`} {
 		if !strings.Contains(content, want) {
 			t.Fatalf("expected normal user tool listing to contain %s, got %s", want, content)
 		}
 	}
-	for _, hidden := range []string{"discord_fetch_message", "native_name", "input_schema", "read_config", "panda_manage_tool_access", "discord_modify_channel_permissions", "admin.config.write", "admin_read", "admin_write"} {
+	for _, hidden := range []string{"current_capabilities", "discord_fetch_message", "native_name", "input_schema", "read_config", "panda_manage_tool_access", "discord_modify_channel_permissions", "admin.config.write", "admin_read", "admin_write"} {
 		if strings.Contains(content, hidden) {
 			t.Fatalf("normal user tool listing leaked admin detail %q: %s", hidden, content)
 		}
@@ -1854,6 +2061,25 @@ func TestExecutorFiltersExecutableToolsByPermission(t *testing.T) {
 	}
 	if !names["web_search"] || !names["discord_fetch_message"] || !names["generate_workflow_json"] {
 		t.Fatalf("expected configured web search tool, got %+v", names)
+	}
+
+	assistantTools = executor.OpenRouterTools(ToolAccess{
+		Policy: ToolPolicyAssistive,
+		Permissions: map[string]struct{}{
+			admin.PermissionAssistantUse:       {},
+			admin.PermissionAssistantWebSearch: {},
+		},
+		EnabledFeatures: map[string]struct{}{
+			features.AssistantChat: {},
+		},
+		FeatureGateActive: true,
+	})
+	names = map[string]bool{}
+	for _, tool := range assistantTools {
+		names[tool.Function.Name] = true
+	}
+	if !names["web_search"] {
+		t.Fatalf("expected configured web search tool even when feature gate omits web_search, got %+v", names)
 	}
 }
 

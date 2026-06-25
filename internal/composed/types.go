@@ -48,6 +48,7 @@ const (
 	EventGuildMemberJoined      = "guild.member.joined"
 	EventGuildMemberRoleAdded   = "guild.member.role_added"
 	EventGuildMemberRoleRemoved = "guild.member.role_removed"
+	EventVoiceStateUpdated      = "voice_state_update"
 
 	EventMessageUpdated        = "message_update"
 	EventMessageDeleted        = "message_delete"
@@ -88,6 +89,7 @@ var supportedEventTypes = map[string]struct{}{
 	EventGuildMemberJoined:      {},
 	EventGuildMemberRoleAdded:   {},
 	EventGuildMemberRoleRemoved: {},
+	EventVoiceStateUpdated:      {},
 	EventMessageUpdated:         {},
 	EventMessageDeleted:         {},
 	EventReactionAdded:          {},
@@ -248,16 +250,18 @@ type TranscriptEntry struct {
 }
 
 type DraftRequest struct {
-	GuildID         string
-	ActorID         string
-	Text            string
-	SpecJSON        string
-	RoleID          string
-	RoleName        string
-	ChannelID       string
-	ChannelName     string
-	SourceChannelID string
-	WelcomeText     string
+	GuildID          string
+	ActorID          string
+	Text             string
+	SpecJSON         string
+	RoleID           string
+	RoleName         string
+	ChannelID        string
+	ChannelName      string
+	VoiceChannelID   string
+	VoiceChannelName string
+	SourceChannelID  string
+	WelcomeText      string
 }
 
 type DraftResult struct {

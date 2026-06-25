@@ -71,6 +71,9 @@ func TestConfigureBehaviorRejectsInvalidRuntimeSettings(t *testing.T) {
 	if _, err := service.ConfigureBehavior(ctx, "guild-1", "admin", BehaviorSettings{ToolPolicy: "execute_anything", ToolPolicySet: true}); err == nil {
 		t.Fatal("expected invalid tool policy to be rejected")
 	}
+	if _, err := service.ConfigureBehavior(ctx, "guild-1", "admin", BehaviorSettings{ToolPolicy: "off", ToolPolicySet: true}); err == nil {
+		t.Fatal("expected legacy off tool policy to be rejected")
+	}
 }
 
 func TestSetSoulPersistsAndSoulWritersAreDelegated(t *testing.T) {
@@ -199,6 +202,60 @@ func TestAdminRoleHasGuildControl(t *testing.T) {
 	allowed, err = service.CanWriteConfig(ctx, AssistantAccessRequest{GuildID: "guild-1", RoleIDs: []string{"role-admin"}})
 	if err != nil || !allowed {
 		t.Fatalf("expected new admin role to grant control, allowed=%t err=%v", allowed, err)
+	}
+}
+
+func TestAdminUserHasGuildControl(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(ctx, "file::memory:?cache=shared")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer db.Close()
+
+	service := NewService(
+		repository.NewGuildConfigRepository(db.DB),
+		repository.NewUsageRepository(db.DB),
+		repository.NewAuditRepository(db.DB),
+		memory.NewService(repository.NewKnowledgeRepository(db.DB)),
+		repository.NewAccessRepository(db.DB),
+		repository.NewBudgetRepository(db.DB),
+		nil,
+	)
+	if _, err := service.ApplyUserProfile(ctx, "guild-1", "owner", "user-admin", "admin"); err != nil {
+		t.Fatalf("ApplyUserProfile admin: %v", err)
+	}
+	if _, err := service.ApplyUserProfile(ctx, "guild-1", "owner", "user-other-admin", "admin"); err != nil {
+		t.Fatalf("ApplyUserProfile second admin: %v", err)
+	}
+
+	request := AssistantAccessRequest{GuildID: "guild-1", UserID: "user-admin"}
+	for name, check := range map[string]func(context.Context, AssistantAccessRequest) (bool, error){
+		"config write":   service.CanWriteConfig,
+		"moderation use": service.CanUseModeration,
+		"assistant use":  service.CanUseAssistant,
+	} {
+		allowed, err := check(ctx, request)
+		if err != nil || !allowed {
+			t.Fatalf("expected admin user to allow %s, allowed=%t err=%v", name, allowed, err)
+		}
+	}
+
+	allowed, err := service.CanWriteConfig(ctx, AssistantAccessRequest{GuildID: "guild-1", UserID: "user-regular"})
+	if err != nil || allowed {
+		t.Fatalf("expected regular user denial, allowed=%t err=%v", allowed, err)
+	}
+
+	if err := service.RemoveUserProfile(ctx, "guild-1", "owner", "user-admin", "admin"); err != nil {
+		t.Fatalf("RemoveUserProfile admin: %v", err)
+	}
+	allowed, err = service.CanWriteConfig(ctx, AssistantAccessRequest{GuildID: "guild-1", UserID: "user-admin"})
+	if err != nil || allowed {
+		t.Fatalf("expected removed admin user to lose control, allowed=%t err=%v", allowed, err)
+	}
+	allowed, err = service.CanWriteConfig(ctx, AssistantAccessRequest{GuildID: "guild-1", UserID: "user-other-admin"})
+	if err != nil || !allowed {
+		t.Fatalf("expected second admin user to retain control, allowed=%t err=%v", allowed, err)
 	}
 }
 

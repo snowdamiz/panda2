@@ -13,8 +13,13 @@ import (
 )
 
 const (
+	voiceConnectAttempts = 2
+)
+
+var (
 	voiceConnectTimeout = 30 * time.Second
-	daveReadyTimeout    = 30 * time.Second
+	daveReadyTimeout    = 45 * time.Second
+	voiceReconnectDelay = 750 * time.Millisecond
 )
 
 type musicVoiceConnector struct {
@@ -45,28 +50,48 @@ func (c *musicVoiceConnector) Connect(ctx context.Context, guildIDValue string, 
 
 	if existing := c.client.VoiceManager.GetConn(guildID); existing != nil {
 		if existingChannelID := existing.ChannelID(); existingChannelID != nil && *existingChannelID == channelID {
-			if err := c.waitForDave(ctx, channelID); err != nil {
+			if err := c.waitForDave(ctx, channelID); err == nil {
+				return &discordVoiceSession{conn: existing}, nil
+			} else if ctx.Err() != nil {
 				return nil, err
+			} else {
+				c.logger.Warn("existing voice connection is not media-ready; reconnecting",
+					slog.Any("err", err),
+					slog.String("guild_id", guildID.String()),
+					slog.String("voice_channel_id", channelID.String()),
+				)
 			}
-			return &discordVoiceSession{conn: existing}, nil
 		}
-		existing.Close(ctx)
+		closeVoiceConn(existing)
 	}
 
-	conn := c.client.VoiceManager.CreateConn(guildID)
-	c.logger.Info("joining voice channel", slog.String("guild_id", guildID.String()), slog.String("voice_channel_id", channelID.String()))
-	connectCtx, cancel := context.WithTimeout(ctx, voiceConnectTimeout)
-	defer cancel()
-	if err := conn.Open(connectCtx, channelID, false, true); err != nil {
-		conn.Close(ctx)
-		return nil, fmt.Errorf("%w: open voice connection: %v", music.ErrVoiceConnection, err)
+	var lastErr error
+	for attempt := 1; attempt <= voiceConnectAttempts; attempt++ {
+		conn := c.client.VoiceManager.CreateConn(guildID)
+		connectCtx, cancel := context.WithTimeout(ctx, voiceConnectTimeout)
+		err := conn.Open(connectCtx, channelID, false, true)
+		cancel()
+		if err != nil {
+			closeVoiceConn(conn)
+			lastErr = fmt.Errorf("%w: open voice connection: %v", music.ErrVoiceConnection, err)
+			if ctx.Err() != nil || attempt == voiceConnectAttempts {
+				return nil, lastErr
+			}
+			c.waitBeforeReconnect(ctx, guildID, channelID, attempt, lastErr)
+			continue
+		}
+		if err := c.waitForDave(ctx, channelID); err != nil {
+			closeVoiceConn(conn)
+			lastErr = err
+			if ctx.Err() != nil || attempt == voiceConnectAttempts {
+				return nil, lastErr
+			}
+			c.waitBeforeReconnect(ctx, guildID, channelID, attempt, lastErr)
+			continue
+		}
+		return &discordVoiceSession{conn: conn}, nil
 	}
-	c.logger.Info("voice connection opened", slog.String("guild_id", guildID.String()), slog.String("voice_channel_id", channelID.String()))
-	if err := c.waitForDave(ctx, channelID); err != nil {
-		conn.Close(ctx)
-		return nil, err
-	}
-	return &discordVoiceSession{conn: conn}, nil
+	return nil, lastErr
 }
 
 func (c *musicVoiceConnector) waitForDave(ctx context.Context, channelID snowflake.ID) error {
@@ -79,6 +104,34 @@ func (c *musicVoiceConnector) waitForDave(ctx context.Context, channelID snowfla
 		return fmt.Errorf("%w: dave media session not ready: %v", music.ErrVoiceConnection, err)
 	}
 	return nil
+}
+
+func (c *musicVoiceConnector) waitBeforeReconnect(ctx context.Context, guildID snowflake.ID, channelID snowflake.ID, attempt int, err error) {
+	c.logger.Warn("voice connection attempt failed; retrying",
+		slog.Any("err", err),
+		slog.String("guild_id", guildID.String()),
+		slog.String("voice_channel_id", channelID.String()),
+		slog.Int("attempt", attempt),
+		slog.Int("max_attempts", voiceConnectAttempts),
+	)
+	if voiceReconnectDelay <= 0 {
+		return
+	}
+	timer := time.NewTimer(voiceReconnectDelay)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+	case <-ctx.Done():
+	}
+}
+
+func closeVoiceConn(conn voice.Conn) {
+	if conn == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	conn.Close(ctx)
 }
 
 type discordVoiceSession struct {

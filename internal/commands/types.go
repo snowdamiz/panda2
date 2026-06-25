@@ -19,7 +19,6 @@ type Request struct {
 	GuildID        string
 	ChannelID      string
 	VoiceChannelID string
-	PreferredTool  string
 	UserID         string
 	RoleIDs        []string
 	IsGuildAdmin   bool
@@ -33,6 +32,7 @@ type Response struct {
 	ThreadName    string
 	Presentation  Presentation
 	Actions       []Action
+	Followups     []Response
 	Confirmation  *Confirmation
 	Confirmations []Confirmation
 	Modal         *Modal
