@@ -140,9 +140,12 @@ func (f *fakeClient) StreamChat(ctx context.Context, request llm.ChatRequest, on
 }
 
 func TestCleanupAssistantModelArtifactsRemovesBareToolMarkers(t *testing.T) {
-	content := cleanupAssistantModelArtifacts("SpaceX stock is unavailable [web_search]. Try the private-company valuation instead [web.search†2].")
+	content := cleanupAssistantModelArtifacts("<panda_respond>\nSpaceX stock is unavailable [web_search]. Try the private-company valuation instead [web.search†2].")
 	if strings.Contains(content, "web_search") || strings.Contains(content, "web.search") {
 		t.Fatalf("expected web search markers to be removed, got %q", content)
+	}
+	if strings.Contains(content, "<panda_respond>") {
+		t.Fatalf("expected natural gate marker to be removed, got %q", content)
 	}
 	if strings.Contains(content, " ]") || strings.Contains(content, " .") {
 		t.Fatalf("expected punctuation spacing to be cleaned, got %q", content)
@@ -1698,6 +1701,81 @@ func TestCompleteTaskCarriesGeneratedFilesFromToolRounds(t *testing.T) {
 	}
 	if strings.Contains(answer.Content, "image-bytes") {
 		t.Fatalf("assistant content should not contain image bytes: %q", answer.Content)
+	}
+	finalMessages := joinMessages(client.requests[1].Messages)
+	if !strings.Contains(finalMessages, "Generated media files have already been attached") {
+		t.Fatalf("expected generated media follow-up guard in final model request: %s", finalMessages)
+	}
+	if client.requests[1].MaxTokens != 120 {
+		t.Fatalf("generated media final response should use a small token budget, got %d", client.requests[1].MaxTokens)
+	}
+}
+
+func TestCompleteTaskSuppressesGeneratedMediaReasoningLeak(t *testing.T) {
+	ctx := context.Background()
+	client := &fakeClient{responses: []llm.ChatResponse{
+		{
+			Model: "fixture/model",
+			ToolCalls: []llm.ToolCall{{
+				ID:   "call-image",
+				Type: "function",
+				Function: llm.ToolCallFunction{
+					Name:      "panda_generate_image",
+					Arguments: `{"prompt":"random meme","caption":"Random meme","filename_hint":"meme"}`,
+				},
+			}},
+		},
+		{
+			Model:   "fixture/model",
+			Content: `We have a conversation. The user says "panda make a random meme". The assistant already generated an image using panda_generate_image. We need to output a proper response with the image attached. The correct format: <panda_respond> then a short comment and attach the image. Thus produce final answer.`,
+		},
+	}}
+	service, db := newTestService(t, client)
+	configs := repository.NewGuildConfigRepository(db.DB)
+	registry, err := tools.NewDefaultRegistry()
+	if err != nil {
+		t.Fatalf("NewDefaultRegistry: %v", err)
+	}
+	imageGenerator := &fakeAssistantImageGenerator{
+		configured: true,
+		response: llm.ImageGenerationResponse{
+			Images: []llm.GeneratedImage{{
+				Bytes:    []byte("image-bytes"),
+				MIMEType: "image/png",
+			}},
+		},
+	}
+	service.WithToolExecutor(tools.NewExecutor(registry, nil, configs).WithImageGenerator(imageGenerator))
+	if _, err := configs.EnsureDefault(ctx, "guild-1"); err != nil {
+		t.Fatalf("EnsureDefault: %v", err)
+	}
+	if _, err := configs.UpdateBehaviorSettings(ctx, "guild-1", map[string]any{"tool_policy": tools.ToolPolicyAssistive}); err != nil {
+		t.Fatalf("UpdateBehaviorSettings: %v", err)
+	}
+
+	answer, err := service.CompleteTask(ctx, TaskRequest{
+		RequestID:         "request-1",
+		GuildID:           "guild-1",
+		UserID:            "user-1",
+		ChannelID:         "channel-1",
+		Command:           "chat",
+		Input:             "panda make a random meme",
+		FeatureGateActive: true,
+		AllowedPermissions: map[string]struct{}{
+			admin.PermissionAssistantImageGeneration: {},
+		},
+		EnabledFeatures: map[string]struct{}{
+			features.ImageGeneration: {},
+		},
+	})
+	if err != nil {
+		t.Fatalf("CompleteTask: %v", err)
+	}
+	if len(answer.GeneratedFiles) != 1 {
+		t.Fatalf("expected generated image to survive reasoning cleanup, got %+v", answer.GeneratedFiles)
+	}
+	if answer.Content != "" {
+		t.Fatalf("expected reasoning leak to be suppressed for generated media response, got %q", answer.Content)
 	}
 }
 
