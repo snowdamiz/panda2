@@ -439,13 +439,13 @@ func DefaultDefinitions() []Definition {
 		},
 		{
 			Name:                  "panda.manage_music",
-			Description:           "Play music, inspect the queue, and control playback from natural-language music requests. Use this for requests like play, pause, resume, skip, stop, queue, now playing, loop, shuffle, playlist, and volume.",
+			Description:           "Play music, inspect the queue, and control playback from natural-language music requests. Use this for requests like play, pause, resume, skip, stop, queue, now playing, loop, shuffle, playlist, and volume. For requests like 'skip this and play X', use one skip_play action with query X instead of separate skip and play calls.",
 			RequiredPermission:    admin.PermissionAssistantUse,
 			FeatureID:             features.Music,
 			ToolClass:             ToolClassWorkflow,
 			InputSchema:           musicManagementSchema(),
 			OutputSchema:          objectSchema("result"),
-			Timeout:               20 * time.Second,
+			Timeout:               90 * time.Second,
 			Redaction:             RedactContent,
 			Audit:                 AuditOnUse,
 			IncludeInModelContext: true,
@@ -812,9 +812,9 @@ func musicManagementSchema() json.RawMessage {
 	return schemaWithProperties([]string{"action"}, map[string]any{
 		"action": map[string]any{
 			"type":        "string",
-			"description": "Action: play, pause, resume, skip, stop, queue, clear, now, controls, loop, shuffle, remove, move, vote_skip, settings, or playlist.",
+			"description": "Action: play, skip_play, pause, resume, skip, stop, queue, clear, now, controls, loop, shuffle, remove, move, vote_skip, settings, or playlist. Use skip_play with query for 'skip this and play ...' so playback stays in the same voice session.",
 		},
-		"query":    map[string]string{"type": "string", "description": "Song/search query for play."},
+		"query":    map[string]string{"type": "string", "description": "Song/search query for play or skip_play."},
 		"song":     map[string]string{"type": "string", "description": "Alias for query."},
 		"track":    map[string]string{"type": "string", "description": "Alias for query."},
 		"mode":     map[string]string{"type": "string", "description": "Mode for loop or playlist actions, such as off/track/queue or save/load/list."},

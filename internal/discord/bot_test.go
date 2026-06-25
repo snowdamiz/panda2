@@ -379,6 +379,44 @@ func TestQueueBackgroundInteractionStoresPayload(t *testing.T) {
 	}
 }
 
+func TestQueueNaturalMessageStoresPayload(t *testing.T) {
+	queue := &fakeInteractionJobQueue{}
+	bot := (&Bot{}).WithJobQueue(queue)
+	guildID := snowflake.MustParse("100000000000000001")
+	channelID := snowflake.MustParse("100000000000000002")
+	messageID := snowflake.MustParse("100000000000000003")
+	reference := &disgoDiscord.MessageReference{
+		MessageID:       &messageID,
+		ChannelID:       &channelID,
+		GuildID:         &guildID,
+		FailIfNotExists: false,
+	}
+	request := commands.Request{
+		RequestID: "message-1",
+		Options:   map[string]string{"message": "panda help"},
+		GuildID:   guildID.String(),
+		ChannelID: channelID.String(),
+		UserID:    "user-1",
+	}
+
+	if err := bot.queueNaturalMessage(context.Background(), channelID, reference, request); err != nil {
+		t.Fatalf("queueNaturalMessage: %v", err)
+	}
+	if len(queue.jobs) != 1 || queue.jobs[0].Kind != NaturalMessageJobKind || queue.jobs[0].GuildID != guildID.String() {
+		t.Fatalf("unexpected queued jobs: %+v", queue.jobs)
+	}
+	var payload naturalMessageJobPayload
+	if err := json.Unmarshal([]byte(queue.jobs[0].Payload), &payload); err != nil {
+		t.Fatalf("decode natural message payload: %v", err)
+	}
+	if payload.ChannelID != channelID.String() || payload.Request.RequestID != "message-1" || payload.Request.Options["message"] != "panda help" {
+		t.Fatalf("unexpected natural message payload: %+v", payload)
+	}
+	if payload.Reference == nil || payload.Reference.MessageID != messageID.String() || payload.Reference.ChannelID != channelID.String() || payload.Reference.GuildID != guildID.String() {
+		t.Fatalf("unexpected natural message reference: %+v", payload.Reference)
+	}
+}
+
 func TestGuildMemberJoinEnqueuesComposedEvent(t *testing.T) {
 	queue := &fakeInteractionJobQueue{}
 	recorder := &fakeDiscordEventRecorder{}

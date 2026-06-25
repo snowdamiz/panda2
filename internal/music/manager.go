@@ -19,13 +19,16 @@ import (
 const (
 	frameDuration            = 20 * time.Millisecond
 	playbackBufferFrames     = 250
-	playbackPrebufferFrames  = 50
+	playbackPrebufferFrames  = 25
 	playbackPrebufferTimeout = 30 * time.Second
 	playbackFrameStall       = 5 * time.Second
 	emptyVoiceDisconnectWait = 10 * time.Second
 )
 
-var silenceOpusFrame = []byte{0xF8, 0xFF, 0xFE}
+var (
+	silenceOpusFrame         = []byte{0xF8, 0xFF, 0xFE}
+	emptySkipReplacementWait = 30 * time.Second
+)
 
 type Manager struct {
 	resolver  Resolver
@@ -93,6 +96,11 @@ func (m *Manager) Handle(ctx context.Context, request Request) (Response, error)
 		return m.withPlayer(request.GuildID, func(player *guildPlayer) (Response, error) {
 			return player.skip()
 		})
+	case ActionSkipPlay:
+		if err := m.ensureDJ(ctx, request); err != nil {
+			return Response{}, err
+		}
+		return m.skipPlay(ctx, request)
 	case ActionStop:
 		if err := m.ensureDJ(ctx, request); err != nil {
 			return Response{}, err
@@ -221,6 +229,36 @@ func (m *Manager) play(ctx context.Context, request Request) (Response, error) {
 	response, err := player.enqueue(ctx, track, request.VoiceChannelID)
 	if err != nil {
 		m.logger.Warn("music voice enqueue failed", slog.Any("err", err), slog.String("guild_id", request.GuildID), slog.String("voice_channel_id", request.VoiceChannelID), slog.String("track", track.Title))
+	}
+	return response, err
+}
+
+func (m *Manager) skipPlay(ctx context.Context, request Request) (Response, error) {
+	query := strings.TrimSpace(request.Intent.Query)
+	if query == "" {
+		return Response{}, ErrMissingSong
+	}
+	if strings.TrimSpace(request.VoiceChannelID) == "" {
+		return Response{}, ErrMissingVoice
+	}
+	track, err := m.resolver.Resolve(ctx, query)
+	if err != nil {
+		m.logger.Warn("music track lookup failed", slog.Any("err", err), slog.String("guild_id", request.GuildID), slog.String("query", query))
+		return Response{}, err
+	}
+	track.Query = query
+	track.RequestedBy = request.UserID
+	track.TextChannelID = request.TextChannelID
+	player := m.existingPlayer(request.GuildID)
+	if player == nil {
+		player = m.player(request.GuildID)
+		player.loadPersistedQueue(ctx)
+		return player.enqueue(ctx, track, request.VoiceChannelID)
+	}
+	player.loadPersistedQueue(ctx)
+	response, err := player.skipAndPlay(ctx, track, request.VoiceChannelID)
+	if err != nil {
+		m.logger.Warn("music skip-and-play failed", slog.Any("err", err), slog.String("guild_id", request.GuildID), slog.String("voice_channel_id", request.VoiceChannelID), slog.String("track", track.Title))
 	}
 	return response, err
 }
@@ -487,6 +525,7 @@ type guildPlayer struct {
 
 	emptyDisconnectTimer *time.Timer
 	emptyDisconnectToken *emptyDisconnectToken
+	emptySkipWaitUntil   time.Time
 	loadedPersisted      bool
 	skipVotes            map[string]struct{}
 }
@@ -498,6 +537,10 @@ func (p *guildPlayer) enqueue(ctx context.Context, track Track, voiceChannelID s
 	if p.playing && p.voiceChannelID != "" && p.voiceChannelID != voiceChannelID {
 		p.mu.Unlock()
 		return Response{}, ErrDifferentVoice
+	}
+	startingAfterSkip := p.playing && p.current == nil && !p.emptySkipWaitUntil.IsZero()
+	if p.playing && !startingAfterSkip {
+		track = withoutTransientStream(track)
 	}
 	p.queueItems = append(p.queueItems, track)
 	position := len(p.queueItems)
@@ -512,6 +555,9 @@ func (p *guildPlayer) enqueue(ctx context.Context, track Track, voiceChannelID s
 	p.persistQueueSnapshot(snapshot)
 
 	if !shouldStart {
+		if startingAfterSkip {
+			return trackResponse("Starting track", fmt.Sprintf("Starting **%s**.", trackTitle(track)), track), nil
+		}
 		return trackResponse("Track queued", fmt.Sprintf("Queued **%s** at position %d.", trackTitle(track), position), track), nil
 	}
 
@@ -574,24 +620,50 @@ func (p *guildPlayer) run() {
 }
 
 func (p *guildPlayer) nextTrack() (Track, bool) {
-	p.mu.Lock()
-	if p.stopping || len(p.queueItems) == 0 {
-		p.playing = false
-		p.paused = false
-		p.voiceChannelID = ""
-		timer := p.clearEmptyVoiceDisconnectLocked()
-		p.mu.Unlock()
-		if timer != nil {
-			timer.Stop()
+	for {
+		p.mu.Lock()
+		if p.stopping {
+			p.emptySkipWaitUntil = time.Time{}
+			p.playing = false
+			p.paused = false
+			p.voiceChannelID = ""
+			timer := p.clearEmptyVoiceDisconnectLocked()
+			p.mu.Unlock()
+			if timer != nil {
+				timer.Stop()
+			}
+			return Track{}, false
 		}
-		return Track{}, false
+		if len(p.queueItems) > 0 {
+			p.emptySkipWaitUntil = time.Time{}
+			track := p.queueItems[0]
+			p.queueItems = p.queueItems[1:]
+			snapshot := append([]Track(nil), p.queueItems...)
+			p.mu.Unlock()
+			p.persistQueueSnapshot(snapshot)
+			return track, true
+		}
+		waitUntil := p.emptySkipWaitUntil
+		if waitUntil.IsZero() || !time.Now().Before(waitUntil) {
+			p.emptySkipWaitUntil = time.Time{}
+			p.playing = false
+			p.paused = false
+			p.voiceChannelID = ""
+			timer := p.clearEmptyVoiceDisconnectLocked()
+			p.mu.Unlock()
+			if timer != nil {
+				timer.Stop()
+			}
+			return Track{}, false
+		}
+		wait := time.Until(waitUntil)
+		if wait > 250*time.Millisecond {
+			wait = 250 * time.Millisecond
+		}
+		p.mu.Unlock()
+		timer := time.NewTimer(wait)
+		<-timer.C
 	}
-	track := p.queueItems[0]
-	p.queueItems = p.queueItems[1:]
-	snapshot := append([]Track(nil), p.queueItems...)
-	p.mu.Unlock()
-	p.persistQueueSnapshot(snapshot)
-	return track, true
 }
 
 func (p *guildPlayer) playTrack(ctx context.Context, track Track) error {
@@ -726,14 +798,48 @@ func (p *guildPlayer) skip() (Response, error) {
 	title := trackTitle(*p.current)
 	remaining := len(p.queueItems)
 	cancel := p.trackCancel
+	var timer *time.Timer
+	if remaining == 0 {
+		p.paused = false
+		p.emptySkipWaitUntil = time.Now().Add(emptySkipReplacementWait)
+		timer = p.clearEmptyVoiceDisconnectLocked()
+	}
 	p.mu.Unlock()
+	if timer != nil {
+		timer.Stop()
+	}
 	if cancel != nil {
 		cancel()
 	}
 	if remaining == 0 {
-		return musicResponse("Track skipped", fmt.Sprintf("Skipped **%s**. The queue is empty, so I will leave voice.", title)), nil
+		return musicResponse("Track skipped", fmt.Sprintf("Skipped **%s**. The queue is empty; I will leave voice if nothing else is queued.", title)), nil
 	}
 	return musicResponse("Track skipped", fmt.Sprintf("Skipped **%s**. %d song(s) left in queue.", title, remaining)), nil
+}
+
+func (p *guildPlayer) skipAndPlay(ctx context.Context, track Track, voiceChannelID string) (Response, error) {
+	p.mu.Lock()
+	if p.playing && p.voiceChannelID != "" && p.voiceChannelID != voiceChannelID {
+		p.mu.Unlock()
+		return Response{}, ErrDifferentVoice
+	}
+	if p.current == nil {
+		p.mu.Unlock()
+		return p.enqueue(ctx, track, voiceChannelID)
+	}
+	skippedTitle := trackTitle(*p.current)
+	cancel := p.trackCancel
+	p.queueItems = append([]Track{track}, p.queueItems...)
+	p.paused = false
+	p.emptySkipWaitUntil = time.Time{}
+	snapshot := append([]Track(nil), p.queueItems...)
+	p.mu.Unlock()
+
+	p.persistQueueSnapshot(snapshot)
+	if cancel != nil {
+		cancel()
+	}
+	return trackResponse("Track replaced", fmt.Sprintf("Skipped **%s** and started buffering **%s**.", skippedTitle, trackTitle(track)), track), nil
 }
 
 func (p *guildPlayer) stop(ctx context.Context) (Response, error) {
@@ -971,6 +1077,7 @@ func (p *guildPlayer) loopCompletedTrack(track Track) {
 		p.mu.Unlock()
 		return
 	}
+	track = withoutTransientStream(track)
 	if mode == "track" {
 		p.queueItems = append([]Track{track}, p.queueItems...)
 	} else {
@@ -1116,6 +1223,12 @@ func removeTrackFromQueue(queue []Track, track Track) []Track {
 	return queue
 }
 
+func withoutTransientStream(track Track) Track {
+	track.StreamURL = ""
+	track.StreamHeaders = nil
+	return track
+}
+
 func trackTitle(track Track) string {
 	if strings.TrimSpace(track.Title) != "" {
 		return track.Title
@@ -1142,7 +1255,7 @@ func requesterSuffix(userID string) string {
 }
 
 func controlsMessage() string {
-	return "Music controls: `play <song>`, `pause`, `resume`, `vote skip`, `skip`, `stop`, `queue`, `remove <#>`, `move <#> to <#>`, `shuffle`, `loop track|queue|off`, `save playlist <name>`, `load playlist <name>`, `volume <1-200>`, `clear queue`, and `now playing`."
+	return "Music controls: `play <song>`, `skip and play <song>`, `pause`, `resume`, `vote skip`, `skip`, `stop`, `queue`, `remove <#>`, `move <#> to <#>`, `shuffle`, `loop track|queue|off`, `save playlist <name>`, `load playlist <name>`, `volume <1-200>`, `clear queue`, and `now playing`."
 }
 
 func musicResponse(title, content string) Response {

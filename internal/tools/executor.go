@@ -1724,7 +1724,7 @@ func (e *Executor) manageMusic(ctx context.Context, request ExecutionRequest, ar
 		return nil, err
 	}
 	action := normalizeMusicManagementAction(stringArgument(args, "action"))
-	if action == "play" || (action == "playlist" && musicPlaylistModeConsumesEntitlement(stringArgument(args, "mode"))) {
+	if action == "play" || action == "skip_play" || (action == "playlist" && musicPlaylistModeConsumesEntitlement(stringArgument(args, "mode"))) {
 		if err := e.musicEntitlementAvailable(ctx, request.GuildID); err != nil {
 			return nil, err
 		}
@@ -2646,6 +2646,8 @@ func normalizeMusicManagementAction(action string) string {
 	switch strings.ToLower(strings.TrimSpace(action)) {
 	case "play", "queue", "add":
 		return "play"
+	case "skip_play", "skip_and_play", "skipplay", "replace", "replace_current":
+		return "skip_play"
 	case "pause":
 		return "pause"
 	case "resume", "start":

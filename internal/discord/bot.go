@@ -82,6 +82,7 @@ type commandSyncer interface {
 
 const maxAttachmentExtractBytes = 1 << 20
 const InteractionJobKind = "discord.interaction"
+const NaturalMessageJobKind = "discord.natural_message"
 const deferredProgressInterval = 8 * time.Second
 const typingRefreshInterval = 5 * time.Second
 const discordContentLimit = 2000
@@ -106,6 +107,19 @@ type interactionJobPayload struct {
 	ApplicationID string                  `json:"application_id"`
 	Token         string                  `json:"token"`
 	Task          commands.BackgroundTask `json:"task"`
+}
+
+type naturalMessageJobPayload struct {
+	ChannelID string                          `json:"channel_id"`
+	Reference *naturalMessageReferencePayload `json:"reference,omitempty"`
+	Request   commands.Request                `json:"request"`
+}
+
+type naturalMessageReferencePayload struct {
+	MessageID       string `json:"message_id,omitempty"`
+	ChannelID       string `json:"channel_id,omitempty"`
+	GuildID         string `json:"guild_id,omitempty"`
+	FailIfNotExists bool   `json:"fail_if_not_exists,omitempty"`
 }
 
 func New(cfg config.Config, router *commands.Router, logger *slog.Logger) (*Bot, error) {
@@ -693,6 +707,79 @@ func (b *Bot) HandleInteractionJob(ctx context.Context, job store.Job) error {
 		b.logger.Warn("failed to update background interaction response", slog.Any("err", err), slog.Uint64("job_id", uint64(job.ID)), slog.String("command", payload.Task.Command))
 	}
 	return err
+}
+
+func (b *Bot) HandleNaturalMessageJob(ctx context.Context, job store.Job) error {
+	if b.client == nil {
+		return errors.New("discord client is not configured")
+	}
+	var payload naturalMessageJobPayload
+	if err := json.Unmarshal([]byte(job.Payload), &payload); err != nil {
+		return err
+	}
+	channelID, err := snowflake.Parse(payload.ChannelID)
+	if err != nil {
+		return err
+	}
+	reference, err := messageReferenceFromPayload(payload.Reference)
+	if err != nil {
+		return err
+	}
+	if b.logger != nil {
+		b.logger.Info("running queued natural message",
+			slog.Uint64("job_id", uint64(job.ID)),
+			slog.String("guild_id", payload.Request.GuildID),
+			slog.String("channel_id", payload.Request.ChannelID),
+			slog.String("request_id", payload.Request.RequestID),
+		)
+	}
+	return b.respondToNaturalMessage(ctx, channelID, reference, payload.Request)
+}
+
+func naturalMessageReferencePayloadFrom(reference *disgoDiscord.MessageReference) *naturalMessageReferencePayload {
+	if reference == nil {
+		return nil
+	}
+	payload := &naturalMessageReferencePayload{FailIfNotExists: reference.FailIfNotExists}
+	if reference.MessageID != nil {
+		payload.MessageID = reference.MessageID.String()
+	}
+	if reference.ChannelID != nil {
+		payload.ChannelID = reference.ChannelID.String()
+	}
+	if reference.GuildID != nil {
+		payload.GuildID = reference.GuildID.String()
+	}
+	return payload
+}
+
+func messageReferenceFromPayload(payload *naturalMessageReferencePayload) (*disgoDiscord.MessageReference, error) {
+	if payload == nil {
+		return nil, nil
+	}
+	reference := &disgoDiscord.MessageReference{FailIfNotExists: payload.FailIfNotExists}
+	if strings.TrimSpace(payload.MessageID) != "" {
+		messageID, err := snowflake.Parse(payload.MessageID)
+		if err != nil {
+			return nil, err
+		}
+		reference.MessageID = &messageID
+	}
+	if strings.TrimSpace(payload.ChannelID) != "" {
+		channelID, err := snowflake.Parse(payload.ChannelID)
+		if err != nil {
+			return nil, err
+		}
+		reference.ChannelID = &channelID
+	}
+	if strings.TrimSpace(payload.GuildID) != "" {
+		guildID, err := snowflake.Parse(payload.GuildID)
+		if err != nil {
+			return nil, err
+		}
+		reference.GuildID = &guildID
+	}
+	return reference, nil
 }
 
 func interactionID(event *events.ApplicationCommandInteractionCreate) string {
@@ -1419,12 +1506,68 @@ func (b *Bot) onMessageCreate(event *events.MessageCreate) {
 		)
 	}
 	reference := messageReferenceFromMessage(event.Message)
-	go b.respondToNaturalMessage(context.Background(), event.ChannelID, reference, request)
+	if err := b.queueNaturalMessage(context.Background(), event.ChannelID, reference, request); err != nil {
+		b.logger.Warn("failed to queue natural message; responding inline",
+			slog.Any("err", err),
+			slog.String("guild_id", request.GuildID),
+			slog.String("channel_id", request.ChannelID),
+			slog.String("request_id", request.RequestID),
+		)
+		b.respondToNaturalMessageAsync(context.Background(), event.ChannelID, reference, request)
+	}
 }
 
-func (b *Bot) respondToNaturalMessage(ctx context.Context, channelID snowflake.ID, reference *disgoDiscord.MessageReference, request commands.Request) {
+func (b *Bot) queueNaturalMessage(ctx context.Context, channelID snowflake.ID, reference *disgoDiscord.MessageReference, request commands.Request) error {
+	if b == nil {
+		return nil
+	}
+	if b.jobs == nil {
+		b.respondToNaturalMessageAsync(ctx, channelID, reference, request)
+		return nil
+	}
+	payload, err := json.Marshal(naturalMessageJobPayload{
+		ChannelID: channelID.String(),
+		Reference: naturalMessageReferencePayloadFrom(reference),
+		Request:   request,
+	})
+	if err != nil {
+		return err
+	}
+	_, err = b.jobs.Enqueue(ctx, store.Job{
+		Kind:        NaturalMessageJobKind,
+		GuildID:     request.GuildID,
+		Payload:     string(payload),
+		MaxAttempts: 3,
+	})
+	if err != nil {
+		return err
+	}
+	if b.logger != nil {
+		b.logger.Info("natural message queued",
+			slog.String("guild_id", request.GuildID),
+			slog.String("channel_id", request.ChannelID),
+			slog.String("request_id", request.RequestID),
+		)
+	}
+	return nil
+}
+
+func (b *Bot) respondToNaturalMessageAsync(ctx context.Context, channelID snowflake.ID, reference *disgoDiscord.MessageReference, request commands.Request) {
+	go func() {
+		if err := b.respondToNaturalMessage(ctx, channelID, reference, request); err != nil && b.logger != nil {
+			b.logger.Warn("natural message response failed",
+				slog.Any("err", err),
+				slog.String("guild_id", request.GuildID),
+				slog.String("channel_id", request.ChannelID),
+				slog.String("request_id", request.RequestID),
+			)
+		}
+	}()
+}
+
+func (b *Bot) respondToNaturalMessage(ctx context.Context, channelID snowflake.ID, reference *disgoDiscord.MessageReference, request commands.Request) error {
 	if b == nil || b.client == nil || b.router == nil {
-		return
+		return nil
 	}
 	if err := b.preflightNaturalMessageReply(request); err != nil {
 		b.logger.Warn("natural message reply permission preflight failed",
@@ -1433,11 +1576,26 @@ func (b *Bot) respondToNaturalMessage(ctx context.Context, channelID snowflake.I
 			slog.String("channel_id", request.ChannelID),
 			slog.String("request_id", request.RequestID),
 		)
-		return
+		return nil
 	}
-	stopTyping := startTypingIndicator(ctx, b.client.Rest, b.logger, channelID, request.RequestID, typingRefreshInterval)
-	defer stopTyping()
-	response := b.router.HandleNaturalMessage(ctx, request)
+	var stopTyping func()
+	var typingMu sync.Mutex
+	var typingOnce sync.Once
+	startTyping := func() {
+		typingOnce.Do(func() {
+			typingMu.Lock()
+			defer typingMu.Unlock()
+			stopTyping = startTypingIndicator(ctx, b.client.Rest, b.logger, channelID, request.RequestID, typingRefreshInterval)
+		})
+	}
+	defer func() {
+		typingMu.Lock()
+		defer typingMu.Unlock()
+		if stopTyping != nil {
+			stopTyping()
+		}
+	}()
+	response := b.router.HandleNaturalMessageStream(ctx, request, startTyping)
 	if b.logger != nil {
 		b.logger.Info("natural message response prepared",
 			slog.String("guild_id", request.GuildID),
@@ -1452,7 +1610,7 @@ func (b *Bot) respondToNaturalMessage(ctx context.Context, channelID snowflake.I
 		)
 	}
 	if !hasChannelResponsePayload(response) {
-		return
+		return nil
 	}
 	if err := b.sendChannelResponse(channelID, response, reference); err != nil {
 		b.logger.Warn("failed to reply to natural message",
@@ -1461,7 +1619,9 @@ func (b *Bot) respondToNaturalMessage(ctx context.Context, channelID snowflake.I
 			slog.String("channel_id", request.ChannelID),
 			slog.String("request_id", request.RequestID),
 		)
+		return err
 	}
+	return nil
 }
 
 func (b *Bot) preflightNaturalMessageReply(request commands.Request) error {

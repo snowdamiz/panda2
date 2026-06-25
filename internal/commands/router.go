@@ -113,7 +113,7 @@ const baseHelpMessage = "### Panda Help\n\n" +
 	"- Use `/billing action:activate api_key:<key>` for one-time activation keys so secrets stay out of normal chat.\n\n" +
 	"**Music**\n" +
 	"- Join a voice channel, then say `Panda play <song>`.\n" +
-	"- Natural controls: `pause`, `resume`, `skip`, `stop`, `queue`, `clear queue`, `now playing`.\n\n" +
+	"- Natural controls: `skip and play <song>`, `pause`, `resume`, `skip`, `stop`, `queue`, `clear queue`, `now playing`.\n\n" +
 	"**Message actions**\n" +
 	"- Use **Explain with Panda** or **Summarize with Panda** from a message's **Apps** menu.\n" +
 	"- Ask Panda in chat to create polls, reminders, schedules, and setup changes; write actions use confirmation buttons."
@@ -377,6 +377,10 @@ func elevatedHelpMessage(access helpAccess) string {
 }
 
 func (r *Router) HandleNaturalMessage(ctx context.Context, request Request) Response {
+	return r.HandleNaturalMessageStream(ctx, request, nil)
+}
+
+func (r *Router) HandleNaturalMessageStream(ctx context.Context, request Request, onRespond func()) Response {
 	slog.Info("natural message route started",
 		slog.String("guild_id", request.GuildID),
 		slog.String("channel_id", request.ChannelID),
@@ -419,42 +423,17 @@ func (r *Router) HandleNaturalMessage(ctx context.Context, request Request) Resp
 		)
 		return denied
 	}
-	decision, err := r.assistant.ClassifyNaturalMessage(ctx, assistant.NaturalMessageRequest{
-		GuildID:          request.GuildID,
-		UserID:           request.UserID,
-		ChannelID:        request.ChannelID,
-		Content:          message,
-		BotMentioned:     truthyOption(request.Options["bot_mentioned"]),
-		ReplyContent:     request.Options["reply_text"],
-		ReplyMessageID:   request.Options["reply_message_id"],
-		ReplyAuthorIsBot: truthyOption(request.Options["reply_author_is_bot"]),
-	})
-	if err != nil {
-		slog.Warn("natural message classification failed", slog.Any("err", err), slog.String("guild_id", request.GuildID), slog.String("channel_id", request.ChannelID), slog.String("request_id", request.RequestID))
-		return Response{}
-	}
-	if !decision.Respond {
-		slog.Info("natural message classifier declined response",
-			slog.String("guild_id", request.GuildID),
-			slog.String("channel_id", request.ChannelID),
-			slog.String("request_id", request.RequestID),
-			slog.String("user_id", request.UserID),
-		)
-		return Response{}
-	}
-	slog.Info("natural message classifier accepted response",
-		slog.String("guild_id", request.GuildID),
-		slog.String("channel_id", request.ChannelID),
-		slog.String("request_id", request.RequestID),
-		slog.String("user_id", request.UserID),
-		slog.Int("prompt_len", len(decision.Prompt)),
-	)
 	request.Command = "chat"
 	if request.Options == nil {
 		request.Options = map[string]string{}
 	}
-	request.Options["question"] = decision.Prompt
-	return r.handleChatModeWithAccess(ctx, request, false, true)
+	request.Options["question"] = message
+	return r.handleChatModeWithOptions(ctx, request, chatModeOptions{
+		threaded:        false,
+		allowSoulWriter: true,
+		naturalMessage:  true,
+		onRespond:       onRespond,
+	})
 }
 
 func (r *Router) canHandleNaturalMessage(ctx context.Context, request Request) bool {
@@ -1356,17 +1335,28 @@ func (r *Router) handleChatMode(ctx context.Context, request Request, threaded b
 	return r.handleChatModeWithAccess(ctx, request, threaded, false)
 }
 
+type chatModeOptions struct {
+	threaded        bool
+	allowSoulWriter bool
+	naturalMessage  bool
+	onRespond       func()
+}
+
 func (r *Router) handleChatModeWithAccess(ctx context.Context, request Request, threaded bool, allowSoulWriter bool) Response {
+	return r.handleChatModeWithOptions(ctx, request, chatModeOptions{threaded: threaded, allowSoulWriter: allowSoulWriter})
+}
+
+func (r *Router) handleChatModeWithOptions(ctx context.Context, request Request, options chatModeOptions) Response {
 	question := strings.TrimSpace(request.Options["question"])
 	if question == "" {
 		return Response{Content: "Please include a message.", Ephemeral: true}
 	}
 	if denied := r.ensureAssistantAllowed(ctx, request); denied.Content != "" {
-		if !allowSoulWriter || !r.canWriteSoul(ctx, request) {
+		if !options.allowSoulWriter || !r.canWriteSoul(ctx, request) {
 			return denied
 		}
 	}
-	if threaded && r.threads != nil && request.GuildID != "" {
+	if options.threaded && r.threads != nil && request.GuildID != "" {
 		if denied := r.ensureThreadsAllowed(ctx, request); denied.Content != "" {
 			return denied
 		}
@@ -1385,7 +1375,7 @@ func (r *Router) handleChatModeWithAccess(ctx context.Context, request Request, 
 	chatChannelID := request.ChannelID
 	threadID := ""
 	threadName := ""
-	if threaded && r.threads != nil && request.GuildID != "" {
+	if options.threaded && r.threads != nil && request.GuildID != "" {
 		thread, err := r.threads.EnsureChatThread(ctx, ThreadRequest{
 			GuildID:   request.GuildID,
 			ChannelID: request.ChannelID,
@@ -1411,8 +1401,8 @@ func (r *Router) handleChatModeWithAccess(ctx context.Context, request Request, 
 		slog.String("thread_id", threadID),
 		slog.String("request_id", request.RequestID),
 		slog.String("user_id", request.UserID),
-		slog.Bool("natural_message", allowSoulWriter),
-		slog.Bool("threaded", threaded),
+		slog.Bool("natural_message", options.naturalMessage),
+		slog.Bool("threaded", options.threaded),
 		slog.Bool("is_owner", request.IsOwner),
 		slog.Bool("is_guild_admin", request.IsGuildAdmin),
 		slog.Int("role_count", len(request.RoleIDs)),
@@ -1424,7 +1414,7 @@ func (r *Router) handleChatModeWithAccess(ctx context.Context, request Request, 
 		slog.Any("enabled_features", permissionNames(enabledFeatures)),
 	)
 	invocationContext := r.invocationContext(ctx, request)
-	answer, err := r.assistant.Chat(ctx, assistant.AskRequest{
+	askRequest := assistant.AskRequest{
 		RequestID:                    request.RequestID,
 		GuildID:                      request.GuildID,
 		UserID:                       request.UserID,
@@ -1436,6 +1426,7 @@ func (r *Router) handleChatModeWithAccess(ctx context.Context, request Request, 
 		ReplyContent:                 request.Options["reply_text"],
 		ReplyMessageID:               request.Options["reply_message_id"],
 		ReplyAuthorIsBot:             truthyOption(request.Options["reply_author_is_bot"]),
+		BotMentioned:                 truthyOption(request.Options["bot_mentioned"]),
 		RoleIDs:                      request.RoleIDs,
 		IsGuildAdmin:                 request.IsGuildAdmin,
 		IsOwner:                      request.IsOwner,
@@ -1445,10 +1436,27 @@ func (r *Router) handleChatModeWithAccess(ctx context.Context, request Request, 
 		EnabledFeatures:              enabledFeatures,
 		FeatureGateActive:            featureGateActive,
 		RequireExplicitComposedTools: toolFilter.requireExplicitComposed,
-	})
+	}
+	var answer assistant.AskResponse
+	var err error
+	if options.naturalMessage {
+		answer, err = r.assistant.ChatNaturalMessage(ctx, askRequest, options.onRespond)
+	} else {
+		answer, err = r.assistant.Chat(ctx, askRequest)
+	}
 	if err != nil {
 		r.releaseAIUsage(ctx, reservation)
 		return assistantError(err)
+	}
+	if answer.Silent {
+		r.releaseAIUsage(ctx, reservation)
+		slog.Info("natural message model declined response",
+			slog.String("guild_id", request.GuildID),
+			slog.String("channel_id", request.ChannelID),
+			slog.String("request_id", request.RequestID),
+			slog.String("user_id", request.UserID),
+		)
+		return Response{}
 	}
 	if !assistantAnswerHasPayload(answer) {
 		r.releaseAIUsage(ctx, reservation)

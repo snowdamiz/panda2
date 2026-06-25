@@ -1,6 +1,7 @@
 package llm
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -9,6 +10,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -89,19 +91,7 @@ func (c *OpenRouterClient) Chat(ctx context.Context, request ChatRequest) (ChatR
 		return ChatResponse{}, fmt.Errorf("chat request requires at least one message")
 	}
 
-	payload := chatCompletionRequest{
-		Model:          request.Model,
-		Messages:       request.Messages,
-		Tools:          request.Tools,
-		ResponseFormat: request.ResponseFormat,
-		Temperature:    request.Temperature,
-		MaxTokens:      request.MaxTokens,
-	}
-	payload.Provider = c.providerPreferences(request)
-	if request.ResponseFormat != nil && request.ResponseFormat.Type == "json_schema" {
-		structuredOutputs := true
-		payload.StructuredOutputs = &structuredOutputs
-	}
+	payload := c.chatCompletionPayload(request)
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return ChatResponse{}, err
@@ -141,6 +131,66 @@ func (c *OpenRouterClient) Chat(ctx context.Context, request ChatRequest) (ChatR
 			TotalTokens:      decoded.Usage.TotalTokens,
 		},
 	}, nil
+}
+
+func (c *OpenRouterClient) StreamChat(ctx context.Context, request ChatRequest, onDelta ChatStreamHandler) (ChatResponse, error) {
+	if c.apiKey == "" {
+		return ChatResponse{}, ErrNotConfigured
+	}
+	if len(request.Messages) == 0 {
+		return ChatResponse{}, fmt.Errorf("chat request requires at least one message")
+	}
+
+	payload := c.chatCompletionPayload(request)
+	payload.Stream = true
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return ChatResponse{}, err
+	}
+	slog.Info("openrouter streaming chat request built",
+		slog.String("model", request.Model),
+		slog.Int("message_count", len(request.Messages)),
+		slog.Int("tool_count", len(request.Tools)),
+		slog.Bool("has_response_format", request.ResponseFormat != nil),
+		slog.Any("provider_order", payload.ProviderOrder()),
+		slog.Bool("provider_allow_fallbacks", payload.ProviderAllowFallbacks()),
+		slog.Bool("provider_require_parameters", payload.Provider != nil && payload.Provider.RequireParameters),
+		slog.Bool("structured_outputs", payload.StructuredOutputs != nil && *payload.StructuredOutputs),
+		slog.Bool("tool_choice_present", false),
+	)
+
+	builder := chatStreamBuilder{fallbackModel: request.Model}
+	err = c.postStream(ctx, "/chat/completions", body, func(data []byte) error {
+		delta, err := builder.Append(data)
+		if err != nil {
+			return err
+		}
+		if onDelta == nil || (delta.Content == "" && !delta.HasToolCall) {
+			return nil
+		}
+		return onDelta(delta)
+	})
+	if err != nil {
+		return ChatResponse{}, err
+	}
+	return builder.Response(), nil
+}
+
+func (c *OpenRouterClient) chatCompletionPayload(request ChatRequest) chatCompletionRequest {
+	payload := chatCompletionRequest{
+		Model:          request.Model,
+		Messages:       request.Messages,
+		Tools:          request.Tools,
+		ResponseFormat: request.ResponseFormat,
+		Temperature:    request.Temperature,
+		MaxTokens:      request.MaxTokens,
+	}
+	payload.Provider = c.providerPreferences(request)
+	if request.ResponseFormat != nil && request.ResponseFormat.Type == "json_schema" {
+		structuredOutputs := true
+		payload.StructuredOutputs = &structuredOutputs
+	}
+	return payload
 }
 
 func (c *OpenRouterClient) providerPreferences(request ChatRequest) *providerPreferences {
@@ -300,6 +350,90 @@ func (c *OpenRouterClient) post(ctx context.Context, path string, body []byte) (
 	return nil, lastErr
 }
 
+func (c *OpenRouterClient) postStream(ctx context.Context, path string, body []byte, handleEvent func([]byte) error) error {
+	if err := c.circuitBreaker.allow(); err != nil {
+		return err
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+path, bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+c.apiKey)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "text/event-stream")
+	if c.appURL != "" {
+		req.Header.Set("HTTP-Referer", c.appURL)
+	}
+	if c.appTitle != "" {
+		req.Header.Set("X-OpenRouter-Title", c.appTitle)
+	}
+
+	resp, err := c.client.Do(req)
+	if err != nil {
+		c.circuitBreaker.recordFailure()
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		data, readErr := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
+		if readErr != nil {
+			return readErr
+		}
+		streamErr := parseOpenRouterError(resp.StatusCode, data)
+		if retryableStatus(resp.StatusCode) {
+			c.circuitBreaker.recordFailure()
+		}
+		return streamErr
+	}
+
+	if err := readServerSentEvents(resp.Body, handleEvent); err != nil {
+		c.circuitBreaker.recordFailure()
+		return err
+	}
+	c.circuitBreaker.recordSuccess()
+	return nil
+}
+
+func readServerSentEvents(reader io.Reader, handleEvent func([]byte) error) error {
+	buffered := bufio.NewReader(reader)
+	var dataLines []string
+	flush := func() error {
+		if len(dataLines) == 0 {
+			return nil
+		}
+		data := strings.TrimSpace(strings.Join(dataLines, "\n"))
+		dataLines = nil
+		if data == "" || data == "[DONE]" {
+			return nil
+		}
+		return handleEvent([]byte(data))
+	}
+
+	for {
+		line, err := buffered.ReadString('\n')
+		if len(line) > 0 {
+			line = strings.TrimRight(line, "\r\n")
+			switch {
+			case line == "":
+				if flushErr := flush(); flushErr != nil {
+					return flushErr
+				}
+			case strings.HasPrefix(line, ":"):
+			case strings.HasPrefix(line, "data:"):
+				dataLines = append(dataLines, strings.TrimSpace(strings.TrimPrefix(line, "data:")))
+			}
+		}
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				return flush()
+			}
+			return err
+		}
+	}
+}
+
 func (c *OpenRouterClient) get(ctx context.Context, path string) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+path, nil)
 	if err != nil {
@@ -415,6 +549,7 @@ type chatCompletionRequest struct {
 	Provider          *providerPreferences `json:"provider,omitempty"`
 	Temperature       float64              `json:"temperature,omitempty"`
 	MaxTokens         int                  `json:"max_tokens,omitempty"`
+	Stream            bool                 `json:"stream,omitempty"`
 }
 
 type providerPreferences struct {
@@ -445,6 +580,137 @@ type chatCompletionResponse struct {
 		CompletionTokens int `json:"completion_tokens"`
 		TotalTokens      int `json:"total_tokens"`
 	} `json:"usage"`
+}
+
+type chatCompletionStreamChunk struct {
+	ID      string `json:"id"`
+	Model   string `json:"model"`
+	Choices []struct {
+		Delta struct {
+			Content   string                `json:"content"`
+			ToolCalls []streamToolCallDelta `json:"tool_calls"`
+		} `json:"delta"`
+	} `json:"choices"`
+	Usage *struct {
+		PromptTokens     int `json:"prompt_tokens"`
+		CompletionTokens int `json:"completion_tokens"`
+		TotalTokens      int `json:"total_tokens"`
+	} `json:"usage"`
+}
+
+type streamToolCallDelta struct {
+	Index    int    `json:"index"`
+	ID       string `json:"id"`
+	Type     string `json:"type"`
+	Function struct {
+		Name      string `json:"name"`
+		Arguments string `json:"arguments"`
+	} `json:"function"`
+}
+
+type chatStreamBuilder struct {
+	id            string
+	model         string
+	fallbackModel string
+	content       strings.Builder
+	toolCalls     map[int]*streamToolCallBuilder
+	usage         Usage
+}
+
+type streamToolCallBuilder struct {
+	id        string
+	callType  string
+	name      strings.Builder
+	arguments strings.Builder
+}
+
+func (b *chatStreamBuilder) Append(data []byte) (ChatStreamDelta, error) {
+	var chunk chatCompletionStreamChunk
+	if err := json.Unmarshal(data, &chunk); err != nil {
+		return ChatStreamDelta{}, err
+	}
+	if chunk.ID != "" {
+		b.id = chunk.ID
+	}
+	if chunk.Model != "" {
+		b.model = chunk.Model
+	}
+	if chunk.Usage != nil {
+		b.usage = Usage{
+			PromptTokens:     chunk.Usage.PromptTokens,
+			CompletionTokens: chunk.Usage.CompletionTokens,
+			TotalTokens:      chunk.Usage.TotalTokens,
+		}
+	}
+
+	var delta ChatStreamDelta
+	for _, choice := range chunk.Choices {
+		if choice.Delta.Content != "" {
+			b.content.WriteString(choice.Delta.Content)
+			delta.Content += choice.Delta.Content
+		}
+		if len(choice.Delta.ToolCalls) == 0 {
+			continue
+		}
+		delta.HasToolCall = true
+		if b.toolCalls == nil {
+			b.toolCalls = map[int]*streamToolCallBuilder{}
+		}
+		for _, streamed := range choice.Delta.ToolCalls {
+			call := b.toolCalls[streamed.Index]
+			if call == nil {
+				call = &streamToolCallBuilder{}
+				b.toolCalls[streamed.Index] = call
+			}
+			if streamed.ID != "" {
+				call.id = streamed.ID
+			}
+			if streamed.Type != "" {
+				call.callType = streamed.Type
+			}
+			if streamed.Function.Name != "" {
+				call.name.WriteString(streamed.Function.Name)
+			}
+			if streamed.Function.Arguments != "" {
+				call.arguments.WriteString(streamed.Function.Arguments)
+			}
+		}
+	}
+	return delta, nil
+}
+
+func (b *chatStreamBuilder) Response() ChatResponse {
+	return ChatResponse{
+		ID:        b.id,
+		Model:     firstNonEmpty(b.model, b.fallbackModel),
+		Content:   b.content.String(),
+		ToolCalls: b.completeToolCalls(),
+		Usage:     b.usage,
+	}
+}
+
+func (b *chatStreamBuilder) completeToolCalls() []ToolCall {
+	if len(b.toolCalls) == 0 {
+		return nil
+	}
+	indexes := make([]int, 0, len(b.toolCalls))
+	for index := range b.toolCalls {
+		indexes = append(indexes, index)
+	}
+	sort.Ints(indexes)
+	result := make([]ToolCall, 0, len(indexes))
+	for _, index := range indexes {
+		call := b.toolCalls[index]
+		result = append(result, ToolCall{
+			ID:   call.id,
+			Type: firstNonEmpty(call.callType, "function"),
+			Function: ToolCallFunction{
+				Name:      call.name.String(),
+				Arguments: call.arguments.String(),
+			},
+		})
+	}
+	return result
 }
 
 type embeddingRequest struct {

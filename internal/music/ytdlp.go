@@ -9,6 +9,7 @@ import (
 	"io"
 	"log/slog"
 	"os/exec"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -94,18 +95,21 @@ func (y *YTDLP) Resolve(ctx context.Context, query string) (Track, error) {
 	if err := json.Unmarshal(output, &metadata); err != nil {
 		return Track{}, fmt.Errorf("%w: parse metadata: %v", ErrTrackLookupFailed, err)
 	}
-	url := strings.TrimSpace(firstNonEmpty(metadata.WebpageURL, metadata.OriginalURL, metadata.URL))
+	streamURL := strings.TrimSpace(metadata.URL)
+	url := strings.TrimSpace(firstNonEmpty(metadata.WebpageURL, metadata.OriginalURL, streamURL))
 	title := strings.TrimSpace(metadata.Title)
 	if url == "" || title == "" {
 		return Track{}, fmt.Errorf("%w: missing title or url", ErrTrackLookupFailed)
 	}
 	return Track{
-		ID:       strings.TrimSpace(metadata.ID),
-		Query:    query,
-		Title:    title,
-		URL:      url,
-		Uploader: strings.TrimSpace(metadata.Uploader),
-		Duration: durationFromSeconds(metadata.Duration),
+		ID:            strings.TrimSpace(metadata.ID),
+		Query:         query,
+		Title:         title,
+		URL:           url,
+		StreamURL:     streamURL,
+		StreamHeaders: cleanHTTPHeaders(metadata.HTTPHeaders),
+		Uploader:      strings.TrimSpace(metadata.Uploader),
+		Duration:      durationFromSeconds(metadata.Duration),
 	}, nil
 }
 
@@ -114,9 +118,13 @@ func (y *YTDLP) Stream(ctx context.Context, track Track) (OpusFrameProvider, err
 	if err != nil {
 		return nil, err
 	}
-	source := strings.TrimSpace(firstNonEmpty(track.URL, track.Query))
+	directSource := strings.TrimSpace(track.StreamURL)
+	source := strings.TrimSpace(firstNonEmpty(directSource, track.URL, track.Query))
 	if source == "" {
 		return nil, ErrMissingSong
+	}
+	if directSource != "" {
+		return y.streamDirect(ctx, tools, directSource, track.StreamHeaders)
 	}
 
 	streamCtx, cancel := context.WithCancel(ctx)
@@ -137,21 +145,7 @@ func (y *YTDLP) Stream(ctx context.Context, track Track) (OpusFrameProvider, err
 		return nil, fmt.Errorf("%w: yt-dlp pipe: %v", ErrTrackStreamFailed, err)
 	}
 
-	ffmpegCmd := exec.CommandContext(streamCtx, tools.FFmpegPath,
-		"-hide_banner",
-		"-loglevel", "error",
-		"-i", "pipe:0",
-		"-vn",
-		"-c:a", "libopus",
-		"-b:a", y.audioBitrate,
-		"-application", "audio",
-		"-compression_level", "5",
-		"-ar", "48000",
-		"-ac", "2",
-		"-frame_duration", "20",
-		"-f", "opus",
-		"pipe:1",
-	)
+	ffmpegCmd := exec.CommandContext(streamCtx, tools.FFmpegPath, ffmpegOpusArgs("pipe:0", y.audioBitrate, nil, false)...)
 	var ffmpegErr limitedBuffer
 	ffmpegCmd.Stdin = ytdlpStdout
 	ffmpegCmd.Stderr = &ffmpegErr
@@ -182,14 +176,126 @@ func (y *YTDLP) Stream(ctx context.Context, track Track) (OpusFrameProvider, err
 	}, nil
 }
 
+func (y *YTDLP) streamDirect(ctx context.Context, tools ToolPaths, source string, headers map[string]string) (OpusFrameProvider, error) {
+	streamCtx, cancel := context.WithCancel(ctx)
+	ffmpegCmd := exec.CommandContext(streamCtx, tools.FFmpegPath, ffmpegOpusArgs(source, y.audioBitrate, headers, true)...)
+	var ffmpegErr limitedBuffer
+	ffmpegCmd.Stderr = &ffmpegErr
+	ffmpegStdout, err := ffmpegCmd.StdoutPipe()
+	if err != nil {
+		cancel()
+		return nil, fmt.Errorf("%w: ffmpeg pipe: %v", ErrTrackStreamFailed, err)
+	}
+	if err := ffmpegCmd.Start(); err != nil {
+		cancel()
+		return nil, fmt.Errorf("%w: start ffmpeg: %v", ErrTrackStreamFailed, err)
+	}
+	return &processOpusProvider{
+		reader:    newOggOpusReader(ffmpegStdout),
+		cancel:    cancel,
+		ffmpeg:    ffmpegCmd,
+		ffmpegErr: &ffmpegErr,
+		logger:    y.logger,
+	}, nil
+}
+
+func ffmpegOpusArgs(input string, bitrate string, headers map[string]string, directHTTP bool) []string {
+	args := []string{"-hide_banner", "-loglevel", "error", "-nostdin"}
+	if directHTTP {
+		args = append(args,
+			"-reconnect", "1",
+			"-reconnect_streamed", "1",
+			"-reconnect_on_network_error", "1",
+			"-reconnect_delay_max", "5",
+		)
+		args = append(args, ffmpegHTTPHeaderArgs(headers)...)
+	}
+	return append(args,
+		"-i", input,
+		"-vn",
+		"-sn",
+		"-dn",
+		"-map", "0:a:0",
+		"-c:a", "libopus",
+		"-b:a", bitrate,
+		"-application", "audio",
+		"-compression_level", "1",
+		"-ar", "48000",
+		"-ac", "2",
+		"-frame_duration", "20",
+		"-f", "opus",
+		"pipe:1",
+	)
+}
+
+func ffmpegHTTPHeaderArgs(headers map[string]string) []string {
+	headers = cleanHTTPHeaders(headers)
+	if len(headers) == 0 {
+		return nil
+	}
+	args := []string{}
+	if userAgent := headerValue(headers, "user-agent"); userAgent != "" {
+		args = append(args, "-user_agent", userAgent)
+	}
+	if referer := headerValue(headers, "referer"); referer != "" {
+		args = append(args, "-referer", referer)
+	}
+	var lines []string
+	for name, value := range headers {
+		switch strings.ToLower(name) {
+		case "user-agent", "referer":
+			continue
+		}
+		lines = append(lines, name+": "+value+"\r\n")
+	}
+	sort.Strings(lines)
+	if len(lines) > 0 {
+		args = append(args, "-headers", strings.Join(lines, ""))
+	}
+	return args
+}
+
+func headerValue(headers map[string]string, name string) string {
+	for key, value := range headers {
+		if strings.EqualFold(key, name) {
+			return value
+		}
+	}
+	return ""
+}
+
+func cleanHTTPHeaders(headers map[string]string) map[string]string {
+	cleaned := map[string]string{}
+	for name, value := range headers {
+		name = cleanHeaderPart(name)
+		value = cleanHeaderPart(value)
+		if name == "" || value == "" {
+			continue
+		}
+		cleaned[name] = value
+	}
+	if len(cleaned) == 0 {
+		return nil
+	}
+	return cleaned
+}
+
+func cleanHeaderPart(value string) string {
+	value = strings.TrimSpace(value)
+	value = strings.ReplaceAll(value, "\r", "")
+	value = strings.ReplaceAll(value, "\n", "")
+	return value
+}
+
 type ytdlpMetadata struct {
-	ID          string  `json:"id"`
-	Title       string  `json:"title"`
-	WebpageURL  string  `json:"webpage_url"`
-	OriginalURL string  `json:"original_url"`
-	URL         string  `json:"url"`
-	Uploader    string  `json:"uploader"`
-	Duration    float64 `json:"duration"`
+	ID          string            `json:"id"`
+	Title       string            `json:"title"`
+	WebpageURL  string            `json:"webpage_url"`
+	OriginalURL string            `json:"original_url"`
+	URL         string            `json:"url"`
+	HTTPHeaders map[string]string `json:"http_headers"`
+	Uploader    string            `json:"uploader"`
+	Duration    float64           `json:"duration"`
 }
 
 type processOpusProvider struct {
@@ -230,12 +336,17 @@ func (p *processOpusProvider) Close() {
 
 func (p *processOpusProvider) wait() error {
 	p.waitOnce.Do(func() {
-		ffmpegErr := p.ffmpeg.Wait()
-		ytdlpErr := p.ytdlp.Wait()
-		if ffmpegErr != nil {
-			p.waitErr = fmt.Errorf("%w: ffmpeg: %v %s", ErrTrackStreamFailed, ffmpegErr, p.ffmpegErr.String())
+		if p.ffmpeg != nil {
+			ffmpegErr := p.ffmpeg.Wait()
+			if ffmpegErr != nil {
+				p.waitErr = fmt.Errorf("%w: ffmpeg: %v %s", ErrTrackStreamFailed, ffmpegErr, p.ffmpegErr.String())
+				return
+			}
+		}
+		if p.ytdlp == nil {
 			return
 		}
+		ytdlpErr := p.ytdlp.Wait()
 		if ytdlpErr != nil {
 			p.waitErr = fmt.Errorf("%w: yt-dlp: %v %s", ErrTrackStreamFailed, ytdlpErr, p.ytdlpErr.String())
 		}

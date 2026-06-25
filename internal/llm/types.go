@@ -12,6 +12,17 @@ type Client interface {
 	Chat(ctx context.Context, request ChatRequest) (ChatResponse, error)
 }
 
+type StreamingClient interface {
+	StreamChat(ctx context.Context, request ChatRequest, onDelta ChatStreamHandler) (ChatResponse, error)
+}
+
+type ChatStreamHandler func(ChatStreamDelta) error
+
+type ChatStreamDelta struct {
+	Content     string
+	HasToolCall bool
+}
+
 type Embedder interface {
 	Embed(ctx context.Context, request EmbeddingRequest) (EmbeddingResponse, error)
 }

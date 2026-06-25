@@ -161,7 +161,7 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 	feedbackService := feedback.NewService(feedbackRepo)
 	toolExecutor.WithScheduleManager(schedulerService)
 	toolExecutor.WithReminderManager(schedulerService)
-	assistantService := assistant.NewService(openRouter, usage, guildConfigs, memoryService, conversations, cfg.OpenRouterModel, cfg.OpenRouterClassifierModel, cfg.OpenRouterFallbackModels).
+	assistantService := assistant.NewService(openRouter, usage, guildConfigs, memoryService, conversations, cfg.OpenRouterModel, cfg.OpenRouterFallbackModels).
 		WithToolExecutor(toolExecutor).
 		WithBilling(billingService).
 		WithCurator(curator)
@@ -211,6 +211,7 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 		composedService.WithDiscordResolver(provider)
 	}
 	worker.Register(discordbot.InteractionJobKind, discord.HandleInteractionJob)
+	worker.Register(discordbot.NaturalMessageJobKind, discord.HandleNaturalMessageJob)
 	worker.Register(composed.EventJobKind, composedService.HandleEventJob)
 	worker.Register(scheduler.JobKind, schedulerService.HandleJob)
 
@@ -260,7 +261,7 @@ func (a *App) Run(ctx context.Context) error {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		if err := a.worker.Run(ctx, "", 5*time.Second); err != nil {
+		if err := a.worker.Run(ctx, "", time.Second); err != nil {
 			errs <- err
 		}
 	}()

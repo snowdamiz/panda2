@@ -7,7 +7,6 @@
   },
   "openrouter": {
     "default_model": "openai/gpt-oss-120b",
-    "classifier_model": "openai/gpt-oss-120b",
     "provider_order": ["cerebras"],
     "allow_provider_fallbacks": false
   },

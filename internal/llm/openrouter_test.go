@@ -260,6 +260,82 @@ func TestOpenRouterChatSendsStructuredResponseFormat(t *testing.T) {
 	}
 }
 
+func TestOpenRouterStreamChatParsesContentAndUsage(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload chatCompletionRequest
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		if !payload.Stream {
+			t.Fatal("expected stream request")
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(`data: {"id":"gen-stream","model":"provider/model","choices":[{"delta":{"content":"hello "}}]}` + "\n\n"))
+		_, _ = w.Write([]byte(`data: {"choices":[{"delta":{"content":"world"}}]}` + "\n\n"))
+		_, _ = w.Write([]byte(`data: {"choices":[],"usage":{"prompt_tokens":2,"completion_tokens":3,"total_tokens":5}}` + "\n\n"))
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+	}))
+	defer server.Close()
+
+	client := NewOpenRouterClient(OpenRouterConfig{APIKey: "key", BaseURL: server.URL})
+	var deltas []string
+	response, err := client.StreamChat(context.Background(), ChatRequest{
+		Model:    "openrouter/auto",
+		Messages: []Message{{Role: "user", Content: "hi"}},
+	}, func(delta ChatStreamDelta) error {
+		deltas = append(deltas, delta.Content)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("StreamChat returned error: %v", err)
+	}
+	if response.Content != "hello world" || response.Model != "provider/model" {
+		t.Fatalf("unexpected streamed response: %+v", response)
+	}
+	if response.Usage.TotalTokens != 5 {
+		t.Fatalf("unexpected usage: %+v", response.Usage)
+	}
+	if len(deltas) != 2 || deltas[0] != "hello " || deltas[1] != "world" {
+		t.Fatalf("unexpected deltas: %+v", deltas)
+	}
+}
+
+func TestOpenRouterStreamChatParsesToolCallDeltas(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(`data: {"id":"gen-tools","model":"provider/model","choices":[{"delta":{"tool_calls":[{"index":0,"id":"call-1","type":"function","function":{"name":"search_"}}]}}]}` + "\n\n"))
+		_, _ = w.Write([]byte(`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"name":"knowledge","arguments":"{\"query\""}}]}}]}` + "\n\n"))
+		_, _ = w.Write([]byte(`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":":\"deploys\"}"}}]}}]}` + "\n\n"))
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+	}))
+	defer server.Close()
+
+	client := NewOpenRouterClient(OpenRouterConfig{APIKey: "key", BaseURL: server.URL})
+	toolDeltaSeen := false
+	response, err := client.StreamChat(context.Background(), ChatRequest{
+		Model:    "openrouter/auto",
+		Messages: []Message{{Role: "user", Content: "hi"}},
+	}, func(delta ChatStreamDelta) error {
+		if delta.HasToolCall {
+			toolDeltaSeen = true
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("StreamChat returned error: %v", err)
+	}
+	if !toolDeltaSeen {
+		t.Fatal("expected tool call delta")
+	}
+	if len(response.ToolCalls) != 1 {
+		t.Fatalf("expected one tool call, got %+v", response.ToolCalls)
+	}
+	call := response.ToolCalls[0]
+	if call.ID != "call-1" || call.Type != "function" || call.Function.Name != "search_knowledge" || call.Function.Arguments != `{"query":"deploys"}` {
+		t.Fatalf("unexpected tool call: %+v", call)
+	}
+}
+
 func TestOpenRouterChatWithoutKey(t *testing.T) {
 	client := NewOpenRouterClient(OpenRouterConfig{BaseURL: "http://127.0.0.1"})
 	_, err := client.Chat(context.Background(), ChatRequest{Messages: []Message{{Role: "user", Content: "hi"}}})
