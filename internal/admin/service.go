@@ -31,25 +31,26 @@ const (
 	RoleProfileAdmin     = "admin"
 	RoleProfileModerator = "moderator"
 
-	PermissionAssistantUse         = "assistant.use"
-	PermissionAssistantUseThreads  = "assistant.use_threads"
-	PermissionAssistantAttachments = "assistant.attachments"
-	PermissionAssistantMemoryRead  = "assistant.memory.read"
-	PermissionAssistantMemoryWrite = "assistant.memory.write"
-	PermissionAssistantWebSearch   = "assistant.web_search"
-	PermissionAssistantSoulWrite   = "assistant.soul.write"
-	PermissionModerationUse        = "moderation.use"
-	PermissionAdminBadge           = "admin.badge"
-	PermissionAdminConfigRead      = "admin.config.read"
-	PermissionAdminConfigWrite     = "admin.config.write"
-	PermissionAdminUsageRead       = "admin.usage.read"
-	PermissionAdminAuditRead       = "admin.audit.read"
-	PermissionAdminMemoryManage    = "admin.memory.manage"
-	PermissionToolComposeDraft     = "tool.compose.draft"
-	PermissionToolComposeApprove   = "tool.compose.approve"
-	PermissionToolComposeInvoke    = "tool.compose.invoke"
-	PermissionToolComposeAudit     = "tool.compose.audit"
-	PermissionOwnerOps             = "owner.ops"
+	PermissionAssistantUse             = "assistant.use"
+	PermissionAssistantUseThreads      = "assistant.use_threads"
+	PermissionAssistantAttachments     = "assistant.attachments"
+	PermissionAssistantImageGeneration = "assistant.image_generation"
+	PermissionAssistantMemoryRead      = "assistant.memory.read"
+	PermissionAssistantMemoryWrite     = "assistant.memory.write"
+	PermissionAssistantWebSearch       = "assistant.web_search"
+	PermissionAssistantSoulWrite       = "assistant.soul.write"
+	PermissionModerationUse            = "moderation.use"
+	PermissionAdminBadge               = "admin.badge"
+	PermissionAdminConfigRead          = "admin.config.read"
+	PermissionAdminConfigWrite         = "admin.config.write"
+	PermissionAdminUsageRead           = "admin.usage.read"
+	PermissionAdminAuditRead           = "admin.audit.read"
+	PermissionAdminMemoryManage        = "admin.memory.manage"
+	PermissionToolComposeDraft         = "tool.compose.draft"
+	PermissionToolComposeApprove       = "tool.compose.approve"
+	PermissionToolComposeInvoke        = "tool.compose.invoke"
+	PermissionToolComposeAudit         = "tool.compose.audit"
+	PermissionOwnerOps                 = "owner.ops"
 
 	minTemperature       = 0
 	maxTemperature       = 2
@@ -63,6 +64,7 @@ var allPermissionNames = []string{
 	PermissionAssistantUse,
 	PermissionAssistantUseThreads,
 	PermissionAssistantAttachments,
+	PermissionAssistantImageGeneration,
 	PermissionAssistantMemoryRead,
 	PermissionAssistantMemoryWrite,
 	PermissionAssistantWebSearch,
@@ -914,6 +916,10 @@ func (s *Service) CanUseThreads(ctx context.Context, request AssistantAccessRequ
 
 func (s *Service) CanUseAttachments(ctx context.Context, request AssistantAccessRequest) (bool, error) {
 	return s.canUseOptionalAssistantPermission(ctx, request, PermissionAssistantAttachments)
+}
+
+func (s *Service) CanUseImageGeneration(ctx context.Context, request AssistantAccessRequest) (bool, error) {
+	return s.canUseOptionalAssistantPermission(ctx, request, PermissionAssistantImageGeneration)
 }
 
 func (s *Service) CanReadMemory(ctx context.Context, request AssistantAccessRequest) (bool, error) {

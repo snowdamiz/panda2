@@ -20,6 +20,7 @@ import (
 	contextsvc "github.com/sn0w/panda2/internal/context"
 	"github.com/sn0w/panda2/internal/features"
 	"github.com/sn0w/panda2/internal/feedback"
+	"github.com/sn0w/panda2/internal/generated"
 	"github.com/sn0w/panda2/internal/llm"
 	"github.com/sn0w/panda2/internal/music"
 	"github.com/sn0w/panda2/internal/ops"
@@ -217,6 +218,49 @@ func (r *Router) WithFeatureService(featureService *features.Service) *Router {
 func (r *Router) WithFeatureInstallIntents(creator FeatureInstallIntentCreator) *Router {
 	r.install = creator
 	return r
+}
+
+func (r *Router) CommitResponseUsage(ctx context.Context, response Response) error {
+	if r == nil || r.billing == nil {
+		return nil
+	}
+	return r.finishResponseUsage(ctx, response, true, map[string]struct{}{})
+}
+
+func (r *Router) ReleaseResponseUsage(ctx context.Context, response Response) error {
+	if r == nil || r.billing == nil {
+		return nil
+	}
+	return r.finishResponseUsage(ctx, response, false, map[string]struct{}{})
+}
+
+func (r *Router) finishResponseUsage(ctx context.Context, response Response, commit bool, seen map[string]struct{}) error {
+	var errs []error
+	for _, reservation := range response.UsageReservations {
+		id := strings.TrimSpace(reservation.ID)
+		if id == "" {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		var err error
+		if commit {
+			err = r.billing.CommitUsage(ctx, reservation)
+		} else {
+			err = r.billing.ReleaseUsage(ctx, reservation)
+		}
+		if err != nil {
+			errs = append(errs, err)
+		}
+	}
+	for _, followup := range response.Followups {
+		if err := r.finishResponseUsage(ctx, followup, commit, seen); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
 }
 
 func (r *Router) Handle(ctx context.Context, request Request) Response {
@@ -457,7 +501,7 @@ func (r *Router) handleOps(ctx context.Context, request Request) Response {
 		if err != nil {
 			return Response{Content: "Ops health check failed.", Ephemeral: true}
 		}
-		return Response{Content: fmt.Sprintf("Health: sqlite=%s discord=%s shards=%s ai_service=%s queued_jobs=%d guild_configs=%d draining=%t incident=%t data_dir=`%s`.", health.SQLite, health.Discord, health.Shards, health.AIService, health.QueuedJobs, health.ConfiguredGuildCount, health.Draining, health.Incident, health.DataDir), Ephemeral: true}
+		return Response{Content: fmt.Sprintf("Health: sqlite=%s discord=%s shards=%s ai_service=%s image_service=%s queued_jobs=%d guild_configs=%d draining=%t incident=%t data_dir=`%s`.", health.SQLite, health.Discord, health.Shards, health.AIService, health.ImageService, health.QueuedJobs, health.ConfiguredGuildCount, health.Draining, health.Incident, health.DataDir), Ephemeral: true}
 	case "guilds":
 		health, err := r.ops.Health(ctx)
 		if err != nil {
@@ -514,6 +558,7 @@ func (r *Router) handleSupport(ctx context.Context, request Request) Response {
 				fmt.Sprintf("- Subscription: `%s`", entitlement.Status),
 				fmt.Sprintf("- AI responses: `%s`", entitlement.UsageLine(billing.MetricAIResponse)),
 				fmt.Sprintf("- Web searches: `%s`", entitlement.UsageLine(billing.MetricWebSearch)),
+				fmt.Sprintf("- Image generations: `%s`", entitlement.UsageLine(billing.MetricImageGeneration)),
 				fmt.Sprintf("- Knowledge storage: `%s`", entitlement.UsageLine(billing.MetricKnowledgeStorageByte)),
 			)
 		} else if errors.Is(err, billing.ErrNoSubscription) {
@@ -2387,6 +2432,9 @@ func (r *Router) allowedToolPermissions(ctx context.Context, request Request) ma
 	if featureEnabled(features.Attachments) {
 		r.addPermissionIfAllowed(ctx, request, permissions, admin.PermissionAssistantAttachments, r.admin.CanUseAttachments)
 	}
+	if featureEnabled(features.ImageGeneration) {
+		r.addPermissionIfAllowed(ctx, request, permissions, admin.PermissionAssistantImageGeneration, r.admin.CanUseImageGeneration)
+	}
 	if featureEnabled(features.Knowledge) {
 		r.addPermissionIfAllowed(ctx, request, permissions, admin.PermissionAssistantMemoryRead, r.admin.CanReadMemory)
 		r.addPermissionIfAllowed(ctx, request, permissions, admin.PermissionAdminMemoryManage, r.admin.CanManageMemory)
@@ -2567,9 +2615,11 @@ func assistantError(err error) Response {
 
 func (r *Router) responseFromAssistantAnswer(ctx context.Context, request Request, answer assistant.AskResponse, threadID, threadName string) Response {
 	response := Response{
-		Content:    answer.Content,
-		ThreadID:   threadID,
-		ThreadName: threadName,
+		Content:           answer.Content,
+		ThreadID:          threadID,
+		ThreadName:        threadName,
+		GeneratedFiles:    generated.CloneFiles(answer.GeneratedFiles),
+		UsageReservations: append([]billing.Reservation(nil), answer.UsageReservations...),
 	}
 	if answer.Card != nil {
 		cardResponse := responseFromAssistantCard(answer.Card)
@@ -2577,6 +2627,8 @@ func (r *Router) responseFromAssistantAnswer(ctx context.Context, request Reques
 			response = cardResponse
 			response.ThreadID = threadID
 			response.ThreadName = threadName
+			response.GeneratedFiles = generated.CloneFiles(answer.GeneratedFiles)
+			response.UsageReservations = append([]billing.Reservation(nil), answer.UsageReservations...)
 			response.Followups = append(response.Followups, Response{Content: answer.Content})
 		} else {
 			response.Content = firstNonEmpty(response.Content, answer.Card.Content)
@@ -2650,7 +2702,7 @@ func answerConfirmations(answer assistant.AskResponse) []assistant.InteractionCo
 }
 
 func assistantAnswerHasPayload(answer assistant.AskResponse) bool {
-	if strings.TrimSpace(answer.Content) != "" || len(answerConfirmations(answer)) > 0 {
+	if strings.TrimSpace(answer.Content) != "" || len(answerConfirmations(answer)) > 0 || len(answer.GeneratedFiles) > 0 {
 		return true
 	}
 	card := answer.Card

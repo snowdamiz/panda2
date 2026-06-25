@@ -1,6 +1,7 @@
 package discord
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -89,6 +90,7 @@ const discordContentLimit = 2000
 const discordEmbedDescriptionLimit = 4096
 const discordEmbedFieldNameLimit = 256
 const discordEmbedFieldValueLimit = 1024
+const discordGeneratedFileLimit = 8 * 1024 * 1024
 
 const (
 	pandaEmbedColor   = 0xff6fae
@@ -552,6 +554,7 @@ func (b *Bot) respondToInteraction(event *events.ApplicationCommandInteractionCr
 		}
 		if request.Command == "chat" && response.ThreadID != "" {
 			if b.postThreadResponse(response) {
+				b.commitResponseUsage(context.Background(), response, requestID, request.Command)
 				_, err := b.client.Rest.UpdateInteractionResponse(
 					b.client.ApplicationID,
 					event.Token(),
@@ -566,7 +569,10 @@ func (b *Bot) respondToInteraction(event *events.ApplicationCommandInteractionCr
 		err := b.updateInteractionResponse(b.client.ApplicationID, event.Token(), response)
 		if err != nil {
 			b.logger.Warn("failed to update interaction response", slog.Any("err", err), slog.String("request_id", requestID), slog.String("command", request.Command))
+			b.releaseResponseUsage(context.Background(), response, requestID, request.Command)
+			return
 		}
+		b.commitResponseUsage(context.Background(), response, requestID, request.Command)
 		return
 	}
 
@@ -580,15 +586,20 @@ func (b *Bot) respondToInteraction(event *events.ApplicationCommandInteractionCr
 	chunks := splitDiscordContent(response.Content)
 	if err := event.CreateMessage(messageCreateFromResponsePart(response, chunks[0], len(chunks) == 1)); err != nil {
 		b.logger.Warn("failed to respond to command", slog.Any("err", err), slog.String("request_id", requestID), slog.String("command", request.Command))
+		b.releaseResponseUsage(context.Background(), response, requestID, request.Command)
 		return
 	}
 	if err := b.createInteractionFollowups(b.client.ApplicationID, event.Token(), response, chunks, 1); err != nil {
 		b.logger.Warn("failed to send command followup", slog.Any("err", err), slog.String("request_id", requestID), slog.String("command", request.Command))
+		b.releaseResponseUsage(context.Background(), response, requestID, request.Command)
 		return
 	}
 	if err := b.createResponseFollowups(b.client.ApplicationID, event.Token(), response.Followups); err != nil {
 		b.logger.Warn("failed to send command response followup", slog.Any("err", err), slog.String("request_id", requestID), slog.String("command", request.Command))
+		b.releaseResponseUsage(context.Background(), response, requestID, request.Command)
+		return
 	}
+	b.commitResponseUsage(context.Background(), response, requestID, request.Command)
 }
 
 func (b *Bot) runDeferredInteraction(ctx context.Context, applicationID snowflake.ID, token, requestID string, request commands.Request) commands.Response {
@@ -705,6 +716,9 @@ func (b *Bot) HandleInteractionJob(ctx context.Context, job store.Job) error {
 	err = b.updateInteractionResponse(applicationID, payload.Token, response)
 	if err != nil {
 		b.logger.Warn("failed to update background interaction response", slog.Any("err", err), slog.Uint64("job_id", uint64(job.ID)), slog.String("command", payload.Task.Command))
+		b.releaseResponseUsage(ctx, response, fmt.Sprintf("job-%d", job.ID), payload.Task.Command)
+	} else {
+		b.commitResponseUsage(ctx, response, fmt.Sprintf("job-%d", job.ID), payload.Task.Command)
 	}
 	return err
 }
@@ -909,10 +923,14 @@ func (b *Bot) recordGatewayGuild(ctx context.Context, source string, guild disgo
 }
 
 func messageCreateFromResponse(response commands.Response) disgoDiscord.MessageCreate {
-	return messageCreateFromResponsePart(response, firstDiscordContentChunk(response.Content), true)
+	return messageCreateFromResponsePartWithFiles(response, firstDiscordContentChunk(response.Content), true, true)
 }
 
 func messageCreateFromResponsePart(response commands.Response, content string, includeComponents bool) disgoDiscord.MessageCreate {
+	return messageCreateFromResponsePartWithFiles(response, content, includeComponents, true)
+}
+
+func messageCreateFromResponsePartWithFiles(response commands.Response, content string, includeComponents bool, includeFiles bool) disgoDiscord.MessageCreate {
 	message := disgoDiscord.NewMessageCreate().WithEphemeral(response.Ephemeral)
 	if response.Poll != nil {
 		if strings.TrimSpace(content) != "" {
@@ -920,6 +938,9 @@ func messageCreateFromResponsePart(response commands.Response, content string, i
 		}
 		if includeComponents {
 			message = message.WithComponents(componentsFromResponse(response)...)
+		}
+		if includeFiles {
+			message = message.WithFiles(discordFilesFromResponse(response)...)
 		}
 		return message.WithPoll(pollCreateFromPoll(*response.Poll))
 	}
@@ -931,18 +952,29 @@ func messageCreateFromResponsePart(response commands.Response, content string, i
 	if includeComponents {
 		message = message.WithComponents(componentsFromResponse(response)...)
 	}
+	if includeFiles {
+		message = message.WithFiles(discordFilesFromResponse(response)...)
+	}
 	return message
 }
 
 func channelMessageCreateFromResponse(response commands.Response) disgoDiscord.MessageCreate {
-	return channelMessageCreateFromResponsePart(response, firstDiscordContentChunk(response.Content), true)
+	return channelMessageCreateFromResponsePartWithFiles(response, firstDiscordContentChunk(response.Content), true, true)
 }
 
 func channelMessageCreateFromResponsePart(response commands.Response, content string, includeComponents bool) disgoDiscord.MessageCreate {
-	return channelMessageCreateFromResponsePartWithReference(response, content, includeComponents, nil)
+	return channelMessageCreateFromResponsePartWithReferenceAndFiles(response, content, includeComponents, nil, true)
 }
 
 func channelMessageCreateFromResponsePartWithReference(response commands.Response, content string, includeComponents bool, reference *disgoDiscord.MessageReference) disgoDiscord.MessageCreate {
+	return channelMessageCreateFromResponsePartWithReferenceAndFiles(response, content, includeComponents, reference, true)
+}
+
+func channelMessageCreateFromResponsePartWithFiles(response commands.Response, content string, includeComponents bool, includeFiles bool) disgoDiscord.MessageCreate {
+	return channelMessageCreateFromResponsePartWithReferenceAndFiles(response, content, includeComponents, nil, includeFiles)
+}
+
+func channelMessageCreateFromResponsePartWithReferenceAndFiles(response commands.Response, content string, includeComponents bool, reference *disgoDiscord.MessageReference, includeFiles bool) disgoDiscord.MessageCreate {
 	message := disgoDiscord.NewMessageCreate()
 	if response.Poll != nil {
 		if strings.TrimSpace(content) != "" {
@@ -953,6 +985,9 @@ func channelMessageCreateFromResponsePartWithReference(response commands.Respons
 		}
 		if reference != nil {
 			message = message.WithMessageReference(reference).WithAllowedMentions(discordReplyAllowedMentions())
+		}
+		if includeFiles {
+			message = message.WithFiles(discordFilesFromResponse(response)...)
 		}
 		return message.WithPoll(pollCreateFromPoll(*response.Poll))
 	}
@@ -967,7 +1002,48 @@ func channelMessageCreateFromResponsePartWithReference(response commands.Respons
 	if reference != nil {
 		message = message.WithMessageReference(reference).WithAllowedMentions(discordReplyAllowedMentions())
 	}
+	if includeFiles {
+		message = message.WithFiles(discordFilesFromResponse(response)...)
+	}
 	return message
+}
+
+func discordFilesFromResponse(response commands.Response) []*disgoDiscord.File {
+	if len(response.GeneratedFiles) == 0 {
+		return nil
+	}
+	files := make([]*disgoDiscord.File, 0, len(response.GeneratedFiles))
+	for _, file := range response.GeneratedFiles {
+		if len(file.Data) == 0 || int64(len(file.Data)) > discordGeneratedFileLimit || !discordGeneratedFileMIME(file.MIMEType) {
+			continue
+		}
+		name := strings.TrimSpace(file.Filename)
+		if name == "" {
+			name = "generated-image" + discordGeneratedFileExtension(file.MIMEType)
+		}
+		files = append(files, disgoDiscord.NewFile(name, limitRunes(strings.TrimSpace(file.AltText), 1024), bytes.NewReader(file.Data)))
+	}
+	return files
+}
+
+func discordGeneratedFileMIME(mimeType string) bool {
+	switch strings.ToLower(strings.TrimSpace(mimeType)) {
+	case "image/png", "image/jpeg", "image/webp":
+		return true
+	default:
+		return false
+	}
+}
+
+func discordGeneratedFileExtension(mimeType string) string {
+	switch strings.ToLower(strings.TrimSpace(mimeType)) {
+	case "image/jpeg":
+		return ".jpg"
+	case "image/webp":
+		return ".webp"
+	default:
+		return ".png"
+	}
 }
 
 func pollCreateFromPoll(poll polls.Poll) disgoDiscord.PollCreate {
@@ -1046,10 +1122,14 @@ func modalCreateFromResponse(response *commands.Modal) disgoDiscord.ModalCreate 
 }
 
 func webhookMessageUpdateFromResponse(response commands.Response) disgoDiscord.MessageUpdate {
-	return webhookMessageUpdateFromResponsePart(response, firstDiscordContentChunk(response.Content), true)
+	return webhookMessageUpdateFromResponsePartWithFiles(response, firstDiscordContentChunk(response.Content), true, true)
 }
 
 func webhookMessageUpdateFromResponsePart(response commands.Response, content string, includeComponents bool) disgoDiscord.MessageUpdate {
+	return webhookMessageUpdateFromResponsePartWithFiles(response, content, includeComponents, true)
+}
+
+func webhookMessageUpdateFromResponsePartWithFiles(response commands.Response, content string, includeComponents bool, includeFiles bool) disgoDiscord.MessageUpdate {
 	message := disgoDiscord.NewMessageUpdate()
 	if embed, ok := embedFromResponsePart(response, content); ok {
 		message = message.WithContent("").WithEmbeds(embed).WithSuppressEmbeds(false)
@@ -1058,6 +1138,9 @@ func webhookMessageUpdateFromResponsePart(response commands.Response, content st
 	}
 	if includeComponents {
 		message = message.WithComponents(componentsFromResponse(response)...)
+	}
+	if includeFiles {
+		message = message.WithFiles(discordFilesFromResponse(response)...)
 	}
 	return message
 }
@@ -1071,7 +1154,7 @@ func (b *Bot) updateInteractionResponse(applicationID snowflake.ID, token string
 	_, err := b.client.Rest.UpdateInteractionResponse(
 		applicationID,
 		token,
-		webhookMessageUpdateFromResponsePart(response, chunks[0], len(chunks) == 1),
+		webhookMessageUpdateFromResponsePartWithFiles(response, chunks[0], len(chunks) == 1, true),
 	)
 	if err != nil {
 		return err
@@ -1087,7 +1170,7 @@ func (b *Bot) createInteractionFollowups(applicationID snowflake.ID, token strin
 		_, err := b.client.Rest.CreateFollowupMessage(
 			applicationID,
 			token,
-			messageCreateFromResponsePart(response, chunks[index], index == len(chunks)-1),
+			messageCreateFromResponsePartWithFiles(response, chunks[index], index == len(chunks)-1, false),
 		)
 		if err != nil {
 			return err
@@ -1104,7 +1187,7 @@ func (b *Bot) createResponseFollowups(applicationID snowflake.ID, token string, 
 				_, err := b.client.Rest.CreateFollowupMessage(
 					applicationID,
 					token,
-					messageCreateFromResponsePart(response, chunk, index == len(chunks)-1),
+					messageCreateFromResponsePartWithFiles(response, chunk, index == len(chunks)-1, index == 0),
 				)
 				if err != nil {
 					return err
@@ -1130,7 +1213,7 @@ func (b *Bot) sendChannelResponse(channelID snowflake.ID, response commands.Resp
 			if index > 0 {
 				chunkReference = nil
 			}
-			message := channelMessageCreateFromResponsePartWithReference(response, chunk, index == len(chunks)-1, chunkReference)
+			message := channelMessageCreateFromResponsePartWithReferenceAndFiles(response, chunk, index == len(chunks)-1, chunkReference, index == 0)
 			if _, err := b.client.Rest.CreateMessage(channelID, message); err != nil {
 				return err
 			}
@@ -1609,9 +1692,37 @@ func (b *Bot) respondToNaturalMessage(ctx context.Context, channelID snowflake.I
 			slog.String("channel_id", request.ChannelID),
 			slog.String("request_id", request.RequestID),
 		)
+		b.releaseResponseUsage(ctx, response, request.RequestID, request.Command)
 		return err
 	}
+	b.commitResponseUsage(ctx, response, request.RequestID, request.Command)
 	return nil
+}
+
+func (b *Bot) commitResponseUsage(ctx context.Context, response commands.Response, requestID, command string) {
+	if b == nil || b.router == nil {
+		return
+	}
+	if err := b.router.CommitResponseUsage(ctx, response); err != nil && b.logger != nil {
+		b.logger.Warn("failed to commit response usage",
+			slog.Any("err", err),
+			slog.String("request_id", requestID),
+			slog.String("command", command),
+		)
+	}
+}
+
+func (b *Bot) releaseResponseUsage(ctx context.Context, response commands.Response, requestID, command string) {
+	if b == nil || b.router == nil {
+		return
+	}
+	if err := b.router.ReleaseResponseUsage(ctx, response); err != nil && b.logger != nil {
+		b.logger.Warn("failed to release response usage",
+			slog.Any("err", err),
+			slog.String("request_id", requestID),
+			slog.String("command", command),
+		)
+	}
 }
 
 func (b *Bot) preflightNaturalMessageReply(request commands.Request) error {
@@ -1646,7 +1757,8 @@ func hasDirectChannelResponsePayload(response commands.Response) bool {
 		len(response.Actions) > 0 ||
 		len(response.Confirmations) > 0 ||
 		response.Confirmation != nil ||
-		response.Feedback != nil
+		response.Feedback != nil ||
+		len(response.GeneratedFiles) > 0
 }
 
 func containsCapabilityAntiPattern(content, pattern string) bool {

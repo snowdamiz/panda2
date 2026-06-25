@@ -478,6 +478,7 @@ type EntitlementSnapshot struct {
 	GraceState                 string     `gorm:"index;not null;size:32"`
 	AIResponsesLimit           int        `gorm:"not null;default:0"`
 	WebSearchesLimit           int        `gorm:"not null;default:0"`
+	ImageGenerationsLimit      int        `gorm:"not null;default:0"`
 	KnowledgeStorageBytesLimit int64      `gorm:"not null;default:0"`
 	SchedulesLimit             int        `gorm:"not null;default:0"`
 	RetentionDays              int        `gorm:"not null;default:0"`
@@ -610,6 +611,8 @@ type UsagePeriod struct {
 	AIResponsesReserved           int       `gorm:"not null;default:0"`
 	WebSearchesConsumed           int       `gorm:"not null;default:0"`
 	WebSearchesReserved           int       `gorm:"not null;default:0"`
+	ImageGenerationsConsumed      int       `gorm:"not null;default:0"`
+	ImageGenerationsReserved      int       `gorm:"not null;default:0"`
 	KnowledgeStorageBytesConsumed int64     `gorm:"not null;default:0"`
 	KnowledgeStorageBytesReserved int64     `gorm:"not null;default:0"`
 	ScheduledRunsConsumed         int       `gorm:"not null;default:0"`

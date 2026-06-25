@@ -18,6 +18,7 @@ import (
 	"github.com/sn0w/panda2/internal/billing"
 	"github.com/sn0w/panda2/internal/curation"
 	"github.com/sn0w/panda2/internal/features"
+	"github.com/sn0w/panda2/internal/generated"
 	"github.com/sn0w/panda2/internal/llm"
 	"github.com/sn0w/panda2/internal/memory"
 	"github.com/sn0w/panda2/internal/repository"
@@ -96,14 +97,16 @@ type AskRequest struct {
 }
 
 type AskResponse struct {
-	Content       string
-	Model         string
-	Usage         llm.Usage
-	Confirmation  *InteractionConfirmation
-	Confirmations []InteractionConfirmation
-	Card          *ToolCard
-	UsedWebSearch bool
-	Silent        bool
+	Content           string
+	Model             string
+	Usage             llm.Usage
+	Confirmation      *InteractionConfirmation
+	Confirmations     []InteractionConfirmation
+	Card              *ToolCard
+	GeneratedFiles    []generated.File
+	UsageReservations []billing.Reservation
+	UsedWebSearch     bool
+	Silent            bool
 }
 
 type InteractionConfirmation struct {
@@ -308,7 +311,7 @@ func (s *Service) chat(ctx context.Context, request AskRequest, options chatOpti
 	messages = append(messages, llm.Message{Role: "user", Content: chatUserMessageContent(request)})
 
 	start := time.Now()
-	response, confirmations, card, sourceLinks, usedWebSearch, silent, err := s.completeWithToolsWithOptions(ctx, config, toolExecutionContext{
+	response, confirmations, card, sourceLinks, generatedFiles, usageReservations, usedWebSearch, silent, err := s.completeWithToolsWithOptions(ctx, config, toolExecutionContext{
 		RequestID:                    request.RequestID,
 		ActorID:                      request.UserID,
 		ChannelID:                    request.ChannelID,
@@ -369,7 +372,7 @@ func (s *Service) chat(ctx context.Context, request AskRequest, options chatOpti
 		Response:  content,
 	})
 
-	return AskResponse{Content: content, Model: response.Model, Usage: response.Usage, Confirmation: firstConfirmation(confirmations), Confirmations: cloneConfirmations(confirmations), Card: card, UsedWebSearch: usedWebSearch}, nil
+	return AskResponse{Content: content, Model: response.Model, Usage: response.Usage, Confirmation: firstConfirmation(confirmations), Confirmations: cloneConfirmations(confirmations), Card: card, GeneratedFiles: generated.CloneFiles(generatedFiles), UsageReservations: append([]billing.Reservation(nil), usageReservations...), UsedWebSearch: usedWebSearch}, nil
 }
 
 func chatReplyContextMessage(request AskRequest) llm.Message {
@@ -438,7 +441,7 @@ func (s *Service) complete(ctx context.Context, request TaskRequest) (AskRespons
 	}
 
 	start := time.Now()
-	response, confirmations, card, sourceLinks, usedWebSearch, err := s.completeWithTools(ctx, config, toolExecutionContext{
+	response, confirmations, card, sourceLinks, generatedFiles, usageReservations, usedWebSearch, err := s.completeWithTools(ctx, config, toolExecutionContext{
 		RequestID:                    request.RequestID,
 		ActorID:                      request.UserID,
 		ChannelID:                    request.ChannelID,
@@ -479,7 +482,7 @@ func (s *Service) complete(ctx context.Context, request TaskRequest) (AskRespons
 		Prompt:    request.Input,
 		Response:  content,
 	})
-	return AskResponse{Content: content, Model: response.Model, Usage: response.Usage, Confirmation: firstConfirmation(confirmations), Confirmations: cloneConfirmations(confirmations), Card: card, UsedWebSearch: usedWebSearch}, nil
+	return AskResponse{Content: content, Model: response.Model, Usage: response.Usage, Confirmation: firstConfirmation(confirmations), Confirmations: cloneConfirmations(confirmations), Card: card, GeneratedFiles: generated.CloneFiles(generatedFiles), UsageReservations: append([]billing.Reservation(nil), usageReservations...), UsedWebSearch: usedWebSearch}, nil
 }
 
 func (s *Service) curateInteraction(ctx context.Context, interaction curation.Interaction) {
@@ -580,12 +583,12 @@ func (s *Service) guildConfig(ctx context.Context, guildID string) (store.GuildC
 	return config, true, nil
 }
 
-func (s *Service) completeWithTools(ctx context.Context, config store.GuildConfig, toolContext toolExecutionContext, request llm.ChatRequest) (llm.ChatResponse, []InteractionConfirmation, *ToolCard, []tools.SourceLink, bool, error) {
-	response, confirmations, card, sourceLinks, usedWebSearch, _, err := s.completeWithToolsWithOptions(ctx, config, toolContext, request, completionOptions{})
-	return response, confirmations, card, sourceLinks, usedWebSearch, err
+func (s *Service) completeWithTools(ctx context.Context, config store.GuildConfig, toolContext toolExecutionContext, request llm.ChatRequest) (llm.ChatResponse, []InteractionConfirmation, *ToolCard, []tools.SourceLink, []generated.File, []billing.Reservation, bool, error) {
+	response, confirmations, card, sourceLinks, generatedFiles, usageReservations, usedWebSearch, _, err := s.completeWithToolsWithOptions(ctx, config, toolContext, request, completionOptions{})
+	return response, confirmations, card, sourceLinks, generatedFiles, usageReservations, usedWebSearch, err
 }
 
-func (s *Service) completeWithToolsWithOptions(ctx context.Context, config store.GuildConfig, toolContext toolExecutionContext, request llm.ChatRequest, options completionOptions) (llm.ChatResponse, []InteractionConfirmation, *ToolCard, []tools.SourceLink, bool, bool, error) {
+func (s *Service) completeWithToolsWithOptions(ctx context.Context, config store.GuildConfig, toolContext toolExecutionContext, request llm.ChatRequest, options completionOptions) (llm.ChatResponse, []InteractionConfirmation, *ToolCard, []tools.SourceLink, []generated.File, []billing.Reservation, bool, bool, error) {
 	access := toolAccess(config, toolContext.AllowedPermissions, toolContext.AllowedTools, toolContext.RestrictedTools, toolContext.EnabledFeatures, toolContext.FeatureGateActive, toolContext.RequireExplicitComposedTools)
 	if s.toolExecutor != nil && len(access.Permissions) > 0 {
 		request.Tools = modelCallableTools(s.toolExecutor.OpenRouterToolsForRequest(ctx, tools.DynamicToolListRequest{
@@ -603,16 +606,18 @@ func (s *Service) completeWithToolsWithOptions(ctx context.Context, config store
 	var card *ToolCard
 	cardContentEligible := true
 	var sourceLinks []tools.SourceLink
+	var generatedFiles []generated.File
+	var usageReservations []billing.Reservation
 	usedWebSearch := false
 	staleCapabilityRetryUsed := false
 
 	for round := 0; ; round++ {
 		response, silent, err := s.chatCompletionForRound(ctx, config, request, round, options)
 		if silent {
-			return response, confirmations, card, sourceLinks, usedWebSearch, true, nil
+			return response, confirmations, card, sourceLinks, generatedFiles, usageReservations, usedWebSearch, true, nil
 		}
 		if err != nil || s.toolExecutor == nil {
-			return response, confirmations, card, sourceLinks, usedWebSearch, false, err
+			return response, confirmations, card, sourceLinks, generatedFiles, usageReservations, usedWebSearch, false, err
 		}
 		if len(response.ToolCalls) == 0 {
 			if containsTextToolCallMarkup(response.Content) {
@@ -659,10 +664,10 @@ func (s *Service) completeWithToolsWithOptions(ctx context.Context, config store
 				request.Messages = messages
 				continue
 			}
-			return response, confirmations, card, sourceLinks, usedWebSearch, false, nil
+			return response, confirmations, card, sourceLinks, generatedFiles, usageReservations, usedWebSearch, false, nil
 		}
 		if round >= maxToolCallRounds {
-			return response, confirmations, card, sourceLinks, usedWebSearch, false, fmt.Errorf("assistant exceeded maximum tool-call rounds (%d)", maxToolCallRounds)
+			return response, confirmations, card, sourceLinks, generatedFiles, usageReservations, usedWebSearch, false, fmt.Errorf("assistant exceeded maximum tool-call rounds (%d)", maxToolCallRounds)
 		}
 
 		messages := append([]llm.Message{}, request.Messages...)
@@ -687,6 +692,8 @@ func (s *Service) completeWithToolsWithOptions(ctx context.Context, config store
 				Call:           call,
 			})
 			message := result.Message
+			generatedFiles = append(generatedFiles, result.GeneratedFiles...)
+			usageReservations = append(usageReservations, result.UsageReservations...)
 			if err != nil {
 				slog.Warn("assistant tool call failed",
 					slog.Any("err", err),
@@ -1485,10 +1492,12 @@ func escapeMarkdownSourceLabel(label string) string {
 
 func toolAvailabilityMessage(availableTools []llm.Tool, access tools.ToolAccess) string {
 	names := make([]string, 0, len(availableTools))
+	nameSet := map[string]struct{}{}
 	for _, tool := range availableTools {
 		name := strings.TrimSpace(tool.Function.Name)
 		if name != "" {
 			names = append(names, name)
+			nameSet[strings.NewReplacer(".", "_").Replace(strings.ToLower(name))] = struct{}{}
 		}
 	}
 	sort.Strings(names)
@@ -1500,10 +1509,14 @@ func toolAvailabilityMessage(availableTools []llm.Tool, access tools.ToolAccess)
 	}
 	adminOnlyNotice := ""
 	if adminOnlyForUser {
-		adminOnlyNotice = " This server's tool policy is `admin_only`; normal chat and any listed web search tool are still available, but broader tools are disabled for users right now. If the user asks to use an unavailable tool, explain that an admin can enable broader access later."
+		adminOnlyNotice = " This server's tool policy is `admin_only`; normal chat, any listed web search tool, and any listed image generation tool are still available, but broader tools are disabled for users right now. If the user asks to use an unavailable tool, explain that an admin can enable broader access later."
 	}
 	disabledFeatureNotice := disabledFeatureAvailabilityNotice(access)
 	contextResolutionNotice := " If recent Discord context resolves a short or elliptical summon to a specific prior question, action, or request for Panda's opinion, answer that resolved request with the current tool constraints. Do not replace it with a generic capability rundown unless the resolved request is genuinely asking what Panda can do."
+	imageCreationNotice := ""
+	if _, ok := nameSet["panda_generate_image"]; ok {
+		imageCreationNotice = " Visual creation routing: when the user asks Panda to create, make, draw, generate, design, or render a visual asset such as a meme, sticker, icon, illustration, sprite sheet, logo, avatar, or poster, call the image generation tool. Do not satisfy those creation requests by searching for or linking existing image pages unless the user explicitly asks to find, browse, compare, or cite existing images."
+	}
 	if len(names) == 0 {
 		return "Tool availability for this request and user: no function tools are currently exposed to Panda. If asked what tools or capabilities Panda has, answer for the current user only, say that no function tools are available in this context, and do not list generic model/platform tools." + contextResolutionNotice + accessNotice + adminOnlyNotice + disabledFeatureNotice
 	}
@@ -1511,7 +1524,7 @@ func toolAvailabilityMessage(availableTools []llm.Tool, access tools.ToolAccess)
 	if strings.TrimSpace(overview) == "" {
 		overview = "Custom tools\n- Custom or specialized server capabilities are available."
 	}
-	return "Internal tool availability for this request and user. Do not reproduce or summarize this block unless the user explicitly asks what Panda can do. current user-scoped capability overview derived from the actual exposed function tools:\n" + overview + "\nAnswer capability questions directly from this overview and the provided function definitions; do not call a tool only to list capabilities. For direct action requests, use the relevant current function tools instead of summarizing available capabilities." + contextResolutionNotice + " This current availability block overrides older chat history, reply context, or previous assistant capability answers. If history contains different capabilities, exact tool IDs, internal listing/debug wording, or a different enabled/disabled state, treat that history as stale and do not copy it. For broad questions like \"what can you do\", answer in natural user-facing categories with short bullets, not tables. When more than three overview sections are present, use the overview's section labels as headings and include the meaningful bullets under each; do not collapse the answer into one-line categories. Do not say \"I can help with N things\" because the categories may contain multiple capabilities. Do not present internal listing/debug helpers as user-facing capabilities. Mention exact function/tool names only when the user explicitly asks for exact tool names, API names, or internal tool IDs. When the user's request contains multiple actions, call all needed function tools in the same assistant turn and preserve the requested order for dependent actions. Do not describe tools available to other users or roles. Do not claim arbitrary webpage browsing, image generation or analysis, code execution, hidden tools, or platform abilities unless they are represented by the current function tools." + accessNotice + adminOnlyNotice + disabledFeatureNotice
+	return "Internal tool availability for this request and user. Do not reproduce or summarize this block unless the user explicitly asks what Panda can do. current user-scoped capability overview derived from the actual exposed function tools:\n" + overview + "\nAnswer capability questions directly from this overview and the provided function definitions; do not call a tool only to list capabilities. For direct action requests, use the relevant current function tools instead of summarizing available capabilities." + contextResolutionNotice + imageCreationNotice + " This current availability block overrides older chat history, reply context, or previous assistant capability answers. If history contains different capabilities, exact tool IDs, internal listing/debug wording, or a different enabled/disabled state, treat that history as stale and do not copy it. For broad questions like \"what can you do\", answer in natural user-facing categories with short bullets, not tables. When more than three overview sections are present, use the overview's section labels as headings and include the meaningful bullets under each; do not collapse the answer into one-line categories. Do not say \"I can help with N things\" because the categories may contain multiple capabilities. Do not present internal listing/debug helpers as user-facing capabilities. Mention exact function/tool names only when the user explicitly asks for exact tool names, API names, or internal tool IDs. When the user's request contains multiple actions, call all needed function tools in the same assistant turn and preserve the requested order for dependent actions. Do not describe tools available to other users or roles. Do not claim arbitrary webpage browsing, image generation or analysis, code execution, hidden tools, or platform abilities unless they are represented by the current function tools." + accessNotice + adminOnlyNotice + disabledFeatureNotice
 }
 
 func toolAccessHasAdminPermission(access tools.ToolAccess) bool {

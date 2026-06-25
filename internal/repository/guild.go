@@ -42,6 +42,54 @@ func (r *GuildRepository) Get(ctx context.Context, guildID string) (store.Guild,
 	return findGuildByID(r.db.WithContext(ctx), guildID)
 }
 
+// GuildListFilter narrows and paginates a guild listing.
+type GuildListFilter struct {
+	Search string
+	Limit  int
+	Offset int
+}
+
+const (
+	guildListDefaultLimit = 50
+	guildListMaxLimit     = 200
+)
+
+// List returns guilds matching the filter ordered by most recently joined,
+// along with the total count of matches ignoring pagination.
+func (r *GuildRepository) List(ctx context.Context, filter GuildListFilter) ([]store.Guild, int64, error) {
+	query := r.db.WithContext(ctx).Model(&store.Guild{})
+	if search := strings.TrimSpace(filter.Search); search != "" {
+		like := "%" + search + "%"
+		query = query.Where(
+			"guild_id LIKE ? OR name LIKE ? OR owner_user_id LIKE ? OR installed_by_user_id LIKE ?",
+			like, like, like, like,
+		)
+	}
+
+	var total int64
+	if err := query.Count(&total).Error; err != nil {
+		return nil, 0, err
+	}
+
+	limit := filter.Limit
+	if limit <= 0 {
+		limit = guildListDefaultLimit
+	}
+	if limit > guildListMaxLimit {
+		limit = guildListMaxLimit
+	}
+	offset := filter.Offset
+	if offset < 0 {
+		offset = 0
+	}
+
+	var guilds []store.Guild
+	if err := query.Order("joined_at DESC").Limit(limit).Offset(offset).Find(&guilds).Error; err != nil {
+		return nil, 0, err
+	}
+	return guilds, total, nil
+}
+
 func (r *GuildRepository) upsertInstall(ctx context.Context, install GuildInstall, status string, leftAt *time.Time, overwriteInstaller bool) (store.Guild, error) {
 	now := time.Now().UTC()
 	if install.AuthorizedAt.IsZero() {

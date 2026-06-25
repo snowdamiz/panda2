@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -19,6 +20,7 @@ import (
 	"github.com/sn0w/panda2/internal/commands"
 	"github.com/sn0w/panda2/internal/composed"
 	"github.com/sn0w/panda2/internal/config"
+	"github.com/sn0w/panda2/internal/generated"
 	"github.com/sn0w/panda2/internal/polls"
 	"github.com/sn0w/panda2/internal/store"
 )
@@ -833,6 +835,71 @@ func TestPollOnlyResponseIsDispatchable(t *testing.T) {
 	}
 	if hasChannelResponsePayload(commands.Response{}) {
 		t.Fatal("empty response should not be dispatched")
+	}
+}
+
+func TestGeneratedFileOnlyResponseIsDispatchableAndAttached(t *testing.T) {
+	response := commands.Response{
+		GeneratedFiles: []generated.File{{
+			Filename: "panda-icon.png",
+			MIMEType: "image/png",
+			Data:     []byte("image-bytes"),
+			AltText:  "Panda icon",
+		}},
+	}
+	if !hasChannelResponsePayload(response) {
+		t.Fatal("generated-file-only response should be dispatchable")
+	}
+	message := messageCreateFromResponse(response)
+	if len(message.Files) != 1 {
+		t.Fatalf("expected one attached file, got %+v", message.Files)
+	}
+	file := message.Files[0]
+	if file.Name != "panda-icon.png" || file.Description != "Panda icon" {
+		t.Fatalf("unexpected file metadata: %+v", file)
+	}
+	data, err := io.ReadAll(file.Reader)
+	if err != nil {
+		t.Fatalf("read attached file: %v", err)
+	}
+	if string(data) != "image-bytes" {
+		t.Fatalf("unexpected file bytes: %q", string(data))
+	}
+}
+
+func TestGeneratedFilesAttachOnlyToFirstResponseChunk(t *testing.T) {
+	response := commands.Response{
+		Content: strings.Repeat("x", discordContentLimit+10),
+		GeneratedFiles: []generated.File{{
+			Filename: "sprite.webp",
+			MIMEType: "image/webp",
+			Data:     []byte("image-bytes"),
+		}},
+	}
+	chunks := splitDiscordContent(response.Content)
+	if len(chunks) < 2 {
+		t.Fatalf("expected chunked response, got %d chunks", len(chunks))
+	}
+	first := messageCreateFromResponsePartWithFiles(response, chunks[0], false, true)
+	second := messageCreateFromResponsePartWithFiles(response, chunks[1], true, false)
+	if len(first.Files) != 1 {
+		t.Fatalf("expected generated file on first chunk, got %+v", first.Files)
+	}
+	if len(second.Files) != 0 {
+		t.Fatalf("expected no generated files on later chunks, got %+v", second.Files)
+	}
+}
+
+func TestGeneratedFileProtectionsSkipInvalidAttachments(t *testing.T) {
+	response := commands.Response{
+		GeneratedFiles: []generated.File{
+			{Filename: "bad.gif", MIMEType: "image/gif", Data: []byte("gif")},
+			{Filename: "huge.png", MIMEType: "image/png", Data: make([]byte, discordGeneratedFileLimit+1)},
+			{Filename: "empty.png", MIMEType: "image/png"},
+		},
+	}
+	if files := discordFilesFromResponse(response); len(files) != 0 {
+		t.Fatalf("expected invalid generated files to be skipped, got %+v", files)
 	}
 }
 

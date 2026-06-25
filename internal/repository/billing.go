@@ -21,6 +21,8 @@ type BillingUsageTotals struct {
 	AIResponsesReserved           int64
 	WebSearchesConsumed           int64
 	WebSearchesReserved           int64
+	ImageGenerationsConsumed      int64
+	ImageGenerationsReserved      int64
 	KnowledgeStorageBytesConsumed int64
 	KnowledgeStorageBytesReserved int64
 	ScheduledRunsConsumed         int64
@@ -870,6 +872,8 @@ func consumedColumn(metric string) string {
 		return "ai_responses_consumed"
 	case "web_search":
 		return "web_searches_consumed"
+	case "image_generation":
+		return "image_generations_consumed"
 	case "knowledge_storage_byte":
 		return "knowledge_storage_bytes_consumed"
 	case "scheduled_run":
@@ -887,6 +891,8 @@ func reservedColumn(metric string) string {
 		return "ai_responses_reserved"
 	case "web_search":
 		return "web_searches_reserved"
+	case "image_generation":
+		return "image_generations_reserved"
 	case "knowledge_storage_byte":
 		return "knowledge_storage_bytes_reserved"
 	case "scheduled_run":
@@ -904,6 +910,8 @@ func totalsFromPeriod(period store.UsagePeriod) BillingUsageTotals {
 		AIResponsesReserved:           int64(period.AIResponsesReserved),
 		WebSearchesConsumed:           int64(period.WebSearchesConsumed),
 		WebSearchesReserved:           int64(period.WebSearchesReserved),
+		ImageGenerationsConsumed:      int64(period.ImageGenerationsConsumed),
+		ImageGenerationsReserved:      int64(period.ImageGenerationsReserved),
 		KnowledgeStorageBytesConsumed: period.KnowledgeStorageBytesConsumed,
 		KnowledgeStorageBytesReserved: period.KnowledgeStorageBytesReserved,
 		ScheduledRunsConsumed:         int64(period.ScheduledRunsConsumed),
@@ -919,6 +927,8 @@ func metricConsumed(totals BillingUsageTotals, metric string) int64 {
 		return totals.AIResponsesConsumed
 	case "web_search":
 		return totals.WebSearchesConsumed
+	case "image_generation":
+		return totals.ImageGenerationsConsumed
 	case "knowledge_storage_byte":
 		return totals.KnowledgeStorageBytesConsumed
 	case "scheduled_run":
@@ -936,6 +946,8 @@ func metricReserved(totals BillingUsageTotals, metric string) int64 {
 		return totals.AIResponsesReserved
 	case "web_search":
 		return totals.WebSearchesReserved
+	case "image_generation":
+		return totals.ImageGenerationsReserved
 	case "knowledge_storage_byte":
 		return totals.KnowledgeStorageBytesReserved
 	case "scheduled_run":

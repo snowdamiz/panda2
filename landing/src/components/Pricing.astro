@@ -12,6 +12,10 @@ const planRows = [
     values: planOptions.map((plan) => plan.searches.replace(' web searches', '')),
   },
   {
+    label: 'Images',
+    values: planOptions.map((plan) => plan.images.replace(' image generations', '')),
+  },
+  {
     label: 'Knowledge',
     values: planOptions.map((plan) => plan.storage.replace(' knowledge', '')),
   },
@@ -46,7 +50,7 @@ const planCheckoutUrl = (slug: string) => `${siteMeta.billingUrl}?plan=${slug}`;
     <div class="pricing-board reveal">
       <div class="pricing-board-header">
         <span>SERVER RATE SHEET</span>
-        <span>Trial: 14 days / 250 AI / 20 search / 25 MB storage</span>
+        <span>Trial: 14 days / 250 AI / 20 search / 5 images / 25 MB storage</span>
       </div>
 
       <div class="pricing-table-wrap">

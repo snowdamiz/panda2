@@ -511,6 +511,92 @@ func TestActiveInstallTrialBackfillCreatesFreeTrialSubscriptions(t *testing.T) {
 	}
 }
 
+func TestImageGenerationDefaultMigrationBackfillsExistingAssistantGuilds(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(filepath.Join(t.TempDir(), "image-generation-backfill.db")), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open seed db: %v", err)
+	}
+	if err := runMigrationsBeforeVersion(db, 32); err != nil {
+		t.Fatalf("seed prior migrations: %v", err)
+	}
+	now := time.Date(2026, 6, 25, 18, 0, 0, 0, time.UTC)
+	leftAt := now.Add(-time.Hour)
+	guilds := []struct {
+		guildID     string
+		status      string
+		installerID string
+		leftAt      *time.Time
+	}{
+		{guildID: "guild-default", status: "active", installerID: "installer-1"},
+		{guildID: "guild-custom", status: "active", installerID: "installer-2"},
+		{guildID: "guild-disabled", status: "active", installerID: "installer-3"},
+		{guildID: "guild-no-assistant", status: "active", installerID: "installer-4"},
+		{guildID: "guild-left", status: "active", installerID: "installer-5", leftAt: &leftAt},
+		{guildID: "guild-inactive", status: "inactive", installerID: "installer-6"},
+	}
+	for _, guild := range guilds {
+		if err := db.Exec(`INSERT INTO guilds (
+			guild_id, name, install_status, owner_user_id, installed_by_user_id, locale, joined_at, left_at, created_at, updated_at
+		) VALUES (?, ?, ?, 'owner-1', ?, 'en-US', ?, ?, ?, ?)`,
+			guild.guildID, guild.guildID, guild.status, guild.installerID, now, guild.leftAt, now, now).Error; err != nil {
+			t.Fatalf("seed guild %s: %v", guild.guildID, err)
+		}
+	}
+	featureRows := []struct {
+		guildID   string
+		featureID string
+		enabled   int
+		source    string
+		actor     string
+	}{
+		{guildID: "guild-default", featureID: "assistant_chat", enabled: 1, source: "migration:default_preset", actor: "installer-1"},
+		{guildID: "guild-custom", featureID: "assistant_chat", enabled: 1, source: "intent-custom", actor: "installer-2"},
+		{guildID: "guild-disabled", featureID: "assistant_chat", enabled: 1, source: "intent-disabled", actor: "installer-3"},
+		{guildID: "guild-disabled", featureID: "image_generation", enabled: 0, source: "admin-disabled", actor: "installer-3"},
+		{guildID: "guild-no-assistant", featureID: "web_search", enabled: 1, source: "intent-no-assistant", actor: "installer-4"},
+		{guildID: "guild-left", featureID: "assistant_chat", enabled: 1, source: "intent-left", actor: "installer-5"},
+		{guildID: "guild-inactive", featureID: "assistant_chat", enabled: 1, source: "intent-inactive", actor: "installer-6"},
+	}
+	for _, row := range featureRows {
+		if err := db.Exec(`INSERT INTO guild_features (guild_id, feature_id, enabled, source_install_intent_id, enabled_by_user_id, created_at, updated_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?)`, row.guildID, row.featureID, row.enabled, row.source, row.actor, now, now).Error; err != nil {
+			t.Fatalf("seed feature %s/%s: %v", row.guildID, row.featureID, err)
+		}
+	}
+
+	if err := RunMigrations(db); err != nil {
+		t.Fatalf("RunMigrations: %v", err)
+	}
+
+	var count int64
+	for _, guildID := range []string{"guild-default", "guild-custom"} {
+		if err := db.Table("guild_features").Where("guild_id = ? AND feature_id = ? AND enabled = ?", guildID, "image_generation", true).Count(&count).Error; err != nil {
+			t.Fatalf("query backfilled image feature for %s: %v", guildID, err)
+		}
+		if count != 1 {
+			t.Fatalf("expected %s to receive image_generation, got %d", guildID, count)
+		}
+	}
+	if err := db.Table("guild_features").Where("guild_id = ? AND feature_id = ? AND enabled = ?", "guild-disabled", "image_generation", false).Count(&count).Error; err != nil {
+		t.Fatalf("query explicitly disabled image feature: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("expected explicitly disabled image_generation row to stay disabled, got %d", count)
+	}
+	if err := db.Table("guild_features").Where("guild_id IN ? AND feature_id = ?", []string{"guild-no-assistant", "guild-left", "guild-inactive"}, "image_generation").Count(&count).Error; err != nil {
+		t.Fatalf("query skipped guilds: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("expected guilds without active assistant installs to stay unchanged, got %d image rows", count)
+	}
+	if err := db.Table("audit_events").Where("action = ? AND guild_id IN ?", "guild_features.default_enabled", []string{"guild-default", "guild-custom"}).Count(&count).Error; err != nil {
+		t.Fatalf("query backfill audit events: %v", err)
+	}
+	if count != 2 {
+		t.Fatalf("expected one audit event per backfilled guild, got %d", count)
+	}
+}
+
 func TestBackupCreatesRestorableSQLiteFile(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()

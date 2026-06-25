@@ -1378,6 +1378,69 @@ var migrations = []Migration{
 			`CREATE INDEX IF NOT EXISTS idx_guild_user_permissions_permission ON guild_user_permissions(permission)`,
 		},
 	},
+	{
+		Version: 31,
+		Name:    "image_generation_usage",
+		SQL: []string{
+			`ALTER TABLE entitlement_snapshots ADD COLUMN image_generations_limit INTEGER NOT NULL DEFAULT 0`,
+			`ALTER TABLE usage_periods ADD COLUMN image_generations_consumed INTEGER NOT NULL DEFAULT 0`,
+			`ALTER TABLE usage_periods ADD COLUMN image_generations_reserved INTEGER NOT NULL DEFAULT 0`,
+			`UPDATE entitlement_snapshots
+				SET image_generations_limit = CASE plan
+					WHEN 'trial' THEN 5
+					WHEN 'starter' THEN 25
+					WHEN 'plus' THEN 100
+					WHEN 'pro' THEN 250
+					WHEN 'business' THEN 1000
+					ELSE image_generations_limit
+				END
+				WHERE image_generations_limit = 0`,
+		},
+	},
+	{
+		Version: 32,
+		Name:    "default_image_generation_feature",
+		SQL: []string{
+			`INSERT INTO audit_events (guild_id, actor_id, action, target_type, target_id, metadata, created_at)
+				SELECT assistant.guild_id,
+					COALESCE(NULLIF(assistant.enabled_by_user_id, ''), guilds.installed_by_user_id, ''),
+					'guild_features.default_enabled',
+					'guild',
+					assistant.guild_id,
+					'{"source":"migration:default_image_generation_feature","features":["image_generation"]}',
+					CURRENT_TIMESTAMP
+				FROM guild_features assistant
+				JOIN guilds ON guilds.guild_id = assistant.guild_id
+				WHERE assistant.feature_id = 'assistant_chat'
+					AND assistant.enabled = 1
+					AND guilds.install_status = 'active'
+					AND guilds.left_at IS NULL
+					AND NOT EXISTS (
+						SELECT 1 FROM guild_features existing
+						WHERE existing.guild_id = assistant.guild_id
+							AND existing.feature_id = 'image_generation'
+					)`,
+			`INSERT OR IGNORE INTO guild_features (guild_id, feature_id, enabled, source_install_intent_id, enabled_by_user_id, created_at, updated_at)
+				SELECT assistant.guild_id,
+					'image_generation',
+					1,
+					'migration:default_image_generation_feature',
+					COALESCE(NULLIF(assistant.enabled_by_user_id, ''), guilds.installed_by_user_id, ''),
+					CURRENT_TIMESTAMP,
+					CURRENT_TIMESTAMP
+				FROM guild_features assistant
+				JOIN guilds ON guilds.guild_id = assistant.guild_id
+				WHERE assistant.feature_id = 'assistant_chat'
+					AND assistant.enabled = 1
+					AND guilds.install_status = 'active'
+					AND guilds.left_at IS NULL
+					AND NOT EXISTS (
+						SELECT 1 FROM guild_features existing
+						WHERE existing.guild_id = assistant.guild_id
+							AND existing.feature_id = 'image_generation'
+					)`,
+		},
+	},
 }
 
 func RunMigrations(db *gorm.DB) error {

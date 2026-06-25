@@ -24,6 +24,7 @@ type Health struct {
 	Discord              string
 	Shards               string
 	AIService            string
+	ImageService         string
 	DataDir              string
 	QueuedJobs           int64
 	ConfiguredGuildCount int64
@@ -37,13 +38,14 @@ func NewService(cfg config.Config, store *store.Store, configs *repository.Guild
 
 func (s *Service) Health(ctx context.Context) (Health, error) {
 	status := Health{
-		SQLite:    "ok",
-		Discord:   configured(s.cfg.DiscordConfigured()),
-		Shards:    shardStatus(s.cfg.DiscordConfigured()),
-		AIService: configured(s.cfg.OpenRouterConfigured()),
-		DataDir:   s.cfg.DataDir,
-		Draining:  s.worker != nil && s.worker.IsDraining(),
-		Incident:  s.incident.Load(),
+		SQLite:       "ok",
+		Discord:      configured(s.cfg.DiscordConfigured()),
+		Shards:       shardStatus(s.cfg.DiscordConfigured()),
+		AIService:    configured(s.cfg.OpenRouterConfigured()),
+		ImageService: configured(s.cfg.OpenRouterImagesConfigured()),
+		DataDir:      s.cfg.DataDir,
+		Draining:     s.worker != nil && s.worker.IsDraining(),
+		Incident:     s.incident.Load(),
 	}
 	if err := s.store.Ping(ctx); err != nil {
 		status.SQLite = "error"
