@@ -1789,7 +1789,7 @@ func startTypingIndicator(ctx context.Context, sender typingSender, channelID sn
 
 func (b *Bot) addReplyContextOptions(ctx context.Context, options map[string]string, message disgoDiscord.Message) {
 	if referenced := message.ReferencedMessage; referenced != nil {
-		b.setReplyContextOptions(options, *referenced)
+		b.setReplyContextOptions(options, *referenced, message.Author.ID)
 		return
 	}
 	if message.MessageReference == nil || message.MessageReference.MessageID == nil {
@@ -1810,12 +1810,15 @@ func (b *Bot) addReplyContextOptions(ctx context.Context, options map[string]str
 		}
 		return
 	}
-	b.setReplyContextOptions(options, *referenced)
+	b.setReplyContextOptions(options, *referenced, message.Author.ID)
 }
 
-func (b *Bot) setReplyContextOptions(options map[string]string, referenced disgoDiscord.Message) {
+func (b *Bot) setReplyContextOptions(options map[string]string, referenced disgoDiscord.Message, currentAuthorID snowflake.ID) {
 	options["reply_text"] = referenced.Content
 	options["reply_message_id"] = referenced.ID.String()
+	if currentAuthorID != 0 && referenced.Author.ID == currentAuthorID {
+		options["reply_author_is_current_user"] = "true"
+	}
 	if b.client != nil && referenced.Author.ID == b.client.ID() {
 		options["reply_author_is_bot"] = "true"
 	}

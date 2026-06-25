@@ -381,46 +381,14 @@ func (r *Router) HandleNaturalMessage(ctx context.Context, request Request) Resp
 }
 
 func (r *Router) HandleNaturalMessageStream(ctx context.Context, request Request, onRespond func()) Response {
-	slog.Info("natural message route started",
-		slog.String("guild_id", request.GuildID),
-		slog.String("channel_id", request.ChannelID),
-		slog.String("request_id", request.RequestID),
-		slog.String("user_id", request.UserID),
-		slog.Bool("is_owner", request.IsOwner),
-		slog.Bool("is_guild_admin", request.IsGuildAdmin),
-		slog.Int("role_count", len(request.RoleIDs)),
-		slog.Bool("bot_mentioned", truthyOption(request.Options["bot_mentioned"])),
-		slog.Bool("reply_author_is_bot", truthyOption(request.Options["reply_author_is_bot"])),
-	)
 	message := strings.TrimSpace(firstNonEmpty(request.Options["message"], request.Options["question"]))
 	if message == "" {
-		slog.Info("natural message route skipped",
-			slog.String("reason", "empty_message"),
-			slog.String("guild_id", request.GuildID),
-			slog.String("channel_id", request.ChannelID),
-			slog.String("request_id", request.RequestID),
-			slog.String("user_id", request.UserID),
-		)
 		return Response{}
 	}
 	if !r.canHandleNaturalMessage(ctx, request) {
-		slog.Info("natural message route skipped",
-			slog.String("reason", "access_denied"),
-			slog.String("guild_id", request.GuildID),
-			slog.String("channel_id", request.ChannelID),
-			slog.String("request_id", request.RequestID),
-			slog.String("user_id", request.UserID),
-		)
 		return Response{}
 	}
 	if denied := r.checkAIUsageAvailable(ctx, request); denied.Content != "" {
-		slog.Info("natural message route denied",
-			slog.String("reason", "ai_usage_unavailable"),
-			slog.String("guild_id", request.GuildID),
-			slog.String("channel_id", request.ChannelID),
-			slog.String("request_id", request.RequestID),
-			slog.String("user_id", request.UserID),
-		)
 		return denied
 	}
 	request.Command = "chat"
@@ -448,13 +416,6 @@ func (r *Router) canHandleNaturalMessage(ctx context.Context, request Request) b
 		return false
 	}
 	if denied := r.ensureFeatureEnabled(ctx, request, features.AssistantChat); denied.Content != "" {
-		slog.Info("natural message access denied",
-			slog.String("reason", "assistant_feature_disabled"),
-			slog.String("guild_id", request.GuildID),
-			slog.String("channel_id", request.ChannelID),
-			slog.String("request_id", request.RequestID),
-			slog.String("user_id", request.UserID),
-		)
 		return false
 	}
 	accessRequest := assistantAccessRequest(request)
@@ -470,27 +431,9 @@ func (r *Router) canHandleNaturalMessage(ctx context.Context, request Request) b
 		return false
 	}
 	if allowed {
-		slog.Info("natural message access allowed",
-			slog.String("reason", "assistant_use"),
-			slog.String("guild_id", request.GuildID),
-			slog.String("channel_id", request.ChannelID),
-			slog.String("request_id", request.RequestID),
-			slog.String("user_id", request.UserID),
-			slog.Bool("is_owner", request.IsOwner),
-			slog.Bool("is_guild_admin", request.IsGuildAdmin),
-			slog.Int("role_count", len(request.RoleIDs)),
-		)
 		return true
 	}
-	soulWriter := r.canWriteSoul(ctx, request)
-	slog.Info("natural message access fallback evaluated",
-		slog.String("guild_id", request.GuildID),
-		slog.String("channel_id", request.ChannelID),
-		slog.String("request_id", request.RequestID),
-		slog.String("user_id", request.UserID),
-		slog.Bool("soul_writer_allowed", soulWriter),
-	)
-	return soulWriter
+	return r.canWriteSoul(ctx, request)
 }
 
 func (r *Router) canWriteSoul(ctx context.Context, request Request) bool {
@@ -1505,25 +1448,6 @@ func (r *Router) handleChatModeWithOptions(ctx context.Context, request Request,
 	toolFilter := r.toolFilter(ctx, request)
 	enabledFeatures, featureGateActive := r.featureSetForAccess(ctx, request.GuildID)
 	allowedPermissions := r.allowedToolPermissions(ctx, request)
-	slog.Info("chat access prepared",
-		slog.String("guild_id", request.GuildID),
-		slog.String("channel_id", chatChannelID),
-		slog.String("source_channel_id", request.ChannelID),
-		slog.String("thread_id", threadID),
-		slog.String("request_id", request.RequestID),
-		slog.String("user_id", request.UserID),
-		slog.Bool("natural_message", options.naturalMessage),
-		slog.Bool("threaded", options.threaded),
-		slog.Bool("is_owner", request.IsOwner),
-		slog.Bool("is_guild_admin", request.IsGuildAdmin),
-		slog.Int("role_count", len(request.RoleIDs)),
-		slog.Any("allowed_permissions", permissionNames(allowedPermissions)),
-		slog.Any("allowed_tools", permissionNames(toolFilter.allowed)),
-		slog.Any("restricted_tools", permissionNames(toolFilter.restricted)),
-		slog.Bool("require_explicit_composed_tools", toolFilter.requireExplicitComposed),
-		slog.Bool("feature_gate_active", featureGateActive),
-		slog.Any("enabled_features", permissionNames(enabledFeatures)),
-	)
 	invocationContext := r.invocationContext(ctx, request)
 	askRequest := assistant.AskRequest{
 		RequestID:                    request.RequestID,
@@ -1537,6 +1461,7 @@ func (r *Router) handleChatModeWithOptions(ctx context.Context, request Request,
 		ReplyContent:                 request.Options["reply_text"],
 		ReplyMessageID:               request.Options["reply_message_id"],
 		ReplyAuthorIsBot:             truthyOption(request.Options["reply_author_is_bot"]),
+		ReplyAuthorIsCurrentUser:     truthyOption(request.Options["reply_author_is_current_user"]),
 		BotMentioned:                 truthyOption(request.Options["bot_mentioned"]),
 		RoleIDs:                      request.RoleIDs,
 		IsGuildAdmin:                 request.IsGuildAdmin,
@@ -1561,12 +1486,6 @@ func (r *Router) handleChatModeWithOptions(ctx context.Context, request Request,
 	}
 	if answer.Silent {
 		r.releaseAIUsage(ctx, reservation)
-		slog.Info("natural message model declined response",
-			slog.String("guild_id", request.GuildID),
-			slog.String("channel_id", request.ChannelID),
-			slog.String("request_id", request.RequestID),
-			slog.String("user_id", request.UserID),
-		)
 		return Response{}
 	}
 	if !assistantAnswerHasPayload(answer) {

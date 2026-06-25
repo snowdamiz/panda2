@@ -2936,6 +2936,41 @@ func TestNaturalMessagePreservesRemainingAnswerAfterMusicCard(t *testing.T) {
 	}
 }
 
+func TestNaturalMessagePreservesShortRemainingAnswerAfterMusicCard(t *testing.T) {
+	client := &fakeLLM{responses: []llm.ChatResponse{
+		{ToolCalls: []llm.ToolCall{{
+			ID:   "call-music-stop",
+			Type: "function",
+			Function: llm.ToolCallFunction{
+				Name:      "panda_manage_music",
+				Arguments: `{"action":"stop"}`,
+			},
+		}}},
+		{Content: "No composed tools are available in this server right now."},
+	}}
+	router := newTestRouter(t, client, 5)
+
+	response := router.HandleNaturalMessage(context.Background(), Request{
+		UserID:         "user-1",
+		GuildID:        "guild-1",
+		ChannelID:      "channel-1",
+		VoiceChannelID: "voice-1",
+		Options: map[string]string{
+			"message":       "panda stop playing song and tell me which composed tools you have",
+			"bot_mentioned": "true",
+		},
+	})
+	if response.Content != "music handled" || response.Presentation.Title != "Now playing" || response.Presentation.Accent != AccentMusic {
+		t.Fatalf("expected primary response to stay the music card, got %+v", response)
+	}
+	if len(response.Followups) != 1 {
+		t.Fatalf("expected short remaining answer to render as a followup, got %+v", response.Followups)
+	}
+	if followup := response.Followups[0]; !strings.Contains(followup.Content, "No composed tools are available") || followup.Presentation.Title != "" {
+		t.Fatalf("expected plain composed-tools followup, got %+v", followup)
+	}
+}
+
 func TestNaturalMessageSplitsMusicCardFromWebSearchAnswer(t *testing.T) {
 	sourceURL := "https://example.com/spacex-stock"
 	musicManager := &fakeToolMusicManager{}
@@ -3007,6 +3042,172 @@ func TestNaturalMessageSplitsMusicCardFromWebSearchAnswer(t *testing.T) {
 	finalRequest := joinRequestMessages(client.requests[2])
 	if !strings.Contains(finalRequest, "may be rendered as a Discord card") || !strings.Contains(finalRequest, "Do not repeat") {
 		t.Fatalf("expected final request to tell the model not to repeat card status, got:\n%s", finalRequest)
+	}
+}
+
+func TestNaturalMessageSelfReplyWakeRunsRepliedToCombinedRequest(t *testing.T) {
+	sourceURL := "https://example.com/spacex-stock"
+	musicManager := &fakeToolMusicManager{}
+	client := &fakeLLM{responses: []llm.ChatResponse{
+		{ToolCalls: []llm.ToolCall{{
+			ID:   "call-music-play",
+			Type: "function",
+			Function: llm.ToolCallFunction{
+				Name:      "panda_manage_music",
+				Arguments: `{"action":"play","query":"fill my pockets by mgk"}`,
+			},
+		}}},
+		{ToolCalls: []llm.ToolCall{{
+			ID:   "call-web-stock",
+			Type: "function",
+			Function: llm.ToolCallFunction{
+				Name:      "web_search",
+				Arguments: `{"query":"SpaceX stock price","limit":1}`,
+			},
+		}}},
+		{Content: "SpaceX is privately held, so there is no public SpaceX stock ticker."},
+	}}
+	router := newTestRouter(t, client, 5, func(executor *tools.Executor) {
+		executor.WithMusicManager(musicManager)
+		executor.WithWebSearcher(fakeCommandWebSearch{response: websearch.Response{
+			Provider: "brave_search",
+			Query:    "SpaceX stock price",
+			Results: []websearch.Result{{
+				Title:       "SpaceX Stock",
+				URL:         sourceURL,
+				Description: "SpaceX is privately held.",
+				Source:      "Example",
+			}},
+		}})
+	})
+
+	response := router.HandleNaturalMessage(context.Background(), Request{
+		UserID:         "user-1",
+		GuildID:        "guild-1",
+		ChannelID:      "channel-1",
+		VoiceChannelID: "voice-1",
+		Options: map[string]string{
+			"message":                      "panda",
+			"reply_text":                   "join bot-test vc and play fill my pockets by mgk, also tell me spacex stock price",
+			"reply_message_id":             "message-replied-to",
+			"reply_author_is_current_user": "true",
+		},
+	})
+	if response.Content != "playing fill my pockets by mgk" || response.Presentation.Title != "Now playing" || response.Presentation.Accent != AccentMusic {
+		t.Fatalf("expected primary response to be the music card, got %+v", response)
+	}
+	if len(response.Followups) != 1 || !strings.Contains(response.Followups[0].Content, "SpaceX is privately held") || !strings.Contains(response.Followups[0].Content, sourceURL) {
+		t.Fatalf("expected stock answer followup with source, got %+v", response.Followups)
+	}
+	if len(musicManager.requests) != 1 || musicManager.requests[0].Action != "play" || musicManager.requests[0].Query != "fill my pockets by mgk" {
+		t.Fatalf("expected replied-to music request to run, got %+v", musicManager.requests)
+	}
+	if len(client.requests) != 3 {
+		t.Fatalf("expected music tool, web tool, and final answer requests, got %d", len(client.requests))
+	}
+	firstLastMessage := client.requests[0].Messages[len(client.requests[0].Messages)-1]
+	if firstLastMessage.Role != "user" {
+		t.Fatalf("expected first request to end with resolved user prompt, got %+v", firstLastMessage)
+	}
+	if strings.TrimSpace(firstLastMessage.Content) == "panda" {
+		t.Fatalf("self-reply wake should not send only the wake word as the active prompt")
+	}
+	firstRequest := joinRequestMessages(client.requests[0])
+	for _, want := range []string{
+		"Replied-to author is current user: true",
+		"handle the replied-to message as the actual request",
+		"Current Discord message content:\npanda",
+		"reply to the current user's own prior Discord message",
+		"Resolve the active user request from both messages",
+		"join bot-test vc and play fill my pockets by mgk",
+		"spacex stock price",
+	} {
+		if !strings.Contains(firstRequest, want) {
+			t.Fatalf("expected first request to include %q, got:\n%s", want, firstRequest)
+		}
+	}
+}
+
+func TestNaturalMessageOtherUserReplyWakeRunsRepliedToCombinedRequest(t *testing.T) {
+	sourceURL := "https://example.com/spacex-stock"
+	musicManager := &fakeToolMusicManager{}
+	client := &fakeLLM{responses: []llm.ChatResponse{
+		{ToolCalls: []llm.ToolCall{{
+			ID:   "call-music-play",
+			Type: "function",
+			Function: llm.ToolCallFunction{
+				Name:      "panda_manage_music",
+				Arguments: `{"action":"play","query":"fill my pockets by mgk"}`,
+			},
+		}}},
+		{ToolCalls: []llm.ToolCall{{
+			ID:   "call-web-stock",
+			Type: "function",
+			Function: llm.ToolCallFunction{
+				Name:      "web_search",
+				Arguments: `{"query":"SpaceX stock price","limit":1}`,
+			},
+		}}},
+		{Content: "SpaceX is privately held, so there is no public SpaceX stock ticker."},
+	}}
+	router := newTestRouter(t, client, 5, func(executor *tools.Executor) {
+		executor.WithMusicManager(musicManager)
+		executor.WithWebSearcher(fakeCommandWebSearch{response: websearch.Response{
+			Provider: "brave_search",
+			Query:    "SpaceX stock price",
+			Results: []websearch.Result{{
+				Title:       "SpaceX Stock",
+				URL:         sourceURL,
+				Description: "SpaceX is privately held.",
+				Source:      "Example",
+			}},
+		}})
+	})
+
+	response := router.HandleNaturalMessage(context.Background(), Request{
+		UserID:         "user-2",
+		GuildID:        "guild-1",
+		ChannelID:      "channel-1",
+		VoiceChannelID: "voice-1",
+		Options: map[string]string{
+			"message":          "panda",
+			"reply_text":       "join bot-test vc and play fill my pockets by mgk, also tell me spacex stock price",
+			"reply_message_id": "message-replied-to",
+		},
+	})
+	if response.Content != "playing fill my pockets by mgk" || response.Presentation.Title != "Now playing" || response.Presentation.Accent != AccentMusic {
+		t.Fatalf("expected primary response to be the music card, got %+v", response)
+	}
+	if len(response.Followups) != 1 || !strings.Contains(response.Followups[0].Content, "SpaceX is privately held") || !strings.Contains(response.Followups[0].Content, sourceURL) {
+		t.Fatalf("expected stock answer followup with source, got %+v", response.Followups)
+	}
+	if len(musicManager.requests) != 1 || musicManager.requests[0].Action != "play" || musicManager.requests[0].Query != "fill my pockets by mgk" {
+		t.Fatalf("expected replied-to music request to run, got %+v", musicManager.requests)
+	}
+	if len(client.requests) != 3 {
+		t.Fatalf("expected music tool, web tool, and final answer requests, got %d", len(client.requests))
+	}
+	firstLastMessage := client.requests[0].Messages[len(client.requests[0].Messages)-1]
+	if firstLastMessage.Role != "user" {
+		t.Fatalf("expected first request to end with resolved user prompt, got %+v", firstLastMessage)
+	}
+	if strings.TrimSpace(firstLastMessage.Content) == "panda" {
+		t.Fatalf("reply wake should not send only the wake word as the active prompt")
+	}
+	firstRequest := joinRequestMessages(client.requests[0])
+	for _, want := range []string{
+		"Replied-to author is current user: false",
+		"handle the replied-to non-Panda message as the actual request",
+		"Do not answer with a generic capability overview",
+		"Current Discord message content:\npanda",
+		"reply to another user's prior Discord message",
+		"Resolve the active user request from both messages",
+		"join bot-test vc and play fill my pockets by mgk",
+		"spacex stock price",
+	} {
+		if !strings.Contains(firstRequest, want) {
+			t.Fatalf("expected first request to include %q, got:\n%s", want, firstRequest)
+		}
 	}
 }
 
@@ -3531,7 +3732,7 @@ func TestNaturalMessageAboutPandaDeclineDoesNotStartResponse(t *testing.T) {
 		GuildID:   "guild-1",
 		ChannelID: "channel-1",
 		Options: map[string]string{
-			"message":       "I think Panda is jumping into conversations too often.",
+			"message":       "how are you guys feeling about the new panda bot",
 			"bot_mentioned": "true",
 		},
 	}, func() {
@@ -3547,8 +3748,16 @@ func TestNaturalMessageAboutPandaDeclineDoesNotStartResponse(t *testing.T) {
 		t.Fatalf("expected only streamed natural chat request, got %d", len(client.requests))
 	}
 	joined := joinRequestMessages(client.requests[0])
-	if !strings.Contains(joined, "talking about Panda instead of to Panda") || !strings.Contains(joined, "Bot mention is only a wake signal") {
-		t.Fatalf("expected natural gate to distinguish about-Panda mentions from direct address, got:\n%s", joined)
+	for _, want := range []string{
+		"talking about Panda instead of to Panda",
+		"The grammatical addressee must be Panda/the bot/the assistant",
+		"how are you guys feeling about the new panda bot",
+		"Panda is the topic, not the addressee",
+		"Bot mention is only a wake signal",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("expected natural gate to include %q, got:\n%s", want, joined)
+		}
 	}
 }
 
