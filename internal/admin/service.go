@@ -221,7 +221,7 @@ func (s *Service) ConfigureBehavior(ctx context.Context, guildID, actorID string
 			policy = defaultToolPolicy
 		}
 		if !allowedToolPolicy(policy) {
-			return store.GuildConfig{}, fmt.Errorf("tool policy must be off, read_only, assistive, admin_only, moderator, write_confirmed, or owner_ops")
+			return store.GuildConfig{}, fmt.Errorf("tool policy must be read_only, assistive, admin_only, moderator, write_confirmed, or owner_ops")
 		}
 		updates["tool_policy"] = policy
 		meta["tool_policy"] = policy
@@ -1020,7 +1020,7 @@ func (s *Service) canUsePermission(ctx context.Context, guildID string, roleIDs 
 
 func allowedToolPolicy(policy string) bool {
 	switch strings.ToLower(strings.TrimSpace(policy)) {
-	case "off", "read_only", "assistive", "admin_only", "moderator", "write_confirmed", "owner_ops":
+	case "read_only", "assistive", "admin_only", "moderator", "write_confirmed", "owner_ops":
 		return true
 	default:
 		return false

@@ -47,6 +47,7 @@ type Bot struct {
 	alerts      DiscordAlertHandler
 	httpClient  *http.Client
 	music       *music.Manager
+	installs    *InstallService
 	closeOnce   sync.Once
 }
 
@@ -141,6 +142,9 @@ func New(cfg config.Config, router *commands.Router, logger *slog.Logger) (*Bot,
 		bot.WithEventListenerFunc(instance.onGuildChannelUpdate),
 		bot.WithEventListenerFunc(instance.onGuildChannelDelete),
 		bot.WithEventListenerFunc(instance.onGuildChannelPinsUpdate),
+		bot.WithEventListenerFunc(instance.onGuildReady),
+		bot.WithEventListenerFunc(instance.onGuildAvailable),
+		bot.WithEventListenerFunc(instance.onGuildJoin),
 		bot.WithEventListenerFunc(instance.onThreadCreate),
 		bot.WithEventListenerFunc(instance.onThreadUpdate),
 		bot.WithEventListenerFunc(instance.onThreadDelete),
@@ -225,6 +229,11 @@ func (b *Bot) WithMusicRepository(repo music.MusicStore) *Bot {
 	if b.music != nil {
 		b.music.WithRepository(repo)
 	}
+	return b
+}
+
+func (b *Bot) WithInstallService(service *InstallService) *Bot {
+	b.installs = service
 	return b
 }
 
@@ -799,6 +808,27 @@ func (b *Bot) requestFromModalEvent(event *events.ModalSubmitInteractionCreate) 
 	return request
 }
 
+func (b *Bot) onGuildReady(event *events.GuildReady) {
+	b.recordGatewayGuild(context.Background(), "guild_ready", event.Guild)
+}
+
+func (b *Bot) onGuildAvailable(event *events.GuildAvailable) {
+	b.recordGatewayGuild(context.Background(), "guild_available", event.Guild)
+}
+
+func (b *Bot) onGuildJoin(event *events.GuildJoin) {
+	b.recordGatewayGuild(context.Background(), "guild_join", event.Guild)
+}
+
+func (b *Bot) recordGatewayGuild(ctx context.Context, source string, guild disgoDiscord.GatewayGuild) {
+	if b == nil || b.installs == nil {
+		return
+	}
+	if err := b.installs.RecordGatewayGuild(ctx, guild); err != nil && b.logger != nil {
+		b.logger.Warn("failed to record gateway guild install", slog.Any("err", err), slog.String("source", source), slog.String("guild_id", guild.ID.String()))
+	}
+}
+
 func messageCreateFromResponse(response commands.Response) disgoDiscord.MessageCreate {
 	return messageCreateFromResponsePart(response, firstDiscordContentChunk(response.Content), true)
 }
@@ -1361,6 +1391,8 @@ func (b *Bot) onMessageCreate(event *events.MessageCreate) {
 	if !shouldHandleNaturalMessage(content, options) {
 		return
 	}
+	isOwner := b.cfg.IsOwner(event.Message.Author.ID.String())
+	isGuildAdmin := b.isMessageGuildAdmin(event, event.Message.Author.ID)
 	request := commands.Request{
 		RequestID:      event.Message.ID.String(),
 		Options:        options,
@@ -1369,8 +1401,22 @@ func (b *Bot) onMessageCreate(event *events.MessageCreate) {
 		VoiceChannelID: b.userVoiceChannelID(context.Background(), guildID, event.Message.Author.ID),
 		UserID:         event.Message.Author.ID.String(),
 		RoleIDs:        messageRoleIDs(event.Message.Member),
-		IsOwner:        b.cfg.IsOwner(event.Message.Author.ID.String()),
-		IsGuildAdmin:   b.isMessageGuildAdmin(event, event.Message.Author.ID),
+		IsOwner:        isOwner,
+		IsGuildAdmin:   isGuildAdmin,
+	}
+	if b.logger != nil {
+		b.logger.Info("natural message request received",
+			slog.String("guild_id", request.GuildID),
+			slog.String("channel_id", request.ChannelID),
+			slog.String("request_id", request.RequestID),
+			slog.String("user_id", request.UserID),
+			slog.Bool("is_owner", request.IsOwner),
+			slog.Bool("is_guild_admin", request.IsGuildAdmin),
+			slog.Int("role_count", len(request.RoleIDs)),
+			slog.Bool("bot_mentioned", options["bot_mentioned"] == "true"),
+			slog.Bool("reply_author_is_bot", options["reply_author_is_bot"] == "true"),
+			slog.Int("content_len", len(content)),
+		)
 	}
 	reference := messageReferenceFromMessage(event.Message)
 	go b.respondToNaturalMessage(context.Background(), event.ChannelID, reference, request)
@@ -1392,6 +1438,19 @@ func (b *Bot) respondToNaturalMessage(ctx context.Context, channelID snowflake.I
 	stopTyping := startTypingIndicator(ctx, b.client.Rest, b.logger, channelID, request.RequestID, typingRefreshInterval)
 	defer stopTyping()
 	response := b.router.HandleNaturalMessage(ctx, request)
+	if b.logger != nil {
+		b.logger.Info("natural message response prepared",
+			slog.String("guild_id", request.GuildID),
+			slog.String("channel_id", request.ChannelID),
+			slog.String("request_id", request.RequestID),
+			slog.String("user_id", request.UserID),
+			slog.Bool("has_payload", hasChannelResponsePayload(response)),
+			slog.Int("content_len", len(strings.TrimSpace(response.Content))),
+			slog.Bool("contains_tool_inventory", containsCapabilityAntiPattern(response.Content, "tool inventory")),
+			slog.Bool("contains_panda_list_tools", containsCapabilityAntiPattern(response.Content, "panda_list_tools")),
+			slog.Bool("contains_three_things", containsCapabilityAntiPattern(response.Content, "three things")),
+		)
+	}
 	if !hasChannelResponsePayload(response) {
 		return
 	}
@@ -1420,6 +1479,10 @@ func (b *Bot) preflightNaturalMessageReply(request commands.Request) error {
 
 func hasChannelResponsePayload(response commands.Response) bool {
 	return strings.TrimSpace(response.Content) != "" || response.Poll != nil
+}
+
+func containsCapabilityAntiPattern(content, pattern string) bool {
+	return strings.Contains(strings.ToLower(content), strings.ToLower(strings.TrimSpace(pattern)))
 }
 
 func (b *Bot) userVoiceChannelID(ctx context.Context, guildIDValue string, userID snowflake.ID) string {

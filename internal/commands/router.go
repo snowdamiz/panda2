@@ -377,14 +377,46 @@ func elevatedHelpMessage(access helpAccess) string {
 }
 
 func (r *Router) HandleNaturalMessage(ctx context.Context, request Request) Response {
+	slog.Info("natural message route started",
+		slog.String("guild_id", request.GuildID),
+		slog.String("channel_id", request.ChannelID),
+		slog.String("request_id", request.RequestID),
+		slog.String("user_id", request.UserID),
+		slog.Bool("is_owner", request.IsOwner),
+		slog.Bool("is_guild_admin", request.IsGuildAdmin),
+		slog.Int("role_count", len(request.RoleIDs)),
+		slog.Bool("bot_mentioned", truthyOption(request.Options["bot_mentioned"])),
+		slog.Bool("reply_author_is_bot", truthyOption(request.Options["reply_author_is_bot"])),
+	)
 	message := strings.TrimSpace(firstNonEmpty(request.Options["message"], request.Options["question"]))
 	if message == "" {
+		slog.Info("natural message route skipped",
+			slog.String("reason", "empty_message"),
+			slog.String("guild_id", request.GuildID),
+			slog.String("channel_id", request.ChannelID),
+			slog.String("request_id", request.RequestID),
+			slog.String("user_id", request.UserID),
+		)
 		return Response{}
 	}
 	if !r.canHandleNaturalMessage(ctx, request) {
+		slog.Info("natural message route skipped",
+			slog.String("reason", "access_denied"),
+			slog.String("guild_id", request.GuildID),
+			slog.String("channel_id", request.ChannelID),
+			slog.String("request_id", request.RequestID),
+			slog.String("user_id", request.UserID),
+		)
 		return Response{}
 	}
 	if denied := r.checkAIUsageAvailable(ctx, request); denied.Content != "" {
+		slog.Info("natural message route denied",
+			slog.String("reason", "ai_usage_unavailable"),
+			slog.String("guild_id", request.GuildID),
+			slog.String("channel_id", request.ChannelID),
+			slog.String("request_id", request.RequestID),
+			slog.String("user_id", request.UserID),
+		)
 		return denied
 	}
 	decision, err := r.assistant.ClassifyNaturalMessage(ctx, assistant.NaturalMessageRequest{
@@ -402,33 +434,84 @@ func (r *Router) HandleNaturalMessage(ctx context.Context, request Request) Resp
 		return Response{}
 	}
 	if !decision.Respond {
+		slog.Info("natural message classifier declined response",
+			slog.String("guild_id", request.GuildID),
+			slog.String("channel_id", request.ChannelID),
+			slog.String("request_id", request.RequestID),
+			slog.String("user_id", request.UserID),
+		)
 		return Response{}
 	}
+	slog.Info("natural message classifier accepted response",
+		slog.String("guild_id", request.GuildID),
+		slog.String("channel_id", request.ChannelID),
+		slog.String("request_id", request.RequestID),
+		slog.String("user_id", request.UserID),
+		slog.Int("prompt_len", len(decision.Prompt)),
+	)
 	request.Command = "chat"
 	if request.Options == nil {
 		request.Options = map[string]string{}
 	}
 	request.Options["question"] = decision.Prompt
-	request.PreferredTool = decision.ToolName
 	return r.handleChatModeWithAccess(ctx, request, false, true)
 }
 
 func (r *Router) canHandleNaturalMessage(ctx context.Context, request Request) bool {
 	if r.admin == nil {
+		slog.Warn("natural message access unavailable",
+			slog.String("reason", "admin_service_missing"),
+			slog.String("guild_id", request.GuildID),
+			slog.String("channel_id", request.ChannelID),
+			slog.String("request_id", request.RequestID),
+			slog.String("user_id", request.UserID),
+		)
 		return false
 	}
 	if denied := r.ensureFeatureEnabled(ctx, request, features.AssistantChat); denied.Content != "" {
+		slog.Info("natural message access denied",
+			slog.String("reason", "assistant_feature_disabled"),
+			slog.String("guild_id", request.GuildID),
+			slog.String("channel_id", request.ChannelID),
+			slog.String("request_id", request.RequestID),
+			slog.String("user_id", request.UserID),
+		)
 		return false
 	}
 	accessRequest := assistantAccessRequest(request)
 	allowed, err := r.admin.CanUseAssistant(ctx, accessRequest)
 	if err != nil {
+		slog.Warn("natural message assistant access lookup failed",
+			slog.Any("err", err),
+			slog.String("guild_id", request.GuildID),
+			slog.String("channel_id", request.ChannelID),
+			slog.String("request_id", request.RequestID),
+			slog.String("user_id", request.UserID),
+		)
 		return false
 	}
 	if allowed {
+		slog.Info("natural message access allowed",
+			slog.String("reason", "assistant_use"),
+			slog.String("guild_id", request.GuildID),
+			slog.String("channel_id", request.ChannelID),
+			slog.String("request_id", request.RequestID),
+			slog.String("user_id", request.UserID),
+			slog.Bool("is_owner", request.IsOwner),
+			slog.Bool("is_guild_admin", request.IsGuildAdmin),
+			slog.Int("role_count", len(request.RoleIDs)),
+		)
 		return true
 	}
-	return r.canWriteSoul(ctx, request)
+	soulWriter := r.canWriteSoul(ctx, request)
+	slog.Info("natural message access fallback evaluated",
+		slog.String("guild_id", request.GuildID),
+		slog.String("channel_id", request.ChannelID),
+		slog.String("request_id", request.RequestID),
+		slog.String("user_id", request.UserID),
+		slog.Bool("soul_writer_allowed", soulWriter),
+	)
+	return soulWriter
 }
 
 func (r *Router) canWriteSoul(ctx context.Context, request Request) bool {
@@ -1320,6 +1403,26 @@ func (r *Router) handleChatModeWithAccess(ctx context.Context, request Request, 
 
 	toolFilter := r.toolFilter(ctx, request)
 	enabledFeatures, featureGateActive := r.featureSetForAccess(ctx, request.GuildID)
+	allowedPermissions := r.allowedToolPermissions(ctx, request)
+	slog.Info("chat access prepared",
+		slog.String("guild_id", request.GuildID),
+		slog.String("channel_id", chatChannelID),
+		slog.String("source_channel_id", request.ChannelID),
+		slog.String("thread_id", threadID),
+		slog.String("request_id", request.RequestID),
+		slog.String("user_id", request.UserID),
+		slog.Bool("natural_message", allowSoulWriter),
+		slog.Bool("threaded", threaded),
+		slog.Bool("is_owner", request.IsOwner),
+		slog.Bool("is_guild_admin", request.IsGuildAdmin),
+		slog.Int("role_count", len(request.RoleIDs)),
+		slog.Any("allowed_permissions", permissionNames(allowedPermissions)),
+		slog.Any("allowed_tools", permissionNames(toolFilter.allowed)),
+		slog.Any("restricted_tools", permissionNames(toolFilter.restricted)),
+		slog.Bool("require_explicit_composed_tools", toolFilter.requireExplicitComposed),
+		slog.Bool("feature_gate_active", featureGateActive),
+		slog.Any("enabled_features", permissionNames(enabledFeatures)),
+	)
 	invocationContext := r.invocationContext(ctx, request)
 	answer, err := r.assistant.Chat(ctx, assistant.AskRequest{
 		RequestID:                    request.RequestID,
@@ -1329,7 +1432,6 @@ func (r *Router) handleChatModeWithAccess(ctx context.Context, request Request, 
 		VoiceChannelID:               request.VoiceChannelID,
 		ThreadID:                     threadID,
 		Question:                     question,
-		PreferredTool:                request.PreferredTool,
 		InvocationContext:            invocationContext,
 		ReplyContent:                 request.Options["reply_text"],
 		ReplyMessageID:               request.Options["reply_message_id"],
@@ -1337,7 +1439,7 @@ func (r *Router) handleChatModeWithAccess(ctx context.Context, request Request, 
 		RoleIDs:                      request.RoleIDs,
 		IsGuildAdmin:                 request.IsGuildAdmin,
 		IsOwner:                      request.IsOwner,
-		AllowedPermissions:           r.allowedToolPermissions(ctx, request),
+		AllowedPermissions:           allowedPermissions,
 		AllowedTools:                 toolFilter.allowed,
 		RestrictedTools:              toolFilter.restricted,
 		EnabledFeatures:              enabledFeatures,
@@ -2195,9 +2297,7 @@ func (r *Router) allowedToolPermissions(ctx context.Context, request Request) ma
 		r.addPermissionIfAllowed(ctx, request, permissions, admin.PermissionAssistantMemoryRead, r.admin.CanReadMemory)
 		r.addPermissionIfAllowed(ctx, request, permissions, admin.PermissionAdminMemoryManage, r.admin.CanManageMemory)
 	}
-	if featureEnabled(features.WebSearch) {
-		r.addPermissionIfAllowed(ctx, request, permissions, admin.PermissionAssistantWebSearch, r.admin.CanUseWebSearch)
-	}
+	r.addPermissionIfAllowed(ctx, request, permissions, admin.PermissionAssistantWebSearch, r.admin.CanUseWebSearch)
 	if featureEnabled(features.AdminSetup) || featureEnabled(features.AdminAccessControl) || featureEnabled(features.AdminAudit) {
 		r.addPermissionIfAllowed(ctx, request, permissions, admin.PermissionAdminConfigRead, r.admin.CanReadConfig)
 		r.addPermissionIfAllowed(ctx, request, permissions, admin.PermissionAdminConfigWrite, r.admin.CanWriteConfig)
@@ -2227,8 +2327,9 @@ func (r *Router) featureSetForAccess(ctx context.Context, guildID string) (map[s
 	enabled, err := r.features.EnabledSet(ctx, guildID)
 	if err != nil {
 		slog.Warn("feature set lookup failed", slog.Any("err", err), slog.String("guild_id", guildID))
-		return map[string]struct{}{}, true
+		return map[string]struct{}{features.WebSearch: {}}, true
 	}
+	enabled[features.WebSearch] = struct{}{}
 	return enabled, true
 }
 

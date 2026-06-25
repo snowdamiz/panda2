@@ -409,7 +409,7 @@ var catalog = []Feature{
 		Label:                "Composed tools",
 		Description:          "Draft, approve, run, schedule, and audit server automations.",
 		PandaPermissions:     []string{admin.PermissionToolComposeDraft, admin.PermissionToolComposeApprove, admin.PermissionToolComposeInvoke, admin.PermissionToolComposeAudit},
-		ToolNames:            []string{"panda.manage_composed_tool", "panda.manage_schedule"},
+		ToolNames:            []string{"generate_workflow_json", "panda.manage_composed_tool", "panda.manage_schedule"},
 		ConsumesPlanQuota:    true,
 		RequiresConfirmation: true,
 		Public:               true,

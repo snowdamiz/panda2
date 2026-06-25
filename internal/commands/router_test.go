@@ -220,6 +220,16 @@ func requestToolNames(request llm.ChatRequest) map[string]bool {
 
 func newTestRouter(t *testing.T, client *fakeLLM, limit int, configureExecutor ...func(*tools.Executor)) *Router {
 	t.Helper()
+	router, _ := newTestRouterWithDeps(t, client, limit, configureExecutor...)
+	return router
+}
+
+type testRouterDeps struct {
+	guilds *repository.GuildRepository
+}
+
+func newTestRouterWithDeps(t *testing.T, client *fakeLLM, limit int, configureExecutor ...func(*tools.Executor)) (*Router, testRouterDeps) {
+	t.Helper()
 	ctx := context.Background()
 	db, err := store.Open(ctx, "file::memory:?cache=shared")
 	if err != nil {
@@ -227,6 +237,7 @@ func newTestRouter(t *testing.T, client *fakeLLM, limit int, configureExecutor .
 	}
 	t.Cleanup(func() { _ = db.Close() })
 
+	guilds := repository.NewGuildRepository(db.DB)
 	configs := repository.NewGuildConfigRepository(db.DB)
 	usage := repository.NewUsageRepository(db.DB)
 	audit := repository.NewAuditRepository(db.DB)
@@ -241,7 +252,8 @@ func newTestRouter(t *testing.T, client *fakeLLM, limit int, configureExecutor .
 	worker := queue.NewWorker(jobs, "test-worker")
 	opsService := ops.NewService(config.Config{DataDir: t.TempDir()}, db, configs, jobs, worker)
 	assistantService := assistant.NewService(client, usage, configs, memoryService, conversations, "openrouter/auto", "", nil)
-	adminService := admin.NewService(configs, usage, audit, memoryService, access, budgets, members)
+	adminService := admin.NewService(configs, usage, audit, memoryService, access, budgets, members).
+		WithGuildRepository(guilds)
 	registry, err := tools.NewDefaultRegistry()
 	if err != nil {
 		t.Fatalf("tool registry: %v", err)
@@ -260,12 +272,13 @@ func newTestRouter(t *testing.T, client *fakeLLM, limit int, configureExecutor .
 		configure(toolExecutor)
 	}
 	assistantService.WithToolExecutor(toolExecutor)
-	return NewRouter(
+	router := NewRouter(
 		adminService,
 		assistantService,
 		opsService,
 		ratelimit.New(limit, time.Minute),
 	).WithComposedService(composedService).WithScheduler(schedulerService).WithDataRepository(repository.NewGuildDataRepository(db.DB)).WithToolExecutor(toolExecutor)
+	return router, testRouterDeps{guilds: guilds}
 }
 
 func attachTestBilling(t *testing.T, router *Router, guildID string) (*billing.Service, billing.Entitlement) {
@@ -1616,7 +1629,7 @@ func TestHandleToolConfirmationAssignsMemberRole(t *testing.T) {
 
 func TestNaturalDiscordRoleCreateRendersConfirmationThroughAgentTool(t *testing.T) {
 	client := &fakeLLM{responses: []llm.ChatResponse{
-		{Content: `{"respond":true,"prompt":"create a new role called test","tool_name":"panda_manage_discord_role"}`},
+		{Content: `{"respond":true,"prompt":"create a new role called test"}`},
 		{ToolCalls: []llm.ToolCall{{
 			ID:   "call-role-create",
 			Type: "function",
@@ -1649,15 +1662,12 @@ func TestNaturalDiscordRoleCreateRendersConfirmationThroughAgentTool(t *testing.
 	if !requestToolNames(client.requests[1])["panda_manage_discord_role"] {
 		t.Fatalf("expected Discord role manager tool for natural role request, got %+v", requestToolNames(client.requests[1]))
 	}
-	if len(client.requests[1].Tools) != 1 {
-		t.Fatalf("expected preferred role creation workflow to be the only exposed tool, got %+v", requestToolNames(client.requests[1]))
-	}
 }
 
 func TestNaturalMemberRoleAssignmentRendersConfirmationThroughAgentTool(t *testing.T) {
 	manager := &fakeMemberRoleManager{}
 	client := &fakeLLM{responses: []llm.ChatResponse{
-		{Content: `{"respond":true,"prompt":"assign role role-pickle to user user-target","tool_name":"panda_manage_member_role"}`},
+		{Content: `{"respond":true,"prompt":"assign role role-pickle to user user-target"}`},
 		{ToolCalls: []llm.ToolCall{{
 			ID:   "call-member-role",
 			Type: "function",
@@ -1689,14 +1699,14 @@ func TestNaturalMemberRoleAssignmentRendersConfirmationThroughAgentTool(t *testi
 	if len(client.requests) != 3 {
 		t.Fatalf("expected classifier, member-role tool call, and final response, got %d request(s)", len(client.requests))
 	}
-	if names := requestToolNames(client.requests[1]); len(names) != 1 || !names["panda_manage_member_role"] {
-		t.Fatalf("expected preferred member-role workflow to be the only exposed tool, got %+v", names)
+	if names := requestToolNames(client.requests[1]); !names["panda_manage_member_role"] {
+		t.Fatalf("expected member-role workflow to be available, got %+v", names)
 	}
 }
 
 func TestNaturalComposedScheduleCreatesThroughAgentTool(t *testing.T) {
 	client := &fakeLLM{responses: []llm.ChatResponse{
-		{Content: `{"respond":true,"prompt":"schedule welcome_builder in 10 minutes with input topic standup","tool_name":"panda_manage_schedule"}`},
+		{Content: `{"respond":true,"prompt":"schedule welcome_builder in 10 minutes with input topic standup"}`},
 		{ToolCalls: []llm.ToolCall{{
 			ID:   "call-schedule-create",
 			Type: "function",
@@ -1729,9 +1739,6 @@ func TestNaturalComposedScheduleCreatesThroughAgentTool(t *testing.T) {
 	if !requestToolNames(client.requests[1])["panda_manage_schedule"] {
 		t.Fatalf("expected schedule manager tool to be available to admin natural chat, got %+v", requestToolNames(client.requests[1]))
 	}
-	if len(client.requests[1].Tools) != 1 {
-		t.Fatalf("expected preferred schedule workflow to be the only exposed tool, got %+v", requestToolNames(client.requests[1]))
-	}
 	schedules, err := router.scheduler.List(context.Background(), "guild-1", "", scheduler.KindComposed, false, 25)
 	if err != nil {
 		t.Fatalf("list schedules: %v", err)
@@ -1753,7 +1760,7 @@ func TestNaturalComposedScheduleCreatesThroughAgentTool(t *testing.T) {
 
 func TestNaturalComposedScheduleListsAndCancelsThroughAgentTool(t *testing.T) {
 	client := &fakeLLM{responses: []llm.ChatResponse{
-		{Content: `{"respond":true,"prompt":"list composed schedules for welcome_builder","tool_name":"panda_manage_schedule"}`},
+		{Content: `{"respond":true,"prompt":"list composed schedules for welcome_builder"}`},
 		{ToolCalls: []llm.ToolCall{{
 			ID:   "call-schedule-list",
 			Type: "function",
@@ -1763,7 +1770,7 @@ func TestNaturalComposedScheduleListsAndCancelsThroughAgentTool(t *testing.T) {
 			},
 		}}},
 		{Content: "There is one scheduled `welcome_builder` run."},
-		{Content: `{"respond":true,"prompt":"cancel scheduled composed tool welcome_builder","tool_name":"panda_manage_schedule"}`},
+		{Content: `{"respond":true,"prompt":"cancel scheduled composed tool welcome_builder"}`},
 		{ToolCalls: []llm.ToolCall{{
 			ID:   "call-schedule-cancel",
 			Type: "function",
@@ -1800,9 +1807,6 @@ func TestNaturalComposedScheduleListsAndCancelsThroughAgentTool(t *testing.T) {
 	if !requestToolNames(client.requests[1])["panda_manage_schedule"] {
 		t.Fatalf("expected schedule manager tool for list request, got %+v", requestToolNames(client.requests[1]))
 	}
-	if len(client.requests[1].Tools) != 1 {
-		t.Fatalf("expected preferred schedule list workflow to be the only exposed tool, got %+v", requestToolNames(client.requests[1]))
-	}
 	listMessages := joinRequestMessages(client.requests[2])
 	if !strings.Contains(listMessages, `"count":1`) || !strings.Contains(listMessages, `"welcome_builder"`) {
 		t.Fatalf("expected schedule list tool result in final chat request, got:\n%s", listMessages)
@@ -1820,9 +1824,6 @@ func TestNaturalComposedScheduleListsAndCancelsThroughAgentTool(t *testing.T) {
 	}
 	if !requestToolNames(client.requests[4])["panda_manage_schedule"] {
 		t.Fatalf("expected schedule manager tool for cancel request, got %+v", requestToolNames(client.requests[4]))
-	}
-	if len(client.requests[4].Tools) != 1 {
-		t.Fatalf("expected preferred schedule cancel workflow to be the only exposed tool, got %+v", requestToolNames(client.requests[4]))
 	}
 	cancelMessages := joinRequestMessages(client.requests[5])
 	if !strings.Contains(cancelMessages, `"action":"cancel"`) || !strings.Contains(cancelMessages, `"schedule_id":`+createdIDString(created.ID)) {
@@ -2274,7 +2275,7 @@ func TestNaturalMessageSetsSoulThroughAgentTool(t *testing.T) {
 
 func TestNaturalMessageSetsPromptThroughAgentTool(t *testing.T) {
 	client := &fakeLLM{responses: []llm.ChatResponse{
-		{Content: `{"respond":true,"prompt":"set your server instructions to Prefer moderator context before answering.","tool_name":"panda_manage_prompt"}`},
+		{Content: `{"respond":true,"prompt":"set your server instructions to Prefer moderator context before answering."}`},
 		{ToolCalls: []llm.ToolCall{{
 			ID:   "call-prompt-set",
 			Type: "function",
@@ -2303,8 +2304,8 @@ func TestNaturalMessageSetsPromptThroughAgentTool(t *testing.T) {
 	if len(client.requests) != 3 {
 		t.Fatalf("expected classifier, prompt tool call, and final response, got %d request(s)", len(client.requests))
 	}
-	if names := requestToolNames(client.requests[1]); len(names) != 1 || !names["panda_manage_prompt"] {
-		t.Fatalf("expected only prompt management tool for natural prompt update, got %+v", names)
+	if names := requestToolNames(client.requests[1]); !names["panda_manage_prompt"] {
+		t.Fatalf("expected prompt management tool for natural prompt update, got %+v", names)
 	}
 
 	ask := router.Handle(context.Background(), Request{
@@ -2395,7 +2396,7 @@ func TestNaturalMessageDraftsEventAutomationThroughAgentTool(t *testing.T) {
 
 func TestNaturalMessageDraftsEveryTimeEventAutomationThroughAgentTool(t *testing.T) {
 	client := &fakeLLM{responses: []llm.ChatResponse{
-		{Content: `{"respond":true,"prompt":"draft a member welcome automation","tool_name":"panda_manage_composed_tool"}`},
+		{Content: `{"respond":true,"prompt":"draft a member welcome automation"}`},
 		{ToolCalls: []llm.ToolCall{{
 			ID:   "call-composed-draft",
 			Type: "function",
@@ -2428,8 +2429,8 @@ func TestNaturalMessageDraftsEveryTimeEventAutomationThroughAgentTool(t *testing
 	if len(client.requests) != 4 {
 		t.Fatalf("expected classifier, composed-tool call, draft LLM, and final response, got %d LLM request(s)", len(client.requests))
 	}
-	if names := requestToolNames(client.requests[1]); len(names) != 1 || !names["panda_manage_composed_tool"] {
-		t.Fatalf("expected preferred composed tool manager to be the only natural chat tool, got %+v", names)
+	if names := requestToolNames(client.requests[1]); !names["panda_manage_composed_tool"] {
+		t.Fatalf("expected composed tool manager to be available, got %+v", names)
 	}
 	if !strings.Contains(joinRequestMessages(client.requests[2]), "Every time a new user enters") {
 		t.Fatalf("expected draft request to include every-time instruction, got:\n%s", joinRequestMessages(client.requests[2]))
@@ -2490,7 +2491,7 @@ func TestNaturalMessageExecutesTextToolCallFallbackForComposedTool(t *testing.T)
 func TestNaturalMessageCreatesNativePollThroughAgentTool(t *testing.T) {
 	discordProvider := &fakeCommandDiscordProvider{}
 	client := &fakeLLM{responses: []llm.ChatResponse{
-		{Content: `{"respond":true,"prompt":"make a poll about fable 5 versus gpt 5.6","tool_name":"discord_create_poll"}`},
+		{Content: `{"respond":true,"prompt":"make a poll about fable 5 versus gpt 5.6"}`},
 		{ToolCalls: []llm.ToolCall{{
 			ID:   "call-poll-create",
 			Type: "function",
@@ -2527,9 +2528,6 @@ func TestNaturalMessageCreatesNativePollThroughAgentTool(t *testing.T) {
 	if !requestToolNames(client.requests[1])["discord_create_poll"] {
 		t.Fatalf("expected Discord poll tool for natural poll request, got %+v", requestToolNames(client.requests[1]))
 	}
-	if len(client.requests[1].Tools) != 1 {
-		t.Fatalf("expected preferred poll workflow to be the only exposed tool, got %+v", requestToolNames(client.requests[1]))
-	}
 	if !strings.Contains(joinRequestMessages(client.requests[2]), "What will be better") {
 		t.Fatalf("expected poll tool result in final chat request, got:\n%s", joinRequestMessages(client.requests[2]))
 	}
@@ -2558,7 +2556,7 @@ func TestNaturalMessageCreatesNativePollThroughAgentTool(t *testing.T) {
 
 func TestNaturalMessageCreatesReminderThroughAgentTool(t *testing.T) {
 	client := &fakeLLM{responses: []llm.ChatResponse{
-		{Content: `{"respond":true,"prompt":"remind me in 10 minutes to stand up","tool_name":"panda_manage_reminder"}`},
+		{Content: `{"respond":true,"prompt":"remind me in 10 minutes to stand up"}`},
 		{ToolCalls: []llm.ToolCall{{
 			ID:   "call-reminder-create",
 			Type: "function",
@@ -2589,9 +2587,6 @@ func TestNaturalMessageCreatesReminderThroughAgentTool(t *testing.T) {
 	if !requestToolNames(client.requests[1])["panda_manage_reminder"] {
 		t.Fatalf("expected reminder tool for natural reminder request, got %+v", requestToolNames(client.requests[1]))
 	}
-	if len(client.requests[1].Tools) != 1 {
-		t.Fatalf("expected preferred reminder workflow to be the only exposed tool, got %+v", requestToolNames(client.requests[1]))
-	}
 	schedules, err := router.scheduler.List(context.Background(), "guild-1", "user-1", scheduler.KindReminder, false, 25)
 	if err != nil {
 		t.Fatalf("list reminders: %v", err)
@@ -2603,7 +2598,7 @@ func TestNaturalMessageCreatesReminderThroughAgentTool(t *testing.T) {
 
 func TestNaturalMessageManagesMusicThroughAgentTool(t *testing.T) {
 	client := &fakeLLM{responses: []llm.ChatResponse{
-		{Content: `{"respond":true,"prompt":"play ocean drive","tool_name":"panda_manage_music"}`},
+		{Content: `{"respond":true,"prompt":"play ocean drive"}`},
 		{ToolCalls: []llm.ToolCall{{
 			ID:   "call-music-play",
 			Type: "function",
@@ -2635,48 +2630,11 @@ func TestNaturalMessageManagesMusicThroughAgentTool(t *testing.T) {
 	if len(client.requests) != 3 {
 		t.Fatalf("expected classifier, music tool call, and final response, got %d request(s)", len(client.requests))
 	}
-	if names := requestToolNames(client.requests[1]); len(names) != 1 || !names["panda_manage_music"] {
-		t.Fatalf("expected only music tool for natural music request, got %+v", names)
-	}
-	if !strings.Contains(joinRequestMessages(client.requests[1]), "natural-message classifier selected the exposed `panda_manage_music` workflow") {
-		t.Fatalf("expected music tool instruction for natural music request, got:\n%s", joinRequestMessages(client.requests[1]))
+	if names := requestToolNames(client.requests[1]); !names["panda_manage_music"] {
+		t.Fatalf("expected music tool for natural music request, got %+v", names)
 	}
 	if !strings.Contains(joinRequestMessages(client.requests[2]), "music handled") {
 		t.Fatalf("expected music tool result in final chat request, got:\n%s", joinRequestMessages(client.requests[2]))
-	}
-}
-
-func TestNaturalMessageExposesMusicWhenToolPolicyOff(t *testing.T) {
-	client := &fakeLLM{responses: []llm.ChatResponse{
-		{Content: `{"respond":true,"prompt":"play passport by mgk","tool_name":"panda_manage_music"}`},
-		{Content: "music tool unavailable"},
-	}}
-	router := newTestRouter(t, client, 5)
-	if _, err := router.admin.ConfigureBehavior(context.Background(), "guild-1", "admin", admin.BehaviorSettings{ToolPolicy: tools.ToolPolicyOff, ToolPolicySet: true}); err != nil {
-		t.Fatalf("ConfigureBehavior: %v", err)
-	}
-
-	response := router.HandleNaturalMessage(context.Background(), Request{
-		UserID:         "user-1",
-		GuildID:        "guild-1",
-		ChannelID:      "channel-1",
-		VoiceChannelID: "voice-1",
-		Options: map[string]string{
-			"message":       "panda play passport by mgk",
-			"bot_mentioned": "true",
-		},
-	})
-	if response.Content != "music tool unavailable" {
-		t.Fatalf("unexpected natural message response: %+v", response)
-	}
-	if len(client.requests) != 2 {
-		t.Fatalf("expected classifier and chat request, got %d request(s)", len(client.requests))
-	}
-	if names := requestToolNames(client.requests[1]); len(names) != 1 || !names["panda_manage_music"] {
-		t.Fatalf("expected only music tool with policy off, got %+v", names)
-	}
-	if !strings.Contains(joinRequestMessages(client.requests[1]), "natural-message classifier selected the exposed `panda_manage_music` workflow") {
-		t.Fatalf("expected music tool instruction with policy off, got:\n%s", joinRequestMessages(client.requests[1]))
 	}
 }
 
@@ -2768,13 +2726,116 @@ func TestNaturalMessageAdminGetsManagementToolsWhenPolicyOff(t *testing.T) {
 		t.Fatalf("expected trigger and chat LLM requests, got %d", len(client.requests))
 	}
 	names := requestToolNames(client.requests[1])
-	for _, want := range []string{"panda_list_tools", "read_config", "panda_manage_soul", "panda_manage_prompt", "panda_manage_tool_access", "panda_manage_composed_tool", "panda_manage_channel_rule", "generate_workflow_json"} {
+	for _, want := range []string{"read_config", "panda_manage_soul", "panda_manage_prompt", "panda_manage_tool_access", "panda_manage_composed_tool", "panda_manage_channel_rule", "generate_workflow_json"} {
 		if !names[want] {
 			t.Fatalf("expected %s in admin natural-message tools, got %+v", want, names)
 		}
 	}
+	if names["panda_list_tools"] {
+		t.Fatalf("list-tools meta tool should not be exposed to response model, got %+v", names)
+	}
 	if names["discord_send_message"] {
 		t.Fatalf("discord_send_message should need Discord provider runtime wiring, got %+v", names)
+	}
+}
+
+func TestNaturalMessageStoredGuildOwnerGetsManagementToolsWhenPolicyOff(t *testing.T) {
+	client := &fakeLLM{responses: []llm.ChatResponse{
+		{Content: `{"respond":true,"prompt":"what can you do"}`},
+		{Content: "chat fixture"},
+	}}
+	router, deps := newTestRouterWithDeps(t, client, 5)
+	ctx := context.Background()
+	if _, err := deps.guilds.RecordAuthorizedInstall(ctx, repository.GuildInstall{
+		GuildID:           "guild-1",
+		Name:              "Test Guild",
+		OwnerUserID:       "owner-1",
+		InstalledByUserID: "installer-1",
+		AuthorizedAt:      time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("RecordAuthorizedInstall: %v", err)
+	}
+
+	response := router.HandleNaturalMessage(ctx, Request{
+		UserID:    "owner-1",
+		GuildID:   "guild-1",
+		ChannelID: "channel-1",
+		Options:   map[string]string{"message": "Panda what can you do?", "bot_mentioned": "true"},
+	})
+	if response.Content != "chat fixture" {
+		t.Fatalf("unexpected natural message response: %+v", response)
+	}
+	if len(client.requests) != 2 {
+		t.Fatalf("expected trigger and chat LLM requests, got %d", len(client.requests))
+	}
+	names := requestToolNames(client.requests[1])
+	for _, want := range []string{"read_config", "panda_manage_soul", "panda_manage_prompt", "panda_manage_tool_access", "panda_manage_composed_tool", "panda_manage_channel_rule", "generate_workflow_json"} {
+		if !names[want] {
+			t.Fatalf("expected stored guild owner to receive %s in natural-message tools, got %+v", want, names)
+		}
+	}
+	if names["panda_list_tools"] {
+		t.Fatalf("list-tools meta tool should not be exposed to response model, got %+v", names)
+	}
+	capabilityContext := joinRequestMessages(client.requests[1])
+	if !strings.Contains(capabilityContext, "Admin setup (caller has admin access)") {
+		t.Fatalf("expected owner/admin capability context, got:\n%s", capabilityContext)
+	}
+	if strings.Contains(capabilityContext, "Show the tool inventory") {
+		t.Fatalf("capability context should not teach the model to expose tool inventory, got:\n%s", capabilityContext)
+	}
+}
+
+func TestNaturalMessageStoredGuildOwnerGetsFeatureGatedManagementTools(t *testing.T) {
+	client := &fakeLLM{responses: []llm.ChatResponse{
+		{Content: `{"respond":true,"prompt":"what can you do"}`},
+		{Content: "chat fixture"},
+	}}
+	router, deps := newTestRouterWithDeps(t, client, 5)
+	featureRepo := attachFeatureService(t, router)
+	ctx := context.Background()
+	if _, err := deps.guilds.RecordAuthorizedInstall(ctx, repository.GuildInstall{
+		GuildID:           "guild-1",
+		Name:              "Test Guild",
+		OwnerUserID:       "owner-1",
+		InstalledByUserID: "installer-1",
+		AuthorizedAt:      time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("RecordAuthorizedInstall: %v", err)
+	}
+	if err := featureRepo.SetGuildFeatures(ctx, "guild-1", features.DefaultInstallPreset(), "intent-1", "owner-1", time.Now().UTC()); err != nil {
+		t.Fatalf("SetGuildFeatures: %v", err)
+	}
+
+	response := router.HandleNaturalMessage(ctx, Request{
+		UserID:    "owner-1",
+		GuildID:   "guild-1",
+		ChannelID: "channel-1",
+		Options:   map[string]string{"message": "Panda what can you do?", "bot_mentioned": "true"},
+	})
+	if response.Content != "chat fixture" {
+		t.Fatalf("unexpected natural message response: %+v", response)
+	}
+	if len(client.requests) != 2 {
+		t.Fatalf("expected trigger and chat LLM requests, got %d", len(client.requests))
+	}
+	names := requestToolNames(client.requests[1])
+	for _, want := range []string{"read_config", "panda_manage_soul", "panda_manage_prompt", "panda_manage_tool_access", "panda_manage_composed_tool", "panda_manage_channel_rule", "generate_workflow_json", "panda_manage_music", "panda_manage_reminder"} {
+		if !names[want] {
+			t.Fatalf("expected feature-gated stored guild owner to receive %s, got %+v", want, names)
+		}
+	}
+	if names["panda_list_tools"] {
+		t.Fatalf("list-tools meta tool should not be exposed to response model, got %+v", names)
+	}
+	capabilityContext := joinRequestMessages(client.requests[1])
+	for _, forbidden := range []string{"Show the tool inventory", "I can help with three things", "`panda_list_tools`"} {
+		if strings.Contains(capabilityContext, forbidden) {
+			t.Fatalf("capability context should not include %q, got:\n%s", forbidden, capabilityContext)
+		}
+	}
+	if !strings.Contains(capabilityContext, "Admin setup (caller has admin access)") {
+		t.Fatalf("expected owner/admin capability context, got:\n%s", capabilityContext)
 	}
 }
 
@@ -2799,6 +2860,36 @@ func TestNaturalMessageClassifiesTrailingPandaMention(t *testing.T) {
 	}
 	if !strings.Contains(joinRequestMessages(client.requests[0]), "what can you do panda") {
 		t.Fatalf("expected exact message in classifier request, got:\n%s", joinRequestMessages(client.requests[0]))
+	}
+}
+
+func TestNaturalCapabilityMessageUsesToolInventoryWorkflow(t *testing.T) {
+	client := &fakeLLM{responses: []llm.ChatResponse{
+		{Content: `{"respond":true,"prompt":"what can you do"}`},
+		{Content: "Quick overview: I can help with reminders, music, and workflow setup here."},
+	}}
+	router := newTestRouter(t, client, 5)
+
+	response := router.HandleNaturalMessage(context.Background(), Request{
+		UserID:    "user-1",
+		GuildID:   "guild-1",
+		ChannelID: "channel-1",
+		Options:   map[string]string{"message": "Panda what can you do?", "bot_mentioned": "true"},
+	})
+	if response.Content != "Quick overview: I can help with reminders, music, and workflow setup here." {
+		t.Fatalf("unexpected natural message response: %+v", response)
+	}
+	if len(client.requests) != 2 {
+		t.Fatalf("expected classifier and direct capability response, got %d", len(client.requests))
+	}
+	if names := requestToolNames(client.requests[1]); names["panda_list_tools"] {
+		t.Fatalf("list-tools meta tool should not be exposed to response model, got %+v", names)
+	}
+	capabilityContext := joinRequestMessages(client.requests[1])
+	for _, want := range []string{"current user-scoped capability overview", "Do not present internal listing/debug helpers", "Mention exact function/tool names only when the user explicitly asks"} {
+		if !strings.Contains(capabilityContext, want) {
+			t.Fatalf("expected capability context %s in response request, got:\n%s", want, capabilityContext)
+		}
 	}
 }
 
@@ -2829,7 +2920,7 @@ func TestGuildControlDoesNotGrantOwnerOpsTools(t *testing.T) {
 
 func TestNaturalOwnerOpsUsesConfirmationButton(t *testing.T) {
 	client := &fakeLLM{responses: []llm.ChatResponse{
-		{Content: `{"respond":true,"prompt":"drain the queue worker","tool_name":"panda_manage_ops"}`},
+		{Content: `{"respond":true,"prompt":"drain the queue worker"}`},
 		{ToolCalls: []llm.ToolCall{{
 			ID:   "call-ops-drain",
 			Type: "function",
@@ -2853,8 +2944,8 @@ func TestNaturalOwnerOpsUsesConfirmationButton(t *testing.T) {
 	if response.Confirmation == nil || !response.Confirmation.Danger || response.Confirmation.ConfirmLabel != "Drain worker" {
 		t.Fatalf("expected owner ops confirmation, got %+v", response)
 	}
-	if names := requestToolNames(client.requests[1]); len(names) != 1 || !names["panda_manage_ops"] {
-		t.Fatalf("expected only owner ops tool for natural owner ops, got %+v", names)
+	if names := requestToolNames(client.requests[1]); !names["panda_manage_ops"] {
+		t.Fatalf("expected owner ops tool for natural owner ops, got %+v", names)
 	}
 	confirmationRequest, ok := RequestFromToolConfirmationID(response.Confirmation.ID, Request{
 		UserID:       "owner",
@@ -2886,6 +2977,30 @@ func TestRegularUserGetsWebSearchPermissionByDefault(t *testing.T) {
 	}
 	if _, ok := permissions[admin.PermissionAdminConfigWrite]; ok {
 		t.Fatalf("regular users should not get admin config write by default: %+v", permissions)
+	}
+}
+
+func TestRegularUserGetsWebSearchPermissionWhenFeatureGateOmitsWebSearch(t *testing.T) {
+	ctx := context.Background()
+	router := newTestRouter(t, &fakeLLM{}, 5)
+	repo := attachFeatureService(t, router)
+	if err := repo.SetGuildFeatures(ctx, "guild-1", []string{features.AssistantChat}, "test", "admin", time.Now().UTC()); err != nil {
+		t.Fatalf("SetGuildFeatures: %v", err)
+	}
+
+	permissions := router.allowedToolPermissions(ctx, Request{
+		UserID:    "user-1",
+		GuildID:   "guild-1",
+		ChannelID: "channel-1",
+		RoleIDs:   []string{"member"},
+	})
+	if _, ok := permissions[admin.PermissionAssistantWebSearch]; !ok {
+		t.Fatalf("web search should be available by default even when guild features omit it: %+v", permissions)
+	}
+
+	enabled, active := router.featureSetForAccess(ctx, "guild-1")
+	if !active || !features.Has(enabled, features.WebSearch) {
+		t.Fatalf("web search should be injected into access feature set, active=%t enabled=%+v", active, enabled)
 	}
 }
 

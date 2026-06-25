@@ -12,6 +12,7 @@ import (
 	"github.com/sn0w/panda2/internal/admin"
 	"github.com/sn0w/panda2/internal/billing"
 	contextsvc "github.com/sn0w/panda2/internal/context"
+	"github.com/sn0w/panda2/internal/features"
 	"github.com/sn0w/panda2/internal/llm"
 	"github.com/sn0w/panda2/internal/memory"
 	"github.com/sn0w/panda2/internal/repository"
@@ -140,7 +141,7 @@ func TestOpenRouterToolsFiltersByPermission(t *testing.T) {
 		Permissions: map[string]struct{}{admin.PermissionAssistantUse: {}},
 	})
 	names := toolNames(tools)
-	if !names["discord_fetch_message"] || !names["panda_list_tools"] || names["generate_workflow_json"] {
+	if !names["discord_fetch_message"] || names["panda_list_tools"] || names["generate_workflow_json"] {
 		t.Fatalf("unexpected read-only tools: %+v", names)
 	}
 	writeTools := registry.OpenRouterToolsForAccess(ToolAccess{
@@ -177,21 +178,28 @@ func TestOpenRouterToolsFiltersByPermission(t *testing.T) {
 	}
 }
 
-func TestOpenRouterToolsKeepsMetadataAvailableWhenPolicyOff(t *testing.T) {
+func TestOpenRouterToolsNormalizesLegacyOffPolicyToAdminOnly(t *testing.T) {
 	registry, err := NewDefaultRegistry()
 	if err != nil {
 		t.Fatalf("NewDefaultRegistry: %v", err)
 	}
 	tools := registry.OpenRouterToolsForAccess(ToolAccess{
-		Policy:      ToolPolicyOff,
-		Permissions: map[string]struct{}{admin.PermissionAssistantUse: {}},
+		Policy: "off",
+		Permissions: map[string]struct{}{
+			admin.PermissionAssistantUse:       {},
+			admin.PermissionAdminConfigRead:    {},
+			admin.PermissionAdminConfigWrite:   {},
+			admin.PermissionAssistantWebSearch: {},
+		},
 	})
 	names := toolNames(tools)
-	if !names["panda_list_tools"] {
-		t.Fatalf("expected metadata list tool under off policy, got %+v", names)
+	if names["panda_list_tools"] {
+		t.Fatalf("metadata inventory should not be exposed to the response model, got %+v", names)
 	}
-	if names["discord_fetch_message"] || names["generate_workflow_json"] {
-		t.Fatalf("off policy should still hide action tools, got %+v", names)
+	for _, want := range []string{"read_config", "panda_manage_tool_access", "web_search"} {
+		if !names[want] {
+			t.Fatalf("legacy off policy should normalize to admin_only and expose %s to admins, got %+v", want, names)
+		}
 	}
 }
 
@@ -209,8 +217,8 @@ func TestOpenRouterToolsAdminOnlyGatesRegularUsers(t *testing.T) {
 		},
 	})
 	regularNames := toolNames(regularTools)
-	if !regularNames["panda_list_tools"] || !regularNames["web_search"] || regularNames["discord_fetch_message"] {
-		t.Fatalf("admin_only should expose metadata and web search to regular users, got %+v", regularNames)
+	if !regularNames["web_search"] || regularNames["panda_list_tools"] || regularNames["discord_fetch_message"] {
+		t.Fatalf("admin_only should expose web search but hide metadata inventory and broader tools from regular users, got %+v", regularNames)
 	}
 
 	adminTools := registry.OpenRouterToolsForAccess(ToolAccess{
@@ -228,6 +236,28 @@ func TestOpenRouterToolsAdminOnlyGatesRegularUsers(t *testing.T) {
 	}
 }
 
+func TestOpenRouterToolsTreatWebSearchAsDefaultFeature(t *testing.T) {
+	registry, err := NewDefaultRegistry()
+	if err != nil {
+		t.Fatalf("NewDefaultRegistry: %v", err)
+	}
+
+	available := registry.OpenRouterToolsForAccess(ToolAccess{
+		Policy: ToolPolicyAdminOnly,
+		Permissions: map[string]struct{}{
+			admin.PermissionAssistantUse:       {},
+			admin.PermissionAssistantWebSearch: {},
+		},
+		EnabledFeatures: map[string]struct{}{
+			features.AssistantChat: {},
+		},
+		FeatureGateActive: true,
+	})
+	if !toolNames(available)["web_search"] {
+		t.Fatalf("web search should remain available when feature gate omits web_search: %+v", toolNames(available))
+	}
+}
+
 func TestOpenRouterToolsHonorsIncludeInModelContext(t *testing.T) {
 	registry, err := NewDefaultRegistry()
 	if err != nil {
@@ -242,29 +272,28 @@ func TestOpenRouterToolsHonorsIncludeInModelContext(t *testing.T) {
 	}
 }
 
-func TestOpenRouterToolsKeepsBotAdminManagementAvailableWhenPolicyOff(t *testing.T) {
+func TestOpenRouterToolsLegacyOffPolicyDoesNotSuppressAdminTools(t *testing.T) {
 	registry, err := NewDefaultRegistry()
 	if err != nil {
 		t.Fatalf("NewDefaultRegistry: %v", err)
 	}
 	tools := registry.OpenRouterToolsForAccess(ToolAccess{
-		Policy: ToolPolicyOff,
+		Policy: "off",
 		Permissions: map[string]struct{}{
 			admin.PermissionAssistantUse:     {},
+			admin.PermissionAdminAuditRead:   {},
 			admin.PermissionAdminConfigRead:  {},
 			admin.PermissionAdminConfigWrite: {},
 			admin.PermissionAdminUsageRead:   {},
 		},
 	})
 	names := toolNames(tools)
-	for _, want := range []string{"panda_list_tools"} {
-		if !names[want] {
-			t.Fatalf("expected %s under off policy, got %+v", want, names)
-		}
+	if names["panda_list_tools"] {
+		t.Fatalf("metadata inventory should not be exposed under legacy off/admin_only policy, got %+v", names)
 	}
-	for _, hidden := range []string{"read_config", "panda_manage_tool_access", "panda_manage_channel_rule", "panda_usage_report", "generate_workflow_json", "discord_modify_channel_permissions", "discord_send_message"} {
-		if names[hidden] {
-			t.Fatalf("expected %s to stay hidden under off policy, got %+v", hidden, names)
+	for _, want := range []string{"read_config", "panda_manage_tool_access", "panda_manage_channel_rule", "panda_usage_report", "generate_workflow_json", "discord_modify_channel_permissions", "discord_send_message"} {
+		if !names[want] {
+			t.Fatalf("legacy off policy should normalize to admin_only and expose %s to admins, got %+v", want, names)
 		}
 	}
 }
@@ -1757,12 +1786,12 @@ func TestExecutorListToolsHidesAdminToolsFromNormalUsers(t *testing.T) {
 		t.Fatalf("Execute: %v", err)
 	}
 	content := result.Message.Content
-	for _, want := range []string{`"presentation":"capabilities"`, `"name":"answer_from_visible_discord_context"`, `"name":"current_capabilities"`} {
+	for _, want := range []string{`"presentation":"capabilities"`, `"name":"answer_from_visible_discord_context"`, `"label":"Look up server context"`} {
 		if !strings.Contains(content, want) {
 			t.Fatalf("expected normal user tool listing to contain %s, got %s", want, content)
 		}
 	}
-	for _, hidden := range []string{"discord_fetch_message", "native_name", "input_schema", "read_config", "panda_manage_tool_access", "discord_modify_channel_permissions", "admin.config.write", "admin_read", "admin_write"} {
+	for _, hidden := range []string{"current_capabilities", "discord_fetch_message", "native_name", "input_schema", "read_config", "panda_manage_tool_access", "discord_modify_channel_permissions", "admin.config.write", "admin_read", "admin_write"} {
 		if strings.Contains(content, hidden) {
 			t.Fatalf("normal user tool listing leaked admin detail %q: %s", hidden, content)
 		}
@@ -1854,6 +1883,25 @@ func TestExecutorFiltersExecutableToolsByPermission(t *testing.T) {
 	}
 	if !names["web_search"] || !names["discord_fetch_message"] || !names["generate_workflow_json"] {
 		t.Fatalf("expected configured web search tool, got %+v", names)
+	}
+
+	assistantTools = executor.OpenRouterTools(ToolAccess{
+		Policy: ToolPolicyAssistive,
+		Permissions: map[string]struct{}{
+			admin.PermissionAssistantUse:       {},
+			admin.PermissionAssistantWebSearch: {},
+		},
+		EnabledFeatures: map[string]struct{}{
+			features.AssistantChat: {},
+		},
+		FeatureGateActive: true,
+	})
+	names = map[string]bool{}
+	for _, tool := range assistantTools {
+		names[tool.Function.Name] = true
+	}
+	if !names["web_search"] {
+		t.Fatalf("expected configured web search tool even when feature gate omits web_search, got %+v", names)
 	}
 }
 

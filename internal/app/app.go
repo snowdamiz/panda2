@@ -95,6 +95,8 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 		BaseURL:                        cfg.OpenRouterBaseURL,
 		AppURL:                         cfg.OpenRouterAppURL,
 		AppTitle:                       cfg.OpenRouterAppTitle,
+		ProviderOrder:                  cfg.OpenRouterProviderOrder,
+		AllowProviderFallbacks:         cfg.OpenRouterAllowProviderFallbacks,
 		MaxRetries:                     2,
 		CircuitBreakerFailureThreshold: cfg.OpenRouterCircuitBreakerFailureThreshold,
 		CircuitBreakerCooldown:         cfg.OpenRouterCircuitBreakerCooldown,
@@ -195,7 +197,8 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 		WithDiscordEventRecorder(discordEvents).
 		WithJobQueue(jobs).
 		WithAlertHandler(alertService).
-		WithMusicRepository(musicRepo)
+		WithMusicRepository(musicRepo).
+		WithInstallService(installService)
 	toolExecutor.WithMusicManager(discord.MusicManager())
 	schedulerService.WithDeliverySender(discord)
 	alertService.WithDeliverySender(discord)

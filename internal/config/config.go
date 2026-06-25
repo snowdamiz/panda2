@@ -20,8 +20,9 @@ const (
 	defaultEnvFilePath               = ".env"
 	defaultDevDataDir                = "data"
 	defaultProdDataDir               = "/data"
-	defaultOpenRouterModel           = "inception/mercury-2"
-	defaultOpenRouterClassifierModel = "inclusionai/ling-2.6-flash"
+	defaultOpenRouterModel           = "openai/gpt-oss-120b"
+	defaultOpenRouterClassifierModel = "openai/gpt-oss-120b"
+	defaultOpenRouterProvider        = "cerebras"
 	defaultSolanaCluster             = "devnet"
 	defaultSolanaConfirmation        = "finalized"
 	defaultSolanaOrderExpiration     = 30 * time.Minute
@@ -42,6 +43,8 @@ type Config struct {
 	OpenRouterModel                          string
 	OpenRouterClassifierModel                string
 	OpenRouterFallbackModels                 []string
+	OpenRouterProviderOrder                  []string
+	OpenRouterAllowProviderFallbacks         bool
 	OpenRouterEmbeddingModel                 string
 	OpenRouterAppURL                         string
 	OpenRouterAppTitle                       string
@@ -95,6 +98,8 @@ type fileOpenRouterConfig struct {
 	DefaultModel    string                   `json:"default_model"`
 	ClassifierModel string                   `json:"classifier_model"`
 	FallbackModels  []string                 `json:"fallback_models"`
+	ProviderOrder   []string                 `json:"provider_order"`
+	AllowFallbacks  *bool                    `json:"allow_provider_fallbacks"`
 	EmbeddingModel  string                   `json:"embedding_model"`
 	AppURL          string                   `json:"app_url"`
 	AppTitle        string                   `json:"app_title"`
@@ -351,6 +356,7 @@ func defaultConfig() Config {
 		OpenRouterBaseURL:                        "https://openrouter.ai/api/v1",
 		OpenRouterModel:                          defaultOpenRouterModel,
 		OpenRouterClassifierModel:                defaultOpenRouterClassifierModel,
+		OpenRouterProviderOrder:                  []string{defaultOpenRouterProvider},
 		OpenRouterAppTitle:                       "Panda Assistant",
 		OpenRouterCircuitBreakerFailureThreshold: 5,
 		OpenRouterCircuitBreakerCooldown:         30 * time.Second,
@@ -620,6 +626,12 @@ func applyFileConfig(cfg *Config, file fileConfig) error {
 	if file.OpenRouter.FallbackModels != nil {
 		cfg.OpenRouterFallbackModels = normalizeList(file.OpenRouter.FallbackModels)
 	}
+	if file.OpenRouter.ProviderOrder != nil {
+		cfg.OpenRouterProviderOrder = normalizeList(file.OpenRouter.ProviderOrder)
+	}
+	if file.OpenRouter.AllowFallbacks != nil {
+		cfg.OpenRouterAllowProviderFallbacks = *file.OpenRouter.AllowFallbacks
+	}
 	if value := strings.TrimSpace(file.OpenRouter.EmbeddingModel); value != "" {
 		cfg.OpenRouterEmbeddingModel = value
 	}
@@ -736,6 +748,10 @@ func applyEnvValues(cfg *Config, lookup func(string) (string, bool)) {
 	if value, ok := csvListFromLookup(lookup, "OPENROUTER_FALLBACK_MODELS"); ok {
 		cfg.OpenRouterFallbackModels = value
 	}
+	if value, ok := csvListFromLookup(lookup, "OPENROUTER_PROVIDER_ORDER"); ok {
+		cfg.OpenRouterProviderOrder = value
+	}
+	cfg.OpenRouterAllowProviderFallbacks = boolFromLookup(lookup, "OPENROUTER_ALLOW_PROVIDER_FALLBACKS", cfg.OpenRouterAllowProviderFallbacks)
 	cfg.OpenRouterEmbeddingModel = nonEmptyStringFromLookup(lookup, "OPENROUTER_EMBEDDING_MODEL", cfg.OpenRouterEmbeddingModel)
 	cfg.OpenRouterAppURL = nonEmptyStringFromLookup(lookup, "OPENROUTER_APP_URL", cfg.OpenRouterAppURL)
 	cfg.OpenRouterAppTitle = nonEmptyStringFromLookup(lookup, "OPENROUTER_APP_TITLE", cfg.OpenRouterAppTitle)
@@ -870,6 +886,22 @@ func intFromLookup(lookup func(string) (string, bool), name string, fallback int
 		return fallback
 	}
 	parsed, err := strconv.Atoi(value)
+	if err != nil {
+		return fallback
+	}
+	return parsed
+}
+
+func boolFromLookup(lookup func(string) (string, bool), name string, fallback bool) bool {
+	value, ok := lookup(name)
+	if !ok {
+		return fallback
+	}
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return fallback
+	}
+	parsed, err := strconv.ParseBool(value)
 	if err != nil {
 		return fallback
 	}

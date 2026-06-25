@@ -2211,9 +2211,6 @@ func userNativeCapabilities(definitions map[string]Definition) []map[string]any 
 	if has("panda.manage_ops") {
 		add("owner_operations", "Owner operations", "Read operational status or prepare drain, resume, and incident-mode changes for confirmation.", true)
 	}
-	if has("panda.list_tools") {
-		add("current_capabilities", "Show current capabilities", "Summarize the Panda capabilities available to you in this channel.", false)
-	}
 	return capabilities
 }
 

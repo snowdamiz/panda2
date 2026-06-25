@@ -45,7 +45,6 @@ const (
 )
 
 const (
-	ToolPolicyOff            = "off"
 	ToolPolicyReadOnly       = "read_only"
 	ToolPolicyAssistive      = "assistive"
 	ToolPolicyAdminOnly      = "admin_only"
@@ -215,8 +214,6 @@ func (d Definition) AvailableTo(access ToolAccess) bool {
 		return true
 	}
 	switch normalizeToolPolicy(access.Policy) {
-	case ToolPolicyOff:
-		return false
 	case ToolPolicyReadOnly:
 		return d.ToolClass == ToolClassDiscordRead || d.ToolClass == ToolClassMemory || d.ToolClass == ToolClassWebRead || d.ToolClass == ToolClassMetadata
 	case ToolPolicyAssistive:
@@ -257,12 +254,15 @@ func (d Definition) AvailableTo(access ToolAccess) bool {
 			d.ToolClass == ToolClassWorkflow ||
 			d.ToolClass == ToolClassMetadata
 	default:
-		return false
+		return hasAdminPolicyAccess(access) && d.ToolClass != ToolClassOwnerOps
 	}
 }
 
 func (access ToolAccess) HasFeature(featureID string) bool {
 	if strings.TrimSpace(featureID) == "" {
+		return true
+	}
+	if featureID == features.WebSearch {
 		return true
 	}
 	if !access.FeatureGateActive {
@@ -339,7 +339,7 @@ func normalizeToolPolicy(policy string) string {
 	case ToolPolicyOwnerOps:
 		return ToolPolicyOwnerOps
 	default:
-		return ToolPolicyOff
+		return ToolPolicyAdminOnly
 	}
 }
 
@@ -453,7 +453,7 @@ func DefaultDefinitions() []Definition {
 		},
 		{
 			Name:                  "panda.list_tools",
-			Description:           "Call this before answering questions about what tools or capabilities Panda has. It lists callable tools in the current guild and channel context.",
+			Description:           "List callable tools in the current guild and channel context for explicit inventory/debug requests.",
 			RequiredPermission:    admin.PermissionAssistantUse,
 			FeatureID:             features.AssistantChat,
 			ToolClass:             ToolClassMetadata,
@@ -462,7 +462,7 @@ func DefaultDefinitions() []Definition {
 			Timeout:               time.Second,
 			Redaction:             RedactNone,
 			Audit:                 AuditNone,
-			IncludeInModelContext: true,
+			IncludeInModelContext: false,
 			BypassToolPolicy:      true,
 		},
 		{

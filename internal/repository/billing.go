@@ -95,14 +95,14 @@ func (r *BillingRepository) GetCustomerAccountByGuild(ctx context.Context, guild
 
 func (r *BillingRepository) GetSubscriptionByGuild(ctx context.Context, guildID string) (store.GuildSubscription, bool, error) {
 	var subscription store.GuildSubscription
-	err := r.db.WithContext(ctx).Where("guild_id = ?", strings.TrimSpace(guildID)).First(&subscription).Error
-	if err == nil {
-		return subscription, true, nil
+	result := r.db.WithContext(ctx).Where("guild_id = ?", strings.TrimSpace(guildID)).Limit(1).Find(&subscription)
+	if result.Error != nil {
+		return store.GuildSubscription{}, false, result.Error
 	}
-	if errors.Is(err, gorm.ErrRecordNotFound) {
+	if result.RowsAffected == 0 {
 		return store.GuildSubscription{}, false, nil
 	}
-	return store.GuildSubscription{}, false, err
+	return subscription, true, nil
 }
 
 func (r *BillingRepository) GetSubscriptionByExternalSubscriptionID(ctx context.Context, externalSubscriptionID string) (store.GuildSubscription, bool, error) {

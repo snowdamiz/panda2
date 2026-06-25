@@ -83,6 +83,8 @@ func TestLoadConfigFile(t *testing.T) {
 			"default_model": "provider/model",
 			"classifier_model": "provider/classifier",
 			"fallback_models": ["provider/fallback-a", "provider/fallback-b", "provider/fallback-a"],
+			"provider_order": ["cerebras", "groq", "cerebras"],
+			"allow_provider_fallbacks": true,
 			"embedding_model": "provider/embed",
 			"app_url": "https://panda.example",
 			"app_title": "Panda Local",
@@ -135,6 +137,12 @@ func TestLoadConfigFile(t *testing.T) {
 	if len(cfg.OpenRouterFallbackModels) != 2 || cfg.OpenRouterFallbackModels[0] != "provider/fallback-a" || cfg.OpenRouterFallbackModels[1] != "provider/fallback-b" {
 		t.Fatalf("unexpected fallback models %#v", cfg.OpenRouterFallbackModels)
 	}
+	if len(cfg.OpenRouterProviderOrder) != 2 || cfg.OpenRouterProviderOrder[0] != "cerebras" || cfg.OpenRouterProviderOrder[1] != "groq" {
+		t.Fatalf("unexpected provider order %#v", cfg.OpenRouterProviderOrder)
+	}
+	if !cfg.OpenRouterAllowProviderFallbacks {
+		t.Fatal("expected OpenRouter provider fallback setting from config file")
+	}
 	if cfg.OpenRouterEmbeddingModel != "provider/embed" || cfg.OpenRouterAppURL != "https://panda.example" || cfg.OpenRouterAppTitle != "Panda Local" {
 		t.Fatalf("unexpected OpenRouter metadata: embed=%q url=%q title=%q", cfg.OpenRouterEmbeddingModel, cfg.OpenRouterAppURL, cfg.OpenRouterAppTitle)
 	}
@@ -172,7 +180,9 @@ func TestEnvOverridesConfigFile(t *testing.T) {
 		"openrouter": {
 			"default_model": "provider/from-file",
 			"classifier_model": "provider/classifier-file",
-			"fallback_models": ["provider/file-fallback"]
+			"fallback_models": ["provider/file-fallback"],
+			"provider_order": ["groq"],
+			"allow_provider_fallbacks": true
 		}
 	}`)
 	t.Setenv("PANDA_CONFIG", configPath)
@@ -181,6 +191,8 @@ func TestEnvOverridesConfigFile(t *testing.T) {
 	t.Setenv("OPENROUTER_DEFAULT_MODEL", "provider/from-env")
 	t.Setenv("OPENROUTER_CLASSIFIER_MODEL", "provider/classifier-env")
 	t.Setenv("OPENROUTER_FALLBACK_MODELS", "provider/env-a,provider/env-b")
+	t.Setenv("OPENROUTER_PROVIDER_ORDER", "cerebras,groq,cerebras")
+	t.Setenv("OPENROUTER_ALLOW_PROVIDER_FALLBACKS", "false")
 	t.Setenv("BRAVE_SEARCH_API_KEY", "brave-key")
 	t.Setenv("BRAVE_SEARCH_BASE_URL", "https://brave-env.example/res/v1")
 	t.Setenv("YTDLP_PATH", "/opt/bin/yt-dlp")
@@ -206,6 +218,12 @@ func TestEnvOverridesConfigFile(t *testing.T) {
 	}
 	if len(cfg.OpenRouterFallbackModels) != 2 || cfg.OpenRouterFallbackModels[0] != "provider/env-a" || cfg.OpenRouterFallbackModels[1] != "provider/env-b" {
 		t.Fatalf("expected env fallback models, got %#v", cfg.OpenRouterFallbackModels)
+	}
+	if len(cfg.OpenRouterProviderOrder) != 2 || cfg.OpenRouterProviderOrder[0] != "cerebras" || cfg.OpenRouterProviderOrder[1] != "groq" {
+		t.Fatalf("expected env provider order, got %#v", cfg.OpenRouterProviderOrder)
+	}
+	if cfg.OpenRouterAllowProviderFallbacks {
+		t.Fatal("expected env provider fallback setting to override config file")
 	}
 	if cfg.IsOwner("42") || !cfg.IsOwner("99") {
 		t.Fatalf("expected env owner ids to override file ids, got %#v", cfg.OwnerUserIDs)
@@ -252,6 +270,8 @@ OPENROUTER_API_KEY='router key'
 OPENROUTER_DEFAULT_MODEL=provider/from-env-file
 OPENROUTER_CLASSIFIER_MODEL=provider/classifier-env-file
 OPENROUTER_FALLBACK_MODELS=provider/env-a, provider/env-b, provider/env-a
+OPENROUTER_PROVIDER_ORDER=cerebras, groq, cerebras
+OPENROUTER_ALLOW_PROVIDER_FALLBACKS=true
 OWNER_USER_IDS=100, 200, 100
 PORT=9099 # local port
 USER_RATE_LIMIT=11
@@ -275,6 +295,12 @@ USER_RATE_LIMIT_WINDOW=90s
 	}
 	if len(cfg.OpenRouterFallbackModels) != 2 || cfg.OpenRouterFallbackModels[0] != "provider/env-a" || cfg.OpenRouterFallbackModels[1] != "provider/env-b" {
 		t.Fatalf("expected env file fallback models, got %#v", cfg.OpenRouterFallbackModels)
+	}
+	if len(cfg.OpenRouterProviderOrder) != 2 || cfg.OpenRouterProviderOrder[0] != "cerebras" || cfg.OpenRouterProviderOrder[1] != "groq" {
+		t.Fatalf("expected env file provider order, got %#v", cfg.OpenRouterProviderOrder)
+	}
+	if !cfg.OpenRouterAllowProviderFallbacks {
+		t.Fatal("expected env file provider fallback setting")
 	}
 	if cfg.IsOwner("42") || !cfg.IsOwner("100") || !cfg.IsOwner("200") {
 		t.Fatalf("expected env file owner ids to override file ids, got %#v", cfg.OwnerUserIDs)
@@ -335,6 +361,8 @@ func TestLoadOptionalRuntimeEnvOverrides(t *testing.T) {
 	t.Setenv("PORT", "8081")
 	t.Setenv("OPENROUTER_EMBEDDING_MODEL", "openai/text-embedding-3-small")
 	t.Setenv("OPENROUTER_FALLBACK_MODELS", "provider/a, provider/b, provider/a")
+	t.Setenv("OPENROUTER_PROVIDER_ORDER", "cerebras, groq, cerebras")
+	t.Setenv("OPENROUTER_ALLOW_PROVIDER_FALLBACKS", "true")
 	t.Setenv("OPENROUTER_CIRCUIT_FAILURE_THRESHOLD", "3")
 	t.Setenv("OPENROUTER_CIRCUIT_COOLDOWN", "45s")
 
@@ -347,6 +375,12 @@ func TestLoadOptionalRuntimeEnvOverrides(t *testing.T) {
 	}
 	if len(cfg.OpenRouterFallbackModels) != 2 || cfg.OpenRouterFallbackModels[0] != "provider/a" || cfg.OpenRouterFallbackModels[1] != "provider/b" {
 		t.Fatalf("unexpected fallback models %#v", cfg.OpenRouterFallbackModels)
+	}
+	if len(cfg.OpenRouterProviderOrder) != 2 || cfg.OpenRouterProviderOrder[0] != "cerebras" || cfg.OpenRouterProviderOrder[1] != "groq" {
+		t.Fatalf("unexpected provider order %#v", cfg.OpenRouterProviderOrder)
+	}
+	if !cfg.OpenRouterAllowProviderFallbacks {
+		t.Fatal("unexpected provider fallback setting")
 	}
 	if cfg.OpenRouterCircuitBreakerFailureThreshold != 3 || cfg.OpenRouterCircuitBreakerCooldown.String() != "45s" {
 		t.Fatalf("unexpected circuit breaker config: threshold=%d cooldown=%s", cfg.OpenRouterCircuitBreakerFailureThreshold, cfg.OpenRouterCircuitBreakerCooldown)
@@ -427,6 +461,8 @@ func clearConfigEnv(t *testing.T) {
 		"OPENROUTER_DEFAULT_MODEL",
 		"OPENROUTER_CLASSIFIER_MODEL",
 		"OPENROUTER_FALLBACK_MODELS",
+		"OPENROUTER_PROVIDER_ORDER",
+		"OPENROUTER_ALLOW_PROVIDER_FALLBACKS",
 		"OPENROUTER_EMBEDDING_MODEL",
 		"OPENROUTER_APP_URL",
 		"OPENROUTER_APP_TITLE",

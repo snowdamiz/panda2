@@ -41,12 +41,18 @@ type fakeAssistantDynamicTools struct {
 	tools []llm.Tool
 }
 
+type fakeAssistantMusicManager struct{}
+
 func (f fakeAssistantDynamicTools) OpenRouterTools(context.Context, tools.DynamicToolListRequest) ([]llm.Tool, error) {
 	return f.tools, nil
 }
 
 func (f fakeAssistantDynamicTools) ExecuteDynamicTool(context.Context, tools.DynamicExecutionRequest) (tools.ExecutionResult, error) {
 	return tools.ExecutionResult{Message: llm.Message{Role: "tool", Content: `{}`}}, nil
+}
+
+func (f fakeAssistantMusicManager) ManageMusic(context.Context, tools.MusicManagementRequest) (any, error) {
+	return map[string]any{"ok": true}, nil
 }
 
 func (f *fakeClient) Chat(_ context.Context, request llm.ChatRequest) (llm.ChatResponse, error) {
@@ -351,51 +357,21 @@ func TestNaturalTriggerPromptCoversDirectCapabilityQuestionWithoutMention(t *tes
 		"naturally addresses Panda by name",
 		"word Panda appears anywhere",
 		"asks to set up or configure Panda",
-		"panda_manage_music",
-		"panda_manage_reminder",
-		"discord_create_poll",
-		"panda_manage_schedule",
-		"panda_manage_discord_role",
-		"panda_manage_member_role",
-		"panda_manage_role_permission",
-		"existing Discord role",
-		"panda_manage_composed_tool",
-		"event-triggered requests",
-		"Do not use this just because a request mentions a target channel",
+		"Do not choose, name, call, rank, or recommend tools",
+		"the response model handles all tool decisions",
 	} {
 		if !strings.Contains(system, want) {
 			t.Fatalf("natural trigger prompt missing %q:\n%s", want, system)
 		}
 	}
+	for _, forbidden := range []string{"tool_name", "panda_manage_", "panda_list_tools", "discord_create_poll"} {
+		if strings.Contains(system, forbidden) {
+			t.Fatalf("natural trigger prompt should not contain classifier-side tool routing %q:\n%s", forbidden, system)
+		}
+	}
 	user := messages[1].Content
 	if !strings.Contains(user, "Bot mentioned: false") || !strings.Contains(user, "what can you do panda") {
 		t.Fatalf("natural trigger input missing direct-address evidence:\n%s", user)
-	}
-}
-
-func TestNaturalPreferredToolChoicesCoverSingleWorkflowTools(t *testing.T) {
-	names := map[string]struct{}{}
-	for _, name := range naturalPreferredToolChoiceNames() {
-		names[name] = struct{}{}
-	}
-	for _, want := range []string{
-		"panda_manage_music",
-		"panda_manage_reminder",
-		"discord_create_poll",
-		"panda_manage_schedule",
-		"panda_manage_discord_role",
-		"panda_manage_member_role",
-		"panda_manage_role_permission",
-		"panda_manage_channel_rule",
-		"panda_manage_tool_access",
-		"panda_manage_composed_tool",
-		"panda_manage_soul",
-		"panda_manage_prompt",
-		"panda_manage_ops",
-	} {
-		if _, ok := names[want]; !ok {
-			t.Fatalf("preferred tool choices missing %q: %+v", want, naturalPreferredToolChoiceNames())
-		}
 	}
 }
 
@@ -461,94 +437,21 @@ func naturalTriggerRequestHasSchema(request llm.ChatRequest) bool {
 	schema := string(request.ResponseFormat.JSONSchema.Schema)
 	if !(strings.Contains(schema, `"respond"`) &&
 		strings.Contains(schema, `"prompt"`) &&
-		strings.Contains(schema, `"tool_name"`) &&
 		strings.Contains(schema, `"additionalProperties": false`)) {
 		return false
 	}
-	for _, name := range naturalPreferredToolChoiceNames() {
-		if name == "" {
-			continue
-		}
-		if !strings.Contains(schema, `"`+name+`"`) {
-			return false
-		}
+	if strings.Contains(schema, `"tool_name"`) || strings.Contains(schema, "panda_manage_") {
+		return false
 	}
 	return true
 }
 
-func TestNaturalPreferredToolChoicesStayInSync(t *testing.T) {
-	names := naturalPreferredToolChoiceNames()
-	if len(names) < 2 || names[0] != "" {
-		t.Fatalf("expected empty default tool choice followed by named choices, got %+v", names)
-	}
-	registry, err := tools.NewDefaultRegistry()
-	if err != nil {
-		t.Fatalf("NewDefaultRegistry: %v", err)
-	}
-	schema := string(naturalTriggerResponseFormat().JSONSchema.Schema)
-	prompt := naturalTriggerMessages(NaturalMessageRequest{Content: "Panda help"})[0].Content
-	seen := map[string]struct{}{}
-	for _, name := range names[1:] {
-		if _, exists := seen[name]; exists {
-			t.Fatalf("duplicate preferred tool choice %q in %+v", name, names)
-		}
-		seen[name] = struct{}{}
-		if got := normalizeNaturalToolChoice(name); got != name {
-			t.Fatalf("preferred tool %q normalizes to %q", name, got)
-		}
-		if _, ok := registry.Get(name); !ok {
-			t.Fatalf("preferred tool %q does not resolve in the default registry", name)
-		}
-		if strings.HasPrefix(name, "panda_") {
-			alias := strings.Replace(name, "panda_", "panda.", 1)
-			if got := normalizeNaturalToolChoice(alias); got != name {
-				t.Fatalf("preferred tool alias %q normalizes to %q, want %q", alias, got, name)
-			}
-		}
-		if strings.HasPrefix(name, "discord_") {
-			alias := strings.Replace(name, "discord_", "discord.", 1)
-			if got := normalizeNaturalToolChoice(alias); got != name {
-				t.Fatalf("preferred tool alias %q normalizes to %q, want %q", alias, got, name)
-			}
-		}
-		if !strings.Contains(schema, `"`+name+`"`) {
-			t.Fatalf("preferred tool %q missing from schema:\n%s", name, schema)
-		}
-		if !strings.Contains(prompt, "`"+name+"`") {
-			t.Fatalf("preferred tool %q missing from prompt:\n%s", name, prompt)
-		}
-	}
-	if got := normalizeNaturalToolChoice("panda_manage_not_real"); got != "" {
-		t.Fatalf("unknown preferred tool normalized to %q", got)
-	}
-}
-
 func TestParseNaturalMessageDecisionExtractsWrappedJSON(t *testing.T) {
-	decision, err := parseNaturalMessageDecision("**Decision**\n```json\n{\"respond\":true,\"prompt\":\"Play music\",\"tool_name\":\"panda_manage_music\"}\n```")
+	decision, err := parseNaturalMessageDecision("**Decision**\n```json\n{\"respond\":true,\"prompt\":\"Play music\"}\n```")
 	if err != nil {
 		t.Fatalf("parseNaturalMessageDecision: %v", err)
 	}
-	if !decision.Respond || decision.Prompt != "Play music" || decision.ToolName != "panda_manage_music" {
-		t.Fatalf("unexpected decision: %+v", decision)
-	}
-}
-
-func TestParseNaturalMessageDecisionKeepsAdminSetupToolHints(t *testing.T) {
-	decision, err := parseNaturalMessageDecision(`{"respond":true,"prompt":"make Mods the moderator role","tool_name":"panda.manage_role_permission"}`)
-	if err != nil {
-		t.Fatalf("parseNaturalMessageDecision: %v", err)
-	}
-	if !decision.Respond || decision.Prompt != "make Mods the moderator role" || decision.ToolName != "panda_manage_role_permission" {
-		t.Fatalf("unexpected decision: %+v", decision)
-	}
-}
-
-func TestParseNaturalMessageDecisionKeepsComposedToolHint(t *testing.T) {
-	decision, err := parseNaturalMessageDecision(`{"respond":true,"prompt":"draft a member welcome automation","tool_name":"panda.manage_composed_tool"}`)
-	if err != nil {
-		t.Fatalf("parseNaturalMessageDecision: %v", err)
-	}
-	if !decision.Respond || decision.Prompt != "draft a member welcome automation" || decision.ToolName != "panda_manage_composed_tool" {
+	if !decision.Respond || decision.Prompt != "Play music" {
 		t.Fatalf("unexpected decision: %+v", decision)
 	}
 }
@@ -743,9 +646,9 @@ func TestAskIncludesNoToolAvailabilityWhenToolsAreUnavailable(t *testing.T) {
 	}
 }
 
-func TestAskListsActualAvailableToolNamesInPrompt(t *testing.T) {
+func TestAskIncludesCompactCapabilitySummaryWithoutListTools(t *testing.T) {
 	ctx := context.Background()
-	client := &fakeClient{response: llm.ChatResponse{Model: "fixture/model", Content: "I can list tools."}}
+	client := &fakeClient{response: llm.ChatResponse{Model: "fixture/model", Content: "I can help with workflows."}}
 	service, db := newTestService(t, client)
 	configs := repository.NewGuildConfigRepository(db.DB)
 	registry, err := tools.NewDefaultRegistry()
@@ -757,7 +660,7 @@ func TestAskListsActualAvailableToolNamesInPrompt(t *testing.T) {
 	if _, err := configs.EnsureDefault(ctx, "guild-1"); err != nil {
 		t.Fatalf("EnsureDefault: %v", err)
 	}
-	if _, err := configs.UpdateBehaviorSettings(ctx, "guild-1", map[string]any{"tool_policy": "read_only"}); err != nil {
+	if _, err := configs.UpdateBehaviorSettings(ctx, "guild-1", map[string]any{"tool_policy": tools.ToolPolicyAssistive}); err != nil {
 		t.Fatalf("UpdateBehaviorSettings: %v", err)
 	}
 
@@ -776,11 +679,82 @@ func TestAskListsActualAvailableToolNamesInPrompt(t *testing.T) {
 		t.Fatalf("expected one LLM request, got %d", len(client.requests))
 	}
 	joined := joinMessages(client.requests[0].Messages)
-	if !strings.Contains(joined, "Panda can call only these current function tools") || !strings.Contains(joined, "`panda_list_tools`") {
-		t.Fatalf("actual tool list missing from request: %s", joined)
+	if !toolNamePresent(client.requests[0].Tools, "generate_workflow_json") {
+		t.Fatalf("expected workflow tool in model request, got %+v", client.requests[0].Tools)
+	}
+	if toolNamePresent(client.requests[0].Tools, "panda_list_tools") {
+		t.Fatalf("list-tools meta tool should not be exposed to response model: %+v", client.requests[0].Tools)
+	}
+	for _, want := range []string{"current user-scoped capability overview derived from the actual exposed function tools", "Composed tools", "server automations", "natural user-facing categories", "Mention exact function/tool names only when the user explicitly asks", "Do not present internal listing/debug helpers"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("capability summary missing %q: %s", want, joined)
+		}
+	}
+	if strings.Contains(joined, "`panda_list_tools`") || strings.Contains(joined, "Show the tool inventory") || strings.Contains(joined, "Do not mention tool inventory") {
+		t.Fatalf("capability context should not mention stale inventory/list helper wording: %s", joined)
 	}
 	if strings.Contains(joined, "`image_generation`") || strings.Contains(joined, "`code_execution`") {
 		t.Fatalf("unavailable generic tools should not appear as current tools: %s", joined)
+	}
+}
+
+func TestAskKeepsDirectMusicCommandAfterToolAvailabilityContext(t *testing.T) {
+	ctx := context.Background()
+	client := &fakeClient{response: llm.ChatResponse{Model: "fixture/model", Content: "ok"}}
+	service, db := newTestService(t, client)
+	configs := repository.NewGuildConfigRepository(db.DB)
+	registry, err := tools.NewDefaultRegistry()
+	if err != nil {
+		t.Fatalf("NewDefaultRegistry: %v", err)
+	}
+	service.WithToolExecutor(tools.NewExecutor(registry, nil, configs).WithMusicManager(fakeAssistantMusicManager{}))
+
+	if _, err := configs.EnsureDefault(ctx, "guild-1"); err != nil {
+		t.Fatalf("EnsureDefault: %v", err)
+	}
+	if _, err := configs.UpdateBehaviorSettings(ctx, "guild-1", map[string]any{"tool_policy": tools.ToolPolicyAssistive}); err != nil {
+		t.Fatalf("UpdateBehaviorSettings: %v", err)
+	}
+
+	_, err = service.Ask(ctx, AskRequest{
+		GuildID:        "guild-1",
+		UserID:         "user-1",
+		ChannelID:      "channel-1",
+		VoiceChannelID: "voice-1",
+		Question:       "play fill my pockets by mgk",
+		AllowedPermissions: map[string]struct{}{
+			admin.PermissionAssistantUse: {},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Ask: %v", err)
+	}
+	if len(client.requests) != 1 {
+		t.Fatalf("expected one LLM request, got %d", len(client.requests))
+	}
+	request := client.requests[0]
+	if !toolNamePresent(request.Tools, "panda_manage_music") {
+		t.Fatalf("expected music tool in model request, got %+v", request.Tools)
+	}
+	if len(request.Messages) == 0 {
+		t.Fatal("expected model messages")
+	}
+	lastMessage := request.Messages[len(request.Messages)-1]
+	if lastMessage.Role != "user" || !strings.Contains(lastMessage.Content, "play fill my pockets by mgk") {
+		t.Fatalf("direct action request should remain the final model message, got role=%q content=%q", lastMessage.Role, lastMessage.Content)
+	}
+	availabilityIndex := -1
+	for index, message := range request.Messages {
+		if strings.Contains(message.Content, "Current user-scoped capability overview") || strings.Contains(message.Content, "current user-scoped capability overview") {
+			availabilityIndex = index
+			break
+		}
+	}
+	if availabilityIndex < 0 {
+		t.Fatalf("expected tool availability context in request, got %s", joinMessages(request.Messages))
+	}
+	if availabilityIndex >= len(request.Messages)-1 {
+		t.Fatalf("tool availability context should appear before the final user command, got messages: %s", joinMessages(request.Messages))
 	}
 }
 
@@ -886,13 +860,16 @@ func TestAskIncludesDisabledFeatureContextWhenFeatureGateActive(t *testing.T) {
 			t.Fatalf("disabled feature context leaked tool name %q: %s", hiddenTool, joined)
 		}
 	}
+	if strings.Contains(joined, "Web search (`web_search`)") {
+		t.Fatalf("web search should not be reported as disabled because it is available by default: %s", joined)
+	}
 }
 
 func TestToolAvailabilityMessageExplainsAdminOnlyPolicyForNormalUsers(t *testing.T) {
 	message := toolAvailabilityMessage([]llm.Tool{{
 		Type: "function",
 		Function: llm.ToolFunction{
-			Name:       "panda_list_tools",
+			Name:       "web_search",
 			Parameters: []byte(`{"type":"object"}`),
 		},
 	}}, tools.ToolAccess{
@@ -908,7 +885,7 @@ func TestToolAvailabilityMessageLabelsAdminAccess(t *testing.T) {
 	message := toolAvailabilityMessage([]llm.Tool{{
 		Type: "function",
 		Function: llm.ToolFunction{
-			Name:       "panda_list_tools",
+			Name:       "read_config",
 			Parameters: []byte(`{"type":"object"}`),
 		},
 	}}, tools.ToolAccess{
@@ -926,29 +903,64 @@ func TestToolAvailabilityMessageLabelsAdminAccess(t *testing.T) {
 	}
 }
 
-func TestAskCapabilityQuestionCanUseListToolsWhenDefaultAdminOnly(t *testing.T) {
-	ctx := context.Background()
-	client := &fakeClient{responses: []llm.ChatResponse{
-		{
-			Model: "fixture/model",
-			ToolCalls: []llm.ToolCall{{
-				ID:   "call-list-tools",
-				Type: "function",
-				Function: llm.ToolCallFunction{
-					Name:      "panda_list_tools",
-					Arguments: `{}`,
-				},
-			}, {
-				ID:   "call-ignored-read-config",
-				Type: "function",
-				Function: llm.ToolCallFunction{
-					Name:      "read_config",
-					Arguments: `{}`,
-				},
-			}},
+func TestToolAvailabilityMessageUsesRichUserScopedCapabilitySections(t *testing.T) {
+	message := toolAvailabilityMessage(testCapabilityTools(
+		"discord_send_message",
+		"discord_add_reaction",
+		"discord_create_poll",
+		"discord_get_poll_answer_voters",
+		"discord_create_thread",
+		"discord_fetch_messages",
+		"discord_channel_activity_summary",
+		"search_knowledge",
+		"summarize_text_file",
+		"web_search",
+		"discord_get_guild",
+		"discord_timeout_member",
+		"discord_create_scheduled_event",
+		"panda_manage_reminder",
+		"panda_manage_music",
+		"generate_workflow_json",
+		"panda_manage_composed_tool",
+		"panda_manage_schedule",
+		"read_config",
+		"panda_manage_soul",
+		"panda_manage_prompt",
+		"panda_manage_tool_access",
+	), tools.ToolAccess{
+		Policy: tools.ToolPolicyAdminOnly,
+		Permissions: map[string]struct{}{
+			admin.PermissionAssistantUse:     {},
+			admin.PermissionAdminConfigWrite: {},
 		},
-		{Model: "fixture/model", Content: "I can inspect my current tool access with panda.list_tools."},
-	}}
+	})
+	for _, want := range []string{
+		"Server channel messages",
+		"Server message management",
+		"Polls",
+		"Native Discord polls from confirmed assistant actions",
+		"Knowledge (caller has admin access)",
+		"Server knowledge search",
+		"Web search",
+		"Current public web answers with source links",
+		"Composed tools",
+		"server automations",
+		"Admin setup (caller has admin access)",
+		"Access controls (caller has admin access)",
+		"do not collapse the answer into one-line categories",
+	} {
+		if !strings.Contains(message, want) {
+			t.Fatalf("rich capability context missing %q:\n%s", want, message)
+		}
+	}
+	if strings.Contains(strings.ToLower(message), "webhook") {
+		t.Fatalf("capability context should not mention webhooks unless webhook tools are exposed:\n%s", message)
+	}
+}
+
+func TestAskCapabilityQuestionAnswersFromCapabilitySummary(t *testing.T) {
+	ctx := context.Background()
+	client := &fakeClient{response: llm.ChatResponse{Model: "fixture/model", Content: "I can help draft and manage workflows here."}}
 	service, db := newTestService(t, client)
 	configs := repository.NewGuildConfigRepository(db.DB)
 	registry, err := tools.NewDefaultRegistry()
@@ -959,6 +971,9 @@ func TestAskCapabilityQuestionCanUseListToolsWhenDefaultAdminOnly(t *testing.T) 
 
 	if _, err := configs.EnsureDefault(ctx, "guild-1"); err != nil {
 		t.Fatalf("EnsureDefault: %v", err)
+	}
+	if _, err := configs.UpdateBehaviorSettings(ctx, "guild-1", map[string]any{"tool_policy": tools.ToolPolicyAssistive}); err != nil {
+		t.Fatalf("UpdateBehaviorSettings: %v", err)
 	}
 
 	response, err := service.Ask(ctx, AskRequest{
@@ -973,31 +988,28 @@ func TestAskCapabilityQuestionCanUseListToolsWhenDefaultAdminOnly(t *testing.T) 
 	if err != nil {
 		t.Fatalf("Ask: %v", err)
 	}
-	if response.Content != "I can inspect my current tool access with panda.list_tools." {
+	if response.Content != "I can help draft and manage workflows here." {
 		t.Fatalf("unexpected response: %q", response.Content)
 	}
-	if len(client.requests) != 2 {
-		t.Fatalf("expected tool loop with two LLM requests, got %d", len(client.requests))
+	if len(client.requests) != 1 {
+		t.Fatalf("expected direct capability response without a list-tools round, got %d request(s)", len(client.requests))
 	}
-	if !toolNamePresent(client.requests[0].Tools, "panda_list_tools") {
-		t.Fatalf("expected panda_list_tools in first model request, got %+v", client.requests[0].Tools)
+	if toolNamePresent(client.requests[0].Tools, "panda_list_tools") {
+		t.Fatalf("list-tools meta tool should not be exposed to response model: %+v", client.requests[0].Tools)
 	}
-	joined := joinMessages(client.requests[1].Messages)
-	for _, want := range []string{`"policy":"admin_only"`, `"presentation":"capabilities"`, `"name":"current_capabilities"`, `"count":1`, `"user_tools_notice"`} {
+	joined := joinMessages(client.requests[0].Messages)
+	for _, want := range []string{"current user-scoped capability overview derived from the actual exposed function tools", "Composed tools", "server automations", "do not call a tool only to list capabilities", "treat that history as stale and do not copy it"} {
 		if !strings.Contains(joined, want) {
-			t.Fatalf("expected tool-list result to contain %s, got %s", want, joined)
+			t.Fatalf("expected capability context to contain %s, got %s", want, joined)
 		}
 	}
 }
 
-func TestAskExecutesTextToolCallFallback(t *testing.T) {
+func TestChatFiltersStaleCapabilityHistoryAndRetriesStaleAnswer(t *testing.T) {
 	ctx := context.Background()
 	client := &fakeClient{responses: []llm.ChatResponse{
-		{
-			Model:   "fixture/model",
-			Content: "<tool_call>panda_list_tools\n</tool_call>",
-		},
-		{Model: "fixture/model", Content: "I checked my available tools."},
+		{Model: "fixture/model", Content: "I can:\n\n- **Show the tool inventory** - list all Panda capabilities.\n- **Control music** - play tracks.\n- **Manage reminders** - create reminders."},
+		{Model: "fixture/model", Content: "I can help with Discord actions, server information, admin settings, workflows, music, and reminders."},
 	}}
 	service, db := newTestService(t, client)
 	configs := repository.NewGuildConfigRepository(db.DB)
@@ -1009,6 +1021,94 @@ func TestAskExecutesTextToolCallFallback(t *testing.T) {
 
 	if _, err := configs.EnsureDefault(ctx, "guild-1"); err != nil {
 		t.Fatalf("EnsureDefault: %v", err)
+	}
+	conversation, err := service.conversations.GetOrCreateActive(ctx, repository.ConversationKey{
+		GuildID:     "guild-1",
+		ChannelID:   "channel-1",
+		OwnerUserID: "user-1",
+		Title:       "what can you do",
+	})
+	if err != nil {
+		t.Fatalf("GetOrCreateActive: %v", err)
+	}
+	if err := service.conversations.AppendMessage(ctx, store.AssistantMessage{
+		ConversationID: conversation.ID,
+		GuildID:        "guild-1",
+		ChannelID:      "channel-1",
+		UserID:         "user-1",
+		Role:           "user",
+		ContentPreview: "what can you do",
+	}); err != nil {
+		t.Fatalf("AppendMessage user: %v", err)
+	}
+	if err := service.conversations.AppendMessage(ctx, store.AssistantMessage{
+		ConversationID: conversation.ID,
+		GuildID:        "guild-1",
+		ChannelID:      "channel-1",
+		UserID:         "user-1",
+		Role:           "assistant",
+		ContentPreview: "I can:\n\n- **Show the tool inventory** - list all Panda capabilities.\n- **Control music** - play tracks.\n- **Manage reminders** - create reminders.",
+	}); err != nil {
+		t.Fatalf("AppendMessage assistant: %v", err)
+	}
+
+	response, err := service.Chat(ctx, AskRequest{
+		GuildID:   "guild-1",
+		UserID:    "user-1",
+		ChannelID: "channel-1",
+		Question:  "what can you do",
+		AllowedPermissions: map[string]struct{}{
+			admin.PermissionAssistantUse:     {},
+			admin.PermissionAdminConfigRead:  {},
+			admin.PermissionAdminConfigWrite: {},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Chat: %v", err)
+	}
+	if response.Content != "I can help with Discord actions, server information, admin settings, workflows, music, and reminders." {
+		t.Fatalf("unexpected response: %q", response.Content)
+	}
+	if len(client.requests) != 2 {
+		t.Fatalf("expected stale capability answer retry, got %d request(s)", len(client.requests))
+	}
+	firstRequest := joinMessages(client.requests[0].Messages)
+	for _, forbidden := range []string{"Show the tool inventory", "Do not mention tool inventory"} {
+		if strings.Contains(firstRequest, forbidden) {
+			t.Fatalf("first request should not contain stale inventory wording %q:\n%s", forbidden, firstRequest)
+		}
+	}
+	secondRequest := joinMessages(client.requests[1].Messages)
+	if !strings.Contains(secondRequest, "Regenerate the previous answer") {
+		t.Fatalf("expected stale-answer retry instruction, got:\n%s", secondRequest)
+	}
+	if len(client.requests[0].Tools) == 0 || len(client.requests[1].Tools) != len(client.requests[0].Tools) {
+		t.Fatalf("retry should preserve current tool context, got first=%d second=%d", len(client.requests[0].Tools), len(client.requests[1].Tools))
+	}
+}
+
+func TestAskExecutesTextToolCallFallback(t *testing.T) {
+	ctx := context.Background()
+	client := &fakeClient{responses: []llm.ChatResponse{
+		{
+			Model:   "fixture/model",
+			Content: "<tool_call>generate_workflow_json\n<arg_key>workflow</arg_key>\n<arg_value>daily_summary</arg_value>\n</tool_call>",
+		},
+		{Model: "fixture/model", Content: "I generated the workflow JSON."},
+	}}
+	service, db := newTestService(t, client)
+	configs := repository.NewGuildConfigRepository(db.DB)
+	registry, err := tools.NewDefaultRegistry()
+	if err != nil {
+		t.Fatalf("NewDefaultRegistry: %v", err)
+	}
+	service.WithToolExecutor(tools.NewExecutor(registry, nil, configs))
+
+	if _, err := configs.EnsureDefault(ctx, "guild-1"); err != nil {
+		t.Fatalf("EnsureDefault: %v", err)
+	}
+	if _, err := configs.UpdateBehaviorSettings(ctx, "guild-1", map[string]any{"tool_policy": tools.ToolPolicyAssistive}); err != nil {
+		t.Fatalf("UpdateBehaviorSettings: %v", err)
 	}
 
 	response, err := service.Ask(ctx, AskRequest{
@@ -1023,17 +1123,20 @@ func TestAskExecutesTextToolCallFallback(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Ask: %v", err)
 	}
-	if response.Content != "I checked my available tools." {
+	if response.Content != "I generated the workflow JSON." {
 		t.Fatalf("unexpected response: %q", response.Content)
 	}
 	if len(client.requests) != 2 {
 		t.Fatalf("expected text tool-call fallback to run the tool loop, got %d LLM requests", len(client.requests))
 	}
-	if !toolNamePresent(client.requests[0].Tools, "panda_list_tools") {
-		t.Fatalf("expected panda_list_tools in first model request, got %+v", client.requests[0].Tools)
+	if !toolNamePresent(client.requests[0].Tools, "generate_workflow_json") {
+		t.Fatalf("expected workflow JSON tool in first model request, got %+v", client.requests[0].Tools)
+	}
+	if toolNamePresent(client.requests[0].Tools, "panda_list_tools") {
+		t.Fatalf("list-tools meta tool should not be exposed to response model: %+v", client.requests[0].Tools)
 	}
 	joined := joinMessages(client.requests[1].Messages)
-	for _, want := range []string{"text_tool_call_1", `"presentation":"capabilities"`, `"name":"current_capabilities"`} {
+	for _, want := range []string{"text_tool_call_1", `"workflow":"daily_summary"`, `"dry_run":true`} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("expected fallback tool execution to add %s to final request, got %s", want, joined)
 		}
@@ -1046,11 +1149,11 @@ func TestAskContinuesSequentialToolRoundsWithinOnePrompt(t *testing.T) {
 		{
 			Model: "fixture/model",
 			ToolCalls: []llm.ToolCall{{
-				ID:   "call-list-tools",
+				ID:   "call-generate-workflow",
 				Type: "function",
 				Function: llm.ToolCallFunction{
-					Name:      "panda_list_tools",
-					Arguments: `{}`,
+					Name:      "generate_workflow_json",
+					Arguments: `{"workflow":"setup_check","inputs":{"scope":"server"}}`,
 				},
 			}},
 		},
@@ -1107,7 +1210,7 @@ func TestAskContinuesSequentialToolRoundsWithinOnePrompt(t *testing.T) {
 		t.Fatalf("batched tool call should not be executed or replayed in the next request, got %s", secondMessages)
 	}
 	finalMessages := joinMessages(client.requests[2].Messages)
-	for _, want := range []string{"call-list-tools", "call-read-config", `"policy":"admin_only"`, `"tool_policy"`} {
+	for _, want := range []string{"call-generate-workflow", "call-read-config", `"workflow":"setup_check"`, `"tool_policy"`} {
 		if !strings.Contains(finalMessages, want) {
 			t.Fatalf("final request should include %s from prior tool rounds, got %s", want, finalMessages)
 		}
@@ -1242,16 +1345,16 @@ func TestParseTextToolCallsRejectsUnavailableOrMixedContent(t *testing.T) {
 	availableTools := []llm.Tool{{
 		Type: "function",
 		Function: llm.ToolFunction{
-			Name: "panda_list_tools",
+			Name: "generate_workflow_json",
 		},
 	}}
 	if _, ok := parseTextToolCalls("<tool_call>panda_manage_composed_tool\n</tool_call>", availableTools); ok {
 		t.Fatal("expected unavailable text tool call to be rejected")
 	}
-	if _, ok := parseTextToolCalls("sure\n<tool_call>panda_list_tools\n</tool_call>", availableTools); ok {
+	if _, ok := parseTextToolCalls("sure\n<tool_call>generate_workflow_json\n</tool_call>", availableTools); ok {
 		t.Fatal("expected mixed prose and text tool call to be rejected")
 	}
-	if _, ok := parseTextToolCalls("<tool_call>panda_list_tools\n</tool_call>\nDone.", availableTools); ok {
+	if _, ok := parseTextToolCalls("<tool_call>generate_workflow_json\n</tool_call>\nDone.", availableTools); ok {
 		t.Fatal("expected trailing prose after text tool call to be rejected")
 	}
 }
@@ -1272,6 +1375,9 @@ func TestAskReturnsToolPayloadRejection(t *testing.T) {
 	if _, err := configs.EnsureDefault(ctx, "guild-1"); err != nil {
 		t.Fatalf("EnsureDefault: %v", err)
 	}
+	if _, err := configs.UpdateBehaviorSettings(ctx, "guild-1", map[string]any{"tool_policy": tools.ToolPolicyAssistive}); err != nil {
+		t.Fatalf("UpdateBehaviorSettings: %v", err)
+	}
 
 	_, err = service.Ask(ctx, AskRequest{
 		GuildID:   "guild-1",
@@ -1288,14 +1394,17 @@ func TestAskReturnsToolPayloadRejection(t *testing.T) {
 	if len(client.requests) != 1 {
 		t.Fatalf("expected one tool-bearing request and no no-tool retry, got %d", len(client.requests))
 	}
-	if !toolNamePresent(client.requests[0].Tools, "panda_list_tools") {
-		t.Fatalf("expected first request to include tools, got %+v", client.requests[0].Tools)
+	if !toolNamePresent(client.requests[0].Tools, "generate_workflow_json") {
+		t.Fatalf("expected first request to include workflow tool, got %+v", client.requests[0].Tools)
+	}
+	if toolNamePresent(client.requests[0].Tools, "panda_list_tools") {
+		t.Fatalf("list-tools meta tool should not be exposed to response model: %+v", client.requests[0].Tools)
 	}
 }
 
 func TestToolAccessOwnerOpsPermissionOverridesConfiguredPolicy(t *testing.T) {
 	access := toolAccess(
-		store.GuildConfig{ToolPolicy: tools.ToolPolicyOff, MemoryEnabled: true},
+		store.GuildConfig{ToolPolicy: tools.ToolPolicyReadOnly, MemoryEnabled: true},
 		map[string]struct{}{
 			admin.PermissionAssistantUse: {},
 			admin.PermissionOwnerOps:     {},
@@ -1584,4 +1693,18 @@ func toolNamePresent(toolList []llm.Tool, name string) bool {
 		}
 	}
 	return false
+}
+
+func testCapabilityTools(names ...string) []llm.Tool {
+	result := make([]llm.Tool, 0, len(names))
+	for _, name := range names {
+		result = append(result, llm.Tool{
+			Type: "function",
+			Function: llm.ToolFunction{
+				Name:       name,
+				Parameters: []byte(`{"type":"object"}`),
+			},
+		})
+	}
+	return result
 }

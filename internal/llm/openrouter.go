@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"strings"
 	"sync"
@@ -14,14 +15,16 @@ import (
 )
 
 type OpenRouterClient struct {
-	apiKey         string
-	baseURL        string
-	appURL         string
-	appTitle       string
-	client         *http.Client
-	maxRetries     int
-	retryDelay     time.Duration
-	circuitBreaker circuitBreaker
+	apiKey                 string
+	baseURL                string
+	appURL                 string
+	appTitle               string
+	providerOrder          []string
+	allowProviderFallbacks bool
+	client                 *http.Client
+	maxRetries             int
+	retryDelay             time.Duration
+	circuitBreaker         circuitBreaker
 }
 
 type OpenRouterConfig struct {
@@ -29,6 +32,8 @@ type OpenRouterConfig struct {
 	BaseURL                        string
 	AppURL                         string
 	AppTitle                       string
+	ProviderOrder                  []string
+	AllowProviderFallbacks         bool
 	Timeout                        time.Duration
 	MaxRetries                     int
 	RetryDelay                     time.Duration
@@ -60,13 +65,15 @@ func NewOpenRouterClient(cfg OpenRouterConfig) *OpenRouterClient {
 		failureThreshold = 5
 	}
 	return &OpenRouterClient{
-		apiKey:     strings.TrimSpace(cfg.APIKey),
-		baseURL:    baseURL,
-		appURL:     strings.TrimSpace(cfg.AppURL),
-		appTitle:   strings.TrimSpace(cfg.AppTitle),
-		client:     &http.Client{Timeout: timeout},
-		maxRetries: cfg.MaxRetries,
-		retryDelay: retryDelay,
+		apiKey:                 strings.TrimSpace(cfg.APIKey),
+		baseURL:                baseURL,
+		appURL:                 strings.TrimSpace(cfg.AppURL),
+		appTitle:               strings.TrimSpace(cfg.AppTitle),
+		providerOrder:          normalizeStringList(cfg.ProviderOrder),
+		allowProviderFallbacks: cfg.AllowProviderFallbacks,
+		client:                 &http.Client{Timeout: timeout},
+		maxRetries:             cfg.MaxRetries,
+		retryDelay:             retryDelay,
 		circuitBreaker: circuitBreaker{
 			failureThreshold: failureThreshold,
 			cooldown:         circuitCooldown,
@@ -90,13 +97,7 @@ func (c *OpenRouterClient) Chat(ctx context.Context, request ChatRequest) (ChatR
 		Temperature:    request.Temperature,
 		MaxTokens:      request.MaxTokens,
 	}
-	if len(request.Tools) > 0 || request.ResponseFormat != nil {
-		allowFallbacks := false
-		payload.Provider = &providerPreferences{
-			RequireParameters: true,
-			AllowFallbacks:    &allowFallbacks,
-		}
-	}
+	payload.Provider = c.providerPreferences(request)
 	if request.ResponseFormat != nil && request.ResponseFormat.Type == "json_schema" {
 		structuredOutputs := true
 		payload.StructuredOutputs = &structuredOutputs
@@ -105,6 +106,17 @@ func (c *OpenRouterClient) Chat(ctx context.Context, request ChatRequest) (ChatR
 	if err != nil {
 		return ChatResponse{}, err
 	}
+	slog.Info("openrouter chat request built",
+		slog.String("model", request.Model),
+		slog.Int("message_count", len(request.Messages)),
+		slog.Int("tool_count", len(request.Tools)),
+		slog.Bool("has_response_format", request.ResponseFormat != nil),
+		slog.Any("provider_order", payload.ProviderOrder()),
+		slog.Bool("provider_allow_fallbacks", payload.ProviderAllowFallbacks()),
+		slog.Bool("provider_require_parameters", payload.Provider != nil && payload.Provider.RequireParameters),
+		slog.Bool("structured_outputs", payload.StructuredOutputs != nil && *payload.StructuredOutputs),
+		slog.Bool("tool_choice_present", false),
+	)
 
 	data, err := c.post(ctx, "/chat/completions", body)
 	if err != nil {
@@ -129,6 +141,20 @@ func (c *OpenRouterClient) Chat(ctx context.Context, request ChatRequest) (ChatR
 			TotalTokens:      decoded.Usage.TotalTokens,
 		},
 	}, nil
+}
+
+func (c *OpenRouterClient) providerPreferences(request ChatRequest) *providerPreferences {
+	requireParameters := len(request.Tools) > 0 || request.ResponseFormat != nil
+	order := normalizeStringList(c.providerOrder)
+	if len(order) == 0 && !requireParameters {
+		return nil
+	}
+	allowFallbacks := c.allowProviderFallbacks
+	return &providerPreferences{
+		Order:             order,
+		RequireParameters: requireParameters,
+		AllowFallbacks:    &allowFallbacks,
+	}
 }
 
 func (c *OpenRouterClient) Embed(ctx context.Context, request EmbeddingRequest) (EmbeddingResponse, error) {
@@ -392,8 +418,20 @@ type chatCompletionRequest struct {
 }
 
 type providerPreferences struct {
-	RequireParameters bool  `json:"require_parameters,omitempty"`
-	AllowFallbacks    *bool `json:"allow_fallbacks,omitempty"`
+	Order             []string `json:"order,omitempty"`
+	RequireParameters bool     `json:"require_parameters,omitempty"`
+	AllowFallbacks    *bool    `json:"allow_fallbacks,omitempty"`
+}
+
+func (p *chatCompletionRequest) ProviderOrder() []string {
+	if p.Provider == nil {
+		return nil
+	}
+	return append([]string(nil), p.Provider.Order...)
+}
+
+func (p *chatCompletionRequest) ProviderAllowFallbacks() bool {
+	return p.Provider != nil && p.Provider.AllowFallbacks != nil && *p.Provider.AllowFallbacks
 }
 
 type chatCompletionResponse struct {
@@ -492,4 +530,22 @@ func firstNonEmpty(value, fallback string) string {
 		return fallback
 	}
 	return value
+}
+
+func normalizeStringList(values []string) []string {
+	seen := map[string]struct{}{}
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		trimmed := strings.TrimSpace(value)
+		if trimmed == "" {
+			continue
+		}
+		key := strings.ToLower(trimmed)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		result = append(result, trimmed)
+	}
+	return result
 }

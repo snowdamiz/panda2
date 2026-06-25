@@ -34,6 +34,9 @@ func TestOpenRouterChatSendsExpectedRequest(t *testing.T) {
 		if _, ok := rawPayload["parallel_tool_calls"]; ok {
 			t.Fatalf("tool requests should not send unsupported parallel_tool_calls: %s", string(body))
 		}
+		if _, ok := rawPayload["tool_choice"]; ok {
+			t.Fatalf("tool requests should not force tool_choice: %s", string(body))
+		}
 		var payload chatCompletionRequest
 		if err := json.Unmarshal(body, &payload); err != nil {
 			t.Fatalf("decode request: %v", err)
@@ -84,6 +87,51 @@ func TestOpenRouterChatSendsExpectedRequest(t *testing.T) {
 	}
 	if response.Usage.TotalTokens != 7 {
 		t.Fatalf("unexpected total tokens %d", response.Usage.TotalTokens)
+	}
+}
+
+func TestOpenRouterChatSendsConfiguredProviderRouting(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload chatCompletionRequest
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		if payload.Provider == nil {
+			t.Fatal("expected provider routing")
+		}
+		if len(payload.Provider.Order) != 1 || payload.Provider.Order[0] != "cerebras" {
+			t.Fatalf("unexpected provider order: %+v", payload.Provider)
+		}
+		if payload.Provider.RequireParameters {
+			t.Fatalf("plain chat request should not require parameters: %+v", payload.Provider)
+		}
+		if payload.Provider.AllowFallbacks == nil || *payload.Provider.AllowFallbacks {
+			t.Fatalf("expected provider fallbacks disabled: %+v", payload.Provider)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id":    "gen-provider",
+			"model": "openai/gpt-oss-120b",
+			"choices": []map[string]any{{
+				"message": map[string]string{"role": "assistant", "content": "routed"},
+			}},
+		})
+	}))
+	defer server.Close()
+
+	client := NewOpenRouterClient(OpenRouterConfig{
+		APIKey:        "key",
+		BaseURL:       server.URL,
+		ProviderOrder: []string{"cerebras", "cerebras"},
+	})
+	response, err := client.Chat(context.Background(), ChatRequest{
+		Model:    "openai/gpt-oss-120b",
+		Messages: []Message{{Role: "user", Content: "hi"}},
+	})
+	if err != nil {
+		t.Fatalf("Chat returned error: %v", err)
+	}
+	if response.Content != "routed" {
+		t.Fatalf("unexpected content %q", response.Content)
 	}
 }
 

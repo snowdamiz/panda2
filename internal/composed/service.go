@@ -407,7 +407,7 @@ func (s *Service) OpenRouterTools(ctx context.Context, request tools.DynamicTool
 	if request.Access.FeatureGateActive && !request.Access.HasFeature(features.ComposedTools) {
 		return nil, nil
 	}
-	if !hasPermission(request.Access, admin.PermissionToolComposeInvoke) || strings.TrimSpace(request.Access.Policy) == tools.ToolPolicyOff {
+	if !hasPermission(request.Access, admin.PermissionToolComposeInvoke) {
 		return nil, nil
 	}
 	mode := firstNonEmpty(request.InvocationType, InvocationChatTool)

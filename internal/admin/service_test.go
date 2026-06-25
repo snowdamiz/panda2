@@ -71,6 +71,9 @@ func TestConfigureBehaviorRejectsInvalidRuntimeSettings(t *testing.T) {
 	if _, err := service.ConfigureBehavior(ctx, "guild-1", "admin", BehaviorSettings{ToolPolicy: "execute_anything", ToolPolicySet: true}); err == nil {
 		t.Fatal("expected invalid tool policy to be rejected")
 	}
+	if _, err := service.ConfigureBehavior(ctx, "guild-1", "admin", BehaviorSettings{ToolPolicy: "off", ToolPolicySet: true}); err == nil {
+		t.Fatal("expected legacy off tool policy to be rejected")
+	}
 }
 
 func TestSetSoulPersistsAndSoulWritersAreDelegated(t *testing.T) {
