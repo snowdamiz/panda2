@@ -6,6 +6,8 @@ const sourceRoot = path.join(root, 'src');
 const allowedTokenFiles = new Set([
   path.join(sourceRoot, 'design', 'tokens.css'),
   path.join(sourceRoot, 'design', 'tokens.ts'),
+  // @font-face declarations require literal family names and url() sources.
+  path.join(sourceRoot, 'styles', 'fonts.css'),
 ]);
 const sourceExtensions = new Set(['.astro', '.css', '.js', '.mjs', '.ts']);
 const ignoredDirs = new Set(['node_modules', 'dist', '.astro']);
