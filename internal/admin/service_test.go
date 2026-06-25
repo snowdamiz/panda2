@@ -2,6 +2,7 @@ package admin
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
@@ -473,6 +474,184 @@ func TestToolRoleAccessIsRoleScoped(t *testing.T) {
 	}
 	if len(access.AllowedTools) != 0 {
 		t.Fatalf("expected removed role to lose tool access, got %+v", access.AllowedTools)
+	}
+}
+
+func TestToolAccessSupportsDirectUsers(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(ctx, "file::memory:?cache=shared")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer db.Close()
+
+	service := NewService(
+		repository.NewGuildConfigRepository(db.DB),
+		repository.NewUsageRepository(db.DB),
+		repository.NewAuditRepository(db.DB),
+		memory.NewService(repository.NewKnowledgeRepository(db.DB)),
+		repository.NewAccessRepository(db.DB),
+		repository.NewBudgetRepository(db.DB),
+		nil,
+	)
+	if _, err := service.AddToolUser(ctx, "guild-1", "admin", "panda.generate_image", "user-artist"); err != nil {
+		t.Fatalf("AddToolUser: %v", err)
+	}
+
+	allowedUser, err := service.ToolUserRoleAccess(ctx, "guild-1", "user-artist", nil)
+	if err != nil {
+		t.Fatalf("ToolUserRoleAccess user: %v", err)
+	}
+	if strings.Join(allowedUser.RestrictedTools, ",") != "panda.generate_image" {
+		t.Fatalf("unexpected restricted tools: %+v", allowedUser.RestrictedTools)
+	}
+	if len(allowedUser.AllowedTools) != 1 || allowedUser.AllowedTools[0] != "panda.generate_image" {
+		t.Fatalf("expected direct user to be allowed, got %+v", allowedUser.AllowedTools)
+	}
+
+	otherUser, err := service.ToolUserRoleAccess(ctx, "guild-1", "user-other", []string{"role-artist"})
+	if err != nil {
+		t.Fatalf("ToolUserRoleAccess other: %v", err)
+	}
+	if len(otherUser.AllowedTools) != 0 {
+		t.Fatalf("expected other user to be restricted, got %+v", otherUser.AllowedTools)
+	}
+
+	rules, err := service.ListToolAccess(ctx, "guild-1")
+	if err != nil {
+		t.Fatalf("ListToolAccess: %v", err)
+	}
+	if len(rules) != 1 || rules[0].SubjectType != "user" || rules[0].SubjectID != "user-artist" {
+		t.Fatalf("expected user access rule, got %+v", rules)
+	}
+
+	if err := service.RemoveToolUser(ctx, "guild-1", "admin", "panda.generate_image", "user-artist"); err != nil {
+		t.Fatalf("RemoveToolUser: %v", err)
+	}
+	afterRemove, err := service.ToolUserRoleAccess(ctx, "guild-1", "user-artist", nil)
+	if err != nil {
+		t.Fatalf("ToolUserRoleAccess after remove: %v", err)
+	}
+	if len(afterRemove.RestrictedTools) != 0 || len(afterRemove.AllowedTools) != 0 {
+		t.Fatalf("expected user tool rule removal, got %+v", afterRemove)
+	}
+
+	if _, err := service.DenyToolUser(ctx, "guild-1", "admin", "panda.generate_image", "user-artist"); err != nil {
+		t.Fatalf("DenyToolUser: %v", err)
+	}
+	deniedUser, err := service.ToolUserRoleAccess(ctx, "guild-1", "user-artist", nil)
+	if err != nil {
+		t.Fatalf("ToolUserRoleAccess denied user: %v", err)
+	}
+	if len(deniedUser.AllowedTools) != 0 || len(deniedUser.DeniedTools) != 1 || deniedUser.DeniedTools[0] != "panda.generate_image" {
+		t.Fatalf("expected direct user deny, got %+v", deniedUser)
+	}
+	if _, err := service.AddToolUser(ctx, "guild-1", "admin", "panda.generate_image", "user-artist"); err != nil {
+		t.Fatalf("AddToolUser after deny: %v", err)
+	}
+	allowedAgain, err := service.ToolUserRoleAccess(ctx, "guild-1", "user-artist", nil)
+	if err != nil {
+		t.Fatalf("ToolUserRoleAccess allowed again: %v", err)
+	}
+	if len(allowedAgain.DeniedTools) != 0 || len(allowedAgain.AllowedTools) != 1 || allowedAgain.AllowedTools[0] != "panda.generate_image" {
+		t.Fatalf("expected allow to replace deny, got %+v", allowedAgain)
+	}
+}
+
+func TestToolAccessRejectsEveryoneRoleForNewGrantsButCanRemoveLegacyRule(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(ctx, "file::memory:?cache=shared")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer db.Close()
+
+	access := repository.NewAccessRepository(db.DB)
+	service := NewService(
+		repository.NewGuildConfigRepository(db.DB),
+		repository.NewUsageRepository(db.DB),
+		repository.NewAuditRepository(db.DB),
+		memory.NewService(repository.NewKnowledgeRepository(db.DB)),
+		access,
+		repository.NewBudgetRepository(db.DB),
+		nil,
+	)
+	if _, err := service.AddToolRole(ctx, "guild-1", "admin", "panda.generate_image", "guild-1"); !errors.Is(err, ErrToolAccessEveryoneRole) {
+		t.Fatalf("expected @everyone role grant rejection, got %v", err)
+	}
+	if _, err := access.AddToolRole(ctx, "guild-1", "panda.generate_image", "guild-1"); err != nil {
+		t.Fatalf("seed legacy tool role: %v", err)
+	}
+	if err := service.RemoveToolRole(ctx, "guild-1", "admin", "panda.generate_image", "guild-1"); err != nil {
+		t.Fatalf("RemoveToolRole should clean legacy @everyone rule: %v", err)
+	}
+	rules, err := service.ListToolAccess(ctx, "guild-1")
+	if err != nil {
+		t.Fatalf("ListToolAccess: %v", err)
+	}
+	if len(rules) != 0 {
+		t.Fatalf("expected legacy @everyone rule to be removed, got %+v", rules)
+	}
+}
+
+func TestClearToolAccessOpensNativeToolGates(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(ctx, "file::memory:?cache=shared")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer db.Close()
+
+	service := NewService(
+		repository.NewGuildConfigRepository(db.DB),
+		repository.NewUsageRepository(db.DB),
+		repository.NewAuditRepository(db.DB),
+		memory.NewService(repository.NewKnowledgeRepository(db.DB)),
+		repository.NewAccessRepository(db.DB),
+		repository.NewBudgetRepository(db.DB),
+		nil,
+	)
+	if _, err := service.AddRolePermission(ctx, "guild-1", "admin", "role-image", PermissionAssistantImageGeneration); err != nil {
+		t.Fatalf("AddRolePermission: %v", err)
+	}
+	if _, err := service.AddUserPermission(ctx, "guild-1", "admin", "user-image", PermissionAssistantImageGeneration); err != nil {
+		t.Fatalf("AddUserPermission: %v", err)
+	}
+	if _, err := service.AddToolRole(ctx, "guild-1", "admin", "panda.generate_image", "role-image"); err != nil {
+		t.Fatalf("AddToolRole: %v", err)
+	}
+	if _, err := service.AddToolUser(ctx, "guild-1", "admin", "panda.generate_image", "user-image"); err != nil {
+		t.Fatalf("AddToolUser: %v", err)
+	}
+
+	permissionResult, err := service.ClearPermissionAccess(ctx, "guild-1", "admin", PermissionAssistantImageGeneration)
+	if err != nil {
+		t.Fatalf("ClearPermissionAccess: %v", err)
+	}
+	if permissionResult.RemovedRoleRules != 1 || permissionResult.RemovedUserRules != 1 {
+		t.Fatalf("unexpected permission clear result: %+v", permissionResult)
+	}
+	toolResult, err := service.ClearToolAccess(ctx, "guild-1", "admin", "panda.generate_image")
+	if err != nil {
+		t.Fatalf("ClearToolAccess: %v", err)
+	}
+	if toolResult.RemovedRoleRules != 1 || toolResult.RemovedUserRules != 1 {
+		t.Fatalf("unexpected tool clear result: %+v", toolResult)
+	}
+	rolePermissions, err := service.ListRolePermissions(ctx, "guild-1")
+	if err != nil {
+		t.Fatalf("ListRolePermissions: %v", err)
+	}
+	userPermissions, err := service.ListUserPermissions(ctx, "guild-1")
+	if err != nil {
+		t.Fatalf("ListUserPermissions: %v", err)
+	}
+	toolRules, err := service.ListToolAccess(ctx, "guild-1")
+	if err != nil {
+		t.Fatalf("ListToolAccess: %v", err)
+	}
+	if len(rolePermissions) != 0 || len(userPermissions) != 0 || len(toolRules) != 0 {
+		t.Fatalf("expected access gates to be open, roles=%+v users=%+v tools=%+v", rolePermissions, userPermissions, toolRules)
 	}
 }
 

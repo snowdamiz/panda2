@@ -286,6 +286,21 @@ func TestSystemPromptPrefersChannelLookupToolsBeforeClarifying(t *testing.T) {
 	}
 }
 
+func TestSystemPromptDefinesDiscordMarkdownAndPandaAdmins(t *testing.T) {
+	prompt := systemPrompt(store.GuildConfig{}, fixedPromptTime)
+	for _, want := range []string{
+		"Discord does not render markdown tables",
+		"never emit pipe-table syntax",
+		"Panda admin mappings are role/user permissions with admin.badge",
+		"Do not answer with Discord roles that merely have Discord's Administrator permission",
+		"Do not model everyone as the Discord @everyone role",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("system prompt missing instruction %q:\n%s", want, prompt)
+		}
+	}
+}
+
 func TestAskExposesDiscordChannelLookupToolWithLookupInstructions(t *testing.T) {
 	ctx := context.Background()
 	client := &fakeClient{response: llm.ChatResponse{Model: "fixture/model", Content: "ok"}}
@@ -1170,6 +1185,9 @@ func TestToolAvailabilityMessageUsesRichUserScopedCapabilitySections(t *testing.
 		"server automations",
 		"Admin setup (caller has admin access)",
 		"Access controls (caller has admin access)",
+		"do not emit markdown tables",
+		"Panda admin role/user mappings (`admin.badge`)",
+		"use the current tool-access open/everyone action",
 		"do not collapse the answer into one-line categories",
 	} {
 		if !strings.Contains(message, want) {

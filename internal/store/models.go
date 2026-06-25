@@ -106,6 +106,17 @@ type GuildToolRole struct {
 	GuildID   string    `gorm:"index;not null;size:32"`
 	ToolName  string    `gorm:"index;not null;size:128"`
 	RoleID    string    `gorm:"index;not null;size:32"`
+	Rule      string    `gorm:"index;not null;default:'allow';size:16"`
+	CreatedAt time.Time `gorm:"not null"`
+	UpdatedAt time.Time `gorm:"not null"`
+}
+
+type GuildToolUser struct {
+	ID        uint      `gorm:"primaryKey"`
+	GuildID   string    `gorm:"index;not null;size:32"`
+	ToolName  string    `gorm:"index;not null;size:128"`
+	UserID    string    `gorm:"index;not null;size:32"`
+	Rule      string    `gorm:"index;not null;default:'allow';size:16"`
 	CreatedAt time.Time `gorm:"not null"`
 	UpdatedAt time.Time `gorm:"not null"`
 }
@@ -267,6 +278,15 @@ type AuditEvent struct {
 	TargetID   string    `gorm:"not null;default:''"`
 	Metadata   string    `gorm:"not null;default:''"`
 	CreatedAt  time.Time `gorm:"index;not null"`
+}
+
+type RuntimeStatus struct {
+	Key       string    `gorm:"primaryKey;size:32"`
+	Disabled  bool      `gorm:"not null;default:false"`
+	Message   string    `gorm:"not null;default:'';size:512"`
+	UpdatedBy string    `gorm:"not null;default:'';size:96"`
+	CreatedAt time.Time `gorm:"not null"`
+	UpdatedAt time.Time `gorm:"not null"`
 }
 
 type Job struct {

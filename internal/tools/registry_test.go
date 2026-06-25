@@ -92,7 +92,7 @@ func TestAdminSetupToolSchemasExposeNaturalLanguageFields(t *testing.T) {
 	assertToolSchemaContains("panda.manage_role_permission", "profile", "role_name", "role")
 	assertToolSchemaContains("panda.manage_user_permission", "profile", "user_id", "member_user_id")
 	assertToolSchemaContains("panda.manage_channel_rule", "channel_name", "channel")
-	assertToolSchemaContains("panda.manage_tool_access", "tool_name", "role_name", "role")
+	assertToolSchemaContains("panda.manage_tool_access", "tool_name", "tool_group", "role_name", "role", "target_type", "user_id", "member_user_id")
 	assertToolSchemaContains("panda.manage_prompt", "prompt", "instructions")
 	assertToolSchemaContains("panda.manage_soul", "soul")
 	assertToolSchemaContains("panda.manage_music", "voice_channel_id", "voice_channel_name", "voice_channel", "vc")
@@ -396,6 +396,16 @@ func TestOpenRouterToolsHonorsRoleToolRestrictions(t *testing.T) {
 	})
 	if !toolNames(allowed)["web_search"] {
 		t.Fatalf("web_search should be visible to an allowed role: %+v", toolNames(allowed))
+	}
+
+	denied := registry.OpenRouterToolsForAccess(ToolAccess{
+		Policy:       ToolPolicyReadOnly,
+		Permissions:  map[string]struct{}{admin.PermissionAssistantWebSearch: {}},
+		AllowedTools: map[string]struct{}{"web.search": {}},
+		DeniedTools:  map[string]struct{}{"web.search": {}},
+	})
+	if toolNames(denied)["web_search"] {
+		t.Fatalf("web_search should be hidden when explicitly denied, even if also allowed: %+v", toolNames(denied))
 	}
 
 	adminOnly := registry.OpenRouterToolsForAccess(ToolAccess{
@@ -1963,10 +1973,10 @@ func TestExecutorRunsAdminServiceTools(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Execute tool access add: %v", err)
 	}
-	if !strings.Contains(toolAccess.Message.Content, `"confirmation_required":true`) || !strings.Contains(toolAccess.Message.Content, "web.search") || !strings.Contains(toolAccess.Message.Content, "role-search") {
+	if !strings.Contains(toolAccess.Message.Content, `"confirmation_required":true`) || !strings.Contains(toolAccess.Message.Content, "web.search") || strings.Contains(toolAccess.Message.Content, "role-search") {
 		t.Fatalf("unexpected tool access confirmation result: %+v", toolAccess)
 	}
-	if toolAccess.Confirmation == nil || toolAccess.Confirmation.Action != "tool_access.add" || toolAccess.Confirmation.Arguments["tool_name"] != "web.search" {
+	if toolAccess.Confirmation == nil || toolAccess.Confirmation.Action != "tool_access.add" || toolAccess.Confirmation.Arguments["tool_name"] != "web.search" || toolAccess.Confirmation.Arguments["role_id"] != "role-search" {
 		t.Fatalf("expected tool access confirmation, got %+v", toolAccess.Confirmation)
 	}
 }
@@ -2044,6 +2054,161 @@ func TestExecutorRoleProfileAndMemberRoleToolsRequireConfirmation(t *testing.T) 
 		t.Fatalf("expected resolved tool access confirmation, got %+v", toolAccess.Confirmation)
 	}
 
+	userToolAccess, err := executor.Execute(context.Background(), ExecutionRequest{
+		GuildID: "guild-1",
+		ActorID: "admin",
+		Access:  testAccess(ToolPolicyWriteConfirmed, admin.PermissionAdminConfigWrite),
+		Call: llm.ToolCall{
+			ID:   "call-user-tool-access",
+			Type: "function",
+			Function: llm.ToolCallFunction{
+				Name:      "panda_manage_tool_access",
+				Arguments: `{"action":"remove","tool_name":"panda.generate_image","user_id":"100000000000000888"}`,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Execute user tool access: %v", err)
+	}
+	if userToolAccess.Confirmation == nil || userToolAccess.Confirmation.Action != "tool_access.remove" || userToolAccess.Confirmation.Arguments["tool_name"] != "panda.generate_image" || userToolAccess.Confirmation.Arguments["user_id"] != "100000000000000888" {
+		t.Fatalf("expected user tool access confirmation, got %+v", userToolAccess.Confirmation)
+	}
+	if strings.Contains(userToolAccess.Confirmation.Summary, "role `") {
+		t.Fatalf("user-targeted tool access summary should not say role: %+v", userToolAccess.Confirmation)
+	}
+
+	userNameProvider := &fakeDiscordProvider{result: map[string]any{"members": []map[string]any{{
+		"user": map[string]any{
+			"id":          "100000000000000999",
+			"username":    "xer0",
+			"global_name": "xer0",
+			"effective":   "xer0",
+		},
+	}}}}
+	userNameExecutor := NewExecutor(registry, nil, nil).
+		WithAdminOperations(newToolAdminService(t)).
+		WithDiscordToolProvider(userNameProvider)
+	denyNamedUser, err := userNameExecutor.Execute(context.Background(), ExecutionRequest{
+		GuildID: "guild-1",
+		ActorID: "admin",
+		Access:  testAccess(ToolPolicyWriteConfirmed, admin.PermissionAdminConfigWrite),
+		Call: llm.ToolCall{
+			ID:   "call-deny-named-user-tool-access",
+			Type: "function",
+			Function: llm.ToolCallFunction{
+				Name:      "panda_manage_tool_access",
+				Arguments: `{"action":"deny","tool_name":"image generation tool","user":"@xer0"}`,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Execute named-user deny tool access: %v", err)
+	}
+	if denyNamedUser.Confirmation == nil || denyNamedUser.Confirmation.Action != "tool_access.deny" {
+		t.Fatalf("expected deny tool access confirmation, got %+v", denyNamedUser.Confirmation)
+	}
+	if denyNamedUser.Confirmation.Arguments["tool_name"] != "panda.generate_image" || denyNamedUser.Confirmation.Arguments["user_id"] != "100000000000000999" {
+		t.Fatalf("expected image generation alias and resolved user ID, got %+v", denyNamedUser.Confirmation)
+	}
+	if len(userNameProvider.requests) != 1 || userNameProvider.requests[0].ToolName != "discord.list_members" {
+		t.Fatalf("expected Discord member lookup, got %+v", userNameProvider.requests)
+	}
+
+	openImageTools, err := executor.Execute(context.Background(), ExecutionRequest{
+		GuildID: "guild-1",
+		ActorID: "admin",
+		Access:  testAccess(ToolPolicyWriteConfirmed, admin.PermissionAdminConfigWrite),
+		Call: llm.ToolCall{
+			ID:   "call-open-image-tools",
+			Type: "function",
+			Function: llm.ToolCallFunction{
+				Name:      "panda_manage_tool_access",
+				Arguments: `{"action":"open","tool_group":"image_tools"}`,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Execute open image tool access: %v", err)
+	}
+	if openImageTools.Confirmation == nil || openImageTools.Confirmation.Action != "tool_access.open" {
+		t.Fatalf("expected open tool access confirmation, got %+v", openImageTools.Confirmation)
+	}
+	if toolNames := openImageTools.Confirmation.Arguments["tool_names"]; !strings.Contains(toolNames, "panda.generate_image") || !strings.Contains(toolNames, "panda.inspect_image") {
+		t.Fatalf("expected image tool group to expand to both native tools, got %+v", openImageTools.Confirmation)
+	}
+	if permissions := openImageTools.Confirmation.Arguments["permissions"]; permissions != admin.PermissionAssistantImageGeneration {
+		t.Fatalf("expected image permission to be cleared by open action, got %+v", openImageTools.Confirmation)
+	}
+	if strings.Contains(openImageTools.Confirmation.Summary, "@everyone") || strings.Contains(openImageTools.Confirmation.Summary, "role `") {
+		t.Fatalf("open-to-everyone summary should not model everyone as a role: %+v", openImageTools.Confirmation)
+	}
+
+	openWebSearch, err := executor.Execute(context.Background(), ExecutionRequest{
+		GuildID: "guild-1",
+		ActorID: "admin",
+		Access:  testAccess(ToolPolicyWriteConfirmed, admin.PermissionAdminConfigWrite),
+		Call: llm.ToolCall{
+			ID:   "call-open-web-search",
+			Type: "function",
+			Function: llm.ToolCallFunction{
+				Name:      "panda_manage_tool_access",
+				Arguments: `{"action":"open","tool_name":"web_search"}`,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Execute open web tool access: %v", err)
+	}
+	if openWebSearch.Confirmation == nil || openWebSearch.Confirmation.Action != "tool_access.open" {
+		t.Fatalf("expected open web tool access confirmation, got %+v", openWebSearch.Confirmation)
+	}
+	if openWebSearch.Confirmation.Arguments["tool_names"] != "web.search" || openWebSearch.Confirmation.Arguments["permissions"] != admin.PermissionAssistantWebSearch {
+		t.Fatalf("expected registered native web tool to clear its required permission, got %+v", openWebSearch.Confirmation)
+	}
+
+	openComposedTool, err := executor.Execute(context.Background(), ExecutionRequest{
+		GuildID: "guild-1",
+		ActorID: "admin",
+		Access:  testAccess(ToolPolicyWriteConfirmed, admin.PermissionAdminConfigWrite),
+		Call: llm.ToolCall{
+			ID:   "call-open-composed-tool",
+			Type: "function",
+			Function: llm.ToolCallFunction{
+				Name:      "panda_manage_tool_access",
+				Arguments: `{"action":"open","tool_name":"welcome_builder"}`,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Execute open composed tool access: %v", err)
+	}
+	if openComposedTool.Confirmation == nil || openComposedTool.Confirmation.Action != "tool_access.open" {
+		t.Fatalf("expected open composed tool access confirmation, got %+v", openComposedTool.Confirmation)
+	}
+	if openComposedTool.Confirmation.Arguments["tool_names"] != "welcome_builder" || openComposedTool.Confirmation.Arguments["permissions"] != "" {
+		t.Fatalf("expected custom tool open to clear only tool allowlist rows, got %+v", openComposedTool.Confirmation)
+	}
+
+	invalidEveryoneGrant, err := executor.Execute(context.Background(), ExecutionRequest{
+		GuildID: "guild-1",
+		ActorID: "admin",
+		Access:  testAccess(ToolPolicyWriteConfirmed, admin.PermissionAdminConfigWrite),
+		Call: llm.ToolCall{
+			ID:   "call-invalid-everyone-tool-access",
+			Type: "function",
+			Function: llm.ToolCallFunction{
+				Name:      "panda_manage_tool_access",
+				Arguments: `{"action":"add","tool_name":"panda.generate_image","role_id":"guild-1"}`,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Execute invalid @everyone tool access: %v", err)
+	}
+	if invalidEveryoneGrant.Confirmation != nil || !strings.Contains(invalidEveryoneGrant.Message.Content, admin.ErrToolAccessEveryoneRole.Error()) {
+		t.Fatalf("expected @everyone role target to be rejected, got %+v", invalidEveryoneGrant)
+	}
+
 	memberRole, err := executor.Execute(context.Background(), ExecutionRequest{
 		GuildID: "guild-1",
 		ActorID: "admin",
@@ -2113,7 +2278,7 @@ func TestExecutorAdminRemovalToolsRequireConfirmation(t *testing.T) {
 		t.Fatalf("Execute channel remove: %v", err)
 	}
 	message := result.Message
-	if !strings.Contains(message.Content, `"confirmation_required":true`) || !strings.Contains(message.Content, channelID) {
+	if !strings.Contains(message.Content, `"confirmation_required":true`) || strings.Contains(message.Content, channelID) {
 		t.Fatalf("expected confirmation preview, got %+v", message)
 	}
 	if result.Confirmation == nil || result.Confirmation.Action != "channel_rule.remove" || result.Confirmation.Arguments["channel_id"] != channelID {

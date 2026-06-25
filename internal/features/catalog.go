@@ -401,7 +401,7 @@ var catalog = []Feature{
 	{
 		ID:               AdminAccessControl,
 		Label:            "Access controls",
-		Description:      "Panda user and role profiles, channel rules, role tool access, and budget limits.",
+		Description:      "Panda user and role profiles, channel rules, user and role tool access, and budget limits.",
 		PandaPermissions: []string{admin.PermissionAdminConfigRead, admin.PermissionAdminConfigWrite},
 		ToolNames:        []string{"panda.manage_role_permission", "panda.manage_user_permission", "panda.manage_channel_rule", "panda.manage_tool_access", "panda.manage_budget_limit"},
 		Public:           true,

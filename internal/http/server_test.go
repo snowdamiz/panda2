@@ -21,6 +21,7 @@ import (
 	"github.com/sn0w/panda2/internal/config"
 	discordbot "github.com/sn0w/panda2/internal/discord"
 	"github.com/sn0w/panda2/internal/repository"
+	"github.com/sn0w/panda2/internal/runtimecontrol"
 	"github.com/sn0w/panda2/internal/store"
 )
 
@@ -702,6 +703,103 @@ func TestAdminCouponEndpointsManageCoupons(t *testing.T) {
 	}
 	if revoked.Status != billing.CouponStatusRevoked {
 		t.Fatalf("expected revoked coupon, got %+v", revoked)
+	}
+}
+
+func TestAdminRuntimeEndpointsManageMaintenanceMode(t *testing.T) {
+	db, err := store.Open(t.Context(), "file::memory:?cache=shared")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer db.Close()
+
+	cfg := solHTTPConfig(t)
+	treasuryWallet, treasuryPrivateKey := adminTestWallet(t)
+	cfg.SolanaTreasuryWallet = treasuryWallet
+	server := New(cfg, db).WithRuntimeStatus(runtimecontrol.NewService(repository.NewRuntimeStatusRepository(db.DB)))
+
+	req, _ := stdhttp.NewRequest(stdhttp.MethodGet, "/admin/runtime", nil)
+	resp, err := server.Test(req)
+	if err != nil {
+		t.Fatalf("unauthorized runtime request failed: %v", err)
+	}
+	if resp.StatusCode != stdhttp.StatusUnauthorized {
+		t.Fatalf("expected 401 without admin wallet session, got %d", resp.StatusCode)
+	}
+
+	sessionToken := createAdminSessionForTest(t, server, treasuryWallet, treasuryPrivateKey)
+	req, _ = stdhttp.NewRequest(stdhttp.MethodGet, "/admin/runtime", nil)
+	req.Header.Set("Authorization", "Bearer "+sessionToken)
+	resp, err = server.Test(req)
+	if err != nil {
+		t.Fatalf("get runtime request failed: %v", err)
+	}
+	if resp.StatusCode != stdhttp.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("expected 200, got %d: %s", resp.StatusCode, body)
+	}
+	var initial adminRuntimeStatusResponse
+	if err := json.NewDecoder(resp.Body).Decode(&initial); err != nil {
+		t.Fatalf("decode initial runtime response: %v", err)
+	}
+	if initial.Disabled || initial.EffectiveMessage != runtimecontrol.DefaultMaintenanceMessage || initial.DefaultMessage != runtimecontrol.DefaultMaintenanceMessage {
+		t.Fatalf("unexpected initial runtime status: %+v", initial)
+	}
+
+	req, _ = stdhttp.NewRequest(stdhttp.MethodPost, "/admin/runtime", strings.NewReader(`{
+		"disabled": true,
+		"message": "Panda is sleeping, maintenance in progress"
+	}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+sessionToken)
+	resp, err = server.Test(req)
+	if err != nil {
+		t.Fatalf("update runtime request failed: %v", err)
+	}
+	if resp.StatusCode != stdhttp.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("expected 200 update, got %d: %s", resp.StatusCode, body)
+	}
+	var disabled adminRuntimeStatusResponse
+	if err := json.NewDecoder(resp.Body).Decode(&disabled); err != nil {
+		t.Fatalf("decode disabled runtime response: %v", err)
+	}
+	if !disabled.Disabled || disabled.Message != "Panda is sleeping, maintenance in progress" || disabled.EffectiveMessage != disabled.Message {
+		t.Fatalf("unexpected disabled runtime status: %+v", disabled)
+	}
+	if !strings.Contains(disabled.UpdatedBy, treasuryWallet) {
+		t.Fatalf("expected treasury wallet actor, got %+v", disabled)
+	}
+
+	req, _ = stdhttp.NewRequest(stdhttp.MethodPost, "/admin/runtime", strings.NewReader(`{"disabled": false, "message": ""}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+sessionToken)
+	resp, err = server.Test(req)
+	if err != nil {
+		t.Fatalf("enable runtime request failed: %v", err)
+	}
+	if resp.StatusCode != stdhttp.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("expected 200 enable, got %d: %s", resp.StatusCode, body)
+	}
+	var enabled adminRuntimeStatusResponse
+	if err := json.NewDecoder(resp.Body).Decode(&enabled); err != nil {
+		t.Fatalf("decode enabled runtime response: %v", err)
+	}
+	if enabled.Disabled || enabled.EffectiveMessage != runtimecontrol.DefaultMaintenanceMessage {
+		t.Fatalf("unexpected enabled runtime status: %+v", enabled)
+	}
+
+	req, _ = stdhttp.NewRequest(stdhttp.MethodPost, "/admin/runtime", strings.NewReader(`{"disabled": true, "message": "`+strings.Repeat("x", 501)+`"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+sessionToken)
+	resp, err = server.Test(req)
+	if err != nil {
+		t.Fatalf("long message runtime request failed: %v", err)
+	}
+	if resp.StatusCode != stdhttp.StatusBadRequest {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("expected 400 for long message, got %d: %s", resp.StatusCode, body)
 	}
 }
 

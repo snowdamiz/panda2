@@ -58,6 +58,7 @@ type ToolAccess struct {
 	Policy                       string
 	Permissions                  map[string]struct{}
 	AllowedTools                 map[string]struct{}
+	DeniedTools                  map[string]struct{}
 	RestrictedTools              map[string]struct{}
 	EnabledFeatures              map[string]struct{}
 	FeatureGateActive            bool
@@ -312,6 +313,20 @@ func (access ToolAccess) HasAnyPermission(permissions ...string) bool {
 }
 
 func (access ToolAccess) allowsTool(requireExplicit bool, names ...string) bool {
+	denied := false
+	for _, name := range names {
+		normalized := normalizeToolName(name)
+		if normalized == "" {
+			continue
+		}
+		if _, ok := access.DeniedTools[normalized]; ok {
+			denied = true
+			break
+		}
+	}
+	if denied {
+		return false
+	}
 	if len(access.RestrictedTools) == 0 && !requireExplicit {
 		return true
 	}
@@ -366,7 +381,7 @@ func DefaultDefinitions() []Definition {
 		discordRead("discord.get_channel", "Read one channel's summary metadata.", []string{"channel_id"}, 2*time.Second, 1, "VIEW_CHANNEL"),
 		discordRead("discord.list_active_threads", "List active guild threads visible to Panda.", []string{}, 3*time.Second, 100, "VIEW_CHANNEL"),
 		discordRead("discord.list_archived_threads", "List archived threads for a channel.", []string{"channel_id"}, 3*time.Second, 100, "VIEW_CHANNEL", "READ_MESSAGE_HISTORY"),
-		discordRead("discord.list_roles", "List guild roles with IDs, names, positions, and key flags.", []string{}, 3*time.Second, 250, "VIEW_CHANNEL"),
+		discordRead("discord.list_roles", "List Discord guild roles with IDs, names, positions, and key flags. This is Discord server state, not Panda admin access; use Panda role/user permission tools for Panda admin questions.", []string{}, 3*time.Second, 250, "VIEW_CHANNEL"),
 		discordRead("discord.get_role", "Read one role's summary metadata.", []string{"role_id"}, 2*time.Second, 1, "VIEW_CHANNEL"),
 		discordRead("discord.get_member", "Read one guild member summary.", []string{"user_id"}, 3*time.Second, 1, "VIEW_CHANNEL"),
 		discordRead("discord.list_scheduled_events", "List guild scheduled events.", []string{}, 3*time.Second, 100, "VIEW_CHANNEL"),
@@ -664,19 +679,19 @@ func ownerOpsTool() Definition {
 }
 
 func rolePermissionManagementTool() Definition {
-	definition := adminWrite("panda.manage_role_permission", "Grant, remove, or list Panda permission names and role profiles for existing Discord roles. Do not use this to create new Discord roles.", []string{"action"})
+	definition := adminWrite("panda.manage_role_permission", "Grant, remove, or list Panda permission names and role profiles for existing Discord roles. Use action=list to inspect Panda role admins: rows with permission admin.badge are Panda admin roles. Do not use Discord Administrator permissions as a substitute for Panda admin mappings. Do not use this to create new Discord roles.", []string{"action"})
 	definition.InputSchema = rolePermissionManagementSchema()
 	return definition
 }
 
 func userPermissionManagementTool() Definition {
-	definition := adminWrite("panda.manage_user_permission", "Grant, remove, or list Panda permission names and profiles for Discord users directly, without changing Discord roles.", []string{"action"})
+	definition := adminWrite("panda.manage_user_permission", "Grant, remove, or list Panda permission names and profiles for Discord users directly, without changing Discord roles. Use action=list to inspect direct Panda admin users: rows with permission admin.badge are Panda admin users.", []string{"action"})
 	definition.InputSchema = userPermissionManagementSchema()
 	return definition
 }
 
 func toolAccessManagementTool() Definition {
-	definition := adminWrite("panda.manage_tool_access", "Allow, remove, or list role access to native or composed Panda tools.", []string{"action"})
+	definition := adminWrite("panda.manage_tool_access", "Allow, deny/block, remove, list/status, or open access to native or composed Panda tools. Preserve the user's requested target type: use user_id/user/member/user_name for user-specific tool access and role_id/role/role_name for role-specific tool access. Use action=deny when the user says do not allow, block, disable, or revoke a user's/role's tool use; deny creates a blocking rule and does not require a previous allow rule. Use action=remove only when deleting an explicit tool access rule. Use action=open with tool_name for any single tool when the user asks to let everyone/the public use it; use tool_group=image_tools for the image tool bundle. Do not grant the @everyone role or the guild ID as a role. Use action=status/list with tool_name for any tool or tool_group=image_tools for image tools. If the user says Panda admins, first inspect Panda admin role/user mappings with panda.manage_role_permission and panda.manage_user_permission; do not infer Panda admins from Discord Administrator roles.", []string{"action"})
 	definition.InputSchema = toolAccessManagementSchema()
 	return definition
 }
@@ -749,13 +764,23 @@ func userPermissionManagementSchema() json.RawMessage {
 
 func toolAccessManagementSchema() json.RawMessage {
 	return schemaWithProperties([]string{"action"}, map[string]any{
-		"action":    map[string]string{"type": "string", "description": "Action: list, add/allow, or remove/deny."},
-		"tool_name": map[string]string{"type": "string", "description": "Native or composed Panda tool name, such as web.search or welcome_builder."},
-		"tool":      map[string]string{"type": "string", "description": "Alias for tool_name."},
-		"role_id":   map[string]string{"type": "string", "description": "Discord role ID or role mention."},
-		"role":      map[string]string{"type": "string", "description": "Discord role ID, mention, or name."},
-		"role_name": map[string]string{"type": "string", "description": "Discord role name to resolve."},
-		"dry_run":   map[string]string{"type": "boolean"},
+		"action":           map[string]string{"type": "string", "description": "Action: list/status/who, add/allow, deny/block/disallow/disable, remove, or open/public/everyone/allow_everyone. Use deny/block when the user says not to allow a user or role; this creates a blocking rule even if no allow rule exists. Use remove only to delete an explicit tool access rule. Use open/everyone to make any tool available to everyone by clearing matching Panda permission mappings for registered native tools and tool-specific allowlist rules for all selected tools."},
+		"tool_name":        map[string]string{"type": "string", "description": "Native or composed Panda tool name, such as panda.generate_image, web.search, or welcome_builder."},
+		"tool":             map[string]string{"type": "string", "description": "Alias for tool_name."},
+		"tool_group":       map[string]string{"type": "string", "description": "Tool bundle for status/open requests. Currently supported: image_tools for both panda.generate_image and panda.inspect_image. For every other tool, use tool_name."},
+		"group":            map[string]string{"type": "string", "description": "Alias for tool_group."},
+		"target_type":      map[string]string{"type": "string", "description": "Target type for add/remove: role or user. Preserve the user's requested type."},
+		"subject_type":     map[string]string{"type": "string", "description": "Alias for target_type."},
+		"role_id":          map[string]string{"type": "string", "description": "Discord role ID or role mention for role-specific tool access. Never use the guild ID/@everyone role to mean everyone; use action=open instead."},
+		"role":             map[string]string{"type": "string", "description": "Discord role ID, mention, or name for role-specific tool access."},
+		"role_name":        map[string]string{"type": "string", "description": "Discord role name to resolve for role-specific tool access."},
+		"user_id":          map[string]string{"type": "string", "description": "Discord user ID or user mention for user-specific tool access."},
+		"user":             map[string]string{"type": "string", "description": "Discord user ID or user mention for user-specific tool access."},
+		"member_user_id":   map[string]string{"type": "string", "description": "Alias for user_id."},
+		"member":           map[string]string{"type": "string", "description": "Discord member user ID or mention for user-specific tool access."},
+		"user_name":        map[string]string{"type": "string", "description": "Optional Discord username for display only; user IDs or mentions are required for writes."},
+		"member_user_name": map[string]string{"type": "string", "description": "Alias for user_name."},
+		"dry_run":          map[string]string{"type": "boolean"},
 	})
 }
 

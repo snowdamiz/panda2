@@ -279,6 +279,8 @@ export const messageForError = (message: string): string => {
     guild_billing_failed: 'Could not load guild billing. Try again.',
     guild_lookup_failed: 'Could not look up that guild. Try again.',
     subscription_update_failed: 'The subscription change was rejected.',
+    runtime_status_failed: 'Could not update Panda runtime state. Try again.',
+    maintenance_message_too_long: 'Maintenance message must be 500 characters or fewer.',
     bad_request: 'The request was rejected.',
   };
   return messages[message] || message;
