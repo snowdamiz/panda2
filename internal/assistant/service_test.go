@@ -1332,6 +1332,87 @@ func TestChatFiltersStaleCapabilityHistoryAndRetriesStaleAnswer(t *testing.T) {
 	}
 }
 
+func TestChatFiltersStaleImageGenerationFailureHistory(t *testing.T) {
+	ctx := context.Background()
+	client := &fakeClient{response: llm.ChatResponse{Model: "fixture/model", Content: "I'll make a fresh meme."}}
+	service, db := newTestService(t, client)
+	configs := repository.NewGuildConfigRepository(db.DB)
+	registry, err := tools.NewDefaultRegistry()
+	if err != nil {
+		t.Fatalf("NewDefaultRegistry: %v", err)
+	}
+	imageGenerator := &fakeAssistantImageGenerator{configured: true}
+	service.WithToolExecutor(tools.NewExecutor(registry, nil, configs).WithImageGenerator(imageGenerator))
+
+	if _, err := configs.EnsureDefault(ctx, "guild-1"); err != nil {
+		t.Fatalf("EnsureDefault: %v", err)
+	}
+	if _, err := configs.UpdateBehaviorSettings(ctx, "guild-1", map[string]any{"tool_policy": tools.ToolPolicyAssistive}); err != nil {
+		t.Fatalf("UpdateBehaviorSettings: %v", err)
+	}
+	conversation, err := service.conversations.GetOrCreateActive(ctx, repository.ConversationKey{
+		GuildID:     "guild-1",
+		ChannelID:   "channel-1",
+		OwnerUserID: "user-1",
+		Title:       "make meme",
+	})
+	if err != nil {
+		t.Fatalf("GetOrCreateActive: %v", err)
+	}
+	if err := service.conversations.AppendMessage(ctx, store.AssistantMessage{
+		ConversationID: conversation.ID,
+		GuildID:        "guild-1",
+		ChannelID:      "channel-1",
+		UserID:         "user-1",
+		Role:           "user",
+		ContentPreview: "panda make me a random meme",
+	}); err != nil {
+		t.Fatalf("AppendMessage user: %v", err)
+	}
+	if err := service.conversations.AppendMessage(ctx, store.AssistantMessage{
+		ConversationID: conversation.ID,
+		GuildID:        "guild-1",
+		ChannelID:      "channel-1",
+		UserID:         "user-1",
+		Role:           "assistant",
+		ContentPreview: "I'm sorry, but I can't create a meme right now because the server's image-generation quota has been used up for this billing period. You can try again later, or an admin can increase the image-generation budget for the server.",
+	}); err != nil {
+		t.Fatalf("AppendMessage assistant: %v", err)
+	}
+
+	if _, err := service.Chat(ctx, AskRequest{
+		GuildID:           "guild-1",
+		UserID:            "user-1",
+		ChannelID:         "channel-1",
+		Question:          "panda make me a random meme",
+		FeatureGateActive: true,
+		AllowedPermissions: map[string]struct{}{
+			admin.PermissionAssistantUse:             {},
+			admin.PermissionAssistantImageGeneration: {},
+		},
+		EnabledFeatures: map[string]struct{}{
+			features.ImageGeneration: {},
+		},
+	}); err != nil {
+		t.Fatalf("Chat: %v", err)
+	}
+	if len(client.requests) != 1 {
+		t.Fatalf("expected one LLM request, got %d", len(client.requests))
+	}
+	if !toolNamePresent(client.requests[0].Tools, "panda_generate_image") {
+		t.Fatalf("expected image generation tool to be available, got %+v", client.requests[0].Tools)
+	}
+	firstRequest := joinMessages(client.requests[0].Messages)
+	for _, forbidden := range []string{"server's image-generation quota has been used up", "increase the image-generation budget", "this billing period"} {
+		if strings.Contains(firstRequest, forbidden) {
+			t.Fatalf("first request should not contain stale image failure %q:\n%s", forbidden, firstRequest)
+		}
+	}
+	if !strings.Contains(firstRequest, "re-check through the current tool") {
+		t.Fatalf("expected stale image failure routing guidance, got:\n%s", firstRequest)
+	}
+}
+
 func TestAskSuppressesTextToolCallMarkup(t *testing.T) {
 	ctx := context.Background()
 	client := &fakeClient{responses: []llm.ChatResponse{
@@ -1637,6 +1718,8 @@ func TestToolAvailabilityMessageRoutesAttachedImagesToInspection(t *testing.T) {
 		"call the image inspection tool",
 		"reference_image_ids",
 		"Do not guess",
+		"Treat old assistant replies about image-generation quota",
+		"re-check through the current tool",
 	} {
 		if !strings.Contains(message, want) {
 			t.Fatalf("image inspection routing context missing %q:\n%s", want, message)

@@ -99,6 +99,33 @@ func TestAdminSetupToolSchemasExposeNaturalLanguageFields(t *testing.T) {
 	assertToolSchemaContains("panda.manage_composed_tool", "voice_channel_id", "voice_channel_name", "voice_channel")
 }
 
+func TestImageGenerationSchemaMatchesOpenRouterImageModelSettings(t *testing.T) {
+	registry, err := NewDefaultRegistry()
+	if err != nil {
+		t.Fatalf("NewDefaultRegistry: %v", err)
+	}
+	definition, ok := registry.Get("panda.generate_image")
+	if !ok {
+		t.Fatal("panda.generate_image not registered")
+	}
+	var schema struct {
+		Properties map[string]json.RawMessage `json:"properties"`
+	}
+	if err := json.Unmarshal(definition.InputSchema, &schema); err != nil {
+		t.Fatalf("decode schema: %v", err)
+	}
+	for _, want := range []string{"prompt", "reference_image_ids", "caption", "aspect_ratio", "resolution", "count", "filename_hint"} {
+		if _, ok := schema.Properties[want]; !ok {
+			t.Fatalf("image generation schema missing provider-supported field %q: %s", want, string(definition.InputSchema))
+		}
+	}
+	for _, legacy := range []string{"size", "quality", "output_format", "transparent_background"} {
+		if _, ok := schema.Properties[legacy]; ok {
+			t.Fatalf("image generation schema should not expose unsupported legacy field %q: %s", legacy, string(definition.InputSchema))
+		}
+	}
+}
+
 func TestChannelAwareToolDescriptionsPreferDiscordChannelLookup(t *testing.T) {
 	registry, err := NewDefaultRegistry()
 	if err != nil {
@@ -1139,14 +1166,14 @@ func TestExecutorGenerateImageCarriesFilesWithoutLeakingBytes(t *testing.T) {
 			Type: "function",
 			Function: llm.ToolCallFunction{
 				Name:      "panda.generate_image",
-				Arguments: `{"prompt":"pixel panda icon","reference_image_ids":["current:100"],"caption":"Panda icon","output_format":"png","filename_hint":"panda icon"}`,
+				Arguments: `{"prompt":"pixel panda icon","reference_image_ids":["current:100"],"caption":"Panda icon","resolution":"1K","filename_hint":"panda icon"}`,
 			},
 		},
 	})
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
-	if len(generator.requests) != 1 || generator.requests[0].Prompt != "pixel panda icon" || generator.requests[0].OutputFormat != "png" {
+	if len(generator.requests) != 1 || generator.requests[0].Prompt != "pixel panda icon" || generator.requests[0].Resolution != "1K" {
 		t.Fatalf("unexpected generator requests: %+v", generator.requests)
 	}
 	if len(generator.requests[0].InputReferences) != 1 || generator.requests[0].InputReferences[0].URL != "https://cdn.example.test/reference.png" {
@@ -1200,6 +1227,52 @@ func TestExecutorGenerateImageRejectsUnknownReferenceID(t *testing.T) {
 	}
 	if !strings.Contains(result.Message.Content, `"provider_status":"invalid_request"`) || !strings.Contains(result.Message.Content, "attach the image again") {
 		t.Fatalf("expected safe invalid reference response, got %s", result.Message.Content)
+	}
+}
+
+func TestExecutorGenerateImageDoesNotForwardLegacyUnsupportedSettings(t *testing.T) {
+	registry, err := NewDefaultRegistry()
+	if err != nil {
+		t.Fatalf("NewDefaultRegistry: %v", err)
+	}
+	generator := &fakeImageGenerator{
+		configured: true,
+		response: llm.ImageGenerationResponse{
+			Images: []llm.GeneratedImage{{
+				Bytes:    []byte("image-bytes"),
+				MIMEType: "image/png",
+			}},
+		},
+	}
+	executor := NewExecutor(registry, nil, nil).WithImageGenerator(generator)
+	access := testAccess(ToolPolicyAssistive, admin.PermissionAssistantImageGeneration)
+	access.FeatureGateActive = true
+	access.EnabledFeatures = map[string]struct{}{features.ImageGeneration: {}}
+	_, err = executor.Execute(context.Background(), ExecutionRequest{
+		GuildID:        "guild-1",
+		ChannelID:      "channel-1",
+		ActorID:        "user-1",
+		RequestID:      "request-1",
+		InvocationType: "chat_tool",
+		Access:         access,
+		Call: llm.ToolCall{
+			ID:   "call-image",
+			Type: "function",
+			Function: llm.ToolCallFunction{
+				Name:      "panda.generate_image",
+				Arguments: `{"prompt":"random meme","quality":"high","output_format":"png","transparent_background":true,"size":"1024x1024"}`,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if len(generator.requests) != 1 {
+		t.Fatalf("expected generator call, got %+v", generator.requests)
+	}
+	request := generator.requests[0]
+	if request.Quality != "" || request.OutputFormat != "" || request.TransparentBackground || request.Size != "" {
+		t.Fatalf("legacy unsupported settings should not be forwarded: %+v", request)
 	}
 }
 

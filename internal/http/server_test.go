@@ -907,6 +907,9 @@ func TestAdminGuildEndpointsListAndUpdateSubscription(t *testing.T) {
 	if _, err := billingService.EnsureTrial(t.Context(), billing.TrialSeed{GuildID: "guild-1", BillingOwnerUserID: "owner-1", Email: "owner@example.com"}); err != nil {
 		t.Fatalf("EnsureTrial: %v", err)
 	}
+	if _, err := billingService.BeginUsage(t.Context(), "guild-1", billing.MetricImageGeneration, 1); err != nil {
+		t.Fatalf("BeginUsage image generation: %v", err)
+	}
 
 	cfg := solHTTPConfig(t)
 	treasuryWallet, treasuryPrivateKey := adminTestWallet(t)
@@ -954,7 +957,7 @@ func TestAdminGuildEndpointsListAndUpdateSubscription(t *testing.T) {
 	if guild.Billing.Limits == nil || guild.Billing.Limits.ImageGenerations != 5 {
 		t.Fatalf("expected image generation limit in admin guild view, got %+v", guild.Billing.Limits)
 	}
-	if guild.Billing.Usage.ImageGenerations != 0 {
+	if guild.Billing.Usage.ImageGenerations != 1 {
 		t.Fatalf("expected image generation usage in admin guild view, got %+v", guild.Billing.Usage)
 	}
 	if len(list.PlanCatalog) == 0 || len(list.Statuses) == 0 {

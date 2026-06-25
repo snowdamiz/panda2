@@ -630,14 +630,29 @@ func (r *BillingRepository) UpdateActivationAPIKey(ctx context.Context, keyID st
 }
 
 func (r *BillingRepository) UsageTotals(ctx context.Context, guildID string, periodStart, periodEnd time.Time) (BillingUsageTotals, error) {
-	period, ok, err := findUsagePeriodByWindow(r.db.WithContext(ctx), strings.TrimSpace(guildID), periodStart, periodEnd, false)
+	now := time.Now().UTC()
+	var totals BillingUsageTotals
+	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		period, ok, err := findUsagePeriodByWindow(tx, strings.TrimSpace(guildID), periodStart, periodEnd, true)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return nil
+		}
+		if err := releaseExpiredUsageReservationsForPeriodTx(tx, period.ID, now); err != nil {
+			return err
+		}
+		if err := tx.Where("id = ?", period.ID).First(&period).Error; err != nil {
+			return err
+		}
+		totals = totalsFromPeriod(period)
+		return nil
+	})
 	if err != nil {
 		return BillingUsageTotals{}, err
 	}
-	if !ok {
-		return BillingUsageTotals{}, nil
-	}
-	return totalsFromPeriod(period), nil
+	return totals, nil
 }
 
 func (r *BillingRepository) BeginUsageReservation(ctx context.Context, subscription store.GuildSubscription, metric string, units int64, includedLimit int64, now time.Time) (store.UsageReservation, BillingUsageTotals, bool, error) {
@@ -691,6 +706,12 @@ func (r *BillingRepository) beginUsageReservation(ctx context.Context, subscript
 	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		period, err := ensureUsagePeriodTx(tx, subscription, now)
 		if err != nil {
+			return err
+		}
+		if err := releaseExpiredUsageReservationsForPeriodTx(tx, period.ID, now); err != nil {
+			return err
+		}
+		if err := tx.Where("id = ?", period.ID).First(&period).Error; err != nil {
 			return err
 		}
 		if currentUsed != nil {
@@ -845,12 +866,51 @@ func findUsagePeriodByWindow(tx *gorm.DB, guildID string, periodStart, periodEnd
 	return period, true, nil
 }
 
+func releaseExpiredUsageReservationsForPeriodTx(tx *gorm.DB, periodID uint, now time.Time) error {
+	if periodID == 0 {
+		return nil
+	}
+	if now.IsZero() {
+		now = time.Now().UTC()
+	} else {
+		now = now.UTC()
+	}
+	var reservations []store.UsageReservation
+	if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+		Where("usage_period_id = ? AND status = ? AND expires_at <= ?", periodID, "pending", now).
+		Find(&reservations).Error; err != nil {
+		return err
+	}
+	if len(reservations) == 0 {
+		return nil
+	}
+	ids := make([]uint, 0, len(reservations))
+	for _, reservation := range reservations {
+		if err := decrementReserved(tx, reservation.UsagePeriodID, reservation.Metric, reservation.Units); err != nil {
+			return err
+		}
+		ids = append(ids, reservation.ID)
+	}
+	return tx.Model(&store.UsageReservation{}).
+		Where("id IN ?", ids).
+		Updates(map[string]any{
+			"status":     "released",
+			"updated_at": now,
+		}).Error
+}
+
 func incrementReserved(tx *gorm.DB, periodID uint, metric string, units int64) error {
 	return incrementUsageColumn(tx, periodID, reservedColumn(metric), units)
 }
 
 func decrementReserved(tx *gorm.DB, periodID uint, metric string, units int64) error {
-	return incrementUsageColumn(tx, periodID, reservedColumn(metric), -units)
+	column := reservedColumn(metric)
+	if column == "" {
+		return fmt.Errorf("unsupported usage metric")
+	}
+	return tx.Model(&store.UsagePeriod{}).
+		Where("id = ?", periodID).
+		UpdateColumn(column, gorm.Expr("CASE WHEN "+column+" >= ? THEN "+column+" - ? ELSE 0 END", units, units)).Error
 }
 
 func incrementConsumed(tx *gorm.DB, periodID uint, metric string, units int64) error {

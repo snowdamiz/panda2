@@ -104,7 +104,7 @@ const (
 
 const billingSlashCommand = "billing"
 
-var naturalMessageReplyPermissions = []string{"VIEW_CHANNEL", "SEND_MESSAGES", "READ_MESSAGE_HISTORY", "EMBED_LINKS"}
+var naturalMessageReplyPermissions = []string{"VIEW_CHANNEL", "SEND_MESSAGES", "READ_MESSAGE_HISTORY"}
 
 type interactionJobPayload struct {
 	ApplicationID string                  `json:"application_id"`

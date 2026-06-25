@@ -902,7 +902,7 @@ const (
 	maxImagePromptChars         = 4000
 	maxImageAnalysisPromptChars = 2000
 	maxImageCaptionChars        = 500
-	maxImageReferenceImages     = 16
+	maxImageReferenceImages     = 14
 )
 
 func (e *Executor) inspectImage(ctx context.Context, request ExecutionRequest, arguments string) (any, error) {
@@ -994,9 +994,7 @@ func (e *Executor) generateImage(ctx context.Context, request ExecutionRequest, 
 		"prompt_chars":    len([]rune(prompt)),
 		"has_caption":     caption != "",
 		"aspect_ratio":    stringArgument(args, "aspect_ratio"),
-		"size":            stringArgument(args, "size"),
-		"quality":         stringArgument(args, "quality"),
-		"format":          stringArgument(args, "output_format"),
+		"resolution":      stringArgument(args, "resolution"),
 		"reference_count": len(references),
 	})
 
@@ -1016,14 +1014,11 @@ func (e *Executor) generateImage(ctx context.Context, request ExecutionRequest, 
 	}
 
 	response, err := e.images.Generate(ctx, llm.ImageGenerationRequest{
-		Prompt:                prompt,
-		AspectRatio:           stringArgument(args, "aspect_ratio"),
-		Size:                  stringArgument(args, "size"),
-		Quality:               stringArgument(args, "quality"),
-		OutputFormat:          stringArgument(args, "output_format"),
-		TransparentBackground: boolArgument(args, "transparent_background"),
-		Count:                 count,
-		InputReferences:       references,
+		Prompt:          prompt,
+		AspectRatio:     stringArgument(args, "aspect_ratio"),
+		Resolution:      stringArgument(args, "resolution"),
+		Count:           count,
+		InputReferences: references,
 	})
 	if err != nil {
 		status, userMessage := imageErrorStatusAndMessage(err)
