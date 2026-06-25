@@ -359,6 +359,7 @@ func (s *Service) chat(ctx context.Context, request AskRequest, options chatOpti
 	}
 
 	content := finalAssistantResponseContent(response.Content, sourceLinks, sourceLinkLimitForPrompt(request.Question), card)
+	content = finalGeneratedMediaResponseContent(content, generatedFiles)
 	_ = s.conversations.AppendMessage(ctx, store.AssistantMessage{
 		ConversationID: conversation.ID,
 		GuildID:        request.GuildID,
@@ -520,6 +521,7 @@ func (s *Service) complete(ctx context.Context, request TaskRequest) (AskRespons
 	}
 
 	content := finalAssistantResponseContent(response.Content, sourceLinks, sourceLinkLimitForPrompt(request.Input), card)
+	content = finalGeneratedMediaResponseContent(content, generatedFiles)
 	s.curateInteraction(ctx, curation.Interaction{
 		GuildID:   request.GuildID,
 		ChannelID: request.ChannelID,
@@ -734,6 +736,7 @@ func (s *Service) completeWithToolsWithOptions(ctx context.Context, config store
 			Content:   response.Content,
 			ToolCalls: response.ToolCalls,
 		})
+		generatedFileCountBeforeRound := len(generatedFiles)
 		for _, call := range response.ToolCalls {
 			usedWebSearch = usedWebSearch || isWebSearchToolName(call.Function.Name)
 			result, err := s.toolExecutor.Execute(ctx, tools.ExecutionRequest{
@@ -787,6 +790,10 @@ func (s *Service) completeWithToolsWithOptions(ctx context.Context, config store
 		}
 		if card != nil {
 			messages = append(messages, llm.Message{Role: "system", Content: standaloneCardFollowupPrompt()})
+		}
+		if len(generatedFiles) > generatedFileCountBeforeRound {
+			messages = append(messages, llm.Message{Role: "system", Content: generatedMediaFollowupPrompt()})
+			request.MaxTokens = generatedMediaFollowupMaxTokens(request.MaxTokens)
 		}
 		request.Messages = messages
 	}
@@ -918,6 +925,18 @@ func stripNaturalGateMarkerPrefix(content string) string {
 
 func standaloneCardFollowupPrompt() string {
 	return "A structured tool result may be rendered as a Discord card. Do not repeat or reformat that card status in final prose. Compare the completed tools against the original user request: if any independent part remains unresolved and a suitable tool is available, call that tool before final prose. Use an available web/search/current-information tool such as web_search for requests involving latest/current prices, stocks, news, scores, schedules, releases, or other time-sensitive facts; do not answer those from memory or omit them. A music/control card only completes the music/control part and never completes a separate lookup, question, or admin instruction. If no non-card work remains, keep final prose empty. Do not include natural response gate markers such as <panda_respond> or <panda_ignore>."
+}
+
+func generatedMediaFollowupPrompt() string {
+	return "Generated media files have already been attached to this Discord response. For the final user-facing text, if the visual request is complete and no separate non-image question remains, write at most one short sentence or leave the response empty. Do not include markdown image embeds, filenames unless the user needs them, raw tool JSON, tool names, internal reasoning, analysis, or natural response gate markers such as <panda_respond>."
+}
+
+func generatedMediaFollowupMaxTokens(current int) int {
+	const limit = 120
+	if current <= 0 || current > limit {
+		return limit
+	}
+	return current
 }
 
 func insertSystemBeforeLatestUser(messages []llm.Message, content string) []llm.Message {
@@ -1315,6 +1334,50 @@ func finalAssistantResponseContent(content string, sourceLinks []tools.SourceLin
 	return content
 }
 
+func finalGeneratedMediaResponseContent(content string, files []generated.File) string {
+	content = strings.TrimSpace(content)
+	if len(files) == 0 || content == "" {
+		return content
+	}
+	if generatedMediaResponseLooksBroken(content) {
+		return ""
+	}
+	const maxGeneratedMediaCaptionRunes = 280
+	if len([]rune(content)) > maxGeneratedMediaCaptionRunes {
+		return ""
+	}
+	return content
+}
+
+func generatedMediaResponseLooksBroken(content string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(content))
+	if normalized == "" {
+		return false
+	}
+	for _, marker := range []string{
+		"we have a conversation",
+		"the user says",
+		"the assistant already",
+		"the assistant should",
+		"we need to",
+		"tool already",
+		"tool returned",
+		"correct format",
+		"thus produce final",
+		"final answer",
+		"final response",
+		"output a proper response",
+		"panda_generate_image",
+		"<panda_respond>",
+		"<panda_ignore>",
+	} {
+		if strings.Contains(normalized, marker) {
+			return true
+		}
+	}
+	return false
+}
+
 func cardCoversAssistantContent(content string, card *ToolCard) bool {
 	contentTokens := meaningfulContentTokens(content)
 	if len(contentTokens) == 0 {
@@ -1411,6 +1474,8 @@ var commonContentTokenStopWords = map[string]struct{}{
 }
 
 func cleanupAssistantModelArtifacts(content string) string {
+	content = strings.ReplaceAll(content, naturalRespondMarker, "")
+	content = strings.ReplaceAll(content, naturalIgnoreMarker, "")
 	content = modelToolCitationPattern.ReplaceAllString(content, "")
 	content = spaceBeforePunctuationMark.ReplaceAllString(content, "$1")
 	return strings.TrimSpace(content)
