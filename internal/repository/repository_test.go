@@ -178,6 +178,50 @@ func TestBillingUsageReservationCreatesInitialPeriodWithoutRecordNotFoundLog(t *
 	}
 }
 
+func TestBillingUsageReservationReleasesExpiredPendingBeforeQuota(t *testing.T) {
+	ctx := context.Background()
+	repo, _, cleanup := newBillingRepositoryWithLogBuffer(t)
+	defer cleanup()
+
+	now := time.Now().UTC().Add(-time.Hour)
+	subscription := store.GuildSubscription{
+		ID:                 1,
+		GuildID:            "guild-1",
+		Plan:               "trial",
+		CurrentPeriodStart: now.Add(-time.Hour),
+		CurrentPeriodEnd:   now.Add(24 * time.Hour),
+	}
+	expired, totals, denied, err := repo.BeginUsageReservation(ctx, subscription, "image_generation", 1, 1, now)
+	if err != nil {
+		t.Fatalf("BeginUsageReservation expired seed: %v", err)
+	}
+	if denied || totals.ImageGenerationsReserved != 1 {
+		t.Fatalf("expected initial pending reservation at limit, denied=%t totals=%+v", denied, totals)
+	}
+
+	fresh, totals, denied, err := repo.BeginUsageReservation(ctx, subscription, "image_generation", 1, 1, now.Add(31*time.Minute))
+	if err != nil {
+		t.Fatalf("BeginUsageReservation after expiry: %v", err)
+	}
+	if denied {
+		t.Fatal("expired pending reservation should not block a fresh reservation")
+	}
+	if fresh.ReservationID == "" || fresh.ReservationID == expired.ReservationID {
+		t.Fatalf("expected fresh reservation, expired=%+v fresh=%+v", expired, fresh)
+	}
+	if totals.ImageGenerationsReserved != 1 || totals.ImageGenerationsConsumed != 0 {
+		t.Fatalf("expected exactly one active reserved image after cleanup, got %+v", totals)
+	}
+
+	var expiredRow store.UsageReservation
+	if err := repo.db.Where("reservation_id = ?", expired.ReservationID).First(&expiredRow).Error; err != nil {
+		t.Fatalf("load expired reservation: %v", err)
+	}
+	if expiredRow.Status != "released" {
+		t.Fatalf("expected expired reservation released, got %+v", expiredRow)
+	}
+}
+
 func TestMusicEnsureSettingsCreatesWithoutRecordNotFoundLog(t *testing.T) {
 	ctx := context.Background()
 	db, logs, cleanup := newRepositoryGormWithLogBuffer(t)

@@ -54,7 +54,16 @@ func preflightDiscordPermissions(request discordPermissionPreflightRequest) erro
 		if err != nil {
 			return fmt.Errorf("discord permission preflight failed: channel lookup: %w", err)
 		}
-		if guildChannel, ok := channel.(disgoDiscord.GuildChannel); ok {
+		required = requiredPermissionsForChannel(required, channel)
+		if parentID, ok := threadParentChannelID(channel); ok {
+			parent, err := request.Rest.GetChannel(parentID)
+			if err != nil {
+				return fmt.Errorf("discord permission preflight failed: parent channel lookup: %w", err)
+			}
+			if parentGuildChannel, ok := parent.(disgoDiscord.GuildChannel); ok {
+				permissions = applyChannelOverwrites(permissions, parentGuildChannel, *member)
+			}
+		} else if guildChannel, ok := channel.(disgoDiscord.GuildChannel); ok {
 			permissions = applyChannelOverwrites(permissions, guildChannel, *member)
 		}
 	}
@@ -99,6 +108,71 @@ func guildPermissions(restClient discordPermissionLookup, guildID snowflake.ID, 
 		permissions &= disgoDiscord.PermissionViewChannel | disgoDiscord.PermissionReadMessageHistory
 	}
 	return permissions, nil
+}
+
+func requiredPermissionsForChannel(required disgoDiscord.Permissions, channel disgoDiscord.Channel) disgoDiscord.Permissions {
+	if !isThreadChannel(channel) || !required.Has(disgoDiscord.PermissionSendMessages) {
+		return required
+	}
+	required &^= disgoDiscord.PermissionSendMessages
+	return required.Add(disgoDiscord.PermissionSendMessagesInThreads)
+}
+
+func threadParentChannelID(channel disgoDiscord.Channel) (snowflake.ID, bool) {
+	if !isThreadChannel(channel) {
+		return 0, false
+	}
+	if guildChannel, ok := channel.(disgoDiscord.GuildChannel); ok {
+		if parentID := guildChannel.ParentID(); parentID != nil && *parentID != 0 {
+			return *parentID, true
+		}
+	}
+	return 0, false
+}
+
+func isThreadChannel(channel disgoDiscord.Channel) bool {
+	if channel == nil {
+		return false
+	}
+	switch channel.Type() {
+	case disgoDiscord.ChannelTypeGuildNewsThread,
+		disgoDiscord.ChannelTypeGuildPublicThread,
+		disgoDiscord.ChannelTypeGuildPrivateThread:
+		return true
+	default:
+		return false
+	}
+}
+
+func applyChannelOverwrites(permissions disgoDiscord.Permissions, channel disgoDiscord.GuildChannel, member disgoDiscord.Member) disgoDiscord.Permissions {
+	if permissions.Has(disgoDiscord.PermissionAdministrator) {
+		return disgoDiscord.PermissionsAll
+	}
+	var allow disgoDiscord.Permissions
+	var deny disgoDiscord.Permissions
+	if overwrite, ok := channel.PermissionOverwrites().Role(channel.GuildID()); ok {
+		permissions |= overwrite.Allow
+		permissions &= ^overwrite.Deny
+	}
+	for _, roleID := range member.RoleIDs {
+		if roleID == channel.GuildID() {
+			continue
+		}
+		if overwrite, ok := channel.PermissionOverwrites().Role(roleID); ok {
+			allow |= overwrite.Allow
+			deny |= overwrite.Deny
+		}
+	}
+	if overwrite, ok := channel.PermissionOverwrites().Member(member.User.ID); ok {
+		allow |= overwrite.Allow
+		deny |= overwrite.Deny
+	}
+	permissions &= ^deny
+	permissions |= allow
+	if member.CommunicationDisabledUntil != nil && member.CommunicationDisabledUntil.After(time.Now()) {
+		permissions &= disgoDiscord.PermissionViewChannel | disgoDiscord.PermissionReadMessageHistory
+	}
+	return permissions
 }
 
 func requiredSnowflake(value string, name string) (snowflake.ID, error) {

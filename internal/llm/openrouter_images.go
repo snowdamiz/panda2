@@ -74,6 +74,7 @@ type ImageGenerationRequest struct {
 	Prompt                string
 	InputReferences       []ImageInputReference
 	AspectRatio           string
+	Resolution            string
 	Size                  string
 	Quality               string
 	OutputFormat          string
@@ -236,6 +237,7 @@ func (c *OpenRouterImageClient) Generate(ctx context.Context, request ImageGener
 		Prompt:          strings.TrimSpace(request.Prompt),
 		InputReferences: imageInputReferences(request.InputReferences),
 		AspectRatio:     strings.TrimSpace(request.AspectRatio),
+		Resolution:      strings.TrimSpace(request.Resolution),
 		Size:            strings.TrimSpace(request.Size),
 		Quality:         strings.TrimSpace(request.Quality),
 		OutputFormat:    strings.TrimSpace(strings.ToLower(request.OutputFormat)),
@@ -441,6 +443,9 @@ func requestedImageParameters(request ImageGenerationRequest) map[string]string 
 	result := map[string]string{}
 	if value := strings.TrimSpace(request.AspectRatio); value != "" {
 		result["aspect_ratio"] = value
+	}
+	if value := strings.TrimSpace(request.Resolution); value != "" {
+		result["resolution"] = value
 	}
 	if value := strings.TrimSpace(request.Size); value != "" {
 		result["size"] = value
@@ -720,6 +725,7 @@ type imageCreateRequest struct {
 	InputReferences []imageCreateInputReference `json:"input_references,omitempty"`
 	N               int                         `json:"n,omitempty"`
 	AspectRatio     string                      `json:"aspect_ratio,omitempty"`
+	Resolution      string                      `json:"resolution,omitempty"`
 	Size            string                      `json:"size,omitempty"`
 	Quality         string                      `json:"quality,omitempty"`
 	OutputFormat    string                      `json:"output_format,omitempty"`
@@ -1007,7 +1013,7 @@ func safeImageErrorMessage(status ImageProviderStatus) string {
 	case ImageProviderStatusPolicyBlocked:
 		return "I could not generate that image because the request was blocked by the image provider's safety policy. Try a safer revision."
 	case ImageProviderStatusInvalid:
-		return "I could not generate that image because one of the requested image settings is unsupported. Try a different size, aspect ratio, quality, or format."
+		return "I could not generate that image because one of the requested image settings is unsupported. Try a different aspect ratio or resolution."
 	case ImageProviderStatusRateLimited:
 		return "Image generation is rate limited right now. Please try again shortly."
 	case ImageProviderStatusUnavailable:

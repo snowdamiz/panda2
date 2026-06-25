@@ -32,6 +32,7 @@ func TestOpenRouterImageGenerateSendsExpectedRequest(t *testing.T) {
 					"provider_name": "Google",
 					"supported_parameters": map[string]any{
 						"aspect_ratio":  map[string]any{"type": "enum", "values": []string{"1:1", "16:9"}},
+						"resolution":    map[string]any{"type": "enum", "values": []string{"512", "1K"}},
 						"output_format": map[string]any{"type": "enum", "values": []string{"png", "jpeg"}},
 					},
 				}},
@@ -51,7 +52,7 @@ func TestOpenRouterImageGenerateSendsExpectedRequest(t *testing.T) {
 			if payload.Model != "google/gemini-3.1-flash-image" || payload.Prompt != "pixel panda icon" {
 				t.Fatalf("unexpected image payload: %+v", payload)
 			}
-			if payload.AspectRatio != "1:1" || payload.OutputFormat != "png" || payload.N != 0 {
+			if payload.AspectRatio != "1:1" || payload.Resolution != "1K" || payload.OutputFormat != "png" || payload.N != 0 {
 				t.Fatalf("unexpected image settings: %+v", payload)
 			}
 			if len(payload.InputReferences) != 1 || payload.InputReferences[0].Type != "image_url" || payload.InputReferences[0].ImageURL.URL != "https://cdn.example.test/ref.png" {
@@ -84,6 +85,7 @@ func TestOpenRouterImageGenerateSendsExpectedRequest(t *testing.T) {
 			URL: "https://cdn.example.test/ref.png",
 		}},
 		AspectRatio:  "1:1",
+		Resolution:   "1K",
 		OutputFormat: "png",
 	})
 	if err != nil {

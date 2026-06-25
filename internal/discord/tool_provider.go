@@ -1492,37 +1492,6 @@ func (p *ToolProvider) preflight(request tools.DiscordToolRequest) error {
 	})
 }
 
-func applyChannelOverwrites(permissions disgoDiscord.Permissions, channel disgoDiscord.GuildChannel, member disgoDiscord.Member) disgoDiscord.Permissions {
-	if permissions.Has(disgoDiscord.PermissionAdministrator) {
-		return disgoDiscord.PermissionsAll
-	}
-	var allow disgoDiscord.Permissions
-	var deny disgoDiscord.Permissions
-	if overwrite, ok := channel.PermissionOverwrites().Role(channel.GuildID()); ok {
-		permissions |= overwrite.Allow
-		permissions &= ^overwrite.Deny
-	}
-	for _, roleID := range member.RoleIDs {
-		if roleID == channel.GuildID() {
-			continue
-		}
-		if overwrite, ok := channel.PermissionOverwrites().Role(roleID); ok {
-			allow |= overwrite.Allow
-			deny |= overwrite.Deny
-		}
-	}
-	if overwrite, ok := channel.PermissionOverwrites().Member(member.User.ID); ok {
-		allow |= overwrite.Allow
-		deny |= overwrite.Deny
-	}
-	permissions &= ^deny
-	permissions |= allow
-	if member.CommunicationDisabledUntil != nil && member.CommunicationDisabledUntil.After(time.Now()) {
-		permissions &= disgoDiscord.PermissionViewChannel | disgoDiscord.PermissionReadMessageHistory
-	}
-	return permissions
-}
-
 func requestChannelID(request tools.DiscordToolRequest) (snowflake.ID, bool) {
 	for _, name := range []string{"channel_id", "thread_id"} {
 		if id, ok := optionalSnowflakeArg(request.Arguments, name); ok {

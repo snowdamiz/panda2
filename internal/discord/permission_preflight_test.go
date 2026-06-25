@@ -11,10 +11,11 @@ import (
 )
 
 type fakePermissionLookup struct {
-	guild   *disgoDiscord.RestGuild
-	member  *disgoDiscord.Member
-	roles   []disgoDiscord.Role
-	channel disgoDiscord.Channel
+	guild    *disgoDiscord.RestGuild
+	member   *disgoDiscord.Member
+	roles    []disgoDiscord.Role
+	channel  disgoDiscord.Channel
+	channels map[snowflake.ID]disgoDiscord.Channel
 }
 
 func (f fakePermissionLookup) GetMember(_ snowflake.ID, _ snowflake.ID, _ ...rest.RequestOpt) (*disgoDiscord.Member, error) {
@@ -29,7 +30,12 @@ func (f fakePermissionLookup) GetRoles(_ snowflake.ID, _ ...rest.RequestOpt) ([]
 	return f.roles, nil
 }
 
-func (f fakePermissionLookup) GetChannel(_ snowflake.ID, _ ...rest.RequestOpt) (disgoDiscord.Channel, error) {
+func (f fakePermissionLookup) GetChannel(channelID snowflake.ID, _ ...rest.RequestOpt) (disgoDiscord.Channel, error) {
+	if len(f.channels) > 0 {
+		if channel, ok := f.channels[channelID]; ok {
+			return channel, nil
+		}
+	}
 	return f.channel, nil
 }
 
@@ -95,11 +101,108 @@ func TestNaturalMessageReplyPreflightAllowsGuildRolePermissions(t *testing.T) {
 	}
 }
 
+func TestNaturalMessageReplyPreflightDoesNotRequireEmbedLinks(t *testing.T) {
+	guildID := snowflake.MustParse("100000000000000001")
+	botID := snowflake.MustParse("100000000000000002")
+	channelID := snowflake.MustParse("100000000000000003")
+	lookup := fakePermissionLookup{
+		guild: &disgoDiscord.RestGuild{Guild: disgoDiscord.Guild{
+			ID:      guildID,
+			OwnerID: snowflake.MustParse("100000000000000009"),
+		}},
+		member: &disgoDiscord.Member{User: disgoDiscord.User{ID: botID}},
+		roles: []disgoDiscord.Role{{
+			ID: guildID,
+			Permissions: disgoDiscord.PermissionViewChannel |
+				disgoDiscord.PermissionSendMessages |
+				disgoDiscord.PermissionReadMessageHistory,
+		}},
+		channel: testGuildTextChannel(t, guildID, channelID, nil),
+	}
+
+	if err := preflightDiscordPermissions(discordPermissionPreflightRequest{
+		Rest:        lookup,
+		BotUserID:   botID,
+		GuildID:     guildID.String(),
+		ChannelID:   channelID.String(),
+		Permissions: naturalMessageReplyPermissions,
+	}); err != nil {
+		t.Fatalf("expected natural reply preflight to pass without Embed Links, got %v", err)
+	}
+}
+
+func TestNaturalMessageReplyPreflightUsesThreadSendPermission(t *testing.T) {
+	guildID := snowflake.MustParse("100000000000000001")
+	botID := snowflake.MustParse("100000000000000002")
+	parentID := snowflake.MustParse("100000000000000003")
+	threadID := snowflake.MustParse("100000000000000004")
+	lookup := fakePermissionLookup{
+		guild: &disgoDiscord.RestGuild{Guild: disgoDiscord.Guild{
+			ID:      guildID,
+			OwnerID: snowflake.MustParse("100000000000000009"),
+		}},
+		member: &disgoDiscord.Member{User: disgoDiscord.User{ID: botID}},
+		roles: []disgoDiscord.Role{{
+			ID: guildID,
+			Permissions: disgoDiscord.PermissionViewChannel |
+				disgoDiscord.PermissionReadMessageHistory |
+				disgoDiscord.PermissionSendMessagesInThreads,
+		}},
+		channels: map[snowflake.ID]disgoDiscord.Channel{
+			parentID: testGuildTextChannel(t, guildID, parentID, nil),
+			threadID: testGuildThread(t, guildID, parentID, threadID),
+		},
+	}
+
+	if err := preflightDiscordPermissions(discordPermissionPreflightRequest{
+		Rest:        lookup,
+		BotUserID:   botID,
+		GuildID:     guildID.String(),
+		ChannelID:   threadID.String(),
+		Permissions: naturalMessageReplyPermissions,
+	}); err != nil {
+		t.Fatalf("expected thread reply preflight to use Send Messages in Threads, got %v", err)
+	}
+}
+
+func TestNaturalMessageReplyPreflightRejectsMissingThreadSend(t *testing.T) {
+	guildID := snowflake.MustParse("100000000000000001")
+	botID := snowflake.MustParse("100000000000000002")
+	parentID := snowflake.MustParse("100000000000000003")
+	threadID := snowflake.MustParse("100000000000000004")
+	lookup := fakePermissionLookup{
+		guild: &disgoDiscord.RestGuild{Guild: disgoDiscord.Guild{
+			ID:      guildID,
+			OwnerID: snowflake.MustParse("100000000000000009"),
+		}},
+		member: &disgoDiscord.Member{User: disgoDiscord.User{ID: botID}},
+		roles: []disgoDiscord.Role{{
+			ID: guildID,
+			Permissions: disgoDiscord.PermissionViewChannel |
+				disgoDiscord.PermissionReadMessageHistory,
+		}},
+		channels: map[snowflake.ID]disgoDiscord.Channel{
+			parentID: testGuildTextChannel(t, guildID, parentID, nil),
+			threadID: testGuildThread(t, guildID, parentID, threadID),
+		},
+	}
+
+	err := preflightDiscordPermissions(discordPermissionPreflightRequest{
+		Rest:        lookup,
+		BotUserID:   botID,
+		GuildID:     guildID.String(),
+		ChannelID:   threadID.String(),
+		Permissions: naturalMessageReplyPermissions,
+	})
+	if err == nil || !strings.Contains(err.Error(), "Send Messages in Threads") {
+		t.Fatalf("expected missing thread send permission, got %v", err)
+	}
+}
+
 func naturalMessageReplyPermissionBits() disgoDiscord.Permissions {
 	return disgoDiscord.PermissionViewChannel |
 		disgoDiscord.PermissionSendMessages |
-		disgoDiscord.PermissionReadMessageHistory |
-		disgoDiscord.PermissionEmbedLinks
+		disgoDiscord.PermissionReadMessageHistory
 }
 
 func testGuildTextChannel(t *testing.T, guildID, channelID snowflake.ID, overwrites []disgoDiscord.PermissionOverwrite) disgoDiscord.GuildTextChannel {
@@ -119,4 +222,27 @@ func testGuildTextChannel(t *testing.T, guildID, channelID snowflake.ID, overwri
 		t.Fatalf("unmarshal channel: %v", err)
 	}
 	return channel
+}
+
+func testGuildThread(t *testing.T, guildID, parentID, threadID snowflake.ID) disgoDiscord.GuildThread {
+	t.Helper()
+	data, err := json.Marshal(map[string]any{
+		"id":        threadID.String(),
+		"type":      disgoDiscord.ChannelTypeGuildPublicThread,
+		"guild_id":  guildID.String(),
+		"parent_id": parentID.String(),
+		"name":      "thread",
+		"thread_metadata": map[string]any{
+			"archived": false,
+			"locked":   false,
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal thread: %v", err)
+	}
+	var thread disgoDiscord.GuildThread
+	if err := json.Unmarshal(data, &thread); err != nil {
+		t.Fatalf("unmarshal thread: %v", err)
+	}
+	return thread
 }

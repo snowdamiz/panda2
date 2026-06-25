@@ -789,7 +789,7 @@ func imageGenerationSchema() json.RawMessage {
 			"items": map[string]any{
 				"type": "string",
 			},
-			"maxItems":    16,
+			"maxItems":    14,
 			"description": "Optional image reference IDs from the current Discord context. Use these when the user asks to edit, restyle, remix, or base generation on attached images.",
 		},
 		"caption": map[string]any{
@@ -799,25 +799,13 @@ func imageGenerationSchema() json.RawMessage {
 		},
 		"aspect_ratio": map[string]any{
 			"type":        "string",
+			"enum":        []string{"1:1", "1:4", "1:8", "2:3", "3:2", "3:4", "4:1", "4:3", "4:5", "5:4", "8:1", "9:16", "16:9", "21:9"},
 			"description": "Optional normalized aspect ratio such as 1:1, 16:9, 9:16, or 4:3.",
 		},
-		"size": map[string]any{
+		"resolution": map[string]any{
 			"type":        "string",
-			"description": "Optional provider-supported size tier or pixel dimensions.",
-		},
-		"quality": map[string]any{
-			"type":        "string",
-			"enum":        []string{"auto", "low", "medium", "high"},
-			"description": "Optional provider-supported rendering quality.",
-		},
-		"output_format": map[string]any{
-			"type":        "string",
-			"enum":        []string{"png", "jpeg", "webp"},
-			"description": "Optional output format. Use png or webp for transparent backgrounds.",
-		},
-		"transparent_background": map[string]any{
-			"type":        "boolean",
-			"description": "Request transparent output only when the selected model supports it.",
+			"enum":        []string{"512", "1K", "2K", "4K"},
+			"description": "Optional OpenRouter image model resolution. Omit unless the user asks for a specific resolution.",
 		},
 		"count": map[string]any{
 			"type":        "integer",
@@ -841,7 +829,7 @@ func imageInspectionSchema() json.RawMessage {
 				"type": "string",
 			},
 			"minItems":    1,
-			"maxItems":    16,
+			"maxItems":    14,
 			"description": "Image reference IDs from the current Discord image reference context to inspect.",
 		},
 		"question": map[string]any{

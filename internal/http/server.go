@@ -929,10 +929,10 @@ func adminGuildBillingViewFrom(overview billing.AdminGuildBilling) *adminGuildBi
 		BillingOwnerUserID: overview.BillingOwnerUserID,
 		Email:              overview.Email,
 		Usage: adminGuildUsageView{
-			AIResponses:           overview.Usage.AIResponsesConsumed,
-			WebSearches:           overview.Usage.WebSearchesConsumed,
-			ImageGenerations:      overview.Usage.ImageGenerationsConsumed,
-			KnowledgeStorageBytes: overview.Usage.KnowledgeStorageBytesConsumed,
+			AIResponses:           billableUsage(overview.Usage.AIResponsesConsumed, overview.Usage.AIResponsesReserved),
+			WebSearches:           billableUsage(overview.Usage.WebSearchesConsumed, overview.Usage.WebSearchesReserved),
+			ImageGenerations:      billableUsage(overview.Usage.ImageGenerationsConsumed, overview.Usage.ImageGenerationsReserved),
+			KnowledgeStorageBytes: billableUsage(overview.Usage.KnowledgeStorageBytesConsumed, overview.Usage.KnowledgeStorageBytesReserved),
 		},
 	}
 	if overview.HasSubscription {
@@ -952,6 +952,10 @@ func adminGuildBillingViewFrom(overview billing.AdminGuildBilling) *adminGuildBi
 		}
 	}
 	return view
+}
+
+func billableUsage(consumed, reserved int64) int64 {
+	return consumed + reserved
 }
 
 func (s *Server) listAdminGuilds(c *fiber.Ctx) error {
