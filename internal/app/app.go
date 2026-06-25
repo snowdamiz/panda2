@@ -150,6 +150,7 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 		WithAuditRecorder(audit).
 		WithAdminOperations(adminService).
 		WithImageGenerator(openRouterImages).
+		WithImageAnalyzer(openRouterImages).
 		WithBilling(billingService).
 		WithOpsManager(opsService)
 	composedService := composed.NewService(composedRepo, toolRegistry, toolExecutor, openRouter, cfg.OpenRouterModel).

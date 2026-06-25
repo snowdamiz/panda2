@@ -357,6 +357,30 @@ func TestCaptureAttachmentsRecordsSafeExtractedText(t *testing.T) {
 	}
 }
 
+func TestImageReferencesFromMessageFiltersSupportedImages(t *testing.T) {
+	pngType := "image/png"
+	gifType := "image/gif"
+	message := disgoDiscord.Message{
+		Attachments: []disgoDiscord.Attachment{
+			{ID: snowflake.MustParse("100000000000000010"), Filename: "reference.png", ContentType: &pngType, URL: "https://cdn.example.test/reference.png", Size: 1234},
+			{ID: snowflake.MustParse("100000000000000011"), Filename: "sticker.webp", URL: "https://cdn.example.test/sticker.webp", Size: 2345},
+			{ID: snowflake.MustParse("100000000000000012"), Filename: "animated.gif", ContentType: &gifType, URL: "https://cdn.example.test/animated.gif", Size: 3456},
+			{ID: snowflake.MustParse("100000000000000013"), Filename: "missing-url.png", ContentType: &pngType, Size: 4567},
+		},
+	}
+
+	references := imageReferencesFromMessage(message, "current")
+	if len(references) != 2 {
+		t.Fatalf("expected two supported image references, got %+v", references)
+	}
+	if references[0].ID != "current:100000000000000010" || references[0].MIMEType != "image/png" || references[0].URL != "https://cdn.example.test/reference.png" {
+		t.Fatalf("unexpected png reference: %+v", references[0])
+	}
+	if references[1].ID != "current:100000000000000011" || references[1].MIMEType != "image/webp" {
+		t.Fatalf("unexpected inferred webp reference: %+v", references[1])
+	}
+}
+
 func TestQueueBackgroundInteractionStoresPayload(t *testing.T) {
 	queue := &fakeInteractionJobQueue{}
 	bot := (&Bot{}).WithJobQueue(queue)

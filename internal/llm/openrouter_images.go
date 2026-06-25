@@ -10,6 +10,7 @@ import (
 	"io"
 	"math"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -71,6 +72,7 @@ type OpenRouterImageConfig struct {
 type ImageGenerationRequest struct {
 	Model                 string
 	Prompt                string
+	InputReferences       []ImageInputReference
 	AspectRatio           string
 	Size                  string
 	Quality               string
@@ -79,10 +81,27 @@ type ImageGenerationRequest struct {
 	Count                 int
 }
 
+type ImageAnalysisRequest struct {
+	Model           string
+	Prompt          string
+	InputReferences []ImageInputReference
+	MaxTokens       int
+}
+
+type ImageInputReference struct {
+	URL string
+}
+
 type ImageGenerationResponse struct {
 	Model  string
 	Images []GeneratedImage
 	Usage  ImageUsage
+}
+
+type ImageAnalysisResponse struct {
+	Model   string
+	Content string
+	Usage   ImageUsage
 }
 
 type GeneratedImage struct {
@@ -213,12 +232,13 @@ func (c *OpenRouterImageClient) Generate(ctx context.Context, request ImageGener
 		return ImageGenerationResponse{}, err
 	}
 	payload := imageCreateRequest{
-		Model:        model,
-		Prompt:       strings.TrimSpace(request.Prompt),
-		AspectRatio:  strings.TrimSpace(request.AspectRatio),
-		Size:         strings.TrimSpace(request.Size),
-		Quality:      strings.TrimSpace(request.Quality),
-		OutputFormat: strings.TrimSpace(strings.ToLower(request.OutputFormat)),
+		Model:           model,
+		Prompt:          strings.TrimSpace(request.Prompt),
+		InputReferences: imageInputReferences(request.InputReferences),
+		AspectRatio:     strings.TrimSpace(request.AspectRatio),
+		Size:            strings.TrimSpace(request.Size),
+		Quality:         strings.TrimSpace(request.Quality),
+		OutputFormat:    strings.TrimSpace(strings.ToLower(request.OutputFormat)),
 	}
 	if request.Count > 1 {
 		payload.N = request.Count
@@ -253,13 +273,51 @@ func (c *OpenRouterImageClient) Generate(ctx context.Context, request ImageGener
 	return ImageGenerationResponse{
 		Model:  model,
 		Images: images,
-		Usage: ImageUsage{
-			PromptTokens:     decoded.Usage.PromptTokens,
-			CompletionTokens: decoded.Usage.CompletionTokens,
-			TotalTokens:      decoded.Usage.TotalTokens,
-			CostUSD:          decoded.Usage.Cost,
-			CostMicros:       int64(math.Round(decoded.Usage.Cost * 1_000_000)),
-		},
+		Usage:  imageUsage(decoded.Usage),
+	}, nil
+}
+
+func (c *OpenRouterImageClient) Analyze(ctx context.Context, request ImageAnalysisRequest) (ImageAnalysisResponse, error) {
+	if c == nil || strings.TrimSpace(c.apiKey) == "" {
+		return ImageAnalysisResponse{}, imageError(ImageProviderStatusUnavailable, ErrImageNotConfigured)
+	}
+	model := firstNonEmpty(request.Model, c.model)
+	request.Model = model
+	if err := c.validateImageAnalysisRequest(request); err != nil {
+		return ImageAnalysisResponse{}, err
+	}
+	payload := imageChatRequest{
+		Model: model,
+		Messages: []imageChatMessage{{
+			Role:    "user",
+			Content: imageChatContent(strings.TrimSpace(request.Prompt), request.InputReferences),
+		}},
+		MaxTokens: request.MaxTokens,
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return ImageAnalysisResponse{}, err
+	}
+
+	data, err := c.post(ctx, "/chat/completions", body, 2<<20)
+	if err != nil {
+		return ImageAnalysisResponse{}, classifyImageGenerationError(err)
+	}
+	var decoded imageChatResponse
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return ImageAnalysisResponse{}, imageError(ImageProviderStatusError, fmt.Errorf("%w: %v", ErrImageInvalidResponse, err))
+	}
+	if len(decoded.Choices) == 0 {
+		return ImageAnalysisResponse{}, imageError(ImageProviderStatusError, fmt.Errorf("%w: missing choices", ErrImageInvalidResponse))
+	}
+	content, err := imageChatContentText(decoded.Choices[0].Message.Content)
+	if err != nil {
+		return ImageAnalysisResponse{}, imageError(ImageProviderStatusError, err)
+	}
+	return ImageAnalysisResponse{
+		Model:   firstNonEmpty(decoded.Model, model),
+		Content: content,
+		Usage:   imageUsage(decoded.Usage),
 	}, nil
 }
 
@@ -329,6 +387,11 @@ func (c *OpenRouterImageClient) validateImageRequest(ctx context.Context, reques
 	if request.Count > 1 {
 		return imageError(ImageProviderStatusInvalid, fmt.Errorf("%w: count is capped at 1", ErrImageUnsupportedArgument))
 	}
+	for _, reference := range request.InputReferences {
+		if !validImageReferenceURL(reference.URL) {
+			return imageError(ImageProviderStatusInvalid, fmt.Errorf("%w: input reference URL must be HTTPS, HTTP, or an image data URL", ErrImageUnsupportedArgument))
+		}
+	}
 	format := strings.ToLower(strings.TrimSpace(request.OutputFormat))
 	if format != "" && !isAllowedImageFormat(format) {
 		return imageError(ImageProviderStatusInvalid, fmt.Errorf("%w: output_format must be png, jpeg, or webp", ErrImageUnsupportedArgument))
@@ -356,6 +419,24 @@ func (c *OpenRouterImageClient) validateImageRequest(ctx context.Context, reques
 	return nil
 }
 
+func (c *OpenRouterImageClient) validateImageAnalysisRequest(request ImageAnalysisRequest) error {
+	if strings.TrimSpace(request.Model) == "" {
+		return imageError(ImageProviderStatusUnavailable, ErrImageNotConfigured)
+	}
+	if strings.TrimSpace(request.Prompt) == "" {
+		return imageError(ImageProviderStatusInvalid, fmt.Errorf("%w: prompt is required", ErrImageUnsupportedArgument))
+	}
+	if len(request.InputReferences) == 0 {
+		return imageError(ImageProviderStatusInvalid, fmt.Errorf("%w: at least one image reference is required", ErrImageUnsupportedArgument))
+	}
+	for _, reference := range request.InputReferences {
+		if !validImageReferenceURL(reference.URL) {
+			return imageError(ImageProviderStatusInvalid, fmt.Errorf("%w: input reference URL must be HTTPS, HTTP, or an image data URL", ErrImageUnsupportedArgument))
+		}
+	}
+	return nil
+}
+
 func requestedImageParameters(request ImageGenerationRequest) map[string]string {
 	result := map[string]string{}
 	if value := strings.TrimSpace(request.AspectRatio); value != "" {
@@ -374,6 +455,92 @@ func requestedImageParameters(request ImageGenerationRequest) map[string]string 
 		result["background"] = "transparent"
 	}
 	return result
+}
+
+func imageInputReferences(references []ImageInputReference) []imageCreateInputReference {
+	if len(references) == 0 {
+		return nil
+	}
+	payloads := make([]imageCreateInputReference, 0, len(references))
+	for _, reference := range references {
+		rawURL := strings.TrimSpace(reference.URL)
+		if rawURL == "" {
+			continue
+		}
+		payloads = append(payloads, imageCreateInputReference{
+			Type:     "image_url",
+			ImageURL: imageCreateImageURL{URL: rawURL},
+		})
+	}
+	return payloads
+}
+
+func imageChatContent(prompt string, references []ImageInputReference) []imageChatContentPart {
+	parts := []imageChatContentPart{{Type: "text", Text: strings.TrimSpace(prompt)}}
+	for _, reference := range references {
+		rawURL := strings.TrimSpace(reference.URL)
+		if rawURL == "" {
+			continue
+		}
+		parts = append(parts, imageChatContentPart{
+			Type:     "image_url",
+			ImageURL: &imageCreateImageURL{URL: rawURL},
+		})
+	}
+	return parts
+}
+
+func imageChatContentText(raw json.RawMessage) (string, error) {
+	raw = bytes.TrimSpace(raw)
+	if len(raw) == 0 || bytes.Equal(raw, []byte("null")) {
+		return "", fmt.Errorf("%w: missing message content", ErrImageInvalidResponse)
+	}
+	var text string
+	if err := json.Unmarshal(raw, &text); err == nil {
+		text = strings.TrimSpace(text)
+		if text == "" {
+			return "", fmt.Errorf("%w: empty message content", ErrImageInvalidResponse)
+		}
+		return text, nil
+	}
+	var parts []struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	}
+	if err := json.Unmarshal(raw, &parts); err != nil {
+		return "", fmt.Errorf("%w: invalid message content", ErrImageInvalidResponse)
+	}
+	var builder strings.Builder
+	for _, part := range parts {
+		if strings.EqualFold(strings.TrimSpace(part.Type), "text") || part.Type == "" {
+			if value := strings.TrimSpace(part.Text); value != "" {
+				if builder.Len() > 0 {
+					builder.WriteString("\n")
+				}
+				builder.WriteString(value)
+			}
+		}
+	}
+	text = strings.TrimSpace(builder.String())
+	if text == "" {
+		return "", fmt.Errorf("%w: empty message content", ErrImageInvalidResponse)
+	}
+	return text, nil
+}
+
+func validImageReferenceURL(rawURL string) bool {
+	rawURL = strings.TrimSpace(rawURL)
+	if rawURL == "" {
+		return false
+	}
+	if strings.HasPrefix(strings.ToLower(rawURL), "data:image/") {
+		return true
+	}
+	parsed, err := url.Parse(rawURL)
+	if err != nil || parsed.Host == "" {
+		return false
+	}
+	return strings.EqualFold(parsed.Scheme, "https") || strings.EqualFold(parsed.Scheme, "http")
 }
 
 func (c *OpenRouterImageClient) supportedParameters(ctx context.Context, model string) (imageSupportedParameters, error) {
@@ -548,14 +715,24 @@ func readLimited(reader io.Reader, limit int64) ([]byte, error) {
 }
 
 type imageCreateRequest struct {
-	Model        string `json:"model"`
-	Prompt       string `json:"prompt"`
-	N            int    `json:"n,omitempty"`
-	AspectRatio  string `json:"aspect_ratio,omitempty"`
-	Size         string `json:"size,omitempty"`
-	Quality      string `json:"quality,omitempty"`
-	OutputFormat string `json:"output_format,omitempty"`
-	Background   string `json:"background,omitempty"`
+	Model           string                      `json:"model"`
+	Prompt          string                      `json:"prompt"`
+	InputReferences []imageCreateInputReference `json:"input_references,omitempty"`
+	N               int                         `json:"n,omitempty"`
+	AspectRatio     string                      `json:"aspect_ratio,omitempty"`
+	Size            string                      `json:"size,omitempty"`
+	Quality         string                      `json:"quality,omitempty"`
+	OutputFormat    string                      `json:"output_format,omitempty"`
+	Background      string                      `json:"background,omitempty"`
+}
+
+type imageCreateInputReference struct {
+	Type     string              `json:"type"`
+	ImageURL imageCreateImageURL `json:"image_url"`
+}
+
+type imageCreateImageURL struct {
+	URL string `json:"url"`
 }
 
 type imageCreateResponse struct {
@@ -563,12 +740,52 @@ type imageCreateResponse struct {
 	Data    []struct {
 		B64JSON string `json:"b64_json"`
 	} `json:"data"`
-	Usage struct {
-		PromptTokens     int     `json:"prompt_tokens"`
-		CompletionTokens int     `json:"completion_tokens"`
-		TotalTokens      int     `json:"total_tokens"`
-		Cost             float64 `json:"cost"`
-	} `json:"usage"`
+	Usage imageUsagePayload `json:"usage"`
+}
+
+type imageChatRequest struct {
+	Model     string             `json:"model"`
+	Messages  []imageChatMessage `json:"messages"`
+	MaxTokens int                `json:"max_tokens,omitempty"`
+}
+
+type imageChatMessage struct {
+	Role    string                 `json:"role"`
+	Content []imageChatContentPart `json:"content"`
+}
+
+type imageChatContentPart struct {
+	Type     string               `json:"type"`
+	Text     string               `json:"text,omitempty"`
+	ImageURL *imageCreateImageURL `json:"image_url,omitempty"`
+}
+
+type imageChatResponse struct {
+	ID      string `json:"id"`
+	Model   string `json:"model"`
+	Choices []struct {
+		Message struct {
+			Content json.RawMessage `json:"content"`
+		} `json:"message"`
+	} `json:"choices"`
+	Usage imageUsagePayload `json:"usage"`
+}
+
+type imageUsagePayload struct {
+	PromptTokens     int     `json:"prompt_tokens"`
+	CompletionTokens int     `json:"completion_tokens"`
+	TotalTokens      int     `json:"total_tokens"`
+	Cost             float64 `json:"cost"`
+}
+
+func imageUsage(payload imageUsagePayload) ImageUsage {
+	return ImageUsage{
+		PromptTokens:     payload.PromptTokens,
+		CompletionTokens: payload.CompletionTokens,
+		TotalTokens:      payload.TotalTokens,
+		CostUSD:          payload.Cost,
+		CostMicros:       int64(math.Round(payload.Cost * 1_000_000)),
+	}
 }
 
 type imageModelsResponse struct {

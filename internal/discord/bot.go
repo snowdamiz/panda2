@@ -29,6 +29,7 @@ import (
 	"github.com/sn0w/panda2/internal/commands"
 	"github.com/sn0w/panda2/internal/config"
 	contextsvc "github.com/sn0w/panda2/internal/context"
+	"github.com/sn0w/panda2/internal/generated"
 	"github.com/sn0w/panda2/internal/music"
 	"github.com/sn0w/panda2/internal/polls"
 	"github.com/sn0w/panda2/internal/scheduler"
@@ -1581,7 +1582,7 @@ func (b *Bot) onMessageCreate(event *events.MessageCreate) {
 	if messageMentionsUser(event.Message, b.client.ID().String()) {
 		options["bot_mentioned"] = "true"
 	}
-	b.addReplyContextOptions(context.Background(), options, event.Message)
+	replyImageReferences := b.addReplyContextOptions(context.Background(), options, event.Message)
 	if !shouldHandleNaturalMessage(content, options) {
 		return
 	}
@@ -1597,6 +1598,10 @@ func (b *Bot) onMessageCreate(event *events.MessageCreate) {
 		RoleIDs:        messageRoleIDs(event.Message.Member),
 		IsOwner:        isOwner,
 		IsGuildAdmin:   isGuildAdmin,
+		ImageReferences: append(
+			imageReferencesFromMessage(event.Message, "current"),
+			replyImageReferences...,
+		),
 	}
 	reference := messageReferenceFromMessage(event.Message)
 	if err := b.queueNaturalMessage(context.Background(), event.ChannelID, reference, request); err != nil {
@@ -1899,17 +1904,17 @@ func startTypingIndicator(ctx context.Context, sender typingSender, channelID sn
 	return cancel
 }
 
-func (b *Bot) addReplyContextOptions(ctx context.Context, options map[string]string, message disgoDiscord.Message) {
+func (b *Bot) addReplyContextOptions(ctx context.Context, options map[string]string, message disgoDiscord.Message) []generated.ImageReference {
 	if referenced := message.ReferencedMessage; referenced != nil {
 		b.setReplyContextOptions(options, *referenced, message.Author.ID)
-		return
+		return imageReferencesFromMessage(*referenced, "reply")
 	}
 	if message.MessageReference == nil || message.MessageReference.MessageID == nil {
-		return
+		return nil
 	}
 	options["reply_message_id"] = message.MessageReference.MessageID.String()
 	if b.client == nil {
-		return
+		return nil
 	}
 	channelID := message.ChannelID
 	if message.MessageReference.ChannelID != nil {
@@ -1920,9 +1925,10 @@ func (b *Bot) addReplyContextOptions(ctx context.Context, options map[string]str
 		if b.logger != nil {
 			b.logger.Warn("failed to fetch referenced message for natural reply", slog.Any("err", err), slog.String("channel_id", channelID.String()), slog.String("message_id", message.MessageReference.MessageID.String()))
 		}
-		return
+		return nil
 	}
 	b.setReplyContextOptions(options, *referenced, message.Author.ID)
+	return imageReferencesFromMessage(*referenced, "reply")
 }
 
 func (b *Bot) setReplyContextOptions(options map[string]string, referenced disgoDiscord.Message, currentAuthorID snowflake.ID) {
@@ -2031,6 +2037,55 @@ func attachmentContentType(attachment disgoDiscord.Attachment) string {
 		return ""
 	}
 	return *attachment.ContentType
+}
+
+func imageReferencesFromMessage(message disgoDiscord.Message, source string) []generated.ImageReference {
+	if len(message.Attachments) == 0 {
+		return nil
+	}
+	references := []generated.ImageReference{}
+	for index, attachment := range message.Attachments {
+		if strings.TrimSpace(attachment.URL) == "" {
+			continue
+		}
+		contentType := imageAttachmentContentType(attachment)
+		if contentType == "" {
+			continue
+		}
+		idPart := strings.TrimSpace(attachment.ID.String())
+		if idPart == "" || idPart == "0" {
+			idPart = fmt.Sprintf("%d", index+1)
+		}
+		size := int64(attachment.Size)
+		references = append(references, generated.ImageReference{
+			ID:        strings.TrimSpace(source) + ":" + idPart,
+			Filename:  attachment.Filename,
+			MIMEType:  contentType,
+			URL:       attachment.URL,
+			SizeBytes: size,
+		})
+	}
+	return references
+}
+
+func imageAttachmentContentType(attachment disgoDiscord.Attachment) string {
+	contentType := strings.ToLower(strings.TrimSpace(strings.Split(attachmentContentType(attachment), ";")[0]))
+	switch contentType {
+	case "image/png", "image/jpeg", "image/webp":
+		return contentType
+	case "image/jpg":
+		return "image/jpeg"
+	}
+	switch strings.ToLower(strings.TrimSpace(attachment.Filename[strings.LastIndex(attachment.Filename, ".")+1:])) {
+	case "png":
+		return "image/png"
+	case "jpg", "jpeg":
+		return "image/jpeg"
+	case "webp":
+		return "image/webp"
+	default:
+		return ""
+	}
 }
 
 func (b *Bot) isGuildAdmin(event *events.ApplicationCommandInteractionCreate) bool {

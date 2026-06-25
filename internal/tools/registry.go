@@ -405,17 +405,31 @@ func DefaultDefinitions() []Definition {
 		},
 		{
 			Name:                  "panda.generate_image",
-			Description:           "Generate one image file for the current Discord response when the user asks Panda to create, make, draw, generate, design, or render visual output such as a meme, sprite sheet, icon, illustration, sticker, logo, avatar, poster, or similar asset. For requests like \"make me a random meme\", create an original image instead of searching for meme pages. Do not use this for plain text answers or requests to find existing images.",
+			Description:           "Generate one image file for the current Discord response when the user asks Panda to create, make, draw, generate, design, edit, restyle, or render visual output such as a meme, sprite sheet, icon, illustration, sticker, logo, avatar, poster, or similar asset. For requests like \"make me a random meme\", create an original image instead of searching for meme pages. If image reference IDs are provided in the current Discord context and the user asks to use or modify an attached image, include those IDs in reference_image_ids. If the edit depends on understanding visual details first, call panda.inspect_image before this tool. Do not use this for plain text answers or requests to find existing images.",
 			RequiredPermission:    admin.PermissionAssistantImageGeneration,
 			FeatureID:             features.ImageGeneration,
 			ToolClass:             ToolClassMedia,
 			InputSchema:           imageGenerationSchema(),
-			OutputSchema:          objectSchema("generated", "image_count", "filename", "caption", "provider_status", "user_message"),
+			OutputSchema:          objectSchema("generated", "image_count", "filename", "caption", "provider_status", "user_message", "reference_count"),
 			Timeout:               2 * time.Minute,
 			Redaction:             RedactContent,
 			Audit:                 AuditSensitive,
 			IncludeInModelContext: true,
 			DiscordPermissions:    []string{"VIEW_CHANNEL", "SEND_MESSAGES", "ATTACH_FILES"},
+		},
+		{
+			Name:                  "panda.inspect_image",
+			Description:           "Inspect attached image references and return a concise textual answer for Panda's normal response model. Use this before answering when the user's request depends on image pixels, visible text in an image, visual comparison, critique, transcription, description, or details of an attached image. Use reference_image_ids from the current Discord image reference context. Do not use this to generate images, browse the web, or inspect images that were not attached to this request or its reply context.",
+			RequiredPermission:    admin.PermissionAssistantImageGeneration,
+			FeatureID:             features.ImageGeneration,
+			ToolClass:             ToolClassMedia,
+			InputSchema:           imageInspectionSchema(),
+			OutputSchema:          objectSchema("analyzed", "reference_count", "answer", "provider_status", "user_message"),
+			Timeout:               45 * time.Second,
+			Redaction:             RedactContent,
+			Audit:                 AuditSensitive,
+			IncludeInModelContext: true,
+			DiscordPermissions:    []string{"VIEW_CHANNEL", "READ_MESSAGE_HISTORY"},
 		},
 		{
 			Name:                  "summarize_text_file",
@@ -770,6 +784,14 @@ func imageGenerationSchema() json.RawMessage {
 			"maxLength":   4000,
 			"description": "Concise visual prompt to send to the image model. Include any requested text exactly as it should appear in the image.",
 		},
+		"reference_image_ids": map[string]any{
+			"type": "array",
+			"items": map[string]any{
+				"type": "string",
+			},
+			"maxItems":    16,
+			"description": "Optional image reference IDs from the current Discord context. Use these when the user asks to edit, restyle, remix, or base generation on attached images.",
+		},
 		"caption": map[string]any{
 			"type":        "string",
 			"maxLength":   500,
@@ -807,6 +829,31 @@ func imageGenerationSchema() json.RawMessage {
 			"type":        "string",
 			"maxLength":   80,
 			"description": "Optional filename stem for the Discord attachment.",
+		},
+	})
+}
+
+func imageInspectionSchema() json.RawMessage {
+	return schemaWithProperties([]string{"reference_image_ids", "question"}, map[string]any{
+		"reference_image_ids": map[string]any{
+			"type": "array",
+			"items": map[string]any{
+				"type": "string",
+			},
+			"minItems":    1,
+			"maxItems":    16,
+			"description": "Image reference IDs from the current Discord image reference context to inspect.",
+		},
+		"question": map[string]any{
+			"type":        "string",
+			"minLength":   1,
+			"maxLength":   2000,
+			"description": "What the image-capable model should inspect, describe, transcribe, compare, or answer from the referenced image(s).",
+		},
+		"detail": map[string]any{
+			"type":        "string",
+			"enum":        []string{"brief", "standard", "detailed"},
+			"description": "Optional detail level for the image inspection result.",
 		},
 	})
 }
