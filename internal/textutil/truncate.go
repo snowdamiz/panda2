@@ -1,6 +1,9 @@
 package textutil
 
-import "strings"
+import (
+	"strings"
+	"unicode"
+)
 
 func Truncate(value string, limit int, suffix string) string {
 	value = strings.TrimSpace(value)
@@ -49,6 +52,27 @@ func SliceBytes(value string, start, end int) string {
 	return value[start:end]
 }
 
+func ContainsWord(content, word string) bool {
+	word = strings.TrimSpace(word)
+	if word == "" {
+		return false
+	}
+	wordStart := -1
+	for index, value := range content {
+		if isWordRune(value) {
+			if wordStart < 0 {
+				wordStart = index
+			}
+			continue
+		}
+		if wordStart >= 0 && strings.EqualFold(content[wordStart:index], word) {
+			return true
+		}
+		wordStart = -1
+	}
+	return wordStart >= 0 && strings.EqualFold(content[wordStart:], word)
+}
+
 func nextRuneBoundary(value string, offset int) int {
 	if offset <= 0 {
 		return 0
@@ -82,4 +106,8 @@ func previousRuneBoundary(value string, offset int) int {
 		previous = index
 	}
 	return len(value)
+}
+
+func isWordRune(value rune) bool {
+	return value == '_' || unicode.IsLetter(value) || unicode.IsDigit(value)
 }

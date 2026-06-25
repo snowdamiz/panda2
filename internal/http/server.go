@@ -261,11 +261,6 @@ func (s *Server) discordInstallCallback(c *fiber.Ctx) error {
 		PermissionBitfield: c.Query("permissions"),
 	})
 	if err != nil {
-		if redirectURL := installLocalDevelopmentSuccessRedirect(s.cfg.PublicAppURL, s.cfg.Environment, c.Query("guild_id")); redirectURL != "" {
-			redirectURL = installRedirectLocation(redirectURL)
-			slog.Warn("discord install callback redirect", "status", "local_development_success", "redirect_url", redirectURL, "guild_id", c.Query("guild_id"), "error_code", installErrorCode(err))
-			return c.Redirect(redirectURL, fiber.StatusFound)
-		}
 		if redirectURL := installFailureRedirect(s.cfg.PublicAppURL, err); redirectURL != "" {
 			redirectURL = installRedirectLocation(redirectURL)
 			slog.Warn("discord install callback redirect", "status", "failed", "redirect_url", redirectURL, "guild_id", c.Query("guild_id"), "error_code", installErrorCode(err))
@@ -288,22 +283,6 @@ func (s *Server) discordInstallCallback(c *fiber.Ctx) error {
 		"intent_id":         result.IntentID,
 		"feature_ids":       result.FeatureIDs,
 	})
-}
-
-func installLocalDevelopmentSuccessRedirect(publicURL, environment, guildID string) string {
-	if strings.EqualFold(strings.TrimSpace(environment), "production") || !isLocalAppURL(publicURL) {
-		return ""
-	}
-	return installSuccessRedirect(publicURL, guildID)
-}
-
-func isLocalAppURL(value string) bool {
-	u, err := stdurl.Parse(strings.TrimSpace(value))
-	if err != nil {
-		return false
-	}
-	host := strings.ToLower(u.Hostname())
-	return host == "localhost" || host == "127.0.0.1" || host == "::1"
 }
 
 func installSuccessRedirect(publicURL, guildID string) string {

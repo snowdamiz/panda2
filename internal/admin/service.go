@@ -785,13 +785,6 @@ func (s *Service) CanUseAssistant(ctx context.Context, request AssistantAccessRe
 	if hasRule && channelRule.Rule == "deny" {
 		return false, nil
 	}
-	hasAllowRules, err := s.access.HasChannelAllowRules(ctx, request.GuildID)
-	if err != nil {
-		return false, err
-	}
-	if hasAllowRules && (!hasRule || channelRule.Rule != "allow") {
-		return false, nil
-	}
 
 	return s.canUsePermission(ctx, request.GuildID, request.RoleIDs, PermissionAssistantUse, true)
 }

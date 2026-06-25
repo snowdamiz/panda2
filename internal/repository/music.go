@@ -62,13 +62,13 @@ func (r *MusicRepository) EnsureSettings(ctx context.Context, guildID string) (s
 	}
 	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var existing store.MusicSettings
-		err := tx.Where("guild_id = ?", guildID).First(&existing).Error
-		if err == nil {
+		result := tx.Where("guild_id = ?", guildID).Limit(1).Find(&existing)
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected > 0 {
 			settings = existing
 			return nil
-		}
-		if err != gorm.ErrRecordNotFound {
-			return err
 		}
 		return tx.Create(&settings).Error
 	})
@@ -105,8 +105,11 @@ func (r *MusicRepository) SavePlaylist(ctx context.Context, playlist store.Music
 	playlist.UpdatedAt = now
 	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var existing store.MusicPlaylist
-		err := tx.Where("guild_id = ? AND name = ?", playlist.GuildID, playlist.Name).First(&existing).Error
-		if err == nil {
+		result := tx.Where("guild_id = ? AND name = ?", playlist.GuildID, playlist.Name).Limit(1).Find(&existing)
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected > 0 {
 			if err := tx.Model(&existing).Updates(map[string]any{
 				"tracks_json": playlist.TracksJSON,
 				"created_by":  firstNonEmpty(playlist.CreatedBy, existing.CreatedBy),
@@ -117,9 +120,6 @@ func (r *MusicRepository) SavePlaylist(ctx context.Context, playlist store.Music
 			playlist = existing
 			return tx.First(&playlist, existing.ID).Error
 		}
-		if err != gorm.ErrRecordNotFound {
-			return err
-		}
 		return tx.Create(&playlist).Error
 	})
 	return playlist, err
@@ -127,16 +127,17 @@ func (r *MusicRepository) SavePlaylist(ctx context.Context, playlist store.Music
 
 func (r *MusicRepository) Playlist(ctx context.Context, guildID, name string) (store.MusicPlaylist, bool, error) {
 	var playlist store.MusicPlaylist
-	err := r.db.WithContext(ctx).
+	result := r.db.WithContext(ctx).
 		Where("guild_id = ? AND name = ?", guildID, strings.ToLower(strings.TrimSpace(name))).
-		First(&playlist).Error
-	if err == nil {
-		return playlist, true, nil
+		Limit(1).
+		Find(&playlist)
+	if result.Error != nil {
+		return store.MusicPlaylist{}, false, result.Error
 	}
-	if err == gorm.ErrRecordNotFound {
+	if result.RowsAffected == 0 {
 		return store.MusicPlaylist{}, false, nil
 	}
-	return store.MusicPlaylist{}, false, err
+	return playlist, true, nil
 }
 
 func (r *MusicRepository) Playlists(ctx context.Context, guildID string, limit int) ([]store.MusicPlaylist, error) {

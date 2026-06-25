@@ -10,6 +10,7 @@ import (
 type Action string
 
 const (
+	ActionJoin     Action = "join"
 	ActionPlay     Action = "play"
 	ActionPause    Action = "pause"
 	ActionResume   Action = "resume"

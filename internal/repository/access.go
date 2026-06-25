@@ -2,7 +2,6 @@ package repository
 
 import (
 	"context"
-	"errors"
 	"time"
 
 	"github.com/sn0w/panda2/internal/store"
@@ -21,12 +20,14 @@ func (r *AccessRepository) AddRolePermission(ctx context.Context, guildID, roleI
 	now := time.Now().UTC()
 	var role store.GuildRole
 	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		err := tx.Where("guild_id = ? AND role_id = ? AND permission = ?", guildID, roleID, permission).First(&role).Error
-		if err == nil {
-			return nil
+		result := tx.Where("guild_id = ? AND role_id = ? AND permission = ?", guildID, roleID, permission).
+			Limit(1).
+			Find(&role)
+		if result.Error != nil {
+			return result.Error
 		}
-		if !errors.Is(err, gorm.ErrRecordNotFound) {
-			return err
+		if result.RowsAffected > 0 {
+			return nil
 		}
 		role = store.GuildRole{
 			GuildID:    guildID,
@@ -47,15 +48,17 @@ func (r *AccessRepository) SetRolePermission(ctx context.Context, guildID, roleI
 		if err := tx.Where("guild_id = ? AND permission = ? AND role_id <> ?", guildID, permission, roleID).Delete(&store.GuildRole{}).Error; err != nil {
 			return err
 		}
-		err := tx.Where("guild_id = ? AND role_id = ? AND permission = ?", guildID, roleID, permission).First(&role).Error
-		if err == nil {
+		result := tx.Where("guild_id = ? AND role_id = ? AND permission = ?", guildID, roleID, permission).
+			Limit(1).
+			Find(&role)
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected > 0 {
 			if err := tx.Model(&role).Update("updated_at", now).Error; err != nil {
 				return err
 			}
 			return tx.First(&role, role.ID).Error
-		}
-		if !errors.Is(err, gorm.ErrRecordNotFound) {
-			return err
 		}
 		role = store.GuildRole{
 			GuildID:    guildID,
@@ -116,12 +119,14 @@ func (r *AccessRepository) AddToolRole(ctx context.Context, guildID, toolName, r
 	now := time.Now().UTC()
 	var toolRole store.GuildToolRole
 	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		err := tx.Where("guild_id = ? AND tool_name = ? AND role_id = ?", guildID, toolName, roleID).First(&toolRole).Error
-		if err == nil {
-			return nil
+		result := tx.Where("guild_id = ? AND tool_name = ? AND role_id = ?", guildID, toolName, roleID).
+			Limit(1).
+			Find(&toolRole)
+		if result.Error != nil {
+			return result.Error
 		}
-		if !errors.Is(err, gorm.ErrRecordNotFound) {
-			return err
+		if result.RowsAffected > 0 {
+			return nil
 		}
 		toolRole = store.GuildToolRole{
 			GuildID:   guildID,
@@ -186,15 +191,17 @@ func (r *AccessRepository) SetChannelRule(ctx context.Context, guildID, channelI
 	now := time.Now().UTC()
 	var channelRule store.GuildChannelRule
 	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		err := tx.Where("guild_id = ? AND channel_id = ?", guildID, channelID).First(&channelRule).Error
-		if err == nil {
+		result := tx.Where("guild_id = ? AND channel_id = ?", guildID, channelID).
+			Limit(1).
+			Find(&channelRule)
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected > 0 {
 			if err := tx.Model(&channelRule).Updates(map[string]any{"rule": rule, "updated_at": now}).Error; err != nil {
 				return err
 			}
 			return tx.First(&channelRule, channelRule.ID).Error
-		}
-		if !errors.Is(err, gorm.ErrRecordNotFound) {
-			return err
 		}
 		channelRule = store.GuildChannelRule{
 			GuildID:   guildID,
@@ -232,21 +239,15 @@ func (r *AccessRepository) ListChannelRules(ctx context.Context, guildID string)
 
 func (r *AccessRepository) ChannelRule(ctx context.Context, guildID, channelID string) (store.GuildChannelRule, bool, error) {
 	var rule store.GuildChannelRule
-	err := r.db.WithContext(ctx).Where("guild_id = ? AND channel_id = ?", guildID, channelID).First(&rule).Error
-	if err == nil {
-		return rule, true, nil
+	result := r.db.WithContext(ctx).
+		Where("guild_id = ? AND channel_id = ?", guildID, channelID).
+		Limit(1).
+		Find(&rule)
+	if result.Error != nil {
+		return store.GuildChannelRule{}, false, result.Error
 	}
-	if errors.Is(err, gorm.ErrRecordNotFound) {
+	if result.RowsAffected == 0 {
 		return store.GuildChannelRule{}, false, nil
 	}
-	return store.GuildChannelRule{}, false, err
-}
-
-func (r *AccessRepository) HasChannelAllowRules(ctx context.Context, guildID string) (bool, error) {
-	var count int64
-	err := r.db.WithContext(ctx).
-		Model(&store.GuildChannelRule{}).
-		Where("guild_id = ? AND rule = ?", guildID, "allow").
-		Count(&count).Error
-	return count > 0, err
+	return rule, true, nil
 }

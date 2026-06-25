@@ -2,7 +2,6 @@ package repository
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -113,11 +112,16 @@ func (r *GuildDataRepository) Summary(ctx context.Context, guildID string) (Guil
 		return GuildDataSummary{}, err
 	}
 	var subscription store.GuildSubscription
-	if err := r.db.WithContext(ctx).Where("guild_id = ?", guildID).First(&subscription).Error; err == nil {
+	result := r.db.WithContext(ctx).
+		Where("guild_id = ?", guildID).
+		Limit(1).
+		Find(&subscription)
+	if result.Error != nil {
+		return GuildDataSummary{}, result.Error
+	}
+	if result.RowsAffected > 0 {
 		summary.CurrentSubscriptionPlan = subscription.Plan
 		summary.CurrentSubscriptionState = subscription.Status
-	} else if !errors.Is(err, gorm.ErrRecordNotFound) {
-		return GuildDataSummary{}, err
 	}
 	return summary, nil
 }

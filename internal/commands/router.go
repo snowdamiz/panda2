@@ -107,12 +107,12 @@ func (access helpAccess) composedTools() bool {
 
 const baseHelpMessage = "### Panda Help\n\n" +
 	"**Chat naturally**\n" +
-	"- Mention `Panda` in a normal message: `Panda is this true?`\n" +
+	"- Say `Panda` in a normal message: `Panda is this true?`\n" +
 	"- Casual mentions may not trigger a reply.\n\n" +
 	"**Billing key entry**\n" +
 	"- Use `/billing action:activate api_key:<key>` for one-time activation keys so secrets stay out of normal chat.\n\n" +
 	"**Music**\n" +
-	"- Join a voice channel, then say `Panda play <song>`.\n" +
+	"- Join a voice channel, then say `Panda join my VC` or `Panda play <song>`.\n" +
 	"- Natural controls: `pause`, `resume`, `skip`, `stop`, `queue`, `clear queue`, `now playing`.\n\n" +
 	"**Message actions**\n" +
 	"- Use **Explain with Panda** or **Summarize with Panda** from a message's **Apps** menu.\n" +
@@ -134,6 +134,7 @@ const discordMessageContentLimit = 2000
 const invocationContextWindow = 2 * time.Minute
 const invocationContextLimit = 50
 const feedbackMinimumPlainTextRunes = 500
+const naturalMentionReminder = "Small note: you don't need to tag Panda. Saying `Panda ...` works too."
 
 func NewRouter(adminService *admin.Service, assistantService *assistant.Service, opsService *ops.Service, limiter *ratelimit.Limiter) *Router {
 	return &Router{admin: adminService, assistant: assistantService, ops: opsService, rateLimit: limiter}
@@ -337,7 +338,7 @@ func elevatedHelpMessage(access helpAccess) string {
 
 	if access.config || access.soul {
 		builder.WriteString("\n\n**Admin setup through chat**\n")
-		builder.WriteString("- Ask Panda to set admin/moderator roles, allowed channels, tool access, prompt, or personality.\n")
+		builder.WriteString("- Ask Panda to set admin/moderator roles, channel limits, tool access, prompt, or personality.\n")
 		builder.WriteString("- Panda can inspect settings, ask for missing choices, and prepare confirmations in chat.\n")
 		if access.soul {
 			builder.WriteString("- Personality/tone changes can be brainstormed first, then saved when you explicitly ask.\n")
@@ -381,11 +382,13 @@ func (r *Router) HandleNaturalMessage(ctx context.Context, request Request) Resp
 	if message == "" {
 		return Response{}
 	}
-	if !r.canHandleNaturalMessage(ctx, request) {
-		return Response{}
+	mentionReminder := naturalMentionReminderRequired(message, request.Options)
+	if denied := r.naturalMessageAccessDenied(ctx, request); denied.Content != "" {
+		logNaturalMessageAccessDenied(request, denied)
+		return withNaturalMentionReminder(denied, mentionReminder)
 	}
 	if denied := r.checkAIUsageAvailable(ctx, request); denied.Content != "" {
-		return denied
+		return withNaturalMentionReminder(denied, mentionReminder)
 	}
 	decision, err := r.assistant.ClassifyNaturalMessage(ctx, assistant.NaturalMessageRequest{
 		GuildID:          request.GuildID,
@@ -399,7 +402,10 @@ func (r *Router) HandleNaturalMessage(ctx context.Context, request Request) Resp
 	})
 	if err != nil {
 		slog.Warn("natural message classification failed", slog.Any("err", err), slog.String("guild_id", request.GuildID), slog.String("channel_id", request.ChannelID), slog.String("request_id", request.RequestID))
-		return Response{}
+		if errors.Is(err, assistant.ErrNaturalMessageDecisionParse) {
+			return Response{}
+		}
+		return withNaturalMentionReminder(assistantError(err), mentionReminder)
 	}
 	if !decision.Respond {
 		return Response{}
@@ -410,25 +416,73 @@ func (r *Router) HandleNaturalMessage(ctx context.Context, request Request) Resp
 	}
 	request.Options["question"] = decision.Prompt
 	request.PreferredTool = decision.ToolName
-	return r.handleChatModeWithAccess(ctx, request, false, true)
+	return withNaturalMentionReminder(r.handleChatModeWithAccess(ctx, request, false, true), mentionReminder)
 }
 
-func (r *Router) canHandleNaturalMessage(ctx context.Context, request Request) bool {
+func naturalMentionReminderRequired(_ string, options map[string]string) bool {
+	return truthyOption(options["bot_mentioned"])
+}
+
+func withNaturalMentionReminder(response Response, enabled bool) Response {
+	if !enabled || !responseHasUserVisiblePayload(response) || strings.Contains(response.Content, naturalMentionReminder) {
+		return response
+	}
+	if strings.TrimSpace(response.Content) == "" {
+		response.Content = naturalMentionReminder
+		return response
+	}
+	response.Content = strings.TrimRight(response.Content, "\n") + "\n\n" + naturalMentionReminder
+	return response
+}
+
+func responseHasUserVisiblePayload(response Response) bool {
+	return strings.TrimSpace(response.Content) != "" || response.Poll != nil
+}
+
+func (r *Router) naturalMessageAccessDenied(ctx context.Context, request Request) Response {
 	if r.admin == nil {
-		return false
+		return Response{
+			Content:   "Panda chat is not configured for this runtime.",
+			Ephemeral: true,
+			Presentation: Presentation{
+				Title:  "Panda chat unavailable",
+				Accent: AccentWarning,
+			},
+		}
 	}
 	if denied := r.ensureFeatureEnabled(ctx, request, features.AssistantChat); denied.Content != "" {
-		return false
+		return denied
 	}
 	accessRequest := assistantAccessRequest(request)
 	allowed, err := r.admin.CanUseAssistant(ctx, accessRequest)
 	if err != nil {
-		return false
+		return Response{Content: "Permission lookup failed. Please try again later.", Ephemeral: true, Presentation: Presentation{Title: "Permission lookup failed", Accent: AccentWarning}}
 	}
 	if allowed {
-		return true
+		return Response{}
 	}
-	return r.canWriteSoul(ctx, request)
+	allowed, err = r.admin.CanWriteSoul(ctx, accessRequest)
+	if err != nil {
+		return Response{Content: "Permission lookup failed. Please try again later.", Ephemeral: true, Presentation: Presentation{Title: "Permission lookup failed", Accent: AccentWarning}}
+	}
+	if allowed {
+		return Response{}
+	}
+	return Response{Content: "You do not have permission to use Panda chat in this channel.", Ephemeral: true, Presentation: Presentation{Title: "Panda chat unavailable", Accent: AccentWarning}}
+}
+
+func logNaturalMessageAccessDenied(request Request, response Response) {
+	reason := strings.TrimSpace(response.Presentation.Title)
+	if reason == "" {
+		reason = "access denied"
+	}
+	slog.Warn(
+		"natural message access denied",
+		slog.String("reason", reason),
+		slog.String("guild_id", request.GuildID),
+		slog.String("channel_id", request.ChannelID),
+		slog.String("request_id", request.RequestID),
+	)
 }
 
 func (r *Router) canWriteSoul(ctx context.Context, request Request) bool {
@@ -1036,7 +1090,7 @@ func (r *Router) handleAdminChannelAccess(ctx context.Context, request Request) 
 		if err != nil {
 			return Response{Content: "Channel access rule could not be saved.", Ephemeral: true}
 		}
-		return Response{Content: fmt.Sprintf("Allowed Panda assistant use in %s. Because an allow rule exists, other channels need their own allow rule unless the user is an admin.", channelDisplay(rule.ChannelID, channelName)), Ephemeral: true}
+		return Response{Content: fmt.Sprintf("Allowed Panda assistant use in %s. Other channels remain available by default; use deny rules to limit Panda.", channelDisplay(rule.ChannelID, channelName)), Ephemeral: true}
 	case "deny", "block":
 		if channelID == "" {
 			return Response{Content: "Choose a `channel` to deny Panda assistant use there.", Ephemeral: true}
@@ -1095,24 +1149,11 @@ func renderChannelRules(rules []store.GuildChannelRule) string {
 	if len(rules) == 0 {
 		return "No channel access rules are configured. Panda assistant use is available in any channel where Discord permissions allow it."
 	}
-	hasAllow := false
-	for _, rule := range rules {
-		if rule.Rule == "allow" {
-			hasAllow = true
-			break
-		}
-	}
-	header := "Channel access rules:"
-	if hasAllow {
-		header = "Channel access rules (allow-list active):"
-	}
-	lines := []string{header}
+	lines := []string{"Channel access rules:"}
 	for _, rule := range rules {
 		lines = append(lines, fmt.Sprintf("- `%s` %s", rule.Rule, channelDisplay(rule.ChannelID, "")))
 	}
-	if hasAllow {
-		lines = append(lines, "Only allowed channels can use Panda assistant features unless the user is an admin.")
-	}
+	lines = append(lines, "Panda is available by default; deny rules limit specific channels.")
 	return strings.Join(lines, "\n")
 }
 
@@ -1234,6 +1275,7 @@ func (r *Router) handleAsk(ctx context.Context, request Request, command string)
 
 	toolFilter := r.toolFilter(ctx, request)
 	enabledFeatures, featureGateActive := r.featureSetForAccess(ctx, request.GuildID)
+	hasGuildControl := r.hasGuildControlForAccess(ctx, request)
 	invocationContext := r.invocationContext(ctx, request)
 	answer, err := r.assistant.Ask(ctx, assistant.AskRequest{
 		RequestID:                    request.RequestID,
@@ -1246,6 +1288,7 @@ func (r *Router) handleAsk(ctx context.Context, request Request, command string)
 		RoleIDs:                      request.RoleIDs,
 		IsGuildAdmin:                 request.IsGuildAdmin,
 		IsOwner:                      request.IsOwner,
+		HasGuildControl:              hasGuildControl,
 		AllowedPermissions:           r.allowedToolPermissions(ctx, request),
 		AllowedTools:                 toolFilter.allowed,
 		RestrictedTools:              toolFilter.restricted,
@@ -1320,6 +1363,7 @@ func (r *Router) handleChatModeWithAccess(ctx context.Context, request Request, 
 
 	toolFilter := r.toolFilter(ctx, request)
 	enabledFeatures, featureGateActive := r.featureSetForAccess(ctx, request.GuildID)
+	hasGuildControl := r.hasGuildControlForAccess(ctx, request)
 	invocationContext := r.invocationContext(ctx, request)
 	answer, err := r.assistant.Chat(ctx, assistant.AskRequest{
 		RequestID:                    request.RequestID,
@@ -1337,6 +1381,7 @@ func (r *Router) handleChatModeWithAccess(ctx context.Context, request Request, 
 		RoleIDs:                      request.RoleIDs,
 		IsGuildAdmin:                 request.IsGuildAdmin,
 		IsOwner:                      request.IsOwner,
+		HasGuildControl:              hasGuildControl,
 		AllowedPermissions:           r.allowedToolPermissions(ctx, request),
 		AllowedTools:                 toolFilter.allowed,
 		RestrictedTools:              toolFilter.restricted,
@@ -1373,6 +1418,7 @@ func (r *Router) handleTask(ctx context.Context, request Request) Response {
 
 	toolFilter := r.toolFilter(ctx, request)
 	enabledFeatures, featureGateActive := r.featureSetForAccess(ctx, request.GuildID)
+	hasGuildControl := r.hasGuildControlForAccess(ctx, request)
 	invocationContext := r.invocationContext(ctx, request)
 	task := BackgroundTask{
 		RequestID:                    request.RequestID,
@@ -1389,6 +1435,7 @@ func (r *Router) handleTask(ctx context.Context, request Request) Response {
 		RoleIDs:                      request.RoleIDs,
 		IsGuildAdmin:                 request.IsGuildAdmin,
 		IsOwner:                      request.IsOwner,
+		HasGuildControl:              hasGuildControl,
 		AllowedPermissions:           permissionNames(r.allowedToolPermissions(ctx, request)),
 		AllowedTools:                 permissionNames(toolFilter.allowed),
 		RestrictedTools:              permissionNames(toolFilter.restricted),
@@ -1450,6 +1497,7 @@ func (r *Router) HandleBackgroundTask(ctx context.Context, task BackgroundTask) 
 		RoleIDs:                      task.RoleIDs,
 		IsGuildAdmin:                 task.IsGuildAdmin,
 		IsOwner:                      task.IsOwner,
+		HasGuildControl:              task.HasGuildControl,
 		AllowedPermissions:           permissionsFromNames(task.AllowedPermissions),
 		AllowedTools:                 permissionsFromNames(task.AllowedTools),
 		RestrictedTools:              permissionsFromNames(task.RestrictedTools),
@@ -2170,6 +2218,7 @@ func (r *Router) toolAccess(ctx context.Context, request Request, policy string)
 		EnabledFeatures:              enabledFeatures,
 		FeatureGateActive:            featureGateActive,
 		RequireExplicitComposedTools: filter.requireExplicitComposed,
+		HasGuildControl:              r.hasGuildControlForAccess(ctx, request),
 	}
 }
 
@@ -2218,6 +2267,17 @@ func (r *Router) allowedToolPermissions(ctx context.Context, request Request) ma
 		r.addPermissionIfAllowed(ctx, request, permissions, admin.PermissionOwnerOps, r.admin.CanUseOwnerOps)
 	}
 	return permissions
+}
+
+func (r *Router) hasGuildControlForAccess(ctx context.Context, request Request) bool {
+	if request.IsOwner || request.IsGuildAdmin {
+		return true
+	}
+	if r.admin == nil {
+		return false
+	}
+	allowed, err := r.admin.HasGuildControl(ctx, assistantAccessRequest(request))
+	return err == nil && allowed
 }
 
 func (r *Router) featureSetForAccess(ctx context.Context, guildID string) (map[string]struct{}, bool) {

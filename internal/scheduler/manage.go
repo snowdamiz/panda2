@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sn0w/panda2/internal/admin"
 	"github.com/sn0w/panda2/internal/composed"
 	"github.com/sn0w/panda2/internal/repository"
 	"github.com/sn0w/panda2/internal/store"
@@ -24,9 +25,16 @@ func (s *Service) ManageSchedule(ctx context.Context, request toolsvc.ScheduleMa
 	if strings.TrimSpace(request.GuildID) == "" {
 		return nil, fmt.Errorf("guild_id is required")
 	}
+	if !request.Access.HasAnyPermission(admin.PermissionToolComposeInvoke) {
+		return nil, fmt.Errorf("missing permission %s for schedule management", admin.PermissionToolComposeInvoke)
+	}
 	switch action {
 	case "list":
-		schedules, err := s.List(ctx, request.GuildID, "", KindComposed, request.IncludeDisabled, 25)
+		ownerUserID := ""
+		if !scheduleCanManageAll(request.Access) {
+			ownerUserID = strings.TrimSpace(request.ActorID)
+		}
+		schedules, err := s.List(ctx, request.GuildID, ownerUserID, KindComposed, request.IncludeDisabled, 25)
 		if err != nil {
 			return nil, err
 		}
@@ -137,13 +145,20 @@ func (s *Service) scheduleToCancel(ctx context.Context, request toolsvc.Schedule
 		if schedule.Kind != KindComposed {
 			return store.Schedule{}, fmt.Errorf("schedule %d is not a composed tool run", request.ScheduleID)
 		}
+		if !scheduleCanManageAll(request.Access) && schedule.OwnerUserID != request.ActorID {
+			return store.Schedule{}, fmt.Errorf("schedule %d is not owned by this caller", request.ScheduleID)
+		}
 		return schedule, nil
 	}
 	toolName := strings.TrimSpace(request.ToolName)
 	if toolName == "" {
 		return store.Schedule{}, fmt.Errorf("schedule_id or tool_name is required")
 	}
-	schedules, err := s.List(ctx, request.GuildID, "", KindComposed, false, 25)
+	ownerUserID := ""
+	if !scheduleCanManageAll(request.Access) {
+		ownerUserID = strings.TrimSpace(request.ActorID)
+	}
+	schedules, err := s.List(ctx, request.GuildID, ownerUserID, KindComposed, false, 25)
 	if err != nil {
 		return store.Schedule{}, err
 	}
@@ -156,6 +171,17 @@ func (s *Service) scheduleToCancel(ctx context.Context, request toolsvc.Schedule
 	default:
 		return store.Schedule{}, fmt.Errorf("multiple active schedules match %q; cancel by schedule_id", toolName)
 	}
+}
+
+func scheduleCanManageAll(access toolsvc.ToolAccess) bool {
+	return access.HasAnyPermission(
+		admin.PermissionAdminConfigRead,
+		admin.PermissionAdminConfigWrite,
+		admin.PermissionAdminUsageRead,
+		admin.PermissionAdminAuditRead,
+		admin.PermissionAdminMemoryManage,
+		admin.PermissionOwnerOps,
+	)
 }
 
 func schedulePayloads(schedules []store.Schedule) []map[string]any {

@@ -267,7 +267,7 @@ func TestInstallFailureRedirectStripsNonLocalPort(t *testing.T) {
 	}
 }
 
-func TestDiscordInstallCallbackAssumesSuccessForLocalDevelopment(t *testing.T) {
+func TestDiscordInstallCallbackKeepsFailureRedirectForLocalDevelopmentURL(t *testing.T) {
 	db, err := store.Open(t.Context(), "file::memory:?cache=shared")
 	if err != nil {
 		t.Fatalf("open store: %v", err)
@@ -295,7 +295,7 @@ func TestDiscordInstallCallbackAssumesSuccessForLocalDevelopment(t *testing.T) {
 	if resp.StatusCode != stdhttp.StatusFound {
 		t.Fatalf("expected 302, got %d", resp.StatusCode)
 	}
-	if location := resp.Header.Get("Location"); location != "http://localhost:4321/install/success/?guild_id=guild-1&status=success" {
+	if location := resp.Header.Get("Location"); location != "http://localhost:4321/install/failed/?error=install_failed&status=failed" {
 		t.Fatalf("unexpected redirect location: %q", location)
 	}
 }
@@ -568,13 +568,13 @@ func TestBillingEntitlementEndpointReportsTrialUsage(t *testing.T) {
 	if body.TrialEndsAt == nil || !body.TrialEndsAt.Equal(now.Add(billing.TrialDuration)) {
 		t.Fatalf("unexpected trial end: %+v", body.TrialEndsAt)
 	}
-	if got := body.Usage["ai_responses"]; got.Used != 42 || got.Limit != 250 || got.Remaining != 208 {
+	if got := body.Usage["ai_responses"]; got.Used != 42 || got.Limit != billing.TrialAIResponses || got.Remaining != billing.TrialAIResponses-42 {
 		t.Fatalf("unexpected AI usage: %+v", got)
 	}
-	if got := body.Usage["web_searches"]; got.Used != 3 || got.Limit != 20 || got.Remaining != 17 {
+	if got := body.Usage["web_searches"]; got.Used != 3 || got.Limit != billing.TrialWebSearches || got.Remaining != billing.TrialWebSearches-3 {
 		t.Fatalf("unexpected search usage: %+v", got)
 	}
-	if got := body.Usage["knowledge_storage"]; got.Used != 1024 || got.Limit != 25*1024*1024 || got.Remaining != 25*1024*1024-1024 {
+	if got := body.Usage["knowledge_storage"]; got.Used != 1024 || got.Limit != billing.TrialKnowledgeBytes || got.Remaining != billing.TrialKnowledgeBytes-1024 {
 		t.Fatalf("unexpected storage usage: %+v", got)
 	}
 }

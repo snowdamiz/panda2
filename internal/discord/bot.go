@@ -33,6 +33,7 @@ import (
 	"github.com/sn0w/panda2/internal/scheduler"
 	"github.com/sn0w/panda2/internal/security"
 	"github.com/sn0w/panda2/internal/store"
+	"github.com/sn0w/panda2/internal/textutil"
 )
 
 type Bot struct {
@@ -47,6 +48,7 @@ type Bot struct {
 	alerts      DiscordAlertHandler
 	httpClient  *http.Client
 	music       *music.Manager
+	natural     *naturalMessageQueue
 	closeOnce   sync.Once
 }
 
@@ -109,10 +111,10 @@ type interactionJobPayload struct {
 
 func New(cfg config.Config, router *commands.Router, logger *slog.Logger) (*Bot, error) {
 	if !cfg.DiscordConfigured() {
-		return &Bot{cfg: cfg, router: router, logger: logger}, nil
+		return &Bot{cfg: cfg, router: router, logger: logger, natural: newNaturalMessageQueue()}, nil
 	}
 
-	instance := &Bot{cfg: cfg, router: router, logger: logger}
+	instance := &Bot{cfg: cfg, router: router, logger: logger, natural: newNaturalMessageQueue()}
 	daveSessions := newDaveSessionFactory(logger)
 	client, err := disgo.New(cfg.DiscordBotToken,
 		bot.WithGatewayConfigOpts(gateway.WithIntents(
@@ -1373,13 +1375,26 @@ func (b *Bot) onMessageCreate(event *events.MessageCreate) {
 		IsGuildAdmin:   b.isMessageGuildAdmin(event, event.Message.Author.ID),
 	}
 	reference := messageReferenceFromMessage(event.Message)
-	go b.respondToNaturalMessage(context.Background(), event.ChannelID, reference, request)
+	b.enqueueNaturalMessage(context.Background(), event.ChannelID, reference, request)
+}
+
+func (b *Bot) enqueueNaturalMessage(ctx context.Context, channelID snowflake.ID, reference *disgoDiscord.MessageReference, request commands.Request) {
+	if b == nil || b.client == nil || b.router == nil {
+		return
+	}
+	if b.natural == nil {
+		b.natural = newNaturalMessageQueue()
+	}
+	b.natural.enqueue(naturalMessageKey(channelID, request), func() {
+		b.respondToNaturalMessage(ctx, channelID, reference, request)
+	})
 }
 
 func (b *Bot) respondToNaturalMessage(ctx context.Context, channelID snowflake.ID, reference *disgoDiscord.MessageReference, request commands.Request) {
 	if b == nil || b.client == nil || b.router == nil {
 		return
 	}
+
 	if err := b.preflightNaturalMessageReply(request); err != nil {
 		b.logger.Warn("natural message reply permission preflight failed",
 			slog.Any("err", err),
@@ -1821,24 +1836,7 @@ func messageMentionsUser(message disgoDiscord.Message, userID string) bool {
 }
 
 func containsPandaWord(content string) bool {
-	wordStart := -1
-	for index, value := range content {
-		if isWordRune(value) {
-			if wordStart < 0 {
-				wordStart = index
-			}
-			continue
-		}
-		if wordStart >= 0 && strings.EqualFold(content[wordStart:index], "panda") {
-			return true
-		}
-		wordStart = -1
-	}
-	return wordStart >= 0 && strings.EqualFold(content[wordStart:], "panda")
-}
-
-func isWordRune(value rune) bool {
-	return value == '_' || unicode.IsLetter(value) || unicode.IsDigit(value)
+	return textutil.ContainsWord(content, "panda")
 }
 
 func snowflakeStrings(ids []snowflake.ID) []string {

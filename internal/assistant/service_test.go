@@ -351,6 +351,8 @@ func TestNaturalTriggerPromptCoversDirectCapabilityQuestionWithoutMention(t *tes
 		"naturally addresses Panda by name",
 		"word Panda appears anywhere",
 		"asks to set up or configure Panda",
+		"MUST set tool_name to `panda_list_tools`",
+		"panda_list_tools",
 		"panda_manage_music",
 		"panda_manage_reminder",
 		"discord_create_poll",
@@ -379,6 +381,7 @@ func TestNaturalPreferredToolChoicesCoverSingleWorkflowTools(t *testing.T) {
 		names[name] = struct{}{}
 	}
 	for _, want := range []string{
+		"panda_list_tools",
 		"panda_manage_music",
 		"panda_manage_reminder",
 		"discord_create_poll",
@@ -396,6 +399,25 @@ func TestNaturalPreferredToolChoicesCoverSingleWorkflowTools(t *testing.T) {
 		if _, ok := names[want]; !ok {
 			t.Fatalf("preferred tool choices missing %q: %+v", want, naturalPreferredToolChoiceNames())
 		}
+	}
+}
+
+func TestClassifyNaturalMessageKeepsCapabilityToolHint(t *testing.T) {
+	ctx := context.Background()
+	client := &fakeClient{response: llm.ChatResponse{Model: "fixture/model", Content: `{"respond":true,"prompt":"what can you do","tool_name":"panda_list_tools"}`}}
+	service, _ := newTestService(t, client)
+
+	decision, err := service.ClassifyNaturalMessage(ctx, NaturalMessageRequest{
+		GuildID:   "guild-1",
+		UserID:    "user-1",
+		ChannelID: "channel-1",
+		Content:   "panda what can you do",
+	})
+	if err != nil {
+		t.Fatalf("ClassifyNaturalMessage: %v", err)
+	}
+	if !decision.Respond || decision.Prompt != "what can you do" || decision.ToolName != "panda_list_tools" {
+		t.Fatalf("unexpected decision: %+v", decision)
 	}
 }
 
@@ -776,8 +798,12 @@ func TestAskListsActualAvailableToolNamesInPrompt(t *testing.T) {
 		t.Fatalf("expected one LLM request, got %d", len(client.requests))
 	}
 	joined := joinMessages(client.requests[0].Messages)
-	if !strings.Contains(joined, "Panda can call only these current function tools") || !strings.Contains(joined, "`panda_list_tools`") {
+	if !strings.Contains(joined, "Tool inventory for this request and user") ||
+		!strings.Contains(joined, "Callable now: `panda_list_tools`") {
 		t.Fatalf("actual tool list missing from request: %s", joined)
+	}
+	if !strings.Contains(joined, "`panda_manage_composed_tool`") || !strings.Contains(joined, "missing_permission") {
+		t.Fatalf("blocked tool inventory missing from request: %s", joined)
 	}
 	if strings.Contains(joined, "`image_generation`") || strings.Contains(joined, "`code_execution`") {
 		t.Fatalf("unavailable generic tools should not appear as current tools: %s", joined)
@@ -839,8 +865,8 @@ func TestAskFiltersFeatureDisabledToolsBeforeModelRequest(t *testing.T) {
 	}
 	joined := joinMessages(client.requests[0].Messages)
 	for _, disabled := range []string{"discord_send_message", "panda_manage_composed_tool", "read_config"} {
-		if strings.Contains(joined, disabled) {
-			t.Fatalf("feature-disabled tool %s leaked into tool availability prompt: %s", disabled, joined)
+		if !strings.Contains(joined, "`"+disabled+"`") || !strings.Contains(joined, "feature_disabled") {
+			t.Fatalf("feature-disabled tool %s missing from blocked tool inventory: %s", disabled, joined)
 		}
 	}
 }
@@ -986,6 +1012,58 @@ func TestAskCapabilityQuestionCanUseListToolsWhenDefaultAdminOnly(t *testing.T) 
 	for _, want := range []string{`"policy":"admin_only"`, `"presentation":"capabilities"`, `"name":"current_capabilities"`, `"count":1`, `"user_tools_notice"`} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("expected tool-list result to contain %s, got %s", want, joined)
+		}
+	}
+}
+
+func TestAskPreferredCapabilityToolListsConfiguredWebSearch(t *testing.T) {
+	ctx := context.Background()
+	client := &fakeClient{responses: []llm.ChatResponse{
+		{Model: "fixture/model", Content: "I can search the web and show current capabilities."},
+	}}
+	service, db := newTestService(t, client)
+	configs := repository.NewGuildConfigRepository(db.DB)
+	registry, err := tools.NewDefaultRegistry()
+	if err != nil {
+		t.Fatalf("NewDefaultRegistry: %v", err)
+	}
+	service.WithToolExecutor(tools.NewExecutor(registry, nil, configs).WithWebSearcher(fakeAssistantWebSearch{}))
+
+	if _, err := configs.EnsureDefault(ctx, "guild-1"); err != nil {
+		t.Fatalf("EnsureDefault: %v", err)
+	}
+
+	response, err := service.Ask(ctx, AskRequest{
+		GuildID:       "guild-1",
+		UserID:        "user-1",
+		ChannelID:     "channel-1",
+		Question:      "what can you do",
+		PreferredTool: "panda_list_tools",
+		AllowedPermissions: map[string]struct{}{
+			admin.PermissionAssistantUse:       {},
+			admin.PermissionAssistantWebSearch: {},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Ask: %v", err)
+	}
+	if response.Content != "I can search the web and show current capabilities." {
+		t.Fatalf("unexpected response: %q", response.Content)
+	}
+	if len(client.requests) != 1 {
+		t.Fatalf("expected selected capability tool to execute before one prose request, got %d", len(client.requests))
+	}
+	if len(client.requests[0].Tools) != 0 {
+		t.Fatalf("post-inventory prose request should not expose tools again, got %+v", client.requests[0].Tools)
+	}
+	firstRequestMessages := joinMessages(client.requests[0].Messages)
+	if !strings.Contains(firstRequestMessages, "The natural-message classifier selected the exposed `panda_list_tools` workflow") ||
+		!strings.Contains(firstRequestMessages, "friendly capability overview") {
+		t.Fatalf("preferred tool instruction missing: %s", joinMessages(client.requests[0].Messages))
+	}
+	for _, want := range []string{"call-selected-panda-list-tools", `"name":"search_the_web"`, `"label":"Search the web"`, `"name":"current_capabilities"`} {
+		if !strings.Contains(firstRequestMessages, want) {
+			t.Fatalf("expected selected tool result to contain %s, got %s", want, firstRequestMessages)
 		}
 	}
 }
@@ -1303,6 +1381,7 @@ func TestToolAccessOwnerOpsPermissionOverridesConfiguredPolicy(t *testing.T) {
 		nil,
 		nil,
 		nil,
+		false,
 		false,
 		false,
 	)

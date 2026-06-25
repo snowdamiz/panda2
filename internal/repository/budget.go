@@ -2,7 +2,6 @@ package repository
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -49,8 +48,13 @@ func (r *BudgetRepository) SetLimit(ctx context.Context, limit store.BudgetLimit
 	now := time.Now().UTC()
 	var saved store.BudgetLimit
 	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		err := tx.Where("guild_id = ? AND scope = ? AND subject_id = ?", limit.GuildID, limit.Scope, limit.SubjectID).First(&saved).Error
-		if err == nil {
+		result := tx.Where("guild_id = ? AND scope = ? AND subject_id = ?", limit.GuildID, limit.Scope, limit.SubjectID).
+			Limit(1).
+			Find(&saved)
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected > 0 {
 			if err := tx.Model(&saved).Updates(map[string]any{
 				"limit_count":    limit.Limit,
 				"window_seconds": limit.WindowSeconds,
@@ -59,9 +63,6 @@ func (r *BudgetRepository) SetLimit(ctx context.Context, limit store.BudgetLimit
 				return err
 			}
 			return tx.First(&saved, saved.ID).Error
-		}
-		if !errors.Is(err, gorm.ErrRecordNotFound) {
-			return err
 		}
 		limit.CreatedAt = now
 		limit.UpdatedAt = now
@@ -113,11 +114,13 @@ func (r *BudgetRepository) CheckAndConsume(ctx context.Context, request BudgetCh
 			windowStart, windowEnd := budgetWindow(now, time.Duration(limit.WindowSeconds)*time.Second)
 			key := budgetBucketKey(limit)
 			var bucket store.RateLimitBucket
-			err := tx.Where("scope = ? AND bucket_key = ? AND window_start = ?", "budget:"+limit.Scope, key, windowStart).First(&bucket).Error
-			if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
-				return err
+			result := tx.Where("scope = ? AND bucket_key = ? AND window_start = ?", "budget:"+limit.Scope, key, windowStart).
+				Limit(1).
+				Find(&bucket)
+			if result.Error != nil {
+				return result.Error
 			}
-			if err == nil && bucket.Count >= limit.Limit {
+			if result.RowsAffected > 0 && bucket.Count >= limit.Limit {
 				denial = BudgetDenial{Scope: limit.Scope, SubjectID: limit.SubjectID, RetryAfter: windowEnd.Sub(now)}
 				return nil
 			}
@@ -127,8 +130,13 @@ func (r *BudgetRepository) CheckAndConsume(ctx context.Context, request BudgetCh
 			windowStart, windowEnd := budgetWindow(now, time.Duration(limit.WindowSeconds)*time.Second)
 			key := budgetBucketKey(limit)
 			var bucket store.RateLimitBucket
-			err := tx.Where("scope = ? AND bucket_key = ? AND window_start = ?", "budget:"+limit.Scope, key, windowStart).First(&bucket).Error
-			if errors.Is(err, gorm.ErrRecordNotFound) {
+			result := tx.Where("scope = ? AND bucket_key = ? AND window_start = ?", "budget:"+limit.Scope, key, windowStart).
+				Limit(1).
+				Find(&bucket)
+			if result.Error != nil {
+				return result.Error
+			}
+			if result.RowsAffected == 0 {
 				bucket = store.RateLimitBucket{
 					Scope:       "budget:" + limit.Scope,
 					BucketKey:   key,
@@ -143,9 +151,6 @@ func (r *BudgetRepository) CheckAndConsume(ctx context.Context, request BudgetCh
 					return err
 				}
 				continue
-			}
-			if err != nil {
-				return err
 			}
 			if err := tx.Model(&bucket).Updates(map[string]any{
 				"count":       bucket.Count + 1,

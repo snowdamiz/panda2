@@ -13,6 +13,7 @@ import (
 	"github.com/sn0w/panda2/internal/admin"
 	"github.com/sn0w/panda2/internal/billing"
 	contextsvc "github.com/sn0w/panda2/internal/context"
+	"github.com/sn0w/panda2/internal/features"
 	"github.com/sn0w/panda2/internal/llm"
 	"github.com/sn0w/panda2/internal/memory"
 	"github.com/sn0w/panda2/internal/ops"
@@ -51,6 +52,10 @@ type DiscordToolProvider interface {
 type DynamicToolProvider interface {
 	OpenRouterTools(ctx context.Context, request DynamicToolListRequest) ([]llm.Tool, error)
 	ExecuteDynamicTool(ctx context.Context, request DynamicExecutionRequest) (ExecutionResult, error)
+}
+
+type DynamicToolInventoryProvider interface {
+	DynamicToolInventory(ctx context.Context, request DynamicToolListRequest) ([]ToolInventoryItem, error)
 }
 
 type ComposedToolManager interface {
@@ -183,6 +188,15 @@ type DynamicExecutionRequest struct {
 	InvocationType string
 	Call           llm.ToolCall
 	NestedDepth    int
+}
+
+type ToolInventoryItem struct {
+	Kind            string
+	Name            string
+	NativeName      string
+	Description     string
+	Status          string
+	DisabledReasons []string
 }
 
 type ComposedToolManagementRequest struct {
@@ -395,6 +409,213 @@ func (e *Executor) OpenRouterToolsForRequest(ctx context.Context, request Dynami
 		seen[name] = struct{}{}
 	}
 	return result
+}
+
+func (e *Executor) ToolAwarenessMessage(ctx context.Context, request DynamicToolListRequest, providedTools []llm.Tool) string {
+	if e == nil || e.registry == nil {
+		return ""
+	}
+	provided := providedToolNames(providedTools)
+	items := e.nativeToolInventory(provided, request.Access)
+	items = append(items, e.dynamicToolInventory(ctx, request, provided)...)
+	return formatToolAwarenessMessage(items, request.Access)
+}
+
+func providedToolNames(tools []llm.Tool) map[string]struct{} {
+	provided := map[string]struct{}{}
+	for _, tool := range tools {
+		name := strings.TrimSpace(tool.Function.Name)
+		if name != "" {
+			provided[name] = struct{}{}
+		}
+	}
+	return provided
+}
+
+func (e *Executor) nativeToolInventory(provided map[string]struct{}, access ToolAccess) []ToolInventoryItem {
+	items := []ToolInventoryItem{}
+	for _, definition := range e.registry.Definitions() {
+		status := e.nativeToolAvailability(definition, access)
+		name := definition.ModelName()
+		item := ToolInventoryItem{
+			Kind:        "native",
+			Name:        name,
+			NativeName:  definition.Name,
+			Description: definition.Description,
+		}
+		switch {
+		case status.Available() && definition.IncludeInModelContext && hasProvidedTool(provided, name):
+			item.Status = "callable"
+		case status.Available() && definition.IncludeInModelContext:
+			item.Status = "available_not_provided"
+			item.DisabledReasons = []string{"not_provided_this_turn"}
+		default:
+			item.Status = "unavailable"
+			item.DisabledReasons = status.Reasons
+			if !definition.IncludeInModelContext {
+				item.DisabledReasons = append(item.DisabledReasons, "not_available_in_chat")
+			}
+			item.DisabledReasons = uniqueStrings(item.DisabledReasons)
+		}
+		items = append(items, item)
+	}
+	return items
+}
+
+func (e *Executor) dynamicToolInventory(ctx context.Context, request DynamicToolListRequest, provided map[string]struct{}) []ToolInventoryItem {
+	if e == nil || e.dynamic == nil {
+		return nil
+	}
+	if inventory, ok := e.dynamic.(DynamicToolInventoryProvider); ok {
+		items, err := inventory.DynamicToolInventory(ctx, request)
+		if err == nil {
+			return normalizeInventoryStatuses(items, provided)
+		}
+	}
+	dynamicTools, err := e.dynamic.OpenRouterTools(ctx, request)
+	if err != nil {
+		return nil
+	}
+	items := []ToolInventoryItem{}
+	for _, tool := range dynamicTools {
+		name := strings.TrimSpace(tool.Function.Name)
+		if name == "" {
+			continue
+		}
+		if _, native := e.registry.Get(name); native {
+			continue
+		}
+		status := "available_not_provided"
+		reasons := []string{"not_provided_this_turn"}
+		if hasProvidedTool(provided, name) {
+			status = "callable"
+			reasons = nil
+		}
+		items = append(items, ToolInventoryItem{
+			Kind:            "composed",
+			Name:            name,
+			Description:     tool.Function.Description,
+			Status:          status,
+			DisabledReasons: reasons,
+		})
+	}
+	return items
+}
+
+func normalizeInventoryStatuses(items []ToolInventoryItem, provided map[string]struct{}) []ToolInventoryItem {
+	for index := range items {
+		item := &items[index]
+		item.Kind = firstNonEmpty(strings.TrimSpace(item.Kind), "dynamic")
+		item.Name = strings.TrimSpace(item.Name)
+		item.NativeName = strings.TrimSpace(item.NativeName)
+		item.Status = strings.ToLower(strings.TrimSpace(item.Status))
+		item.DisabledReasons = uniqueStrings(item.DisabledReasons)
+		switch item.Status {
+		case "callable", "enabled", "available":
+			if hasProvidedTool(provided, item.Name) {
+				item.Status = "callable"
+				item.DisabledReasons = nil
+			} else {
+				item.Status = "available_not_provided"
+				item.DisabledReasons = []string{"not_provided_this_turn"}
+			}
+		case "available_not_provided":
+			if hasProvidedTool(provided, item.Name) {
+				item.Status = "callable"
+				item.DisabledReasons = nil
+			} else if len(item.DisabledReasons) == 0 {
+				item.DisabledReasons = []string{"not_provided_this_turn"}
+			}
+		default:
+			item.Status = "unavailable"
+			if len(item.DisabledReasons) == 0 {
+				item.DisabledReasons = []string{"not_callable_in_this_context"}
+			}
+		}
+	}
+	return items
+}
+
+func hasProvidedTool(provided map[string]struct{}, names ...string) bool {
+	for _, name := range names {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+		if _, ok := provided[name]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+func formatToolAwarenessMessage(items []ToolInventoryItem, access ToolAccess) string {
+	callable := []string{}
+	blockedByReason := map[string][]string{}
+	notProvided := []string{}
+	for _, item := range items {
+		name := strings.TrimSpace(item.Name)
+		if name == "" {
+			continue
+		}
+		label := "`" + name + "`"
+		switch item.Status {
+		case "callable":
+			callable = append(callable, label)
+		case "available_not_provided":
+			notProvided = append(notProvided, label+" (not provided as a function tool this turn)")
+		default:
+			reasons := item.DisabledReasons
+			if len(reasons) == 0 {
+				reasons = []string{"not_callable_in_this_context"}
+			}
+			reasonKey := strings.Join(reasons, ", ")
+			blockedByReason[reasonKey] = append(blockedByReason[reasonKey], label)
+		}
+	}
+	sort.Strings(callable)
+	sort.Strings(notProvided)
+	blocked := groupedBlockedToolSummaries(blockedByReason)
+	lines := []string{
+		"Tool inventory for this request and user.",
+		"Policy: `" + normalizeToolPolicy(access.Policy) + "`.",
+	}
+	if len(callable) == 0 {
+		lines = append(lines, "Callable now: none.")
+	} else {
+		lines = append(lines, "Callable now: "+strings.Join(callable, ", ")+".")
+	}
+	if len(blocked) > 0 {
+		lines = append(lines, "Known but not callable for this user or context: "+strings.Join(blocked, ", ")+".")
+	}
+	if len(notProvided) > 0 {
+		lines = append(lines, "Known and otherwise available but not callable in this turn: "+strings.Join(notProvided, ", ")+".")
+	}
+	if canSeeAdminToolDetails(access) {
+		lines = append(lines, "Current caller has admin-level Panda tool access in this context; do not describe them as a regular user or non-admin.")
+	} else if normalizeToolPolicy(access.Policy) == ToolPolicyAdminOnly {
+		lines = append(lines, "This server's tool policy is `admin_only`; normal chat and any listed web search tool may be callable, but broader tools are blocked for this user unless an admin changes access.")
+	}
+	lines = append(lines, "Call only the tools listed under Callable now. For known but blocked tools, say the capability exists but cannot be called in this context and use the listed reason codes; do not claim a blocked tool was called. Do not invent unlisted generic platform tools.")
+	return strings.Join(lines, " ")
+}
+
+func groupedBlockedToolSummaries(blockedByReason map[string][]string) []string {
+	if len(blockedByReason) == 0 {
+		return nil
+	}
+	keys := make([]string, 0, len(blockedByReason))
+	for key := range blockedByReason {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	groups := make([]string, 0, len(keys))
+	for _, key := range keys {
+		names := blockedByReason[key]
+		sort.Strings(names)
+		groups = append(groups, key+": "+strings.Join(names, ", "))
+	}
+	return groups
 }
 
 func (e *Executor) Execute(ctx context.Context, request ExecutionRequest) (ExecutionResult, error) {
@@ -1952,14 +2173,21 @@ func (e *Executor) listAvailableTools(ctx context.Context, request ExecutionRequ
 	adminToolsHidden := false
 
 	nativeTools := []map[string]any{}
+	disabledNativeTools := []map[string]any{}
 	if kind == "all" || kind == "native" {
 		for _, definition := range e.registry.Definitions() {
-			executable := e.canExecute(definition.Name)
+			status := e.nativeToolAvailability(definition, request.Access)
 			adminTool := isAdminToolDefinition(definition)
-			if adminTool && !canSeeAdminTools && executable {
+			if adminTool && !canSeeAdminTools && status.Executable {
 				adminToolsHidden = true
 			}
-			if !definition.AvailableTo(request.Access) || !executable || (adminTool && !canSeeAdminTools) {
+			if adminTool && !canSeeAdminTools {
+				continue
+			}
+			if !status.Available() {
+				if canSeeDisabledToolDetails(request.Access, definition) {
+					disabledNativeTools = append(disabledNativeTools, disabledNativeToolItem(status, request.Access, includeSchemas))
+				}
 				continue
 			}
 			item := map[string]any{
@@ -1975,6 +2203,7 @@ func (e *Executor) listAvailableTools(ctx context.Context, request ExecutionRequ
 				"max_limit":             definition.MaxLimit,
 				"discord_permissions":   definition.DiscordPermissions,
 				"available_in_chat":     definition.IncludeInModelContext,
+				"status":                "enabled",
 			}
 			if includeSchemas {
 				item["input_schema"] = definition.InputSchema
@@ -2026,11 +2255,13 @@ func (e *Executor) listAvailableTools(ctx context.Context, request ExecutionRequ
 		"count":           len(items),
 		"native_count":    len(nativeTools),
 		"composed_count":  len(composedTools),
+		"disabled_tools":  disabledNativeTools,
+		"disabled_count":  len(disabledNativeTools),
 		"kind":            kind,
 		"policy":          normalizeToolPolicy(request.Access.Policy),
 		"access_level":    "user",
 		"invocation_type": firstNonEmpty(request.InvocationType, "chat_tool"),
-		"note":            "This list is already filtered by guild tool policy, role tool access, user permissions, and configured integrations. Tools not returned here are not callable in this context.",
+		"note":            "The tools list contains callable tools for this exact context. disabled_tools explains unavailable native tools with exact reason labels: feature_disabled, missing_permission, tool_access_restricted, tool_policy_disabled, or integration_not_configured. Do not describe feature_disabled or missing_permission as guild policy.",
 	}
 	if canSeeAdminTools {
 		response["access_level"] = "admin"
@@ -2048,15 +2279,20 @@ func (e *Executor) listAvailableTools(ctx context.Context, request ExecutionRequ
 
 func (e *Executor) listUserCapabilities(ctx context.Context, request ExecutionRequest, kind string, includeSchemas bool) (any, error) {
 	nativeDefinitions := map[string]Definition{}
+	disabledNativeStatuses := []nativeToolAvailability{}
 	adminToolsHidden := false
 	if kind == "all" || kind == "native" {
 		for _, definition := range e.registry.Definitions() {
-			executable := e.canExecute(definition.Name)
+			status := e.nativeToolAvailability(definition, request.Access)
 			adminTool := isAdminToolDefinition(definition)
-			if adminTool && executable {
+			if adminTool && status.Executable {
 				adminToolsHidden = true
 			}
-			if !definition.AvailableTo(request.Access) || !executable || adminTool {
+			if !status.Available() {
+				disabledNativeStatuses = append(disabledNativeStatuses, status)
+				continue
+			}
+			if adminTool {
 				continue
 			}
 			nativeDefinitions[definition.Name] = definition
@@ -2064,6 +2300,7 @@ func (e *Executor) listUserCapabilities(ctx context.Context, request ExecutionRe
 	}
 
 	nativeCapabilities := userNativeCapabilities(nativeDefinitions)
+	disabledCapabilities := userDisabledNativeCapabilities(disabledNativeStatuses, nativeDefinitions)
 	composedCapabilities := []map[string]any{}
 	if (kind == "all" || kind == "composed") && e.dynamic != nil {
 		dynamicTools, err := e.dynamic.OpenRouterTools(ctx, DynamicToolListRequest{
@@ -2086,6 +2323,7 @@ func (e *Executor) listUserCapabilities(ctx context.Context, request ExecutionRe
 				"name":        name,
 				"label":       name,
 				"description": firstNonEmpty(strings.TrimSpace(tool.Function.Description), "Run an approved custom Panda workflow."),
+				"status":      "enabled",
 			})
 		}
 	}
@@ -2103,17 +2341,20 @@ func (e *Executor) listUserCapabilities(ctx context.Context, request ExecutionRe
 	})
 
 	response := map[string]any{
-		"tools":           items,
-		"capabilities":    items,
-		"count":           len(items),
-		"native_count":    len(nativeCapabilities),
-		"composed_count":  len(composedCapabilities),
-		"kind":            kind,
-		"policy":          normalizeToolPolicy(request.Access.Policy),
-		"access_level":    "user",
-		"presentation":    "capabilities",
-		"invocation_type": firstNonEmpty(request.InvocationType, "chat_tool"),
-		"note":            "This user-facing list summarizes what Panda can help with in this context. Low-level built-in tool names, schemas, and admin-only details are hidden from non-admin users.",
+		"tools":                 items,
+		"capabilities":          items,
+		"count":                 len(items),
+		"native_count":          len(nativeCapabilities),
+		"composed_count":        len(composedCapabilities),
+		"disabled_capabilities": disabledCapabilities,
+		"disabled_count":        len(disabledCapabilities),
+		"kind":                  kind,
+		"policy":                normalizeToolPolicy(request.Access.Policy),
+		"access_level":          "user",
+		"presentation":          "capabilities",
+		"invocation_type":       firstNonEmpty(request.InvocationType, "chat_tool"),
+		"note":                  "This user-facing list summarizes what Panda can help with in this context. disabled_capabilities uses exact reason labels: feature_disabled, missing_permission, tool_access_restricted, tool_policy_disabled, or integration_not_configured. Do not describe feature_disabled or missing_permission as guild policy. Low-level built-in tool names, schemas, and admin-only details are hidden from non-admin users.",
+		"presentation_guidance": "For broad capability questions, summarize enabled capabilities and omit a disabled section. Use disabled_capabilities only when the user asks what is blocked or asks about a specific unavailable capability.",
 	}
 	if includeSchemas {
 		response["schemas_hidden"] = true
@@ -2129,6 +2370,318 @@ func (e *Executor) listUserCapabilities(ctx context.Context, request ExecutionRe
 	return response, nil
 }
 
+type nativeToolAvailability struct {
+	Definition Definition
+	Executable bool
+	Reasons    []string
+}
+
+func (status nativeToolAvailability) Available() bool {
+	return status.Executable && len(status.Reasons) == 0
+}
+
+func (e *Executor) nativeToolAvailability(definition Definition, access ToolAccess) nativeToolAvailability {
+	executable := e.canExecute(definition.Name)
+	reasons := append([]string(nil), definition.UnavailableReasons(access)...)
+	if !executable {
+		reasons = append(reasons, ToolUnavailableIntegrationDisabled)
+	}
+	return nativeToolAvailability{
+		Definition: definition,
+		Executable: executable,
+		Reasons:    uniqueStrings(reasons),
+	}
+}
+
+func disabledNativeToolItem(status nativeToolAvailability, access ToolAccess, includeSchemas bool) map[string]any {
+	definition := status.Definition
+	item := map[string]any{
+		"kind":                  "native",
+		"name":                  definition.ModelName(),
+		"native_name":           definition.Name,
+		"wire_name":             definition.ModelName(),
+		"description":           definition.Description,
+		"tool_class":            definition.ToolClass,
+		"required_permission":   definition.RequiredPermission,
+		"alternate_permissions": definition.AlternatePermissions,
+		"requires_confirmation": definition.RequiresConfirmation,
+		"supports_dry_run":      definition.SupportsDryRun,
+		"max_limit":             definition.MaxLimit,
+		"discord_permissions":   definition.DiscordPermissions,
+		"available_in_chat":     definition.IncludeInModelContext,
+		"status":                "disabled",
+		"disabled_reasons":      status.Reasons,
+		"reason_details":        toolUnavailableReasonDetails(definition, access, status.Reasons),
+		"configured_runtime":    status.Executable,
+	}
+	if definition.FeatureID != "" {
+		item["feature_id"] = definition.FeatureID
+		if feature, ok := features.Lookup(definition.FeatureID); ok {
+			item["feature_label"] = feature.Label
+		}
+	}
+	if includeSchemas {
+		item["input_schema"] = definition.InputSchema
+		item["output_schema"] = definition.OutputSchema
+	}
+	return item
+}
+
+func canSeeDisabledToolDetails(access ToolAccess, definition Definition) bool {
+	if definition.ToolClass == ToolClassOwnerOps && !access.HasAnyPermission(admin.PermissionOwnerOps) {
+		return false
+	}
+	return true
+}
+
+func toolUnavailableReasonDetails(definition Definition, access ToolAccess, reasons []string) map[string]any {
+	details := map[string]any{}
+	for _, reason := range reasons {
+		switch reason {
+		case ToolUnavailableFeatureDisabled:
+			feature := map[string]any{
+				"feature_id": definition.FeatureID,
+			}
+			if catalogFeature, ok := features.Lookup(definition.FeatureID); ok {
+				feature["label"] = catalogFeature.Label
+				feature["description"] = catalogFeature.Description
+			}
+			details[reason] = feature
+		case ToolUnavailableMissingPermission:
+			details[reason] = map[string]any{
+				"required_permission":   definition.RequiredPermission,
+				"alternate_permissions": definition.AlternatePermissions,
+			}
+		case ToolUnavailableAccessRestricted:
+			details[reason] = map[string]any{
+				"native_name": definition.Name,
+				"wire_name":   definition.ModelName(),
+				"notice":      "Role tool access denies this native tool in the current context.",
+			}
+		case ToolUnavailablePolicyDisabled:
+			details[reason] = map[string]any{
+				"policy": normalizeToolPolicy(access.Policy),
+				"notice": "The current guild tool policy does not allow this tool class.",
+			}
+		case ToolUnavailableIntegrationDisabled:
+			details[reason] = map[string]any{
+				"integration": integrationLabelForDefinition(definition),
+				"notice":      "This bot runtime does not have the required service or manager configured.",
+			}
+		}
+	}
+	return details
+}
+
+func userDisabledNativeCapabilities(statuses []nativeToolAvailability, enabledDefinitions map[string]Definition) []map[string]any {
+	byFeature := map[string]*disabledCapabilityAggregate{}
+	for _, status := range statuses {
+		definition := status.Definition
+		if len(status.Reasons) == 0 || !isUserFacingDisabledDefinition(definition) {
+			continue
+		}
+		feature, ok := features.Lookup(definition.FeatureID)
+		if !ok || !feature.Public {
+			continue
+		}
+		aggregate := byFeature[feature.ID]
+		if aggregate == nil {
+			aggregate = &disabledCapabilityAggregate{
+				feature:            feature,
+				reasons:            map[string]struct{}{},
+				discordPermissions: map[string]struct{}{},
+			}
+			byFeature[feature.ID] = aggregate
+		}
+		aggregate.blockedTools++
+		for _, reason := range status.Reasons {
+			aggregate.reasons[reason] = struct{}{}
+		}
+		for _, permission := range discordPermissionsForDefinition(definition) {
+			if permission = strings.TrimSpace(permission); permission != "" {
+				aggregate.discordPermissions[permission] = struct{}{}
+			}
+		}
+	}
+	if len(byFeature) == 0 {
+		return nil
+	}
+	enabledFeatures := map[string]struct{}{}
+	for _, definition := range enabledDefinitions {
+		if definition.FeatureID != "" {
+			enabledFeatures[definition.FeatureID] = struct{}{}
+		}
+	}
+	items := make([]map[string]any, 0, len(byFeature))
+	for _, aggregate := range byFeature {
+		reasons := keysSorted(aggregate.reasons)
+		status := "disabled"
+		if _, ok := enabledFeatures[aggregate.feature.ID]; ok {
+			status = "partially_available"
+		}
+		item := map[string]any{
+			"kind":             "disabled_capability",
+			"name":             aggregate.feature.ID,
+			"label":            aggregate.feature.Label,
+			"description":      aggregate.feature.Description,
+			"feature_id":       aggregate.feature.ID,
+			"status":           status,
+			"disabled_reasons": reasons,
+			"reason_details":   userCapabilityReasonDetails(reasons),
+			"blocked_tools":    aggregate.blockedTools,
+		}
+		if len(aggregate.discordPermissions) > 0 {
+			item["required_discord_permissions"] = keysSorted(aggregate.discordPermissions)
+			item["discord_permission_notice"] = discordPermissionNotice()
+		}
+		items = append(items, item)
+	}
+	sort.Slice(items, func(i, j int) bool {
+		left := fmt.Sprint(items[i]["label"])
+		right := fmt.Sprint(items[j]["label"])
+		return left < right
+	})
+	return items
+}
+
+type disabledCapabilityAggregate struct {
+	feature            features.Feature
+	reasons            map[string]struct{}
+	discordPermissions map[string]struct{}
+	blockedTools       int
+}
+
+func isUserFacingDisabledDefinition(definition Definition) bool {
+	if definition.FeatureID == "" || definition.ToolClass == ToolClassOwnerOps {
+		return false
+	}
+	feature, ok := features.Lookup(definition.FeatureID)
+	return ok && feature.Public
+}
+
+func userCapabilityReasonDetails(reasons []string) map[string]string {
+	details := map[string]string{}
+	for _, reason := range reasons {
+		switch reason {
+		case ToolUnavailableFeatureDisabled:
+			details[reason] = "The server feature is not enabled."
+		case ToolUnavailableMissingPermission:
+			details[reason] = "The current user or role does not have the required Panda permission."
+		case ToolUnavailableAccessRestricted:
+			details[reason] = "Role tool access denies the underlying tool."
+		case ToolUnavailablePolicyDisabled:
+			details[reason] = "The current guild tool policy does not allow this capability."
+		case ToolUnavailableIntegrationDisabled:
+			details[reason] = "The bot runtime is missing the required configured service or integration."
+		}
+	}
+	return details
+}
+
+func integrationLabelForDefinition(definition Definition) string {
+	switch definition.Name {
+	case "discord.fetch_messages", "discord.fetch_message":
+		return "Discord context reader or Discord tool provider"
+	case "search_knowledge":
+		return "knowledge search service"
+	case "web.search":
+		return "Brave Search web searcher"
+	case "summarize_text_file":
+		return "attachment reader"
+	case "read_config":
+		return "guild config reader"
+	case "manage_memory_consent", "panda.usage_report", "panda.manage_soul", "panda.manage_prompt", "panda.manage_budget_limit", "panda.manage_knowledge", "panda.manage_role_permission", "panda.manage_tool_access", "panda.manage_channel_rule":
+		return "admin operations service"
+	case "panda.manage_member_role":
+		return "Discord tool provider"
+	case "panda.manage_composed_tool":
+		return "composed-tool manager"
+	case "panda.manage_schedule":
+		return "schedule manager"
+	case "panda.manage_reminder":
+		return "reminder manager"
+	case "panda.manage_music":
+		return "music manager"
+	case "panda.manage_ops":
+		return "owner ops manager"
+	case "draft_moderator_note", "generate_workflow_json", "panda.list_tools", "panda.manage_discord_role":
+		return "built in"
+	default:
+		if strings.HasPrefix(definition.Name, "discord.") {
+			return "Discord tool provider"
+		}
+		return "runtime service"
+	}
+}
+
+func uniqueStrings(values []string) []string {
+	seen := map[string]struct{}{}
+	result := []string{}
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		result = append(result, value)
+	}
+	return result
+}
+
+func keysSorted(values map[string]struct{}) []string {
+	result := make([]string, 0, len(values))
+	for value := range values {
+		result = append(result, value)
+	}
+	sort.Strings(result)
+	return result
+}
+
+func discordPermissionsForDefinitions(definitions map[string]Definition, names ...string) []string {
+	permissions := map[string]struct{}{}
+	for _, name := range names {
+		definition, ok := definitions[name]
+		if !ok {
+			continue
+		}
+		addDiscordPermissions(permissions, definition)
+	}
+	return keysSorted(permissions)
+}
+
+func discordPermissionsForDefinition(definition Definition) []string {
+	permissions := map[string]struct{}{}
+	addDiscordPermissions(permissions, definition)
+	return keysSorted(permissions)
+}
+
+func addDiscordPermissions(permissions map[string]struct{}, definition Definition) {
+	for _, permission := range definition.DiscordPermissions {
+		if permission = strings.TrimSpace(permission); permission != "" {
+			permissions[permission] = struct{}{}
+		}
+	}
+	if definition.FeatureID == "" {
+		return
+	}
+	feature, ok := features.Lookup(definition.FeatureID)
+	if !ok {
+		return
+	}
+	for _, permission := range feature.DiscordPermissions {
+		if permission = strings.TrimSpace(permission); permission != "" {
+			permissions[permission] = struct{}{}
+		}
+	}
+}
+
+func discordPermissionNotice() string {
+	return "These Discord permissions are required at execution time; channel overrides or role hierarchy can still prevent a Discord action even when Panda's feature and tool gates are enabled."
+}
+
 func userNativeCapabilities(definitions map[string]Definition) []map[string]any {
 	has := func(names ...string) bool {
 		for _, name := range names {
@@ -2139,21 +2692,27 @@ func userNativeCapabilities(definitions map[string]Definition) []map[string]any 
 		return false
 	}
 	capabilities := []map[string]any{}
-	add := func(name, label, description string, requiresConfirmation bool) {
-		capabilities = append(capabilities, map[string]any{
+	add := func(name, label, description string, requiresConfirmation bool, toolNames ...string) {
+		item := map[string]any{
 			"kind":                  "native_capability",
 			"name":                  name,
 			"label":                 label,
 			"description":           description,
 			"requires_confirmation": requiresConfirmation,
-		})
+			"status":                "enabled",
+		}
+		if permissions := discordPermissionsForDefinitions(definitions, toolNames...); len(permissions) > 0 {
+			item["required_discord_permissions"] = permissions
+			item["discord_permission_notice"] = discordPermissionNotice()
+		}
+		capabilities = append(capabilities, item)
 	}
 
 	if has("discord.fetch_message", "discord.fetch_messages", "discord.fetch_thread_context", "discord.fetch_reply_chain", "discord.channel_activity_summary") {
-		add("answer_from_visible_discord_context", "Answer using visible Discord context", "Read or summarize recent messages, reply chains, and thread context Panda can see when needed.", false)
+		add("answer_from_visible_discord_context", "Answer using visible Discord context", "Read or summarize recent messages, reply chains, and thread context Panda can see when needed.", false, "discord.fetch_message", "discord.fetch_messages", "discord.fetch_thread_context", "discord.fetch_reply_chain", "discord.channel_activity_summary")
 	}
 	if has("discord.get_guild", "discord.list_channels", "discord.get_channel", "discord.list_roles", "discord.get_role", "discord.get_member", "discord.list_pins", "discord.list_active_threads", "discord.list_archived_threads", "discord.list_scheduled_events", "discord.list_emojis", "discord.list_stickers", "discord.list_soundboard_sounds") {
-		add("look_up_server_context", "Look up server context", "Use visible channel, role, member, pin, thread, event, emoji, sticker, or soundboard metadata to answer questions.", false)
+		add("look_up_server_context", "Look up server context", "Use visible channel, role, member, pin, thread, event, emoji, sticker, or soundboard metadata to answer questions.", false, "discord.get_guild", "discord.list_channels", "discord.get_channel", "discord.list_roles", "discord.get_role", "discord.get_member", "discord.list_pins", "discord.list_active_threads", "discord.list_archived_threads", "discord.list_scheduled_events", "discord.list_emojis", "discord.list_stickers", "discord.list_soundboard_sounds")
 	}
 	if has("web.search") {
 		add("search_the_web", "Search the web", "Look up current public information and answer with source links.", false)
@@ -2171,42 +2730,42 @@ func userNativeCapabilities(definitions map[string]Definition) []map[string]any 
 		add("draft_workflow_json", "Draft workflow JSON", "Generate structured workflow JSON without taking action.", false)
 	}
 	if has("discord.create_thread") {
-		add("start_threads_with_confirmation", "Start threads with confirmation", "Prepare a new Discord thread from a channel or message, then wait for explicit confirmation before creating it.", true)
+		add("start_threads_with_confirmation", "Start threads with confirmation", "Prepare a new Discord thread from a channel or message, then wait for explicit confirmation before creating it.", true, "discord.create_thread")
 	}
 	if has("discord.send_message", "discord.reply_message") {
-		add("send_messages_with_confirmation", "Send or reply with confirmation", "Prepare a Panda message or reply, then wait for explicit confirmation before posting.", true)
+		add("send_messages_with_confirmation", "Send or reply with confirmation", "Prepare a Panda message or reply, then wait for explicit confirmation before posting.", true, "discord.send_message", "discord.reply_message")
 	}
 	if has("discord.edit_own_message", "discord.delete_own_message") {
-		add("manage_panda_messages_with_confirmation", "Manage Panda's own messages with confirmation", "Prepare edits or deletions for Panda-authored messages only, then wait for explicit confirmation.", true)
+		add("manage_panda_messages_with_confirmation", "Manage Panda's own messages with confirmation", "Prepare edits or deletions for Panda-authored messages only, then wait for explicit confirmation.", true, "discord.edit_own_message", "discord.delete_own_message")
 	}
 	if has("discord.create_poll", "discord.end_poll") {
-		add("native_discord_polls", "Create and manage native Discord polls", "Create native Discord polls or prepare closing Panda-authored polls.", true)
+		add("native_discord_polls", "Create and manage native Discord polls", "Create native Discord polls or prepare closing Panda-authored polls.", true, "discord.create_poll", "discord.end_poll")
 	} else if has("discord.get_poll_answer_voters") {
-		add("inspect_native_discord_poll_voters", "Inspect native Discord poll voters", "List users who voted for a visible native Discord poll answer.", false)
+		add("inspect_native_discord_poll_voters", "Inspect native Discord poll voters", "List users who voted for a visible native Discord poll answer.", false, "discord.get_poll_answer_voters")
 	}
 	if has("discord.add_reaction", "discord.remove_own_reaction") {
-		add("manage_reactions_with_confirmation", "Manage reactions with confirmation", "Prepare adding or removing Panda's own reaction on visible messages, then wait for explicit confirmation.", true)
+		add("manage_reactions_with_confirmation", "Manage reactions with confirmation", "Prepare adding or removing Panda's own reaction on visible messages, then wait for explicit confirmation.", true, "discord.add_reaction", "discord.remove_own_reaction")
 	}
 	if has("discord.pin_message", "discord.unpin_message") {
-		add("manage_pins_with_confirmation", "Manage pins with confirmation", "Prepare pinning or unpinning a visible message, then wait for explicit confirmation.", true)
+		add("manage_pins_with_confirmation", "Manage pins with confirmation", "Prepare pinning or unpinning a visible message, then wait for explicit confirmation.", true, "discord.pin_message", "discord.unpin_message")
 	}
 	if has("discord.rename_thread", "discord.archive_thread", "discord.add_thread_member", "discord.remove_thread_member") {
-		add("manage_threads_with_confirmation", "Manage threads with confirmation", "Prepare thread renames, archive changes, or member changes, then wait for explicit confirmation.", true)
+		add("manage_threads_with_confirmation", "Manage threads with confirmation", "Prepare thread renames, archive changes, or member changes, then wait for explicit confirmation.", true, "discord.rename_thread", "discord.archive_thread", "discord.add_thread_member", "discord.remove_thread_member")
 	}
 	if has("discord.timeout_member", "discord.remove_timeout", "discord.kick_member", "discord.ban_member", "discord.unban_member", "discord.bulk_ban_members", "discord.add_member_role", "discord.remove_member_role", "discord.set_member_nick", "discord.delete_message", "discord.bulk_delete_messages", "discord.set_channel_slowmode", "discord.lock_thread") {
-		add("moderation_actions_with_confirmation", "Moderation actions with confirmation", "Prepare configured moderation actions, then wait for explicit confirmation before execution.", true)
+		add("moderation_actions_with_confirmation", "Moderation actions with confirmation", "Prepare configured moderation actions, then wait for explicit confirmation before execution.", true, "discord.timeout_member", "discord.remove_timeout", "discord.kick_member", "discord.ban_member", "discord.unban_member", "discord.bulk_ban_members", "discord.add_member_role", "discord.remove_member_role", "discord.set_member_nick", "discord.delete_message", "discord.bulk_delete_messages", "discord.set_channel_slowmode", "discord.lock_thread")
 	}
 	if has("discord.create_role", "panda.manage_discord_role") {
-		add("create_roles_with_confirmation", "Create roles with confirmation", "Prepare new Discord roles with no elevated permissions, then wait for explicit confirmation. Execution requires Panda's bot role to have Manage Roles and sufficient role hierarchy.", true)
+		add("create_roles_with_confirmation", "Create roles with confirmation", "Prepare new Discord roles with no elevated permissions, then wait for explicit confirmation. Execution requires Panda's bot role to have Manage Roles and sufficient role hierarchy.", true, "discord.create_role", "panda.manage_discord_role")
 	}
 	if has("panda.manage_schedule") {
 		add("manage_composed_schedules", "Manage composed tool schedules", "Create, list, or cancel scheduled runs for approved composed tools.", false)
 	}
 	if has("panda.manage_reminder") {
-		add("manage_reminders", "Manage reminders", "Create, list, cancel, complete, or snooze personal reminders.", false)
+		add("manage_reminders", "Manage reminders", "Create, list, cancel, complete, or snooze personal reminders.", false, "panda.manage_reminder")
 	}
 	if has("panda.manage_music") {
-		add("manage_music", "Manage music", "Play music, inspect the queue, and control playback from natural requests.", false)
+		add("manage_music", "Manage music", "Play music, inspect the queue, and control playback from natural requests.", false, "panda.manage_music")
 	}
 	if has("panda.manage_ops") {
 		add("owner_operations", "Owner operations", "Read operational status or prepare drain, resume, and incident-mode changes for confirmation.", true)
@@ -2218,10 +2777,13 @@ func userNativeCapabilities(definitions map[string]Definition) []map[string]any 
 }
 
 func hiddenAdminToolsNotice() string {
-	return "Additional admin-only tools exist, but their names and details are hidden unless your role can use them."
+	return "Additional admin-only tool schemas and low-level details are hidden unless your role can use them; public capability status still shows when admin features are unavailable."
 }
 
 func canSeeAdminToolDetails(access ToolAccess) bool {
+	if access.HasGuildControl {
+		return true
+	}
 	for _, permission := range []string{
 		admin.PermissionAdminConfigRead,
 		admin.PermissionAdminConfigWrite,
@@ -2647,6 +3209,8 @@ func normalizeReminderManagementAction(action string) string {
 
 func normalizeMusicManagementAction(action string) string {
 	switch strings.ToLower(strings.TrimSpace(action)) {
+	case "join", "connect", "join_voice", "connect_voice", "join_vc", "vc":
+		return "join"
 	case "play", "queue", "add":
 		return "play"
 	case "pause":

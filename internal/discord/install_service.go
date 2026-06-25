@@ -213,7 +213,7 @@ func (s *InstallService) CreateInstallIntent(ctx context.Context, request Create
 	if strings.TrimSpace(s.redirectURI) == "" {
 		return CreateInstallIntentResult{}, errors.New("discord install redirect uri is not configured")
 	}
-	selection, err := features.Calculate(request.FeatureIDs, true)
+	selection, err := features.Calculate(installFeatureIDsOrDefault(request.FeatureIDs), true)
 	if err != nil {
 		return CreateInstallIntentResult{}, err
 	}
@@ -271,6 +271,15 @@ func (s *InstallService) CreateInstallIntent(ctx context.Context, request Create
 		ExpiresAt:    intent.ExpiresAt,
 		Selection:    selection,
 	}, nil
+}
+
+func installFeatureIDsOrDefault(featureIDs []string) []string {
+	for _, featureID := range featureIDs {
+		if strings.TrimSpace(featureID) != "" {
+			return featureIDs
+		}
+	}
+	return features.DefaultInstallPreset()
 }
 
 func (s *InstallService) HandleOAuthCallback(ctx context.Context, request InstallCallbackRequest) (InstallCallbackResult, error) {

@@ -222,6 +222,38 @@ func TestInstallServiceBindsFeaturesFromOAuthAndVerifiedBotGuild(t *testing.T) {
 	assertAuditAction(t, db, "guild_features.install_bound")
 }
 
+func TestInstallServiceDefaultsEmptyFeatureSelectionToDefaultPreset(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(ctx, "file::memory:?cache=shared")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer db.Close()
+
+	service := NewInstallService(repository.NewGuildRepository(db.DB), repository.NewAuditRepository(db.DB)).
+		WithFeatureRepository(repository.NewFeatureRepository(db.DB)).
+		WithInstallConfig(InstallConfig{
+			ApplicationID: "app-1",
+			RedirectURI:   "https://api.example.test/discord/install/callback",
+		})
+
+	intent, err := service.CreateInstallIntent(ctx, CreateInstallIntentRequest{Source: "landing"})
+	if err != nil {
+		t.Fatalf("CreateInstallIntent: %v", err)
+	}
+	defaults := featurecatalog.FeatureSet(featurecatalog.DefaultInstallPreset())
+	selected := featurecatalog.FeatureSet(intent.Selection.SelectedFeatureIDs)
+	expanded := featurecatalog.FeatureSet(intent.Selection.ExpandedFeatureIDs)
+	for _, want := range []string{featurecatalog.AssistantChat, featurecatalog.WebSearch, featurecatalog.ComposedTools, featurecatalog.DiscordMessages} {
+		if !featurecatalog.Has(defaults, want) || !featurecatalog.Has(selected, want) || !featurecatalog.Has(expanded, want) {
+			t.Fatalf("expected default install selection to include %s, selected=%+v expanded=%+v defaults=%+v", want, intent.Selection.SelectedFeatureIDs, intent.Selection.ExpandedFeatureIDs, featurecatalog.DefaultInstallPreset())
+		}
+	}
+	if intent.Selection.DiscordPermissionBitfield == "0" || !strings.Contains(intent.AuthorizeURL, "permissions=") {
+		t.Fatalf("expected default install to request Discord permissions, selection=%+v url=%s", intent.Selection, intent.AuthorizeURL)
+	}
+}
+
 func TestInstallServiceKeepsOAuthErrorWhenGuildCannotBeVerified(t *testing.T) {
 	ctx := context.Background()
 	db, err := store.Open(ctx, "file::memory:?cache=shared")

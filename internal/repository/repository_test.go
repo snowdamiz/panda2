@@ -178,6 +178,60 @@ func TestBillingUsageReservationCreatesInitialPeriodWithoutRecordNotFoundLog(t *
 	}
 }
 
+func TestChannelRuleMissingReadDoesNotLogRecordNotFound(t *testing.T) {
+	ctx := context.Background()
+	db, logs, cleanup := newRepositoryGormWithLogBuffer(t)
+	defer cleanup()
+
+	repo := NewAccessRepository(db)
+	if _, ok, err := repo.ChannelRule(ctx, "guild-1", "channel-1"); err != nil || ok {
+		t.Fatalf("expected missing channel rule without error, ok=%t err=%v", ok, err)
+	}
+	if strings.Contains(logs.String(), "record not found") {
+		t.Fatalf("missing channel rule should not be logged as record not found:\n%s", logs.String())
+	}
+}
+
+func TestConversationGetOrCreateDoesNotLogRecordNotFound(t *testing.T) {
+	ctx := context.Background()
+	db, logs, cleanup := newRepositoryGormWithLogBuffer(t)
+	defer cleanup()
+
+	repo := NewConversationRepository(db)
+	conversation, err := repo.GetOrCreateActive(ctx, ConversationKey{
+		GuildID:     "guild-1",
+		ChannelID:   "channel-1",
+		OwnerUserID: "user-1",
+	})
+	if err != nil {
+		t.Fatalf("GetOrCreateActive: %v", err)
+	}
+	if conversation.GuildID != "guild-1" || conversation.ChannelID != "channel-1" {
+		t.Fatalf("unexpected conversation: %+v", conversation)
+	}
+	if strings.Contains(logs.String(), "record not found") {
+		t.Fatalf("conversation creation should not be logged as record not found:\n%s", logs.String())
+	}
+}
+
+func TestMusicEnsureSettingsDoesNotLogRecordNotFound(t *testing.T) {
+	ctx := context.Background()
+	db, logs, cleanup := newRepositoryGormWithLogBuffer(t)
+	defer cleanup()
+
+	repo := NewMusicRepository(db)
+	settings, err := repo.EnsureSettings(ctx, "guild-1")
+	if err != nil {
+		t.Fatalf("EnsureSettings: %v", err)
+	}
+	if settings.GuildID != "guild-1" || settings.DefaultVolume != 100 {
+		t.Fatalf("unexpected music settings: %+v", settings)
+	}
+	if strings.Contains(logs.String(), "record not found") {
+		t.Fatalf("music settings creation should not be logged as record not found:\n%s", logs.String())
+	}
+}
+
 func newBillingRepositoryWithLogBuffer(t *testing.T) (*BillingRepository, *bytes.Buffer, func()) {
 	t.Helper()
 	db, logs, cleanup := newRepositoryGormWithLogBuffer(t)

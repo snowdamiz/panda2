@@ -76,6 +76,8 @@ func (m *Manager) Handle(ctx context.Context, request Request) (Response, error)
 		return Response{}, ErrMissingGuild
 	}
 	switch request.Intent.Action {
+	case ActionJoin:
+		return m.join(ctx, request)
 	case ActionPlay:
 		return m.play(ctx, request)
 	case ActionPause:
@@ -198,6 +200,22 @@ func (m *Manager) UpdateVoiceOccupancy(guildID string, voiceChannelID string, ha
 		return
 	}
 	player.scheduleEmptyVoiceDisconnect(voiceChannelID, m.emptyVoiceDisconnectWait)
+}
+
+func (m *Manager) join(ctx context.Context, request Request) (Response, error) {
+	voiceChannelID := strings.TrimSpace(request.VoiceChannelID)
+	if voiceChannelID == "" {
+		return Response{}, ErrMissingVoice
+	}
+	if m.connector == nil {
+		return Response{}, fmt.Errorf("%w: voice connector is not configured", ErrVoiceConnection)
+	}
+	player := m.player(request.GuildID)
+	response, err := player.join(ctx, voiceChannelID)
+	if err != nil {
+		m.logger.Warn("music voice join failed", slog.Any("err", err), slog.String("guild_id", request.GuildID), slog.String("voice_channel_id", voiceChannelID))
+	}
+	return response, err
 }
 
 func (m *Manager) play(ctx context.Context, request Request) (Response, error) {
@@ -492,6 +510,50 @@ type guildPlayer struct {
 }
 
 type emptyDisconnectToken struct{}
+
+func (p *guildPlayer) join(ctx context.Context, voiceChannelID string) (Response, error) {
+	voiceChannelID = strings.TrimSpace(voiceChannelID)
+	if voiceChannelID == "" {
+		return Response{}, ErrMissingVoice
+	}
+
+	p.mu.Lock()
+	if p.playing && p.voiceChannelID != "" && p.voiceChannelID != voiceChannelID {
+		p.mu.Unlock()
+		return Response{}, ErrDifferentVoice
+	}
+	if p.session != nil && p.voiceChannelID == voiceChannelID {
+		p.mu.Unlock()
+		return musicResponse("Connected to voice", fmt.Sprintf("I'm already in <#%s>.", voiceChannelID)), nil
+	}
+	idleSession := p.session
+	closeIdleSession := idleSession != nil && !p.playing
+	if closeIdleSession {
+		p.session = nil
+		p.voiceChannelID = ""
+	}
+	p.mu.Unlock()
+
+	if closeIdleSession {
+		idleSession.Close(ctx)
+	}
+	session, err := p.manager.connector.Connect(ctx, p.guildID, voiceChannelID)
+	if err != nil {
+		p.manager.removePlayer(p.guildID, p)
+		return Response{}, err
+	}
+	if session == nil {
+		p.manager.removePlayer(p.guildID, p)
+		return Response{}, fmt.Errorf("%w: voice connector returned no session", ErrVoiceConnection)
+	}
+
+	p.mu.Lock()
+	p.session = session
+	p.voiceChannelID = firstNonEmpty(session.ChannelID(), voiceChannelID)
+	p.stopping = false
+	p.mu.Unlock()
+	return musicResponse("Connected to voice", fmt.Sprintf("Joined <#%s>.", voiceChannelID)), nil
+}
 
 func (p *guildPlayer) enqueue(ctx context.Context, track Track, voiceChannelID string) (Response, error) {
 	p.mu.Lock()
@@ -1142,7 +1204,7 @@ func requesterSuffix(userID string) string {
 }
 
 func controlsMessage() string {
-	return "Music controls: `play <song>`, `pause`, `resume`, `vote skip`, `skip`, `stop`, `queue`, `remove <#>`, `move <#> to <#>`, `shuffle`, `loop track|queue|off`, `save playlist <name>`, `load playlist <name>`, `volume <1-200>`, `clear queue`, and `now playing`."
+	return "Music controls: `join my VC`, `play <song>`, `pause`, `resume`, `vote skip`, `skip`, `stop`, `queue`, `remove <#>`, `move <#> to <#>`, `shuffle`, `loop track|queue|off`, `save playlist <name>`, `load playlist <name>`, `volume <1-200>`, `clear queue`, and `now playing`."
 }
 
 func musicResponse(title, content string) Response {

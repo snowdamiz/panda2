@@ -7,11 +7,12 @@ import (
 )
 
 const (
-	PlanTrial    = "trial"
-	PlanStarter  = "starter"
-	PlanPlus     = "plus"
-	PlanPro      = "pro"
-	PlanBusiness = "business"
+	PlanDevelopment = "development"
+	PlanTrial       = "trial"
+	PlanStarter     = "starter"
+	PlanPlus        = "plus"
+	PlanPro         = "pro"
+	PlanBusiness    = "business"
 
 	StatusTrialing  = "trialing"
 	StatusActive    = "active"
@@ -46,8 +47,12 @@ const (
 )
 
 const (
-	TrialDuration = 14 * 24 * time.Hour
-	GraceDuration = 3 * 24 * time.Hour
+	TrialDuration       = 14 * 24 * time.Hour
+	GraceDuration       = 3 * 24 * time.Hour
+	UnlimitedUsageLimit = int64(1 << 62)
+	TrialAIResponses    = 250
+	TrialWebSearches    = 20
+	TrialKnowledgeBytes = 25 * 1024 * 1024
 )
 
 type PlanLimits struct {
@@ -68,10 +73,10 @@ var planLimits = map[string]PlanLimits{
 		Plan:                  PlanTrial,
 		DisplayName:           "Trial",
 		PriceCents:            0,
-		AIResponses:           250,
-		WebSearches:           20,
-		KnowledgeStorageBytes: 25 * 1024 * 1024,
-		Schedules:             3,
+		AIResponses:           TrialAIResponses,
+		WebSearches:           TrialWebSearches,
+		KnowledgeStorageBytes: TrialKnowledgeBytes,
+		Schedules:             int(UnlimitedUsageLimit),
 		RetentionDays:         14,
 		MusicEnabled:          true,
 		PremiumToolsEnabled:   true,
@@ -202,10 +207,20 @@ func IncludedLimit(limits PlanLimits, metric string) int64 {
 }
 
 func FormatUsage(used, limit int64, metric string) string {
+	if unlimitedLimit(limit) {
+		if metric == MetricKnowledgeStorageByte {
+			return fmt.Sprintf("%s / unlimited", formatBytes(used))
+		}
+		return fmt.Sprintf("%d / unlimited", used)
+	}
 	if metric == MetricKnowledgeStorageByte {
 		return fmt.Sprintf("%s / %s", formatBytes(used), formatBytes(limit))
 	}
 	return fmt.Sprintf("%d / %d", used, limit)
+}
+
+func unlimitedLimit(limit int64) bool {
+	return limit >= UnlimitedUsageLimit
 }
 
 func formatBytes(value int64) string {

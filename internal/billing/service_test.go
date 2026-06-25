@@ -13,7 +13,7 @@ import (
 	storepkg "github.com/sn0w/panda2/internal/store"
 )
 
-func TestEnsureTrialMetersUsageAndDeniesOverQuota(t *testing.T) {
+func TestEnsureTrialKeepsUsageQuotaButAllowsFeatures(t *testing.T) {
 	ctx := context.Background()
 	service, database := newBillingTestService(t)
 	defer database.Close()
@@ -35,6 +35,12 @@ func TestEnsureTrialMetersUsageAndDeniesOverQuota(t *testing.T) {
 	if !entitlement.Plan.MusicEnabled || !entitlement.Plan.PremiumToolsEnabled {
 		t.Fatalf("trial entitlement should include all feature privileges: %+v", entitlement.Plan)
 	}
+	if entitlement.Plan.Schedules != int(UnlimitedUsageLimit) {
+		t.Fatalf("trial schedule feature should not be capacity-restricted: %+v", entitlement.Plan)
+	}
+	if entitlement.Plan.AIResponses != TrialAIResponses || entitlement.Plan.WebSearches != TrialWebSearches || entitlement.Plan.KnowledgeStorageBytes != TrialKnowledgeBytes {
+		t.Fatalf("trial entitlement should keep usage quotas: %+v", entitlement.Plan)
+	}
 
 	reservation, err := service.BeginUsage(ctx, "guild-1", MetricAIResponse, int64(entitlement.Plan.AIResponses))
 	if err != nil {
@@ -54,6 +60,68 @@ func TestEnsureTrialMetersUsageAndDeniesOverQuota(t *testing.T) {
 	}
 	if quotaErr.Metric != MetricAIResponse || quotaErr.Used != int64(entitlement.Plan.AIResponses) || quotaErr.Limit != int64(entitlement.Plan.AIResponses) {
 		t.Fatalf("unexpected quota error: %+v", quotaErr)
+	}
+}
+
+func TestResolveCreatesTrialWhenSubscriptionIsMissing(t *testing.T) {
+	ctx := context.Background()
+	service, database := newBillingTestService(t)
+	defer database.Close()
+
+	now := time.Date(2026, 6, 21, 12, 0, 0, 0, time.UTC)
+	service.SetClock(func() time.Time { return now })
+
+	entitlement, err := service.Resolve(ctx, "guild-new")
+	if err != nil {
+		t.Fatalf("Resolve missing subscription: %v", err)
+	}
+	if entitlement.Plan.Plan != PlanTrial || entitlement.Status != StatusTrialing || entitlement.TrialEndsAt == nil || !entitlement.TrialEndsAt.Equal(now.Add(TrialDuration)) {
+		t.Fatalf("expected new trial entitlement, got %+v", entitlement)
+	}
+	subscription, ok, err := repository.NewBillingRepository(database.DB).GetSubscriptionByGuild(ctx, "guild-new")
+	if err != nil || !ok {
+		t.Fatalf("expected subscription row: ok=%v err=%v", ok, err)
+	}
+	if subscription.PaymentProvider != ProviderTrial || subscription.BillingOwnerUserID != "" {
+		t.Fatalf("unexpected trial subscription row: %+v", subscription)
+	}
+}
+
+func TestDevelopmentBillingDoesNotRequireOrCreateSubscription(t *testing.T) {
+	ctx := context.Background()
+	database, err := storepkg.Open(ctx, filepath.Join(t.TempDir(), "billing.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer database.Close()
+	service := NewService(repository.NewBillingRepository(database.DB), Config{
+		Environment: "development",
+		PublicURL:   "http://localhost:4321",
+	})
+
+	entitlement, err := service.Resolve(ctx, "guild-dev")
+	if err != nil {
+		t.Fatalf("Resolve development entitlement: %v", err)
+	}
+	if entitlement.Plan.Plan != PlanDevelopment || !entitlement.CanUsePaidFeatures || entitlement.ReadOnly {
+		t.Fatalf("unexpected development entitlement: %+v", entitlement)
+	}
+	trial, err := service.EnsureTrial(ctx, TrialSeed{GuildID: "guild-dev", BillingOwnerUserID: "owner-1"})
+	if err != nil {
+		t.Fatalf("EnsureTrial in development: %v", err)
+	}
+	if trial.Plan.Plan != PlanDevelopment {
+		t.Fatalf("development EnsureTrial should return development entitlement, got %+v", trial)
+	}
+	reservation, err := service.BeginUsage(ctx, "guild-dev", MetricAIResponse, 1_000_000)
+	if err != nil {
+		t.Fatalf("BeginUsage in development: %v", err)
+	}
+	if reservation.ID != "" {
+		t.Fatalf("development usage should not create a reservation row: %+v", reservation)
+	}
+	if _, ok, err := repository.NewBillingRepository(database.DB).GetSubscriptionByGuild(ctx, "guild-dev"); err != nil || ok {
+		t.Fatalf("development should not create subscription rows: ok=%v err=%v", ok, err)
 	}
 }
 

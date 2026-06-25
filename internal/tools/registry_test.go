@@ -12,6 +12,7 @@ import (
 	"github.com/sn0w/panda2/internal/admin"
 	"github.com/sn0w/panda2/internal/billing"
 	contextsvc "github.com/sn0w/panda2/internal/context"
+	"github.com/sn0w/panda2/internal/features"
 	"github.com/sn0w/panda2/internal/llm"
 	"github.com/sn0w/panda2/internal/memory"
 	"github.com/sn0w/panda2/internal/repository"
@@ -63,6 +64,20 @@ func TestDefaultRegistryDefinitionsAreValid(t *testing.T) {
 	}
 	for name := range restored {
 		t.Fatalf("expected restored tool %s to be registered", name)
+	}
+}
+
+func TestMusicToolTimeoutCoversLookupVoiceAndDaveSetup(t *testing.T) {
+	registry, err := NewDefaultRegistry()
+	if err != nil {
+		t.Fatalf("NewDefaultRegistry: %v", err)
+	}
+	definition, ok := registry.Get("panda.manage_music")
+	if !ok {
+		t.Fatal("expected music tool definition")
+	}
+	if definition.Timeout < 75*time.Second {
+		t.Fatalf("music timeout should cover track lookup plus Discord voice/DAVE setup, got %s", definition.Timeout)
 	}
 }
 
@@ -211,6 +226,29 @@ func TestOpenRouterToolsAdminOnlyGatesRegularUsers(t *testing.T) {
 	regularNames := toolNames(regularTools)
 	if !regularNames["panda_list_tools"] || !regularNames["web_search"] || regularNames["discord_fetch_message"] {
 		t.Fatalf("admin_only should expose metadata and web search to regular users, got %+v", regularNames)
+	}
+	if regularNames["panda_manage_composed_tool"] || regularNames["panda_manage_schedule"] || regularNames["discord_send_message"] {
+		t.Fatalf("admin_only should keep regular users away from write/workflow tools without explicit access, got %+v", regularNames)
+	}
+
+	automationTools := registry.OpenRouterToolsForAccess(ToolAccess{
+		Policy: ToolPolicyAdminOnly,
+		Permissions: map[string]struct{}{
+			admin.PermissionAssistantUse:      {},
+			admin.PermissionToolComposeInvoke: {},
+		},
+		FeatureGateActive: true,
+		EnabledFeatures: map[string]struct{}{
+			features.AssistantChat: {},
+			features.ComposedTools: {},
+		},
+	})
+	automationNames := toolNames(automationTools)
+	if !automationNames["panda_manage_composed_tool"] || !automationNames["panda_manage_schedule"] {
+		t.Fatalf("admin_only should honor explicit composed automation access, got %+v", automationNames)
+	}
+	if automationNames["generate_workflow_json"] || automationNames["discord_send_message"] {
+		t.Fatalf("admin_only explicit automation access should stay narrow, got %+v", automationNames)
 	}
 
 	adminTools := registry.OpenRouterToolsForAccess(ToolAccess{
@@ -787,6 +825,43 @@ func TestExecutorRunsMusicManager(t *testing.T) {
 		t.Fatalf("missing music execution context: %+v", request)
 	}
 	if !strings.Contains(result.Message.Content, `"action":"play"`) || !strings.Contains(result.Message.Content, `"query":"lofi rain"`) {
+		t.Fatalf("unexpected music manager result: %+v", result)
+	}
+}
+
+func TestExecutorRunsMusicJoinWithoutSongQuery(t *testing.T) {
+	registry, err := NewDefaultRegistry()
+	if err != nil {
+		t.Fatalf("NewDefaultRegistry: %v", err)
+	}
+	manager := &fakeMusicManager{}
+	executor := NewExecutor(registry, nil, nil).WithMusicManager(manager)
+	result, err := executor.Execute(context.Background(), ExecutionRequest{
+		GuildID:        "guild-1",
+		ChannelID:      "text-1",
+		VoiceChannelID: "voice-1",
+		ActorID:        "user-1",
+		Access:         testAccess(ToolPolicyOff, admin.PermissionAssistantUse),
+		Call: llm.ToolCall{
+			ID:   "call-music-join",
+			Type: "function",
+			Function: llm.ToolCallFunction{
+				Name:      "panda_manage_music",
+				Arguments: `{"action":"connect"}`,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if len(manager.requests) != 1 {
+		t.Fatalf("expected music manager request, got %d", len(manager.requests))
+	}
+	request := manager.requests[0]
+	if request.Action != "join" || request.Query != "" || request.VoiceChannelID != "voice-1" {
+		t.Fatalf("unexpected music join request: %+v", request)
+	}
+	if !strings.Contains(result.Message.Content, `"action":"join"`) {
 		t.Fatalf("unexpected music manager result: %+v", result)
 	}
 }
@@ -1769,6 +1844,119 @@ func TestExecutorListToolsHidesAdminToolsFromNormalUsers(t *testing.T) {
 	}
 }
 
+func TestExecutorListToolsShowsDisabledUserCapabilityReasons(t *testing.T) {
+	registry, err := NewDefaultRegistry()
+	if err != nil {
+		t.Fatalf("NewDefaultRegistry: %v", err)
+	}
+	executor := NewExecutor(registry, nil, nil).WithDiscordToolProvider(&fakeDiscordProvider{})
+
+	result, err := executor.Execute(context.Background(), ExecutionRequest{
+		GuildID: "guild-1",
+		ActorID: "user-1",
+		Access:  testAccess(ToolPolicyReadOnly, admin.PermissionAssistantUse),
+		Call: llm.ToolCall{
+			ID:   "call-list-disabled-user",
+			Type: "function",
+			Function: llm.ToolCallFunction{
+				Name:      "panda_list_tools",
+				Arguments: `{}`,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	content := result.Message.Content
+	for _, want := range []string{`"disabled_capabilities"`, `"name":"web_search"`, `"label":"Web search"`, `"integration_not_configured"`, `"missing_permission"`, `"name":"discord_messages"`, `"tool_policy_disabled"`} {
+		if !strings.Contains(content, want) {
+			t.Fatalf("expected disabled user capabilities to contain %s, got %s", want, content)
+		}
+	}
+	for _, hidden := range []string{`"native_name":"web.search"`, `"required_permission":"assistant.web_search"`} {
+		if strings.Contains(content, hidden) {
+			t.Fatalf("normal user disabled capability leaked low-level detail %q: %s", hidden, content)
+		}
+	}
+}
+
+func TestExecutorListToolsShowsFeatureDisabledCapability(t *testing.T) {
+	registry, err := NewDefaultRegistry()
+	if err != nil {
+		t.Fatalf("NewDefaultRegistry: %v", err)
+	}
+	executor := NewExecutor(registry, nil, nil).WithWebSearcher(fakeWebSearch{})
+
+	result, err := executor.Execute(context.Background(), ExecutionRequest{
+		GuildID: "guild-1",
+		ActorID: "user-1",
+		Access: ToolAccess{
+			Policy:            ToolPolicyAssistive,
+			Permissions:       map[string]struct{}{admin.PermissionAssistantUse: {}, admin.PermissionAssistantWebSearch: {}},
+			FeatureGateActive: true,
+			EnabledFeatures:   map[string]struct{}{features.AssistantChat: {}},
+		},
+		Call: llm.ToolCall{
+			ID:   "call-list-feature-disabled",
+			Type: "function",
+			Function: llm.ToolCallFunction{
+				Name:      "panda_list_tools",
+				Arguments: `{}`,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	content := result.Message.Content
+	for _, want := range []string{`"name":"web_search"`, `"label":"Web search"`, `"feature_disabled"`} {
+		if !strings.Contains(content, want) {
+			t.Fatalf("expected feature-disabled capability to contain %s, got %s", want, content)
+		}
+	}
+	if strings.Contains(content, `"name":"search_the_web"`) {
+		t.Fatalf("web search should not be listed as enabled when the feature is disabled: %s", content)
+	}
+}
+
+func TestExecutorListToolsShowsRoleRestrictedCapability(t *testing.T) {
+	registry, err := NewDefaultRegistry()
+	if err != nil {
+		t.Fatalf("NewDefaultRegistry: %v", err)
+	}
+	executor := NewExecutor(registry, nil, nil).WithWebSearcher(fakeWebSearch{})
+
+	result, err := executor.Execute(context.Background(), ExecutionRequest{
+		GuildID: "guild-1",
+		ActorID: "user-1",
+		Access: ToolAccess{
+			Policy:          ToolPolicyAssistive,
+			Permissions:     map[string]struct{}{admin.PermissionAssistantUse: {}, admin.PermissionAssistantWebSearch: {}},
+			RestrictedTools: map[string]struct{}{"web.search": {}},
+		},
+		Call: llm.ToolCall{
+			ID:   "call-list-restricted",
+			Type: "function",
+			Function: llm.ToolCallFunction{
+				Name:      "panda_list_tools",
+				Arguments: `{}`,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	content := result.Message.Content
+	for _, want := range []string{`"name":"web_search"`, `"tool_access_restricted"`} {
+		if !strings.Contains(content, want) {
+			t.Fatalf("expected role-restricted capability to contain %s, got %s", want, content)
+		}
+	}
+	if strings.Contains(content, `"name":"search_the_web"`) {
+		t.Fatalf("web search should not be listed as enabled when role tool access restricts it: %s", content)
+	}
+}
+
 func TestExecutorListToolsShowsAdminToolsToAdmins(t *testing.T) {
 	registry, err := NewDefaultRegistry()
 	if err != nil {
@@ -1809,6 +1997,46 @@ func TestExecutorListToolsShowsAdminToolsToAdmins(t *testing.T) {
 	for _, hidden := range []string{"admin_tools_hidden", "super secret admin tools"} {
 		if strings.Contains(content, hidden) {
 			t.Fatalf("admin tool listing should not include hidden-admin marker %q: %s", hidden, content)
+		}
+	}
+}
+
+func TestExecutorListToolsShowsDisabledToolDetailsToAdmins(t *testing.T) {
+	registry, err := NewDefaultRegistry()
+	if err != nil {
+		t.Fatalf("NewDefaultRegistry: %v", err)
+	}
+	executor := NewExecutor(registry, nil, nil).WithWebSearcher(fakeWebSearch{})
+
+	result, err := executor.Execute(context.Background(), ExecutionRequest{
+		GuildID: "guild-1",
+		ActorID: "admin",
+		Access: ToolAccess{
+			Policy: ToolPolicyWriteConfirmed,
+			Permissions: map[string]struct{}{
+				admin.PermissionAssistantUse:       {},
+				admin.PermissionAssistantWebSearch: {},
+				admin.PermissionAdminConfigRead:    {},
+			},
+			FeatureGateActive: true,
+			EnabledFeatures:   map[string]struct{}{features.AssistantChat: {}, features.AdminSetup: {}},
+		},
+		Call: llm.ToolCall{
+			ID:   "call-list-admin-disabled",
+			Type: "function",
+			Function: llm.ToolCallFunction{
+				Name:      "panda_list_tools",
+				Arguments: `{}`,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	content := result.Message.Content
+	for _, want := range []string{`"disabled_tools"`, `"native_name":"web.search"`, `"feature_id":"web_search"`, `"feature_label":"Web search"`, `"feature_disabled"`} {
+		if !strings.Contains(content, want) {
+			t.Fatalf("expected admin disabled tool details to contain %s, got %s", want, content)
 		}
 	}
 }

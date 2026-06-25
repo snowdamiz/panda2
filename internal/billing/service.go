@@ -24,6 +24,7 @@ var (
 
 type Config struct {
 	PublicURL              string
+	Environment            string
 	SolanaRPCURL           string
 	SolanaCluster          string
 	SolanaTreasuryWallet   string
@@ -108,6 +109,7 @@ type CostEvent struct {
 
 func NewService(repo *repository.BillingRepository, cfg Config) *Service {
 	cfg.PublicURL = strings.TrimRight(strings.TrimSpace(cfg.PublicURL), "/")
+	cfg.Environment = strings.ToLower(strings.TrimSpace(cfg.Environment))
 	cfg.SolanaRPCURL = strings.TrimSpace(cfg.SolanaRPCURL)
 	cfg.SolanaCluster = strings.TrimSpace(cfg.SolanaCluster)
 	if cfg.SolanaCluster == "" {
@@ -151,6 +153,9 @@ func (s *Service) SetClock(now func() time.Time) {
 func (s *Service) EnsureTrial(ctx context.Context, seed TrialSeed) (Entitlement, error) {
 	if s == nil || s.repo == nil {
 		return Entitlement{}, ErrNoSubscription
+	}
+	if s.developmentMode() {
+		return s.developmentEntitlement(seed.GuildID), nil
 	}
 	now := s.currentTime()
 	if !seed.AuthorizedAt.IsZero() {
@@ -197,12 +202,18 @@ func (s *Service) Resolve(ctx context.Context, guildID string) (Entitlement, err
 	if s == nil || s.repo == nil {
 		return Entitlement{}, ErrNoSubscription
 	}
+	if s.developmentMode() {
+		return s.developmentEntitlement(guildID), nil
+	}
 	subscription, ok, err := s.repo.GetSubscriptionByGuild(ctx, guildID)
 	if err != nil {
 		return Entitlement{}, err
 	}
 	if !ok {
-		return Entitlement{GuildID: strings.TrimSpace(guildID), UpgradeURL: s.upgradeURL(guildID)}, ErrNoSubscription
+		return s.EnsureTrial(ctx, TrialSeed{
+			GuildID:      guildID,
+			AuthorizedAt: s.currentTime(),
+		})
 	}
 	return s.entitlementFromSubscription(ctx, subscription)
 }
@@ -261,6 +272,9 @@ func (s *Service) Check(ctx context.Context, guildID, metric string, units int64
 		return entitlement, ErrReadOnly
 	}
 	limit := IncludedLimit(entitlement.Plan, metric)
+	if unlimitedLimit(limit) {
+		return entitlement, nil
+	}
 	used := entitlement.metricConsumed(metric)
 	reserved := entitlement.metricReserved(metric)
 	if used+reserved+units > limit {
@@ -275,6 +289,9 @@ func (s *Service) BeginUsage(ctx context.Context, guildID, metric string, units 
 		return Reservation{GuildID: strings.TrimSpace(guildID), Metric: metric, Units: units, Entitlement: entitlement}, err
 	}
 	metric, _ = NormalizeMetric(metric)
+	if s.developmentMode() {
+		return Reservation{GuildID: entitlement.GuildID, Metric: metric, Units: units, Entitlement: entitlement}, nil
+	}
 	now := s.currentTime()
 	reservation, totals, denied, err := s.repo.BeginUsageReservation(ctx, store.GuildSubscription{
 		ID:                 entitlement.SubscriptionID,
@@ -324,6 +341,9 @@ func (s *Service) BeginCurrentUsage(ctx context.Context, guildID, metric string,
 	if !entitlement.CanUsePaidFeatures || entitlement.ReadOnly {
 		return Reservation{GuildID: entitlement.GuildID, Metric: metric, Units: units, Entitlement: entitlement}, ErrReadOnly
 	}
+	if s.developmentMode() {
+		return Reservation{GuildID: entitlement.GuildID, Metric: metric, Units: units, Entitlement: entitlement}, nil
+	}
 	now := s.currentTime()
 	reservation, totals, denied, err := s.repo.BeginCurrentUsageReservation(ctx, store.GuildSubscription{
 		ID:                 entitlement.SubscriptionID,
@@ -363,6 +383,9 @@ func (s *Service) SyncCurrentUsage(ctx context.Context, guildID, metric string, 
 	metric, ok := NormalizeMetric(metric)
 	if !ok {
 		return fmt.Errorf("unsupported usage metric")
+	}
+	if s.developmentMode() {
+		return nil
 	}
 	return s.repo.SyncCurrentUsage(ctx, store.GuildSubscription{
 		ID:                 entitlement.SubscriptionID,
@@ -535,6 +558,35 @@ func (s *Service) currentTime() time.Time {
 		return time.Now().UTC()
 	}
 	return s.now().UTC()
+}
+
+func (s *Service) developmentMode() bool {
+	return s != nil && strings.TrimSpace(s.cfg.Environment) != "" && !strings.EqualFold(strings.TrimSpace(s.cfg.Environment), "production")
+}
+
+func (s *Service) developmentEntitlement(guildID string) Entitlement {
+	now := s.currentTime()
+	return Entitlement{
+		GuildID: strings.TrimSpace(guildID),
+		Plan: PlanLimits{
+			Plan:                  PlanDevelopment,
+			DisplayName:           "Development",
+			AIResponses:           int(UnlimitedUsageLimit),
+			WebSearches:           int(UnlimitedUsageLimit),
+			KnowledgeStorageBytes: UnlimitedUsageLimit,
+			Schedules:             int(UnlimitedUsageLimit),
+			RetentionDays:         365,
+			MusicEnabled:          true,
+			PremiumToolsEnabled:   true,
+		},
+		Status:             StatusActive,
+		GraceState:         GraceActive,
+		PaymentProvider:    ProviderManual,
+		PeriodStart:        now,
+		PeriodEnd:          now.AddDate(100, 0, 0),
+		CanUsePaidFeatures: true,
+		UpgradeURL:         s.upgradeURL(guildID),
+	}
 }
 
 func (s *Service) upgradeURL(guildID string) string {

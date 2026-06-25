@@ -100,7 +100,15 @@ func (r *Router) handleSchedule(ctx context.Context, request Request) Response {
 	action := strings.ToLower(strings.TrimSpace(firstNonEmpty(request.Options["action"], "list")))
 	switch action {
 	case "list":
-		schedules, err := r.scheduler.List(ctx, request.GuildID, "", scheduler.KindComposed, false, 25)
+		ownerUserID := ""
+		hasControl, err := r.admin.HasGuildControl(ctx, assistantAccessRequest(request))
+		if err != nil {
+			return Response{Content: "Permission lookup failed. Please try again later.", Ephemeral: true}
+		}
+		if !hasControl {
+			ownerUserID = request.UserID
+		}
+		schedules, err := r.scheduler.List(ctx, request.GuildID, ownerUserID, scheduler.KindComposed, false, 25)
 		if err != nil {
 			return Response{Content: "Schedule lookup failed.", Ephemeral: true}
 		}
@@ -355,7 +363,7 @@ func (r *Router) handleAdminStatus(ctx context.Context, request Request) Respons
 		fmt.Sprintf("- schedules: active `%d`, paused `%d`, failed `%d`", scheduleStats.Active, scheduleStats.Paused, scheduleStats.FailedRuns),
 		fmt.Sprintf("- alert packs: `%d` configured", len(alertRules)),
 	}
-	warnings := adminStatusWarnings(config, roles, channelRules, scheduleStats, alertRules)
+	warnings := adminStatusWarnings(config, roles, scheduleStats, alertRules)
 	if r.setup != nil {
 		if runtime, err := r.setup.CheckSetup(ctx, request.GuildID, request.ChannelID); err == nil {
 			if !runtime.DiscordConfigured {
@@ -732,12 +740,7 @@ func (r *Router) handleAdminSetup(ctx context.Context, request Request) Response
 		}
 	}
 	if channelID := strings.TrimSpace(request.Options["channel_id"]); channelID != "" {
-		actions = append(actions, "allowed channel")
-		if !dryRun {
-			if _, err := r.admin.SetChannelRule(ctx, request.GuildID, request.UserID, channelID, "allow"); err != nil {
-				return Response{Content: "Default channel could not be configured.", Ephemeral: true}
-			}
-		}
+		actions = append(actions, "channel access default-open")
 	}
 	status := r.handleAdminStatus(ctx, request)
 	prefix := "Setup checklist"
@@ -920,23 +923,13 @@ func scheduleMutationError(err error, fallback string) Response {
 	return Response{Content: fallback, Ephemeral: true}
 }
 
-func adminStatusWarnings(config store.GuildConfig, roles []store.GuildRole, channelRules []store.GuildChannelRule, stats repository.ScheduleStats, alerts []store.AlertRule) []string {
+func adminStatusWarnings(config store.GuildConfig, roles []store.GuildRole, stats repository.ScheduleStats, alerts []store.AlertRule) []string {
 	var warnings []string
 	if !config.AssistantEnabled {
 		warnings = append(warnings, "Assistant responses are disabled.")
 	}
 	if len(roleIDsForPermission(roles, admin.PermissionAdminBadge)) == 0 {
 		warnings = append(warnings, "No Panda admin role is configured; only server admins/owners can manage Panda.")
-	}
-	hasAllow := false
-	for _, rule := range channelRules {
-		if rule.Rule == "allow" {
-			hasAllow = true
-			break
-		}
-	}
-	if !hasAllow {
-		warnings = append(warnings, "No allow-listed assistant channels are configured.")
 	}
 	if stats.FailedRuns > 0 {
 		warnings = append(warnings, fmt.Sprintf("%d schedule(s) have recent failed runs.", stats.FailedRuns))

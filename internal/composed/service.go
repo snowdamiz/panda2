@@ -433,6 +433,92 @@ func (s *Service) OpenRouterTools(ctx context.Context, request tools.DynamicTool
 	return result, nil
 }
 
+func (s *Service) DynamicToolInventory(ctx context.Context, request tools.DynamicToolListRequest) ([]tools.ToolInventoryItem, error) {
+	if s == nil || s.repo == nil || strings.TrimSpace(request.GuildID) == "" {
+		return nil, nil
+	}
+	records, err := s.repo.ListEnabledWithVersions(ctx, request.GuildID)
+	if err != nil {
+		return nil, err
+	}
+	graph := s.composedGraph(records)
+	mode := firstNonEmpty(request.InvocationType, InvocationChatTool)
+	items := make([]tools.ToolInventoryItem, 0, len(records))
+	for _, record := range records {
+		spec, err := ParseSpec([]byte(record.Version.SpecJSON))
+		if err != nil {
+			items = append(items, tools.ToolInventoryItem{
+				Kind:            "composed",
+				Name:            strings.TrimSpace(record.Tool.Name),
+				Status:          "unavailable",
+				DisabledReasons: []string{"invalid_spec"},
+			})
+			continue
+		}
+		spec = NormalizeSpec(spec)
+		definition := ToolDefinition(spec)
+		reasons := s.composedInventoryDisabledReasons(spec, request.Access, mode, graph)
+		status := "callable"
+		if len(reasons) > 0 {
+			status = "unavailable"
+		}
+		items = append(items, tools.ToolInventoryItem{
+			Kind:            "composed",
+			Name:            definition.ModelName(),
+			NativeName:      definition.Name,
+			Description:     definition.Description,
+			Status:          status,
+			DisabledReasons: reasons,
+		})
+	}
+	return items, nil
+}
+
+func (s *Service) composedInventoryDisabledReasons(spec Spec, access tools.ToolAccess, mode string, graph composedGraph) []string {
+	reasons := []string{}
+	if access.FeatureGateActive && !access.HasFeature(features.ComposedTools) {
+		reasons = append(reasons, tools.ToolUnavailableFeatureDisabled)
+	}
+	if !hasPermission(access, admin.PermissionToolComposeInvoke) {
+		reasons = append(reasons, tools.ToolUnavailableMissingPermission)
+	}
+	if strings.TrimSpace(access.Policy) == tools.ToolPolicyOff {
+		reasons = append(reasons, tools.ToolUnavailablePolicyDisabled)
+	}
+	if !hasInvocation(spec, mode) {
+		reasons = append(reasons, "invocation_not_available")
+	}
+	if graph.hasCycle(spec.Name) {
+		reasons = append(reasons, "invalid_composed_graph")
+	}
+	if report := ValidateSpec(spec, s.registry); !report.Valid {
+		reasons = append(reasons, "invalid_spec")
+	}
+	if !access.AllowsComposedTool(spec.Name, ToolDefinition(spec).Name, ToolDefinition(spec).ModelName()) {
+		reasons = append(reasons, tools.ToolUnavailableAccessRestricted)
+	} else if specUsesAdminTool(spec, s.registry) && !accessHasAdminToolPermission(access) {
+		reasons = append(reasons, tools.ToolUnavailableMissingPermission)
+	}
+	return uniqueInventoryReasons(reasons)
+}
+
+func uniqueInventoryReasons(values []string) []string {
+	seen := map[string]struct{}{}
+	result := []string{}
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		result = append(result, value)
+	}
+	return result
+}
+
 func (s *Service) CanInvoke(ctx context.Context, guildID, name string, access tools.ToolAccess, invocationType string) (bool, error) {
 	if access.FeatureGateActive && !access.HasFeature(features.ComposedTools) {
 		return false, nil

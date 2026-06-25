@@ -1196,6 +1196,215 @@ var migrations = []Migration{
 				WHERE intent.guild_id <> ''`,
 		},
 	},
+	{
+		Version: 25,
+		Name:    "default_features_for_configured_legacy_guilds",
+		SQL: []string{
+			`INSERT INTO audit_events (guild_id, actor_id, action, target_type, target_id, metadata, created_at)
+				SELECT config.guild_id, '', 'guild_features.backfill', 'guild', config.guild_id,
+					'{"source":"migration:configured_guild_default_preset","features":["admin_access_control","admin_audit","admin_setup","assistant_chat","attachments","composed_tools","discord_messages","knowledge","music","polls","reminders","threads","web_search"]}',
+					CURRENT_TIMESTAMP
+				FROM guild_configs config
+				WHERE config.guild_id <> ''
+					AND NOT EXISTS (
+						SELECT 1 FROM guild_features existing
+						WHERE existing.guild_id = config.guild_id
+					)`,
+			`INSERT OR IGNORE INTO guild_features (guild_id, feature_id, enabled, source_install_intent_id, enabled_by_user_id, created_at, updated_at)
+				SELECT config.guild_id, feature.feature_id, 1, 'migration:configured_guild_default_preset', '', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+				FROM guild_configs config
+				JOIN (
+					SELECT 'admin_access_control' AS feature_id
+					UNION ALL SELECT 'admin_audit'
+					UNION ALL SELECT 'admin_setup'
+					UNION ALL SELECT 'assistant_chat'
+					UNION ALL SELECT 'attachments'
+					UNION ALL SELECT 'composed_tools'
+					UNION ALL SELECT 'discord_messages'
+					UNION ALL SELECT 'knowledge'
+					UNION ALL SELECT 'music'
+					UNION ALL SELECT 'polls'
+					UNION ALL SELECT 'reminders'
+					UNION ALL SELECT 'threads'
+					UNION ALL SELECT 'web_search'
+				) feature
+				WHERE config.guild_id <> ''
+					AND NOT EXISTS (
+						SELECT 1 FROM guild_features existing
+						WHERE existing.guild_id = config.guild_id
+					)`,
+		},
+	},
+	{
+		Version: 26,
+		Name:    "current_default_features_for_legacy_default_guilds",
+		SQL: []string{
+			`INSERT INTO audit_events (guild_id, actor_id, action, target_type, target_id, metadata, created_at)
+				SELECT legacy.guild_id, legacy.actor_id, 'guild_features.default_enabled', 'guild', legacy.guild_id,
+					'{"source":"migration:current_default_preset","features":["admin_access_control","admin_audit","admin_setup","assistant_chat","attachments","composed_tools","discord_messages","knowledge","music","polls","reminders","threads","web_search"]}',
+					CURRENT_TIMESTAMP
+				FROM (
+					SELECT guild_id, MIN(enabled_by_user_id) AS actor_id
+					FROM guild_features
+					WHERE source_install_intent_id = 'migration:default_preset'
+						AND enabled = 1
+					GROUP BY guild_id
+				) legacy
+				WHERE EXISTS (
+					SELECT 1
+					FROM (
+						SELECT 'admin_access_control' AS feature_id
+						UNION ALL SELECT 'admin_audit'
+						UNION ALL SELECT 'admin_setup'
+						UNION ALL SELECT 'assistant_chat'
+						UNION ALL SELECT 'attachments'
+						UNION ALL SELECT 'composed_tools'
+						UNION ALL SELECT 'discord_messages'
+						UNION ALL SELECT 'knowledge'
+						UNION ALL SELECT 'music'
+						UNION ALL SELECT 'polls'
+						UNION ALL SELECT 'reminders'
+						UNION ALL SELECT 'threads'
+						UNION ALL SELECT 'web_search'
+					) feature
+					WHERE NOT EXISTS (
+						SELECT 1 FROM guild_features existing
+						WHERE existing.guild_id = legacy.guild_id
+							AND existing.feature_id = feature.feature_id
+					)
+				)`,
+			`INSERT OR IGNORE INTO guild_features (guild_id, feature_id, enabled, source_install_intent_id, enabled_by_user_id, created_at, updated_at)
+				SELECT legacy.guild_id, feature.feature_id, 1, 'migration:current_default_preset', legacy.actor_id, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+				FROM (
+					SELECT guild_id, MIN(enabled_by_user_id) AS actor_id
+					FROM guild_features
+					WHERE source_install_intent_id = 'migration:default_preset'
+						AND enabled = 1
+					GROUP BY guild_id
+				) legacy
+				JOIN (
+					SELECT 'admin_access_control' AS feature_id
+					UNION ALL SELECT 'admin_audit'
+					UNION ALL SELECT 'admin_setup'
+					UNION ALL SELECT 'assistant_chat'
+					UNION ALL SELECT 'attachments'
+					UNION ALL SELECT 'composed_tools'
+					UNION ALL SELECT 'discord_messages'
+					UNION ALL SELECT 'knowledge'
+					UNION ALL SELECT 'music'
+					UNION ALL SELECT 'polls'
+					UNION ALL SELECT 'reminders'
+					UNION ALL SELECT 'threads'
+					UNION ALL SELECT 'web_search'
+				) feature
+				WHERE NOT EXISTS (
+					SELECT 1 FROM guild_features existing
+					WHERE existing.guild_id = legacy.guild_id
+						AND existing.feature_id = feature.feature_id
+				)`,
+		},
+	},
+	{
+		Version: 27,
+		Name:    "current_default_features_for_landing_default_guilds",
+		SQL: []string{
+			`CREATE TABLE IF NOT EXISTS install_intents (
+				intent_id TEXT PRIMARY KEY,
+				state_hash TEXT NOT NULL,
+				selected_feature_ids TEXT NOT NULL DEFAULT '[]',
+				expanded_feature_ids TEXT NOT NULL DEFAULT '[]',
+				requested_discord_permissions TEXT NOT NULL DEFAULT '[]',
+				requested_permission_bitfield TEXT NOT NULL DEFAULT '0',
+				granted_discord_permissions TEXT NOT NULL DEFAULT '[]',
+				granted_scopes TEXT NOT NULL DEFAULT '[]',
+				source TEXT NOT NULL DEFAULT '',
+				desired_plan TEXT NOT NULL DEFAULT '',
+				referrer TEXT NOT NULL DEFAULT '',
+				campaign TEXT NOT NULL DEFAULT '',
+				installer_session_metadata TEXT NOT NULL DEFAULT '{}',
+				status TEXT NOT NULL DEFAULT 'pending',
+				guild_id TEXT NOT NULL DEFAULT '',
+				installer_user_id TEXT NOT NULL DEFAULT '',
+				expires_at DATETIME NOT NULL,
+				consumed_at DATETIME,
+				created_at DATETIME NOT NULL,
+				updated_at DATETIME NOT NULL
+			)`,
+			`INSERT INTO audit_events (guild_id, actor_id, action, target_type, target_id, metadata, created_at)
+				SELECT landing.guild_id, landing.installer_user_id, 'guild_features.default_enabled', 'guild', landing.guild_id,
+					'{"source":"migration:current_landing_default_preset","features":["admin_access_control","admin_audit","admin_setup","assistant_chat","attachments","composed_tools","discord_messages","knowledge","music","polls","reminders","threads","web_search"]}',
+					CURRENT_TIMESTAMP
+				FROM (
+					SELECT guild_id, MIN(intent_id) AS intent_id, MIN(installer_user_id) AS installer_user_id
+					FROM install_intents
+					WHERE status = 'consumed'
+						AND guild_id <> ''
+						AND source = 'landing'
+						AND expanded_feature_ids IN (
+							'["admin_access_control","admin_audit","admin_setup","assistant_chat","attachments","composed_tools","knowledge","music","polls","reminders","threads","web_search"]',
+							'["admin_access_control","admin_audit","admin_setup","assistant_chat","attachments","composed_tools","discord_messages","knowledge","music","polls","reminders","threads","web_search"]'
+						)
+					GROUP BY guild_id
+				) landing
+				WHERE EXISTS (
+					SELECT 1
+					FROM (
+						SELECT 'admin_access_control' AS feature_id
+						UNION ALL SELECT 'admin_audit'
+						UNION ALL SELECT 'admin_setup'
+						UNION ALL SELECT 'assistant_chat'
+						UNION ALL SELECT 'attachments'
+						UNION ALL SELECT 'composed_tools'
+						UNION ALL SELECT 'discord_messages'
+						UNION ALL SELECT 'knowledge'
+						UNION ALL SELECT 'music'
+						UNION ALL SELECT 'polls'
+						UNION ALL SELECT 'reminders'
+						UNION ALL SELECT 'threads'
+						UNION ALL SELECT 'web_search'
+					) feature
+					WHERE NOT EXISTS (
+						SELECT 1 FROM guild_features existing
+						WHERE existing.guild_id = landing.guild_id
+							AND existing.feature_id = feature.feature_id
+					)
+				)`,
+			`INSERT OR IGNORE INTO guild_features (guild_id, feature_id, enabled, source_install_intent_id, enabled_by_user_id, created_at, updated_at)
+				SELECT landing.guild_id, feature.feature_id, 1, 'migration:current_landing_default_preset', landing.installer_user_id, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+				FROM (
+					SELECT guild_id, MIN(intent_id) AS intent_id, MIN(installer_user_id) AS installer_user_id
+					FROM install_intents
+					WHERE status = 'consumed'
+						AND guild_id <> ''
+						AND source = 'landing'
+						AND expanded_feature_ids IN (
+							'["admin_access_control","admin_audit","admin_setup","assistant_chat","attachments","composed_tools","knowledge","music","polls","reminders","threads","web_search"]',
+							'["admin_access_control","admin_audit","admin_setup","assistant_chat","attachments","composed_tools","discord_messages","knowledge","music","polls","reminders","threads","web_search"]'
+						)
+					GROUP BY guild_id
+				) landing
+				JOIN (
+					SELECT 'admin_access_control' AS feature_id
+					UNION ALL SELECT 'admin_audit'
+					UNION ALL SELECT 'admin_setup'
+					UNION ALL SELECT 'assistant_chat'
+					UNION ALL SELECT 'attachments'
+					UNION ALL SELECT 'composed_tools'
+					UNION ALL SELECT 'discord_messages'
+					UNION ALL SELECT 'knowledge'
+					UNION ALL SELECT 'music'
+					UNION ALL SELECT 'polls'
+					UNION ALL SELECT 'reminders'
+					UNION ALL SELECT 'threads'
+					UNION ALL SELECT 'web_search'
+				) feature
+				WHERE NOT EXISTS (
+					SELECT 1 FROM guild_features existing
+					WHERE existing.guild_id = landing.guild_id
+						AND existing.feature_id = feature.feature_id
+				)`,
+		},
+	},
 }
 
 func RunMigrations(db *gorm.DB) error {

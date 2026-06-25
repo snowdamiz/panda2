@@ -102,6 +102,7 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 	memoryService := memory.NewServiceWithEmbeddings(knowledge, openRouter, cfg.OpenRouterEmbeddingModel)
 	billingService := billing.NewService(billingRepo, billing.Config{
 		PublicURL:              cfg.PublicAppURL,
+		Environment:            cfg.Environment,
 		SolanaRPCURL:           cfg.SolanaRPCURL,
 		SolanaCluster:          cfg.SolanaCluster,
 		SolanaTreasuryWallet:   cfg.SolanaTreasuryWallet,

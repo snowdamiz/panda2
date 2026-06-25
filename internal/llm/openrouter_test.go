@@ -34,6 +34,9 @@ func TestOpenRouterChatSendsExpectedRequest(t *testing.T) {
 		if _, ok := rawPayload["parallel_tool_calls"]; ok {
 			t.Fatalf("tool requests should not send unsupported parallel_tool_calls: %s", string(body))
 		}
+		if _, ok := rawPayload["tool_choice"]; ok {
+			t.Fatalf("tool requests should not send unsupported tool_choice: %s", string(body))
+		}
 		var payload chatCompletionRequest
 		if err := json.Unmarshal(body, &payload); err != nil {
 			t.Fatalf("decode request: %v", err)

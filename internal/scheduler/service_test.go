@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sn0w/panda2/internal/admin"
 	"github.com/sn0w/panda2/internal/queue"
 	"github.com/sn0w/panda2/internal/repository"
 	"github.com/sn0w/panda2/internal/store"
@@ -189,5 +190,85 @@ func TestManageReminderRejectsPublicReminderWithoutConfirmation(t *testing.T) {
 	})
 	if err == nil || !strings.Contains(err.Error(), "confirmation button") {
 		t.Fatalf("expected public reminder confirmation error, got %v", err)
+	}
+}
+
+func TestManageScheduleRequiresComposeInvoke(t *testing.T) {
+	now := time.Date(2026, 6, 21, 12, 0, 0, 0, time.UTC)
+	service, db, _, _ := newSchedulerTestService(t, now)
+	defer db.Close()
+
+	_, err := service.ManageSchedule(context.Background(), toolsvc.ScheduleManagementRequest{
+		GuildID: "guild-1",
+		ActorID: "user-1",
+		Action:  "list",
+	})
+	if err == nil || !strings.Contains(err.Error(), admin.PermissionToolComposeInvoke) {
+		t.Fatalf("expected compose invoke permission error, got %v", err)
+	}
+}
+
+func TestManageScheduleScopesDelegatedCallerToOwnSchedules(t *testing.T) {
+	now := time.Date(2026, 6, 21, 12, 0, 0, 0, time.UTC)
+	service, db, _, _ := newSchedulerTestService(t, now)
+	defer db.Close()
+	ctx := context.Background()
+	access := toolsvc.ToolAccess{
+		Policy:      toolsvc.ToolPolicyWriteConfirmed,
+		Permissions: map[string]struct{}{admin.PermissionToolComposeInvoke: {}},
+	}
+
+	own, err := service.CreateComposed(ctx, CreateComposedRequest{
+		GuildID:     "guild-1",
+		ChannelID:   "channel-1",
+		OwnerUserID: "user-1",
+		ToolName:    "welcome_builder",
+		NextRunAt:   now.Add(time.Hour),
+	})
+	if err != nil {
+		t.Fatalf("CreateComposed own: %v", err)
+	}
+	other, err := service.CreateComposed(ctx, CreateComposedRequest{
+		GuildID:     "guild-1",
+		ChannelID:   "channel-1",
+		OwnerUserID: "user-2",
+		ToolName:    "welcome_builder",
+		NextRunAt:   now.Add(2 * time.Hour),
+	})
+	if err != nil {
+		t.Fatalf("CreateComposed other: %v", err)
+	}
+
+	result, err := service.ManageSchedule(ctx, toolsvc.ScheduleManagementRequest{
+		GuildID: "guild-1",
+		ActorID: "user-1",
+		Action:  "list",
+		Access:  access,
+	})
+	if err != nil {
+		t.Fatalf("ManageSchedule list: %v", err)
+	}
+	root, ok := result.(map[string]any)
+	if !ok {
+		t.Fatalf("unexpected list result: %+v", result)
+	}
+	payload, ok := root["result"].(map[string]any)
+	if !ok || payload["count"] != 1 {
+		t.Fatalf("expected one visible schedule, got %+v", result)
+	}
+	schedules, ok := payload["schedules"].([]map[string]any)
+	if !ok || len(schedules) != 1 || schedules[0]["schedule_id"] != own.ID {
+		t.Fatalf("expected only caller-owned schedule %d, got %+v", own.ID, payload["schedules"])
+	}
+
+	_, err = service.ManageSchedule(ctx, toolsvc.ScheduleManagementRequest{
+		GuildID:    "guild-1",
+		ActorID:    "user-1",
+		Action:     "cancel",
+		ScheduleID: other.ID,
+		Access:     access,
+	})
+	if err == nil || !strings.Contains(err.Error(), "not owned") {
+		t.Fatalf("expected ownership denial for schedule %d, got %v", other.ID, err)
 	}
 }

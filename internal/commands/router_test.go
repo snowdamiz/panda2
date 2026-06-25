@@ -218,6 +218,10 @@ func requestToolNames(request llm.ChatRequest) map[string]bool {
 	return names
 }
 
+func withTagReminder(content string) string {
+	return content + "\n\n" + naturalMentionReminder
+}
+
 func newTestRouter(t *testing.T, client *fakeLLM, limit int, configureExecutor ...func(*tools.Executor)) *Router {
 	t.Helper()
 	ctx := context.Background()
@@ -411,7 +415,7 @@ func TestRouterHelpHidesElevatedGuidanceFromRegularUsers(t *testing.T) {
 	for _, want := range []string{
 		"### Panda Help",
 		"**Chat naturally**",
-		"- Mention `Panda` in a normal message: `Panda is this true?`",
+		"- Say `Panda` in a normal message: `Panda is this true?`",
 		"**Message actions**",
 		"**Good things to ask**",
 	} {
@@ -694,7 +698,7 @@ func TestAdminRoleProfileConfiguresDelegatedAdminRole(t *testing.T) {
 	}
 }
 
-func TestAdminChannelAccessAllowListsAssistantUse(t *testing.T) {
+func TestAdminChannelAccessDefaultsOpenAndDenyLimitsAssistantUse(t *testing.T) {
 	ctx := context.Background()
 	router := newTestRouter(t, &fakeLLM{response: llm.ChatResponse{Content: "ok"}}, 5)
 
@@ -725,16 +729,34 @@ func TestAdminChannelAccessAllowListsAssistantUse(t *testing.T) {
 	if !allowed.Ephemeral || !strings.Contains(allowed.Content, "Allowed Panda assistant use") || !strings.Contains(allowed.Content, "#panda") {
 		t.Fatalf("expected channel allow response, got %+v", allowed)
 	}
+	if !strings.Contains(allowed.Content, "Other channels remain available by default") {
+		t.Fatalf("expected default-open allow copy, got %+v", allowed)
+	}
 
-	denied := router.Handle(ctx, Request{
+	other := router.Handle(ctx, Request{
 		Command:   "ask",
 		GuildID:   "guild-1",
 		ChannelID: "channel-other",
 		UserID:    "user-1",
 		Options:   map[string]string{"question": "hi"},
 	})
-	if !denied.Ephemeral || !strings.Contains(denied.Content, "permission") {
-		t.Fatalf("expected non-allowed channel denial, got %+v", denied)
+	if other.Content != "ok" {
+		t.Fatalf("expected other channels to remain available, got %+v", other)
+	}
+
+	deny := router.Handle(ctx, Request{
+		Command:      "admin",
+		Subcommand:   "channel",
+		GuildID:      "guild-1",
+		UserID:       "admin",
+		IsGuildAdmin: true,
+		Options: map[string]string{
+			"action":     "deny",
+			"channel_id": "channel-denied",
+		},
+	})
+	if !deny.Ephemeral || !strings.Contains(deny.Content, "Denied Panda assistant use") {
+		t.Fatalf("expected channel deny response, got %+v", deny)
 	}
 
 	answer := router.Handle(ctx, Request{
@@ -748,6 +770,17 @@ func TestAdminChannelAccessAllowListsAssistantUse(t *testing.T) {
 		t.Fatalf("expected allowed channel answer, got %+v", answer)
 	}
 
+	denied := router.Handle(ctx, Request{
+		Command:   "ask",
+		GuildID:   "guild-1",
+		ChannelID: "channel-denied",
+		UserID:    "user-1",
+		Options:   map[string]string{"question": "hi"},
+	})
+	if !denied.Ephemeral || !strings.Contains(denied.Content, "permission") {
+		t.Fatalf("expected denied channel to be blocked, got %+v", denied)
+	}
+
 	list := router.Handle(ctx, Request{
 		Command:      "admin",
 		Subcommand:   "channel",
@@ -756,8 +789,8 @@ func TestAdminChannelAccessAllowListsAssistantUse(t *testing.T) {
 		IsGuildAdmin: true,
 		Options:      map[string]string{"action": "list"},
 	})
-	if !strings.Contains(list.Content, "allow-list active") || !strings.Contains(list.Content, "channel-allowed") {
-		t.Fatalf("expected allow-list details, got %+v", list)
+	if strings.Contains(list.Content, "allow-list active") || !strings.Contains(list.Content, "channel-allowed") || !strings.Contains(list.Content, "channel-denied") {
+		t.Fatalf("expected default-open channel rule details, got %+v", list)
 	}
 
 	removed := router.Handle(ctx, Request{
@@ -1720,7 +1753,7 @@ func TestNaturalComposedScheduleCreatesThroughAgentTool(t *testing.T) {
 			"bot_mentioned": "true",
 		},
 	})
-	if response.Content != "Scheduled `welcome_builder`." {
+	if response.Content != withTagReminder("Scheduled `welcome_builder`.") {
 		t.Fatalf("expected final schedule response, got %+v", response)
 	}
 	if len(client.requests) != 3 {
@@ -1794,7 +1827,7 @@ func TestNaturalComposedScheduleListsAndCancelsThroughAgentTool(t *testing.T) {
 		IsGuildAdmin: true,
 		Options:      map[string]string{"message": "Panda what composed tool schedules are set for welcome_builder?", "bot_mentioned": "true"},
 	})
-	if listResponse.Content != "There is one scheduled `welcome_builder` run." {
+	if listResponse.Content != withTagReminder("There is one scheduled `welcome_builder` run.") {
 		t.Fatalf("expected model-rendered schedule list, got %+v", listResponse)
 	}
 	if !requestToolNames(client.requests[1])["panda_manage_schedule"] {
@@ -1815,7 +1848,7 @@ func TestNaturalComposedScheduleListsAndCancelsThroughAgentTool(t *testing.T) {
 		IsGuildAdmin: true,
 		Options:      map[string]string{"message": "Panda remove scheduled composed tool welcome_builder", "bot_mentioned": "true"},
 	})
-	if cancelResponse.Content != "Cancelled the scheduled `welcome_builder` run." {
+	if cancelResponse.Content != withTagReminder("Cancelled the scheduled `welcome_builder` run.") {
 		t.Fatalf("expected model-rendered schedule cancellation, got %+v", cancelResponse)
 	}
 	if !requestToolNames(client.requests[4])["panda_manage_schedule"] {
@@ -2048,7 +2081,7 @@ func TestChatUsesAssistantService(t *testing.T) {
 func TestChatEmptyAssistantResponseReleasesBillingReservation(t *testing.T) {
 	ctx := context.Background()
 	router := newTestRouter(t, &fakeLLM{response: llm.ChatResponse{Model: "fixture/model"}}, 20)
-	billingService, entitlement := attachTestBilling(t, router, "guild-1")
+	billingService, _ := attachTestBilling(t, router, "guild-1")
 
 	response := router.handleChatModeWithAccess(ctx, Request{
 		Command:      "chat",
@@ -2061,19 +2094,19 @@ func TestChatEmptyAssistantResponseReleasesBillingReservation(t *testing.T) {
 	if !response.Ephemeral || !strings.Contains(response.Content, "empty response") {
 		t.Fatalf("expected empty response guard, got %+v", response)
 	}
-	reservation, err := billingService.BeginUsage(ctx, "guild-1", billing.MetricAIResponse, int64(entitlement.Plan.AIResponses))
+	entitlement, err := billingService.Resolve(ctx, "guild-1")
 	if err != nil {
-		t.Fatalf("empty chat response should release billing reservation: %v", err)
+		t.Fatalf("Resolve billing after empty response: %v", err)
 	}
-	if err := billingService.ReleaseUsage(ctx, reservation); err != nil {
-		t.Fatalf("release verification reservation: %v", err)
+	if entitlement.Usage.AIResponsesReserved != 0 || entitlement.Usage.AIResponsesConsumed != 0 {
+		t.Fatalf("empty chat response should release billing reservation, got usage %+v", entitlement.Usage)
 	}
 }
 
 func TestBackgroundTaskEmptyAssistantResponseReleasesBillingReservation(t *testing.T) {
 	ctx := context.Background()
 	router := newTestRouter(t, &fakeLLM{response: llm.ChatResponse{Model: "fixture/model"}}, 20)
-	billingService, entitlement := attachTestBilling(t, router, "guild-1")
+	billingService, _ := attachTestBilling(t, router, "guild-1")
 
 	response := router.HandleBackgroundTask(ctx, BackgroundTask{
 		RequestID: "task-empty",
@@ -2086,12 +2119,12 @@ func TestBackgroundTaskEmptyAssistantResponseReleasesBillingReservation(t *testi
 	if !response.Ephemeral || !strings.Contains(response.Content, "empty response") {
 		t.Fatalf("expected empty response guard, got %+v", response)
 	}
-	reservation, err := billingService.BeginUsage(ctx, "guild-1", billing.MetricAIResponse, int64(entitlement.Plan.AIResponses))
+	entitlement, err := billingService.Resolve(ctx, "guild-1")
 	if err != nil {
-		t.Fatalf("empty background response should release billing reservation: %v", err)
+		t.Fatalf("Resolve billing after empty response: %v", err)
 	}
-	if err := billingService.ReleaseUsage(ctx, reservation); err != nil {
-		t.Fatalf("release verification reservation: %v", err)
+	if entitlement.Usage.AIResponsesReserved != 0 || entitlement.Usage.AIResponsesConsumed != 0 {
+		t.Fatalf("empty background response should release billing reservation, got usage %+v", entitlement.Usage)
 	}
 }
 
@@ -2208,7 +2241,7 @@ func TestNaturalMessageUsesInlineChat(t *testing.T) {
 		ChannelID: "channel-1",
 		Options:   map[string]string{"message": "Panda continue", "bot_mentioned": "true"},
 	})
-	if response.Content != "chat fixture" || response.ThreadID != "" {
+	if response.Content != withTagReminder("chat fixture") || response.ThreadID != "" {
 		t.Fatalf("unexpected natural message response: %+v", response)
 	}
 	if len(threadManager.calls) != 0 {
@@ -2219,6 +2252,63 @@ func TestNaturalMessageUsesInlineChat(t *testing.T) {
 	}
 	if !strings.Contains(joinRequestMessages(client.requests[0]), "Bot mentioned: true") {
 		t.Fatalf("expected trigger request to include mention metadata: %+v", client.requests[0])
+	}
+}
+
+func TestNaturalMessageMentionTriggerAddsReminder(t *testing.T) {
+	client := &fakeLLM{responses: []llm.ChatResponse{
+		{Content: `{"respond":true,"prompt":"continue"}`},
+		{Content: "chat fixture"},
+	}}
+	router := newTestRouter(t, client, 5)
+
+	response := router.HandleNaturalMessage(context.Background(), Request{
+		UserID:    "user-1",
+		GuildID:   "guild-1",
+		ChannelID: "channel-1",
+		Options:   map[string]string{"message": "<@123456789012345678> continue", "bot_mentioned": "true"},
+	})
+	if response.Content != withTagReminder("chat fixture") {
+		t.Fatalf("expected tag reminder on mention-triggered response, got %+v", response)
+	}
+}
+
+func TestNaturalMessageTaggedWakeWordAddsReminder(t *testing.T) {
+	client := &fakeLLM{responses: []llm.ChatResponse{
+		{Content: `{"respond":true,"prompt":"continue"}`},
+		{Content: "chat fixture"},
+	}}
+	router := newTestRouter(t, client, 5)
+
+	response := router.HandleNaturalMessage(context.Background(), Request{
+		UserID:    "user-1",
+		GuildID:   "guild-1",
+		ChannelID: "channel-1",
+		Options:   map[string]string{"message": "Panda continue", "bot_mentioned": "true"},
+	})
+	if response.Content != withTagReminder("chat fixture") {
+		t.Fatalf("expected tagged wake-word response with tag reminder, got %+v", response)
+	}
+}
+
+func TestNaturalMessageClassifierFailureReturnsVisibleError(t *testing.T) {
+	client := &fakeLLM{err: errors.New("classifier unavailable")}
+	router := newTestRouter(t, client, 5)
+
+	response := router.HandleNaturalMessage(context.Background(), Request{
+		UserID:    "user-1",
+		GuildID:   "guild-1",
+		ChannelID: "channel-1",
+		Options: map[string]string{
+			"message":       "Panda can you help?",
+			"bot_mentioned": "true",
+		},
+	})
+	if !strings.Contains(response.Content, "trouble with AI responses") || response.Presentation.Accent != AccentDanger {
+		t.Fatalf("expected visible AI failure response, got %+v", response)
+	}
+	if len(client.requests) != 1 {
+		t.Fatalf("expected only classifier request, got %d", len(client.requests))
 	}
 }
 
@@ -2580,7 +2670,7 @@ func TestNaturalMessageCreatesReminderThroughAgentTool(t *testing.T) {
 			"bot_mentioned": "true",
 		},
 	})
-	if response.Content != "Reminder created." {
+	if response.Content != withTagReminder("Reminder created.") {
 		t.Fatalf("expected model-rendered reminder response, got %+v", response)
 	}
 	if len(client.requests) != 3 {
@@ -2626,7 +2716,7 @@ func TestNaturalMessageManagesMusicThroughAgentTool(t *testing.T) {
 			"bot_mentioned": "true",
 		},
 	})
-	if response.Content != "music handled" || response.Presentation.Title != "Now playing" || response.Presentation.Accent != AccentMusic {
+	if response.Content != withTagReminder("music handled") || response.Presentation.Title != "Now playing" || response.Presentation.Accent != AccentMusic {
 		t.Fatalf("expected structured music card response, got %+v", response)
 	}
 	if response.Presentation.URL != "https://example.com/track" || len(response.Presentation.Fields) != 1 || len(response.Actions) != 1 {
@@ -2643,6 +2733,52 @@ func TestNaturalMessageManagesMusicThroughAgentTool(t *testing.T) {
 	}
 	if !strings.Contains(joinRequestMessages(client.requests[2]), "music handled") {
 		t.Fatalf("expected music tool result in final chat request, got:\n%s", joinRequestMessages(client.requests[2]))
+	}
+}
+
+func TestNaturalMessageJoinsVoiceThroughAgentTool(t *testing.T) {
+	client := &fakeLLM{responses: []llm.ChatResponse{
+		{Content: `{"respond":true,"prompt":"join my VC","tool_name":"panda_manage_music"}`},
+		{ToolCalls: []llm.ToolCall{{
+			ID:   "call-music-join",
+			Type: "function",
+			Function: llm.ToolCallFunction{
+				Name:      "panda_manage_music",
+				Arguments: `{"action":"join"}`,
+			},
+		}}},
+		{Content: "Joined voice."},
+	}}
+	musicManager := &fakeToolMusicManager{}
+	router := newTestRouter(t, client, 5, func(executor *tools.Executor) {
+		executor.WithMusicManager(musicManager)
+	})
+
+	response := router.HandleNaturalMessage(context.Background(), Request{
+		UserID:         "user-1",
+		GuildID:        "guild-1",
+		ChannelID:      "channel-1",
+		VoiceChannelID: "voice-1",
+		Options: map[string]string{
+			"message":       "panda join my vc",
+			"bot_mentioned": "true",
+		},
+	})
+	if response.Content != withTagReminder("music handled") {
+		t.Fatalf("expected model-rendered join response, got %+v", response)
+	}
+	if len(musicManager.requests) != 1 {
+		t.Fatalf("expected one music request, got %+v", musicManager.requests)
+	}
+	request := musicManager.requests[0]
+	if request.Action != "join" || request.VoiceChannelID != "voice-1" || request.Query != "" {
+		t.Fatalf("expected voice join request with structured voice channel, got %+v", request)
+	}
+	if len(client.requests) != 3 {
+		t.Fatalf("expected classifier, music tool call, and final response, got %d request(s)", len(client.requests))
+	}
+	if names := requestToolNames(client.requests[1]); len(names) != 1 || !names["panda_manage_music"] {
+		t.Fatalf("expected only music tool for natural voice join request, got %+v", names)
 	}
 }
 
@@ -2666,7 +2802,7 @@ func TestNaturalMessageExposesMusicWhenToolPolicyOff(t *testing.T) {
 			"bot_mentioned": "true",
 		},
 	})
-	if response.Content != "music tool unavailable" {
+	if response.Content != withTagReminder("music tool unavailable") {
 		t.Fatalf("unexpected natural message response: %+v", response)
 	}
 	if len(client.requests) != 2 {
@@ -2761,7 +2897,7 @@ func TestNaturalMessageAdminGetsManagementToolsWhenPolicyOff(t *testing.T) {
 		IsGuildAdmin: true,
 		Options:      map[string]string{"message": "Panda what can you do?", "bot_mentioned": "true"},
 	})
-	if response.Content != "chat fixture" {
+	if response.Content != withTagReminder("chat fixture") {
 		t.Fatalf("unexpected natural message response: %+v", response)
 	}
 	if len(client.requests) != 2 {
@@ -2775,6 +2911,48 @@ func TestNaturalMessageAdminGetsManagementToolsWhenPolicyOff(t *testing.T) {
 	}
 	if names["discord_send_message"] {
 		t.Fatalf("discord_send_message should need Discord provider runtime wiring, got %+v", names)
+	}
+	chatMessages := joinRequestMessages(client.requests[1])
+	if !strings.Contains(chatMessages, "Current caller has admin-level Panda tool access") {
+		t.Fatalf("admin natural-message prompt should preserve admin context, got:\n%s", chatMessages)
+	}
+	if strings.Contains(chatMessages, "unless an admin changes access") || strings.Contains(chatMessages, "disabled for users right now") {
+		t.Fatalf("admin natural-message prompt should not use regular-user access copy, got:\n%s", chatMessages)
+	}
+}
+
+func TestNaturalMessageAdminFeatureDisabledPromptKeepsAdminContext(t *testing.T) {
+	client := &fakeLLM{responses: []llm.ChatResponse{
+		{Content: `{"respond":true,"prompt":"what can you do","tool_name":"panda_list_tools"}`},
+		{Content: "chat fixture"},
+	}}
+	router := newTestRouter(t, client, 5)
+	repo := attachFeatureService(t, router)
+	if err := repo.SetGuildFeatures(context.Background(), "guild-1", []string{features.AssistantChat, features.Music, features.Reminders}, "test", "admin", time.Now().UTC()); err != nil {
+		t.Fatalf("SetGuildFeatures: %v", err)
+	}
+
+	response := router.HandleNaturalMessage(context.Background(), Request{
+		UserID:       "admin",
+		GuildID:      "guild-1",
+		ChannelID:    "channel-1",
+		IsGuildAdmin: true,
+		Options:      map[string]string{"message": "Panda what can you do?", "bot_mentioned": "true"},
+	})
+	if response.Content != withTagReminder("chat fixture") {
+		t.Fatalf("unexpected natural message response: %+v", response)
+	}
+	if len(client.requests) != 2 {
+		t.Fatalf("expected trigger and chat LLM requests, got %d", len(client.requests))
+	}
+	chatMessages := joinRequestMessages(client.requests[1])
+	for _, want := range []string{"Current caller has admin-level Panda tool access", "`web_search`", "feature_disabled"} {
+		if !strings.Contains(chatMessages, want) {
+			t.Fatalf("expected admin feature-disabled prompt to contain %q, got:\n%s", want, chatMessages)
+		}
+	}
+	if strings.Contains(chatMessages, "unless an admin changes access") || strings.Contains(chatMessages, "disabled for users right now") {
+		t.Fatalf("admin feature-disabled prompt should not use regular-user access copy, got:\n%s", chatMessages)
 	}
 }
 
@@ -2886,6 +3064,26 @@ func TestRegularUserGetsWebSearchPermissionByDefault(t *testing.T) {
 	}
 	if _, ok := permissions[admin.PermissionAdminConfigWrite]; ok {
 		t.Fatalf("regular users should not get admin config write by default: %+v", permissions)
+	}
+}
+
+func TestNaturalMessageReturnsFeatureDenialWhenAssistantChatDisabled(t *testing.T) {
+	client := &fakeLLM{response: llm.ChatResponse{Content: `{"respond":true,"prompt":"what can you do"}`}}
+	router := newTestRouter(t, client, 5)
+	attachFeatureService(t, router)
+
+	response := router.HandleNaturalMessage(context.Background(), Request{
+		RequestID: "message-1",
+		UserID:    "user-1",
+		GuildID:   "guild-1",
+		ChannelID: "channel-1",
+		Options:   map[string]string{"message": "panda what can you do"},
+	})
+	if !response.Ephemeral || !strings.Contains(response.Content, "feature is not enabled") {
+		t.Fatalf("expected visible feature denial, got %+v", response)
+	}
+	if len(client.requests) != 0 {
+		t.Fatalf("disabled feature gate should stop before classifier, got %d request(s)", len(client.requests))
 	}
 }
 

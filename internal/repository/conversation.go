@@ -2,7 +2,6 @@ package repository
 
 import (
 	"context"
-	"errors"
 	"strings"
 	"time"
 
@@ -41,12 +40,12 @@ func (r *ConversationRepository) GetOrCreateActive(ctx context.Context, key Conv
 			query = query.Where("channel_id = ? AND thread_id = ''", key.ChannelID)
 		}
 
-		err := query.Order("updated_at DESC").First(&conversation).Error
-		if err == nil {
-			return nil
+		result := query.Order("updated_at DESC").Limit(1).Find(&conversation)
+		if result.Error != nil {
+			return result.Error
 		}
-		if !errors.Is(err, gorm.ErrRecordNotFound) {
-			return err
+		if result.RowsAffected > 0 {
+			return nil
 		}
 
 		expiresAt := now.Add(30 * 24 * time.Hour)

@@ -54,6 +54,14 @@ const (
 	ToolPolicyOwnerOps       = "owner_ops"
 )
 
+const (
+	ToolUnavailableFeatureDisabled     = "feature_disabled"
+	ToolUnavailableMissingPermission   = "missing_permission"
+	ToolUnavailableAccessRestricted    = "tool_access_restricted"
+	ToolUnavailablePolicyDisabled      = "tool_policy_disabled"
+	ToolUnavailableIntegrationDisabled = "integration_not_configured"
+)
+
 type ToolAccess struct {
 	Policy                       string
 	Permissions                  map[string]struct{}
@@ -62,6 +70,7 @@ type ToolAccess struct {
 	EnabledFeatures              map[string]struct{}
 	FeatureGateActive            bool
 	RequireExplicitComposedTools bool
+	HasGuildControl              bool
 }
 
 type Definition struct {
@@ -202,18 +211,39 @@ func (d Definition) OpenRouterTool() llm.Tool {
 }
 
 func (d Definition) AvailableTo(access ToolAccess) bool {
+	return len(d.UnavailableReasons(access)) == 0
+}
+
+func (d Definition) UnavailableReasons(access ToolAccess) []string {
+	reasons := []string{}
 	if access.FeatureGateActive && d.FeatureID != "" && !access.HasFeature(d.FeatureID) {
-		return false
+		reasons = append(reasons, ToolUnavailableFeatureDisabled)
 	}
-	if !access.HasAnyPermission(append([]string{d.RequiredPermission}, d.AlternatePermissions...)...) {
-		return false
+	if !access.HasAnyPermission(d.permissionAlternatives()...) {
+		reasons = append(reasons, ToolUnavailableMissingPermission)
 	}
 	if !access.AllowsDefinition(d) {
-		return false
+		reasons = append(reasons, ToolUnavailableAccessRestricted)
 	}
 	if d.BypassToolPolicy {
-		return true
+		return reasons
 	}
+	if !d.allowedByPolicy(access) {
+		reasons = append(reasons, ToolUnavailablePolicyDisabled)
+	}
+	return reasons
+}
+
+func (d Definition) permissionAlternatives() []string {
+	permissions := make([]string, 0, 1+len(d.AlternatePermissions))
+	if strings.TrimSpace(d.RequiredPermission) != "" {
+		permissions = append(permissions, d.RequiredPermission)
+	}
+	permissions = append(permissions, d.AlternatePermissions...)
+	return permissions
+}
+
+func (d Definition) allowedByPolicy(access ToolAccess) bool {
 	switch normalizeToolPolicy(access.Policy) {
 	case ToolPolicyOff:
 		return false
@@ -227,7 +257,9 @@ func (d Definition) AvailableTo(access ToolAccess) bool {
 			d.ToolClass == ToolClassMetadata ||
 			(d.ToolClass == ToolClassModerationWrite && d.RequiresConfirmation)
 	case ToolPolicyAdminOnly:
-		return d.ToolClass == ToolClassWebRead || (hasAdminPolicyAccess(access) && d.ToolClass != ToolClassOwnerOps)
+		return d.ToolClass == ToolClassWebRead ||
+			(hasAdminPolicyAccess(access) && d.ToolClass != ToolClassOwnerOps) ||
+			hasExplicitComposedWorkflowAccess(access, d)
 	case ToolPolicyModerator:
 		return d.ToolClass == ToolClassDiscordRead ||
 			d.ToolClass == ToolClassMemory ||
@@ -271,7 +303,28 @@ func (access ToolAccess) HasFeature(featureID string) bool {
 	return features.Has(access.EnabledFeatures, featureID)
 }
 
+func hasExplicitComposedWorkflowAccess(access ToolAccess, definition Definition) bool {
+	if definition.ToolClass != ToolClassWorkflow || definition.FeatureID != features.ComposedTools {
+		return false
+	}
+	for _, permission := range definition.permissionAlternatives() {
+		switch permission {
+		case admin.PermissionToolComposeDraft,
+			admin.PermissionToolComposeApprove,
+			admin.PermissionToolComposeInvoke,
+			admin.PermissionToolComposeAudit:
+			if access.HasAnyPermission(permission) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func hasAdminPolicyAccess(access ToolAccess) bool {
+	if access.HasGuildControl {
+		return true
+	}
 	return access.HasAnyPermission(
 		admin.PermissionAdminConfigRead,
 		admin.PermissionAdminConfigWrite,
@@ -439,13 +492,13 @@ func DefaultDefinitions() []Definition {
 		},
 		{
 			Name:                  "panda.manage_music",
-			Description:           "Play music, inspect the queue, and control playback from natural-language music requests. Use this for requests like play, pause, resume, skip, stop, queue, now playing, loop, shuffle, playlist, and volume.",
+			Description:           "Join the user's voice channel, play music, inspect the queue, and control playback from natural-language music requests. Use this for requests like join my VC, play, pause, resume, skip, stop, queue, now playing, loop, shuffle, playlist, and volume.",
 			RequiredPermission:    admin.PermissionAssistantUse,
 			FeatureID:             features.Music,
 			ToolClass:             ToolClassWorkflow,
 			InputSchema:           musicManagementSchema(),
 			OutputSchema:          objectSchema("result"),
-			Timeout:               20 * time.Second,
+			Timeout:               75 * time.Second,
 			Redaction:             RedactContent,
 			Audit:                 AuditOnUse,
 			IncludeInModelContext: true,
@@ -453,7 +506,7 @@ func DefaultDefinitions() []Definition {
 		},
 		{
 			Name:                  "panda.list_tools",
-			Description:           "Call this before answering questions about what tools or capabilities Panda has. It lists callable tools in the current guild and channel context.",
+			Description:           "Call this before answering questions about what tools or capabilities Panda has. It lists enabled tools and explains disabled or partially available capabilities in the current guild and channel context.",
 			RequiredPermission:    admin.PermissionAssistantUse,
 			FeatureID:             features.AssistantChat,
 			ToolClass:             ToolClassMetadata,
@@ -812,9 +865,9 @@ func musicManagementSchema() json.RawMessage {
 	return schemaWithProperties([]string{"action"}, map[string]any{
 		"action": map[string]any{
 			"type":        "string",
-			"description": "Action: play, pause, resume, skip, stop, queue, clear, now, controls, loop, shuffle, remove, move, vote_skip, settings, or playlist.",
+			"description": "Action: join, play, pause, resume, skip, stop, queue, clear, now, controls, loop, shuffle, remove, move, vote_skip, settings, or playlist.",
 		},
-		"query":    map[string]string{"type": "string", "description": "Song/search query for play."},
+		"query":    map[string]string{"type": "string", "description": "Song/search query for play. Leave empty for join."},
 		"song":     map[string]string{"type": "string", "description": "Alias for query."},
 		"track":    map[string]string{"type": "string", "description": "Alias for query."},
 		"mode":     map[string]string{"type": "string", "description": "Mode for loop or playlist actions, such as off/track/queue or save/load/list."},

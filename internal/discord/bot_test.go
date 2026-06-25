@@ -310,6 +310,76 @@ func TestTypingIndicatorNoopsWithoutSender(t *testing.T) {
 	stop()
 }
 
+func TestNaturalMessageQueueRunsSameChannelFIFOAndOtherChannelsIndependently(t *testing.T) {
+	queue := newNaturalMessageQueue()
+	key := naturalMessageKey(snowflake.MustParse("100000000000000002"), commands.Request{
+		GuildID:   "guild-1",
+		ChannelID: "channel-1",
+	})
+	otherKey := naturalMessageKey(snowflake.MustParse("100000000000000003"), commands.Request{
+		GuildID:   "guild-1",
+		ChannelID: "channel-2",
+	})
+
+	started := make(chan int, 3)
+	done := make(chan int, 3)
+	releaseFirst := make(chan struct{})
+
+	queue.enqueue(key, func() {
+		started <- 1
+		<-releaseFirst
+		done <- 1
+	})
+
+	if got := waitForInt(t, started); got != 1 {
+		t.Fatalf("expected first same-channel task to start first, got %d", got)
+	}
+
+	queue.enqueue(key, func() {
+		started <- 2
+		done <- 2
+	})
+	queue.enqueue(otherKey, func() {
+		started <- 3
+		done <- 3
+	})
+
+	if got := waitForInt(t, started); got != 3 {
+		t.Fatalf("expected other channel to run independently, got %d", got)
+	}
+	if got := waitForInt(t, done); got != 3 {
+		t.Fatalf("expected other channel to finish while first channel is blocked, got %d", got)
+	}
+
+	select {
+	case got := <-started:
+		t.Fatalf("same-channel task started before first task finished: %d", got)
+	case <-time.After(20 * time.Millisecond):
+	}
+
+	close(releaseFirst)
+	if got := waitForInt(t, done); got != 1 {
+		t.Fatalf("expected first same-channel task to finish before second starts, got %d", got)
+	}
+	if got := waitForInt(t, started); got != 2 {
+		t.Fatalf("expected second same-channel task to start after first finished, got %d", got)
+	}
+	if got := waitForInt(t, done); got != 2 {
+		t.Fatalf("expected second same-channel task to finish last, got %d", got)
+	}
+}
+
+func waitForInt(t *testing.T, values <-chan int) int {
+	t.Helper()
+	select {
+	case value := <-values:
+		return value
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("timed out waiting for queued task")
+		return 0
+	}
+}
+
 func TestCaptureAttachmentsRecordsSafeExtractedText(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
