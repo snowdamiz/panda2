@@ -46,6 +46,10 @@ type fakeAssistantImageGenerator struct {
 	analysisRequests []llm.ImageAnalysisRequest
 }
 
+type fakeAssistantGIFFrameExtractor struct {
+	calls []generated.ImageReference
+}
+
 func (f fakeAssistantWebSearch) Search(context.Context, websearch.Request) (websearch.Response, error) {
 	return f.response, f.err
 }
@@ -62,6 +66,11 @@ func (f *fakeAssistantImageGenerator) Generate(_ context.Context, request llm.Im
 func (f *fakeAssistantImageGenerator) Analyze(_ context.Context, request llm.ImageAnalysisRequest) (llm.ImageAnalysisResponse, error) {
 	f.analysisRequests = append(f.analysisRequests, request)
 	return f.analysisResponse, f.analysisErr
+}
+
+func (f *fakeAssistantGIFFrameExtractor) ExtractGIFFrame(_ context.Context, reference generated.ImageReference) (generated.File, error) {
+	f.calls = append(f.calls, reference)
+	return generated.File{Filename: "reaction-frame.png", MIMEType: "image/png", Data: []byte("gif-frame")}, nil
 }
 
 type fakeAssistantDynamicTools struct {
@@ -243,6 +252,27 @@ func TestAskInjectsCurrentDateTimeMetadata(t *testing.T) {
 	} {
 		if !strings.Contains(systemContent, want) {
 			t.Fatalf("system prompt missing date/time metadata %q:\n%s", want, systemContent)
+		}
+	}
+}
+
+func TestSystemPromptIncludesIdentityAndSoulPresenceGuidance(t *testing.T) {
+	prompt := systemPrompt(store.GuildConfig{
+		AgentSoul: "Be crisp, warm, and lightly irreverent.",
+	}, fixedPromptTime)
+	for _, want := range []string{
+		"Identity and presence:",
+		"Speak as Panda in first person",
+		"configured Agent soul as your default voice",
+		`Do not reduce yourself to "just code"`,
+		"generic offers to help instead of engaging",
+		"Treat direct casual messages as real conversation",
+		"Do not pretend to be human",
+		"Agent soul (style and presence guidance for every response):",
+		"Be crisp, warm, and lightly irreverent.",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("system prompt missing soul presence guidance %q:\n%s", want, prompt)
 		}
 	}
 }
@@ -476,6 +506,50 @@ func TestChatNaturalMessageStreamsGateAndStripsMarker(t *testing.T) {
 	}
 }
 
+func TestChatNaturalMessageGateTreatsDirectCasualSummonAsResponseWorthy(t *testing.T) {
+	ctx := context.Background()
+	client := &fakeClient{response: llm.ChatResponse{Content: naturalRespondMarker + "\nYo, I'm here."}}
+	service, _ := newTestService(t, client)
+	respondStarted := 0
+
+	response, err := service.ChatNaturalMessage(ctx, AskRequest{
+		GuildID:      "guild-1",
+		UserID:       "user-1",
+		ChannelID:    "channel-1",
+		Question:     "panda are u here?",
+		BotMentioned: true,
+	}, func() {
+		respondStarted++
+	})
+	if err != nil {
+		t.Fatalf("ChatNaturalMessage: %v", err)
+	}
+	if response.Silent || response.Content != "Yo, I'm here." {
+		t.Fatalf("unexpected natural response: %+v", response)
+	}
+	if respondStarted != 1 {
+		t.Fatalf("expected one streamed response start, got %d", respondStarted)
+	}
+	joined := joinMessages(client.requests[0].Messages)
+	for _, want := range []string{
+		"clearly trying to get a reaction from Panda",
+		"direct casual engagement",
+		"availability or attention checks",
+		"panda are u here?",
+		"prefer a brief response",
+		"configured soul",
+		"present Discord participant",
+		"generic assistant boilerplate",
+		"bunch of code",
+		"Bot mention is a wake signal",
+		"Treat it as evidence",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("natural response gate should include %q, got:\n%s", want, joined)
+		}
+	}
+}
+
 func TestChatNaturalMessageCanDecline(t *testing.T) {
 	ctx := context.Background()
 	client := &fakeClient{response: llm.ChatResponse{Content: naturalIgnoreMarker}}
@@ -538,7 +612,7 @@ func TestChatNaturalMessageDeclinesWhenPandaIsDiscussedNotAddressed(t *testing.T
 		"talking about Panda instead of to Panda",
 		"how are you guys feeling about the new panda bot",
 		"Panda is the topic, not the addressee",
-		"Bot mention is only a wake signal",
+		"Bot mention is a wake signal",
 	} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("natural response gate should include %q, got:\n%s", want, joined)
@@ -1212,7 +1286,7 @@ func TestToolAvailabilityMessageRoutesVisualCreationToImageGeneration(t *testing
 		},
 	})
 	for _, want := range []string{
-		"Visual creation routing",
+		"Visual creation:",
 		"create, make, draw, generate",
 		"meme",
 		"call the image generation tool",
@@ -1635,6 +1709,32 @@ func TestAskExecutesMultipleToolCallsFromOneModelTurn(t *testing.T) {
 	}
 }
 
+func TestImageReferenceContextCoversReplyAndSnapshotImages(t *testing.T) {
+	message := imageReferenceContextMessage([]generated.ImageReference{{
+		ID:       "reply:100",
+		Filename: "cat.png",
+		MIMEType: "image/png",
+		URL:      "https://cdn.discordapp.com/attachments/cat.png",
+	}})
+
+	if message.Role != "system" {
+		t.Fatalf("expected system image context message, got %+v", message)
+	}
+	for _, want := range []string{"reply:100", "do not ask the user to attach it again", "\"this\"", "no text", "make a meme out of this", "infer fitting meme text", "do not treat reference IDs, media metadata"} {
+		if !strings.Contains(message.Content, want) {
+			t.Fatalf("expected image context to contain %q, got:\n%s", want, message.Content)
+		}
+	}
+	if strings.Contains(message.Content, "https://cdn.discordapp.com") {
+		t.Fatalf("image context must not expose raw attachment URLs to the answer model: %s", message.Content)
+	}
+	for _, leaked := range []string{"cat.png", "image/png", "GIFV", "video-backed", "still PNG frame", "content_type"} {
+		if strings.Contains(message.Content, leaked) {
+			t.Fatalf("image context leaked media implementation detail %q:\n%s", leaked, message.Content)
+		}
+	}
+}
+
 func TestCompleteTaskCarriesGeneratedFilesFromToolRounds(t *testing.T) {
 	ctx := context.Background()
 	client := &fakeClient{responses: []llm.ChatResponse{
@@ -1666,7 +1766,10 @@ func TestCompleteTaskCarriesGeneratedFilesFromToolRounds(t *testing.T) {
 			}},
 		},
 	}
-	service.WithToolExecutor(tools.NewExecutor(registry, nil, configs).WithImageGenerator(imageGenerator))
+	gifExtractor := &fakeAssistantGIFFrameExtractor{}
+	service.WithToolExecutor(tools.NewExecutor(registry, nil, configs).
+		WithImageGenerator(imageGenerator).
+		WithGIFFrameExtractor(gifExtractor))
 	if _, err := configs.EnsureDefault(ctx, "guild-1"); err != nil {
 		t.Fatalf("EnsureDefault: %v", err)
 	}
@@ -1726,6 +1829,194 @@ func TestCompleteTaskCarriesGeneratedFilesFromToolRounds(t *testing.T) {
 	}
 	if client.requests[1].MaxTokens != 120 {
 		t.Fatalf("generated media final response should use a small token budget, got %d", client.requests[1].MaxTokens)
+	}
+}
+
+func TestCompleteTaskRetriesWhenImageMemeRequestAsksForCaptionsInsteadOfTool(t *testing.T) {
+	ctx := context.Background()
+	client := &fakeClient{responses: []llm.ChatResponse{
+		{
+			Model:   "fixture/model",
+			Content: "Sure thing! What text would you like on the meme (e.g., top and bottom captions)? Let me know, and I'll generate it for you.",
+		},
+		{
+			Model: "fixture/model",
+			ToolCalls: []llm.ToolCall{{
+				ID:   "call-image",
+				Type: "function",
+				Function: llm.ToolCallFunction{
+					Name:      "panda_generate_image",
+					Arguments: `{"prompt":"Create a humorous meme from the referenced image. Add fitting meme text if useful.","reference_image_ids":["reply:100"],"filename_hint":"meme"}`,
+				},
+			}},
+		},
+		{Model: "fixture/model"},
+	}}
+	service, db := newTestService(t, client)
+	configs := repository.NewGuildConfigRepository(db.DB)
+	registry, err := tools.NewDefaultRegistry()
+	if err != nil {
+		t.Fatalf("NewDefaultRegistry: %v", err)
+	}
+	imageGenerator := &fakeAssistantImageGenerator{
+		configured: true,
+		response: llm.ImageGenerationResponse{
+			Images: []llm.GeneratedImage{{
+				Bytes:    []byte("meme-bytes"),
+				MIMEType: "image/png",
+			}},
+		},
+	}
+	gifExtractor := &fakeAssistantGIFFrameExtractor{}
+	service.WithToolExecutor(tools.NewExecutor(registry, nil, configs).
+		WithImageGenerator(imageGenerator).
+		WithGIFFrameExtractor(gifExtractor))
+	if _, err := configs.EnsureDefault(ctx, "guild-1"); err != nil {
+		t.Fatalf("EnsureDefault: %v", err)
+	}
+	if _, err := configs.UpdateBehaviorSettings(ctx, "guild-1", map[string]any{"tool_policy": tools.ToolPolicyAssistive}); err != nil {
+		t.Fatalf("UpdateBehaviorSettings: %v", err)
+	}
+
+	answer, err := service.CompleteTask(ctx, TaskRequest{
+		RequestID: "request-1",
+		GuildID:   "guild-1",
+		UserID:    "user-1",
+		ChannelID: "channel-1",
+		Command:   "chat",
+		Input:     "panda make a meme out of this",
+		ImageReferences: []generated.ImageReference{{
+			ID:       "reply:100",
+			Filename: "reaction.gif",
+			MIMEType: "image/gif",
+			URL:      "https://cdn.example.test/reaction.gif",
+		}},
+		FeatureGateActive: true,
+		AllowedPermissions: map[string]struct{}{
+			admin.PermissionAssistantImageGeneration: {},
+		},
+		EnabledFeatures: map[string]struct{}{
+			features.ImageGeneration: {},
+		},
+	})
+	if err != nil {
+		t.Fatalf("CompleteTask: %v", err)
+	}
+	if len(client.requests) < 3 {
+		t.Fatalf("expected initial request, retry request, and generated-media followup, got %d", len(client.requests))
+	}
+	retryMessages := joinMessages(client.requests[1].Messages)
+	for _, want := range []string{"Regenerate the previous response", "reply:100", "Do not ask for top/bottom captions", "must call `panda_generate_image`"} {
+		if !strings.Contains(retryMessages, want) {
+			t.Fatalf("retry request should contain %q, got:\n%s", want, retryMessages)
+		}
+	}
+	if len(imageGenerator.requests) != 1 {
+		t.Fatalf("expected image generator to run after routing retry, got %+v", imageGenerator.requests)
+	}
+	if len(gifExtractor.calls) != 1 || gifExtractor.calls[0].ID != "reply:100" {
+		t.Fatalf("expected GIF extractor to receive the reply image ref, got %+v", gifExtractor.calls)
+	}
+	if len(imageGenerator.requests[0].InputReferences) != 1 || !strings.HasPrefix(imageGenerator.requests[0].InputReferences[0].URL, "data:image/png;base64,") {
+		t.Fatalf("expected extracted PNG frame reference, got %+v", imageGenerator.requests[0].InputReferences)
+	}
+	if len(answer.GeneratedFiles) != 1 || answer.GeneratedFiles[0].Filename != "meme.png" {
+		t.Fatalf("expected generated meme file, got %+v", answer.GeneratedFiles)
+	}
+}
+
+func TestCompleteTaskRepairsImagePromptWithInternalRoutingMetadata(t *testing.T) {
+	ctx := context.Background()
+	client := &fakeClient{responses: []llm.ChatResponse{
+		{
+			Model: "fixture/model",
+			ToolCalls: []llm.ToolCall{{
+				ID:   "call-image-bad",
+				Type: "function",
+				Function: llm.ToolCallFunction{
+					Name:      "panda_generate_image",
+					Arguments: `{"prompt":"Make a meme about a video-backed Discord GIF and the still PNG frame extraction.","reference_image_ids":["reply_embed_1"],"filename_hint":"meme"}`,
+				},
+			}},
+		},
+		{
+			Model: "fixture/model",
+			ToolCalls: []llm.ToolCall{{
+				ID:   "call-image-clean",
+				Type: "function",
+				Function: llm.ToolCallFunction{
+					Name:      "panda_generate_image",
+					Arguments: `{"prompt":"Create a humorous meme from the referenced image. Add fitting meme text if useful.","reference_image_ids":["reply_embed_1"],"filename_hint":"meme"}`,
+				},
+			}},
+		},
+		{Model: "fixture/model"},
+	}}
+	service, db := newTestService(t, client)
+	configs := repository.NewGuildConfigRepository(db.DB)
+	registry, err := tools.NewDefaultRegistry()
+	if err != nil {
+		t.Fatalf("NewDefaultRegistry: %v", err)
+	}
+	imageGenerator := &fakeAssistantImageGenerator{
+		configured: true,
+		response: llm.ImageGenerationResponse{
+			Images: []llm.GeneratedImage{{
+				Bytes:    []byte("image-bytes"),
+				MIMEType: "image/png",
+			}},
+		},
+	}
+	gifExtractor := &fakeAssistantGIFFrameExtractor{}
+	service.WithToolExecutor(tools.NewExecutor(registry, nil, configs).
+		WithImageGenerator(imageGenerator).
+		WithGIFFrameExtractor(gifExtractor))
+	if _, err := configs.EnsureDefault(ctx, "guild-1"); err != nil {
+		t.Fatalf("EnsureDefault: %v", err)
+	}
+
+	answer, err := service.CompleteTask(ctx, TaskRequest{
+		RequestID: "request-1",
+		GuildID:   "guild-1",
+		UserID:    "user-1",
+		ChannelID: "channel-1",
+		Command:   "chat",
+		Input:     "panda make a meme out of this",
+		ImageReferences: []generated.ImageReference{{
+			ID:       "reply_embed_1",
+			Filename: "reaction.mp4",
+			MIMEType: "video/mp4",
+			URL:      "https://media.tenor.example/reaction.mp4",
+		}},
+		FeatureGateActive: true,
+		AllowedPermissions: map[string]struct{}{
+			admin.PermissionAssistantImageGeneration: {},
+		},
+		EnabledFeatures: map[string]struct{}{
+			features.ImageGeneration: {},
+		},
+	})
+	if err != nil {
+		t.Fatalf("CompleteTask: %v", err)
+	}
+	if len(imageGenerator.requests) != 1 {
+		t.Fatalf("expected only the repaired prompt to reach image generator, got %+v", imageGenerator.requests)
+	}
+	if got := imageGenerator.requests[0].Prompt; strings.Contains(strings.ToLower(got), "video-backed") || strings.Contains(strings.ToLower(got), "still png frame") {
+		t.Fatalf("clean image prompt still contains internal routing metadata: %q", got)
+	}
+	if len(answer.GeneratedFiles) != 1 {
+		t.Fatalf("expected generated file after clean retry, got %+v", answer.GeneratedFiles)
+	}
+	if len(gifExtractor.calls) != 1 || gifExtractor.calls[0].ID != "reply_embed_1" {
+		t.Fatalf("expected media frame extractor to receive clean retry reference, got %+v", gifExtractor.calls)
+	}
+	if len(client.requests) < 2 {
+		t.Fatalf("expected a retry request after rejected prompt, got %d", len(client.requests))
+	}
+	retryMessages := joinMessages(client.requests[1].Messages)
+	if !strings.Contains(retryMessages, `"retryable":true`) || !strings.Contains(retryMessages, "clean visual prompt") {
+		t.Fatalf("expected retryable prompt-repair tool message, got %s", retryMessages)
 	}
 }
 
@@ -1809,8 +2100,8 @@ func TestToolAvailabilityMessageRoutesAttachedImagesToInspection(t *testing.T) {
 		},
 	})
 	for _, want := range []string{
-		"Attached image routing",
-		"normal answer model cannot see image pixels",
+		"Attached image use",
+		"this chat context does not include image pixels",
 		"call the image inspection tool",
 		"reference_image_ids",
 		"Do not guess",

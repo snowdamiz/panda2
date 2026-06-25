@@ -418,6 +418,9 @@ func (b *Bot) recordMessageEvent(ctx context.Context, eventType string, message 
 			"author_bot":       fmt.Sprintf("%t", message.Author.Bot),
 			"attachment_count": fmt.Sprintf("%d", len(message.Attachments)),
 			"embed_count":      fmt.Sprintf("%d", len(message.Embeds)),
+			"sticker_count":    fmt.Sprintf("%d", len(message.StickerItems)),
+			"snapshot_count":   fmt.Sprintf("%d", len(message.MessageSnapshots)),
+			"image_ref_count":  fmt.Sprintf("%d", len(imageReferencesFromMessage(message, "event"))),
 		}),
 	})
 }

@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
+	"net/url"
 	"sort"
 	"strconv"
 	"strings"
@@ -40,6 +42,14 @@ type ImageGenerator interface {
 type ImageAnalyzer interface {
 	Configured() bool
 	Analyze(ctx context.Context, request llm.ImageAnalysisRequest) (llm.ImageAnalysisResponse, error)
+}
+
+type ImageRuntimeDiagnostics struct {
+	HasGenerator         bool
+	GeneratorConfigured  bool
+	HasAnalyzer          bool
+	AnalyzerConfigured   bool
+	HasGIFFrameExtractor bool
 }
 
 type ConfigReader interface {
@@ -150,6 +160,7 @@ type Executor struct {
 	webSearch   WebSearcher
 	images      ImageGenerator
 	imageVision ImageAnalyzer
+	gifFrames   GIFFrameExtractor
 	configs     ConfigReader
 	context     ContextReader
 	attachments AttachmentReader
@@ -326,6 +337,11 @@ func (e *Executor) WithImageAnalyzer(analyzer ImageAnalyzer) *Executor {
 	return e
 }
 
+func (e *Executor) WithGIFFrameExtractor(extractor GIFFrameExtractor) *Executor {
+	e.gifFrames = extractor
+	return e
+}
+
 func (e *Executor) WithAttachmentReader(reader AttachmentReader) *Executor {
 	e.attachments = reader
 	return e
@@ -381,6 +397,24 @@ func (e *Executor) WithOpsManager(manager OpsManager) *Executor {
 	return e
 }
 
+func (e *Executor) ImageRuntimeDiagnostics() ImageRuntimeDiagnostics {
+	if e == nil {
+		return ImageRuntimeDiagnostics{}
+	}
+	diagnostics := ImageRuntimeDiagnostics{
+		HasGenerator:         e.images != nil,
+		HasAnalyzer:          e.imageVision != nil,
+		HasGIFFrameExtractor: e.gifFrames != nil,
+	}
+	if e.images != nil {
+		diagnostics.GeneratorConfigured = e.images.Configured()
+	}
+	if e.imageVision != nil {
+		diagnostics.AnalyzerConfigured = e.imageVision.Configured()
+	}
+	return diagnostics
+}
+
 func (e *Executor) OpenRouterTools(access ToolAccess) []llm.Tool {
 	if e == nil || e.registry == nil {
 		return nil
@@ -408,6 +442,13 @@ func (e *Executor) OpenRouterToolsForRequest(ctx context.Context, request Dynami
 	}
 	dynamicTools, err := e.dynamic.OpenRouterTools(ctx, request)
 	if err != nil {
+		slog.Warn("dynamic tool listing failed",
+			slog.Any("err", err),
+			slog.String("guild_id", request.GuildID),
+			slog.String("channel_id", request.ChannelID),
+			slog.String("user_id", request.ActorID),
+			slog.String("invocation_type", request.InvocationType),
+		)
 		return result
 	}
 	seen := map[string]struct{}{}
@@ -462,6 +503,18 @@ func (e *Executor) Execute(ctx context.Context, request ExecutionRequest) (Execu
 	}
 	if !e.canExecute(definition.Name) {
 		return ExecutionResult{}, fmt.Errorf("tool %s is not executable in this runtime", definition.Name)
+	}
+	if isImageToolDefinition(definition.Name) {
+		slog.Info("image tool execution started",
+			slog.String("guild_id", request.GuildID),
+			slog.String("channel_id", request.ChannelID),
+			slog.String("request_id", request.RequestID),
+			slog.String("user_id", request.ActorID),
+			slog.String("tool_name", definition.ModelName()),
+			slog.Int("available_image_ref_count", len(request.ImageReferences)),
+			slog.Any("available_image_ref_ids", toolImageReferenceIDs(request.ImageReferences)),
+			slog.Any("requested_image_ref_ids", stringListArgumentFromRaw(request.Call.Function.Arguments, "reference_image_ids")),
+		)
 	}
 
 	timeout := definition.Timeout
@@ -552,6 +605,18 @@ func (e *Executor) Execute(ctx context.Context, request ExecutionRequest) (Execu
 	if err != nil {
 		payload = map[string]any{"error": err.Error()}
 	}
+	if isImageToolDefinition(definition.Name) {
+		slog.Info("image tool execution completed",
+			slog.String("guild_id", request.GuildID),
+			slog.String("channel_id", request.ChannelID),
+			slog.String("request_id", request.RequestID),
+			slog.String("user_id", request.ActorID),
+			slog.String("tool_name", definition.ModelName()),
+			slog.Bool("success", err == nil),
+			slog.Int("generated_file_count", len(generatedFiles)),
+			slog.Int("usage_reservation_count", len(usageReservations)),
+		)
+	}
 	confirmation := confirmationFromPayload(payload)
 	data, marshalErr := json.Marshal(toolMessagePayload(payload))
 	if marshalErr != nil {
@@ -585,6 +650,34 @@ func redactExecutionResult(result ExecutionResult) ExecutionResult {
 	result.GeneratedFiles = generated.CloneFiles(result.GeneratedFiles)
 	result.UsageReservations = append([]billing.Reservation(nil), result.UsageReservations...)
 	return result
+}
+
+func isImageToolDefinition(name string) bool {
+	switch strings.TrimSpace(name) {
+	case "panda.generate_image", "panda.inspect_image":
+		return true
+	default:
+		return false
+	}
+}
+
+func toolImageReferenceIDs(references []generated.ImageReference) []string {
+	ids := make([]string, 0, len(references))
+	for _, reference := range references {
+		id := strings.TrimSpace(reference.ID)
+		if id != "" {
+			ids = append(ids, id)
+		}
+	}
+	return ids
+}
+
+func stringListArgumentFromRaw(rawArguments, key string) []string {
+	arguments, err := parseArguments(rawArguments)
+	if err != nil {
+		return nil
+	}
+	return stringListArgument(arguments, key)
 }
 
 func (e *Executor) executeDiscordTool(ctx context.Context, definition Definition, request ExecutionRequest, rawArguments string) (any, error) {
@@ -927,7 +1020,7 @@ func (e *Executor) inspectImage(ctx context.Context, request ExecutionRequest, a
 	if len([]rune(question)) > maxImageAnalysisPromptChars {
 		return imageInspectionPayload(false, 0, "", llm.ImageProviderStatusInvalid, "That image inspection request is too long. Please ask with a shorter question."), nil
 	}
-	references, err := selectedImageInputReferences(args, request.ImageReferences)
+	references, err := e.selectedImageInputReferences(ctx, request, args)
 	if err != nil {
 		return imageInspectionPayload(false, 0, "", llm.ImageProviderStatusInvalid, err.Error()), nil
 	}
@@ -985,6 +1078,25 @@ func (e *Executor) generateImage(ctx context.Context, request ExecutionRequest, 
 		return imageToolPayload(false, 0, "", "", llm.ImageProviderStatusInvalid, "That image prompt is too long. Please ask with a shorter visual description."), nil, nil, nil
 	}
 	caption := truncateRunes(strings.TrimSpace(stringArgument(args, "caption")), maxImageCaptionChars)
+	if flags := imagePromptInternalMetadataFlags(prompt); len(flags) > 0 {
+		slog.Warn("image generation prompt rejected for internal metadata",
+			slog.String("guild_id", request.GuildID),
+			slog.String("channel_id", request.ChannelID),
+			slog.String("request_id", request.RequestID),
+			slog.String("user_id", request.ActorID),
+			slog.Any("flags", flags),
+			slog.Int("prompt_chars", len([]rune(prompt))),
+			slog.Int("available_image_ref_count", len(request.ImageReferences)),
+			slog.Any("requested_image_ref_ids", stringListArgument(args, "reference_image_ids")),
+		)
+		e.recordImageAudit(ctx, request, "image_generation.prompt_rejected", map[string]any{
+			"reason":          "internal_metadata",
+			"flags":           flags,
+			"prompt_chars":    len([]rune(prompt)),
+			"reference_count": len(stringListArgument(args, "reference_image_ids")),
+		})
+		return imagePromptRejectedPayload(caption), nil, nil, nil
+	}
 	count := intArgument(args, "count", 1)
 	if count <= 0 {
 		count = 1
@@ -992,10 +1104,31 @@ func (e *Executor) generateImage(ctx context.Context, request ExecutionRequest, 
 	if count > 1 {
 		return imageToolPayload(false, 0, "", caption, llm.ImageProviderStatusInvalid, "This Panda rollout can generate one image at a time. Please ask for one image."), nil, nil, nil
 	}
-	references, err := selectedImageInputReferences(args, request.ImageReferences)
+	references, err := e.selectedImageInputReferences(ctx, request, args)
 	if err != nil {
+		slog.Warn("image generation reference selection failed",
+			slog.Any("err", err),
+			slog.String("guild_id", request.GuildID),
+			slog.String("channel_id", request.ChannelID),
+			slog.String("request_id", request.RequestID),
+			slog.String("user_id", request.ActorID),
+			slog.Int("available_image_ref_count", len(request.ImageReferences)),
+			slog.Any("available_image_ref_ids", toolImageReferenceIDs(request.ImageReferences)),
+			slog.Any("requested_image_ref_ids", stringListArgument(args, "reference_image_ids")),
+		)
 		return imageToolPayload(false, 0, "", caption, llm.ImageProviderStatusInvalid, err.Error()), nil, nil, nil
 	}
+	slog.Info("image generation request prepared",
+		slog.String("guild_id", request.GuildID),
+		slog.String("channel_id", request.ChannelID),
+		slog.String("request_id", request.RequestID),
+		slog.String("user_id", request.ActorID),
+		slog.Int("prompt_chars", len([]rune(prompt))),
+		slog.Int("available_image_ref_count", len(request.ImageReferences)),
+		slog.Any("available_image_ref_ids", toolImageReferenceIDs(request.ImageReferences)),
+		slog.Any("requested_image_ref_ids", stringListArgument(args, "reference_image_ids")),
+		slog.Int("selected_reference_count", len(references)),
+	)
 
 	e.recordImageAudit(ctx, request, "image_generation.attempt", map[string]any{
 		"prompt_chars":    len([]rune(prompt)),
@@ -1066,7 +1199,7 @@ func (e *Executor) generateImage(ctx context.Context, request ExecutionRequest, 
 	return payload, []generated.File{file}, reservations, nil
 }
 
-func selectedImageInputReferences(arguments map[string]any, available []generated.ImageReference) ([]llm.ImageInputReference, error) {
+func (e *Executor) selectedImageInputReferences(ctx context.Context, request ExecutionRequest, arguments map[string]any) ([]llm.ImageInputReference, error) {
 	ids := stringListArgument(arguments, "reference_image_ids")
 	if len(ids) == 0 {
 		return nil, nil
@@ -1075,21 +1208,107 @@ func selectedImageInputReferences(arguments map[string]any, available []generate
 		return nil, fmt.Errorf("This request included too many reference images. Please use at most %d.", maxImageReferenceImages)
 	}
 	availableByID := map[string]generated.ImageReference{}
-	for _, reference := range available {
+	for _, reference := range request.ImageReferences {
 		id := strings.TrimSpace(reference.ID)
 		if id != "" {
 			availableByID[id] = reference
 		}
 	}
 	references := make([]llm.ImageInputReference, 0, len(ids))
+	extractedFrameReferences := 0
 	for _, id := range ids {
 		reference, ok := availableByID[id]
 		if !ok || strings.TrimSpace(reference.URL) == "" {
 			return nil, fmt.Errorf("I could not find one of the requested image references. Please attach the image again and retry.")
 		}
+		if needsImageReferenceFrameExtraction(reference) {
+			if e == nil || e.gifFrames == nil {
+				return nil, fmt.Errorf("I found a referenced media item that needs preprocessing, but frame extraction is not configured. Please try again later.")
+			}
+			slog.Info("image reference frame extraction started",
+				slog.String("guild_id", request.GuildID),
+				slog.String("channel_id", request.ChannelID),
+				slog.String("request_id", request.RequestID),
+				slog.String("user_id", request.ActorID),
+				slog.String("image_ref_id", id),
+				slog.String("mime_type", reference.MIMEType),
+				slog.String("filename_ext", imageReferenceExtension(reference.Filename)),
+				slog.String("url_ext", imageReferenceExtension(reference.URL)),
+			)
+			frame, err := e.gifFrames.ExtractGIFFrame(ctx, reference)
+			if err != nil {
+				slog.Warn("image reference frame extraction failed",
+					slog.Any("err", err),
+					slog.String("guild_id", request.GuildID),
+					slog.String("channel_id", request.ChannelID),
+					slog.String("request_id", request.RequestID),
+					slog.String("user_id", request.ActorID),
+					slog.String("image_ref_id", id),
+					slog.String("mime_type", reference.MIMEType),
+					slog.String("filename_ext", imageReferenceExtension(reference.Filename)),
+					slog.String("url_ext", imageReferenceExtension(reference.URL)),
+				)
+				return nil, fmt.Errorf("I could not extract a still frame from the referenced animated image. Please try again later or upload a still image.")
+			}
+			references = append(references, llm.ImageInputReference{URL: imageDataURL(frame.MIMEType, frame.Data)})
+			extractedFrameReferences++
+			slog.Info("image reference frame extraction completed",
+				slog.String("guild_id", request.GuildID),
+				slog.String("channel_id", request.ChannelID),
+				slog.String("request_id", request.RequestID),
+				slog.String("user_id", request.ActorID),
+				slog.String("image_ref_id", id),
+				slog.String("frame_mime_type", frame.MIMEType),
+				slog.Int("frame_size_bytes", len(frame.Data)),
+			)
+			continue
+		}
 		references = append(references, llm.ImageInputReference{URL: strings.TrimSpace(reference.URL)})
 	}
+	if extractedFrameReferences > 0 {
+		slog.Info("image references prepared with extracted frames",
+			slog.String("guild_id", request.GuildID),
+			slog.String("channel_id", request.ChannelID),
+			slog.String("request_id", request.RequestID),
+			slog.String("user_id", request.ActorID),
+			slog.Int("selected_reference_count", len(references)),
+			slog.Int("extracted_frame_count", extractedFrameReferences),
+		)
+	}
 	return references, nil
+}
+
+func needsImageReferenceFrameExtraction(reference generated.ImageReference) bool {
+	contentType := strings.ToLower(strings.TrimSpace(strings.Split(reference.MIMEType, ";")[0]))
+	switch contentType {
+	case "image/gif", "image/apng", "video/mp4", "video/webm", "video/quicktime":
+		return true
+	}
+	for _, value := range []string{reference.Filename, reference.URL} {
+		switch strings.ToLower(imageReferenceExtension(value)) {
+		case "gif", "gifv", "mp4", "m4v", "webm", "mov":
+			return true
+		}
+	}
+	return false
+}
+
+func imageReferenceExtension(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	if parsed, err := url.Parse(raw); err == nil && parsed.Path != "" {
+		raw = parsed.Path
+	}
+	if slash := strings.LastIndex(raw, "/"); slash >= 0 && slash+1 < len(raw) {
+		raw = raw[slash+1:]
+	}
+	dot := strings.LastIndex(raw, ".")
+	if dot < 0 || dot+1 >= len(raw) {
+		return ""
+	}
+	return strings.ToLower(strings.TrimSpace(raw[dot+1:]))
 }
 
 func imageAnalysisPrompt(question, detail string) string {
@@ -1192,6 +1411,57 @@ func imageToolPayload(generated bool, imageCount int, filename, caption string, 
 		"provider_status": string(status),
 		"user_message":    userMessage,
 	}
+}
+
+func imagePromptRejectedPayload(caption string) map[string]any {
+	payload := imageToolPayload(false, 0, "", caption, llm.ImageProviderStatusInvalid, "The image prompt picked up internal routing text, so I need to retry with a cleaner visual prompt.")
+	payload["retryable"] = true
+	payload["model_instruction"] = "Call the image generation tool again with a clean visual prompt based only on the user's creative request and any intended visible image text. Keep the same reference IDs. Do not answer the user yet."
+	return payload
+}
+
+func imagePromptInternalMetadataFlags(prompt string) []string {
+	normalized := strings.ToLower(strings.TrimSpace(prompt))
+	if normalized == "" {
+		return nil
+	}
+	patterns := []struct {
+		flag    string
+		pattern string
+	}{
+		{flag: "reference_image_ids", pattern: "reference_image_ids"},
+		{flag: "reference_id", pattern: "reference id"},
+		{flag: "image_reference", pattern: "image reference"},
+		{flag: "discord_context", pattern: "current discord context"},
+		{flag: "normal_answer_model", pattern: "normal answer model"},
+		{flag: "function_tool", pattern: "function tool"},
+		{flag: "tool_name_generate", pattern: "panda_generate_image"},
+		{flag: "tool_name_generate", pattern: "panda.generate_image"},
+		{flag: "tool_name_inspect", pattern: "panda_inspect_image"},
+		{flag: "tool_name_inspect", pattern: "panda.inspect_image"},
+		{flag: "tool_layer", pattern: "tool layer"},
+		{flag: "still_png_frame", pattern: "still png frame"},
+		{flag: "gifv", pattern: "gifv"},
+		{flag: "video_backed", pattern: "video-backed"},
+		{flag: "mime_type", pattern: "mime type"},
+		{flag: "content_type", pattern: "content_type"},
+		{flag: "provider_status", pattern: "provider_status"},
+		{flag: "routing_instruction", pattern: "routing instruction"},
+		{flag: "media_metadata", pattern: "media metadata"},
+	}
+	seen := map[string]struct{}{}
+	flags := []string{}
+	for _, pattern := range patterns {
+		if !strings.Contains(normalized, pattern.pattern) {
+			continue
+		}
+		if _, ok := seen[pattern.flag]; ok {
+			continue
+		}
+		seen[pattern.flag] = struct{}{}
+		flags = append(flags, pattern.flag)
+	}
+	return flags
 }
 
 func imageErrorStatusAndMessage(err error) (llm.ImageProviderStatus, string) {

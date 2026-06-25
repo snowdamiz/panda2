@@ -94,7 +94,7 @@ func TestAdminSetupToolSchemasExposeNaturalLanguageFields(t *testing.T) {
 	assertToolSchemaContains("panda.manage_channel_rule", "channel_name", "channel")
 	assertToolSchemaContains("panda.manage_tool_access", "tool_name", "tool_group", "role_name", "role", "target_type", "user_id", "member_user_id")
 	assertToolSchemaContains("panda.manage_prompt", "prompt", "instructions")
-	assertToolSchemaContains("panda.manage_soul", "soul")
+	assertToolSchemaContains("panda.manage_soul", "soul", "enum", "status", "set", "update")
 	assertToolSchemaContains("panda.manage_music", "voice_channel_id", "voice_channel_name", "voice_channel", "vc")
 	assertToolSchemaContains("panda.manage_composed_tool", "voice_channel_id", "voice_channel_name", "voice_channel")
 }
@@ -663,6 +663,20 @@ func (f *fakeImageAnalyzer) Analyze(_ context.Context, request llm.ImageAnalysis
 	return f.response, f.err
 }
 
+type fakeGIFFrameExtractor struct {
+	frame generated.File
+	err   error
+	calls []generated.ImageReference
+}
+
+func (f *fakeGIFFrameExtractor) ExtractGIFFrame(_ context.Context, reference generated.ImageReference) (generated.File, error) {
+	f.calls = append(f.calls, reference)
+	if f.err != nil {
+		return generated.File{}, f.err
+	}
+	return f.frame, nil
+}
+
 type fakeComposedManager struct {
 	requests []ComposedToolManagementRequest
 }
@@ -1203,6 +1217,218 @@ func TestExecutorGenerateImageCarriesFilesWithoutLeakingBytes(t *testing.T) {
 	}
 }
 
+func TestExecutorGenerateImageExtractsFrameForGIFReferences(t *testing.T) {
+	registry, err := NewDefaultRegistry()
+	if err != nil {
+		t.Fatalf("NewDefaultRegistry: %v", err)
+	}
+	generator := &fakeImageGenerator{
+		configured: true,
+		response: llm.ImageGenerationResponse{
+			Images: []llm.GeneratedImage{{
+				Bytes:    []byte("generated-image"),
+				MIMEType: "image/png",
+			}},
+		},
+	}
+	extractor := &fakeGIFFrameExtractor{frame: generated.File{MIMEType: "image/png", Data: []byte("gif-frame")}}
+	executor := NewExecutor(registry, nil, nil).
+		WithImageGenerator(generator).
+		WithGIFFrameExtractor(extractor)
+	access := testAccess(ToolPolicyAssistive, admin.PermissionAssistantImageGeneration)
+	access.FeatureGateActive = true
+	access.EnabledFeatures = map[string]struct{}{features.ImageGeneration: {}}
+
+	result, err := executor.Execute(context.Background(), ExecutionRequest{
+		GuildID:        "guild-1",
+		ChannelID:      "channel-1",
+		ActorID:        "user-1",
+		RequestID:      "request-1",
+		InvocationType: "chat_tool",
+		ImageReferences: []generated.ImageReference{{
+			ID:       "reply:gif",
+			Filename: "reaction.gif",
+			MIMEType: "image/gif",
+			URL:      "https://cdn.example.test/reaction.gif",
+		}},
+		Access: access,
+		Call: llm.ToolCall{
+			ID:   "call-image",
+			Type: "function",
+			Function: llm.ToolCallFunction{
+				Name:      "panda.generate_image",
+				Arguments: `{"prompt":"make a meme","reference_image_ids":["reply:gif"],"filename_hint":"meme"}`,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if len(extractor.calls) != 1 || extractor.calls[0].ID != "reply:gif" {
+		t.Fatalf("expected gif extractor to receive selected reference, got %+v", extractor.calls)
+	}
+	if len(generator.requests) != 1 || len(generator.requests[0].InputReferences) != 1 {
+		t.Fatalf("expected one generator request with one input reference, got %+v", generator.requests)
+	}
+	wantDataURL := "data:image/png;base64," + base64.StdEncoding.EncodeToString([]byte("gif-frame"))
+	if got := generator.requests[0].InputReferences[0].URL; got != wantDataURL {
+		t.Fatalf("expected extracted frame data URL, got %q", got)
+	}
+	if strings.Contains(generator.requests[0].InputReferences[0].URL, "reaction.gif") {
+		t.Fatalf("generator should not receive original GIF URL: %+v", generator.requests[0].InputReferences)
+	}
+	if !strings.Contains(result.Message.Content, `"generated":true`) {
+		t.Fatalf("expected generated payload, got %s", result.Message.Content)
+	}
+}
+
+func TestExecutorGenerateImageExtractsFrameForVideoBackedGIFReferences(t *testing.T) {
+	registry, err := NewDefaultRegistry()
+	if err != nil {
+		t.Fatalf("NewDefaultRegistry: %v", err)
+	}
+	generator := &fakeImageGenerator{
+		configured: true,
+		response: llm.ImageGenerationResponse{
+			Images: []llm.GeneratedImage{{
+				Bytes:    []byte("generated-image"),
+				MIMEType: "image/png",
+			}},
+		},
+	}
+	extractor := &fakeGIFFrameExtractor{frame: generated.File{MIMEType: "image/png", Data: []byte("video-frame")}}
+	executor := NewExecutor(registry, nil, nil).
+		WithImageGenerator(generator).
+		WithGIFFrameExtractor(extractor)
+	access := testAccess(ToolPolicyAssistive, admin.PermissionAssistantImageGeneration)
+	access.FeatureGateActive = true
+	access.EnabledFeatures = map[string]struct{}{features.ImageGeneration: {}}
+
+	result, err := executor.Execute(context.Background(), ExecutionRequest{
+		GuildID:        "guild-1",
+		ChannelID:      "channel-1",
+		ActorID:        "user-1",
+		RequestID:      "request-1",
+		InvocationType: "chat_tool",
+		ImageReferences: []generated.ImageReference{{
+			ID:       "reply_embed_1",
+			Filename: "reaction.mp4",
+			MIMEType: "video/mp4",
+			URL:      "https://media.tenor.example/reaction.mp4",
+		}},
+		Access: access,
+		Call: llm.ToolCall{
+			ID:   "call-image",
+			Type: "function",
+			Function: llm.ToolCallFunction{
+				Name:      "panda.generate_image",
+				Arguments: `{"prompt":"make a meme","reference_image_ids":["reply_embed_1"],"filename_hint":"meme"}`,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if len(extractor.calls) != 1 || extractor.calls[0].ID != "reply_embed_1" {
+		t.Fatalf("expected frame extractor to receive selected video reference, got %+v", extractor.calls)
+	}
+	wantDataURL := "data:image/png;base64," + base64.StdEncoding.EncodeToString([]byte("video-frame"))
+	if len(generator.requests) != 1 || len(generator.requests[0].InputReferences) != 1 || generator.requests[0].InputReferences[0].URL != wantDataURL {
+		t.Fatalf("expected generated request to use extracted frame, got %+v", generator.requests)
+	}
+	if !strings.Contains(result.Message.Content, `"generated":true`) {
+		t.Fatalf("expected generated payload, got %s", result.Message.Content)
+	}
+}
+
+func TestExecutorGenerateImageRejectsPromptWithInternalRoutingMetadata(t *testing.T) {
+	registry, err := NewDefaultRegistry()
+	if err != nil {
+		t.Fatalf("NewDefaultRegistry: %v", err)
+	}
+	generator := &fakeImageGenerator{configured: true}
+	executor := NewExecutor(registry, nil, nil).WithImageGenerator(generator)
+	access := testAccess(ToolPolicyAssistive, admin.PermissionAssistantImageGeneration)
+	access.FeatureGateActive = true
+	access.EnabledFeatures = map[string]struct{}{features.ImageGeneration: {}}
+
+	result, err := executor.Execute(context.Background(), ExecutionRequest{
+		GuildID:        "guild-1",
+		ChannelID:      "channel-1",
+		ActorID:        "user-1",
+		RequestID:      "request-1",
+		InvocationType: "chat_tool",
+		ImageReferences: []generated.ImageReference{{
+			ID:       "reply_embed_1",
+			Filename: "reaction.mp4",
+			MIMEType: "video/mp4",
+			URL:      "https://media.tenor.example/reaction.mp4",
+		}},
+		Access: access,
+		Call: llm.ToolCall{
+			ID:   "call-image",
+			Type: "function",
+			Function: llm.ToolCallFunction{
+				Name:      "panda.generate_image",
+				Arguments: `{"prompt":"Make a meme about a video-backed Discord GIF and the still PNG frame extraction.","reference_image_ids":["reply_embed_1"],"filename_hint":"meme"}`,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if len(generator.requests) != 0 {
+		t.Fatalf("prompt with internal routing metadata should not reach provider, got %+v", generator.requests)
+	}
+	if !strings.Contains(result.Message.Content, `"provider_status":"invalid_request"`) || !strings.Contains(result.Message.Content, `"retryable":true`) {
+		t.Fatalf("expected retryable invalid prompt payload, got %s", result.Message.Content)
+	}
+}
+
+func TestExecutorGenerateImageRejectsGIFReferenceWithoutExtractor(t *testing.T) {
+	registry, err := NewDefaultRegistry()
+	if err != nil {
+		t.Fatalf("NewDefaultRegistry: %v", err)
+	}
+	generator := &fakeImageGenerator{configured: true}
+	executor := NewExecutor(registry, nil, nil).WithImageGenerator(generator)
+	access := testAccess(ToolPolicyAssistive, admin.PermissionAssistantImageGeneration)
+	access.FeatureGateActive = true
+	access.EnabledFeatures = map[string]struct{}{features.ImageGeneration: {}}
+
+	result, err := executor.Execute(context.Background(), ExecutionRequest{
+		GuildID:        "guild-1",
+		ChannelID:      "channel-1",
+		ActorID:        "user-1",
+		RequestID:      "request-1",
+		InvocationType: "chat_tool",
+		ImageReferences: []generated.ImageReference{{
+			ID:       "reply:gif",
+			Filename: "reaction.gif",
+			MIMEType: "image/gif",
+			URL:      "https://cdn.example.test/reaction.gif",
+		}},
+		Access: access,
+		Call: llm.ToolCall{
+			ID:   "call-image",
+			Type: "function",
+			Function: llm.ToolCallFunction{
+				Name:      "panda.generate_image",
+				Arguments: `{"prompt":"make a meme","reference_image_ids":["reply:gif"]}`,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if len(generator.requests) != 0 {
+		t.Fatalf("GIF without extractor should fail before provider call, got %+v", generator.requests)
+	}
+	if !strings.Contains(result.Message.Content, `"provider_status":"invalid_request"`) || !strings.Contains(result.Message.Content, "needs preprocessing") {
+		t.Fatalf("expected safe GIF extraction failure, got %s", result.Message.Content)
+	}
+}
+
 func TestExecutorGenerateImageRejectsUnknownReferenceID(t *testing.T) {
 	registry, err := NewDefaultRegistry()
 	if err != nil {
@@ -1342,6 +1568,69 @@ func TestExecutorInspectImageUsesSelectedReferences(t *testing.T) {
 	}
 	if !strings.Contains(result.Message.Content, `"analyzed":true`) || !strings.Contains(result.Message.Content, "small panda icon") {
 		t.Fatalf("tool message should expose safe analysis, got %s", result.Message.Content)
+	}
+}
+
+func TestExecutorInspectImageExtractsFrameForGIFReferences(t *testing.T) {
+	registry, err := NewDefaultRegistry()
+	if err != nil {
+		t.Fatalf("NewDefaultRegistry: %v", err)
+	}
+	analyzer := &fakeImageAnalyzer{
+		configured: true,
+		response: llm.ImageAnalysisResponse{
+			Model:   "provider/image-model",
+			Content: "The extracted frame shows a surprised cat.",
+		},
+	}
+	extractor := &fakeGIFFrameExtractor{frame: generated.File{MIMEType: "image/png", Data: []byte("gif-frame")}}
+	executor := NewExecutor(registry, nil, nil).
+		WithImageAnalyzer(analyzer).
+		WithGIFFrameExtractor(extractor)
+	access := testAccess(ToolPolicyAssistive, admin.PermissionAssistantImageGeneration)
+	access.FeatureGateActive = true
+	access.EnabledFeatures = map[string]struct{}{features.ImageGeneration: {}}
+
+	result, err := executor.Execute(context.Background(), ExecutionRequest{
+		GuildID:        "guild-1",
+		ChannelID:      "channel-1",
+		ActorID:        "user-1",
+		RequestID:      "request-1",
+		InvocationType: "chat_tool",
+		ImageReferences: []generated.ImageReference{{
+			ID:       "reply:gif",
+			Filename: "reaction.gif",
+			MIMEType: "image/gif",
+			URL:      "https://cdn.example.test/reaction.gif",
+		}},
+		Access: access,
+		Call: llm.ToolCall{
+			ID:   "call-inspect",
+			Type: "function",
+			Function: llm.ToolCallFunction{
+				Name:      "panda.inspect_image",
+				Arguments: `{"question":"What is in this image?","reference_image_ids":["reply:gif"],"detail":"brief"}`,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if len(extractor.calls) != 1 || extractor.calls[0].ID != "reply:gif" {
+		t.Fatalf("expected gif extractor call, got %+v", extractor.calls)
+	}
+	if len(analyzer.requests) != 1 || len(analyzer.requests[0].InputReferences) != 1 {
+		t.Fatalf("expected one analyzer request with one input reference, got %+v", analyzer.requests)
+	}
+	wantDataURL := "data:image/png;base64," + base64.StdEncoding.EncodeToString([]byte("gif-frame"))
+	if got := analyzer.requests[0].InputReferences[0].URL; got != wantDataURL {
+		t.Fatalf("expected extracted frame data URL, got %q", got)
+	}
+	if strings.Contains(result.Message.Content, "reaction.gif") || strings.Contains(result.Message.Content, wantDataURL) {
+		t.Fatalf("tool message leaked GIF input details: %s", result.Message.Content)
+	}
+	if !strings.Contains(result.Message.Content, `"analyzed":true`) || !strings.Contains(result.Message.Content, "surprised cat") {
+		t.Fatalf("expected analysis payload, got %s", result.Message.Content)
 	}
 }
 

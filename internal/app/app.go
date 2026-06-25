@@ -23,6 +23,7 @@ import (
 	"github.com/sn0w/panda2/internal/llm"
 	"github.com/sn0w/panda2/internal/maintenance"
 	"github.com/sn0w/panda2/internal/memory"
+	"github.com/sn0w/panda2/internal/music"
 	"github.com/sn0w/panda2/internal/ops"
 	"github.com/sn0w/panda2/internal/queue"
 	"github.com/sn0w/panda2/internal/ratelimit"
@@ -116,6 +117,12 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 		CircuitBreakerFailureThreshold: cfg.OpenRouterCircuitBreakerFailureThreshold,
 		CircuitBreakerCooldown:         cfg.OpenRouterCircuitBreakerCooldown,
 	})
+	musicSidecars := music.NewSidecarManager(music.SidecarConfig{
+		Dir:        cfg.MusicSidecarDir,
+		YTDLPPath:  cfg.MusicYTDLPPath,
+		FFmpegPath: cfg.MusicFFmpegPath,
+		Logger:     logger,
+	})
 	memoryService := memory.NewServiceWithEmbeddings(knowledge, openRouter, cfg.OpenRouterEmbeddingModel)
 	billingService := billing.NewService(billingRepo, billing.Config{
 		PublicURL:              cfg.PublicAppURL,
@@ -154,6 +161,7 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 		WithAdminOperations(adminService).
 		WithImageGenerator(openRouterImages).
 		WithImageAnalyzer(openRouterImages).
+		WithGIFFrameExtractor(tools.NewFFmpegGIFFrameExtractor(musicSidecars)).
 		WithBilling(billingService).
 		WithOpsManager(opsService)
 	composedService := composed.NewService(composedRepo, toolRegistry, toolExecutor, openRouter, cfg.OpenRouterModel).
@@ -206,7 +214,7 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 		WithFeatureService(featureService).
 		WithFeatureInstallIntents(commandInstallIntentAdapter{service: installService})
 
-	discord, err := discordbot.New(cfg, router, logger)
+	discord, err := discordbot.NewWithSidecarManager(cfg, router, logger, musicSidecars)
 	if err != nil {
 		_ = dataStore.Close()
 		return nil, err

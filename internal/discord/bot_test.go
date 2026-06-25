@@ -370,14 +370,193 @@ func TestImageReferencesFromMessageFiltersSupportedImages(t *testing.T) {
 	}
 
 	references := imageReferencesFromMessage(message, "current")
-	if len(references) != 2 {
-		t.Fatalf("expected two supported image references, got %+v", references)
+	if len(references) != 3 {
+		t.Fatalf("expected three supported image references, got %+v", references)
 	}
 	if references[0].ID != "current:100000000000000010" || references[0].MIMEType != "image/png" || references[0].URL != "https://cdn.example.test/reference.png" {
 		t.Fatalf("unexpected png reference: %+v", references[0])
 	}
 	if references[1].ID != "current:100000000000000011" || references[1].MIMEType != "image/webp" {
 		t.Fatalf("unexpected inferred webp reference: %+v", references[1])
+	}
+	if references[2].ID != "current:100000000000000012" || references[2].MIMEType != "image/gif" {
+		t.Fatalf("unexpected gif reference: %+v", references[2])
+	}
+}
+
+func TestImageReferencesFromMessageAcceptsDiscordImageDimensionsWithoutMimeOrExtension(t *testing.T) {
+	width := 1024
+	height := 768
+	message := disgoDiscord.Message{
+		Attachments: []disgoDiscord.Attachment{
+			{
+				ID:       snowflake.MustParse("100000000000000014"),
+				Filename: "discord-upload",
+				URL:      "https://cdn.discordapp.com/attachments/100/200/discord-upload",
+				Width:    &width,
+				Height:   &height,
+				Size:     5678,
+			},
+		},
+	}
+
+	references := imageReferencesFromMessage(message, "reply")
+	if len(references) != 1 {
+		t.Fatalf("expected dimension-bearing Discord attachment to become an image reference, got %+v", references)
+	}
+	reference := references[0]
+	if reference.ID != "reply:100000000000000014" || reference.MIMEType != "" || reference.URL != "https://cdn.discordapp.com/attachments/100/200/discord-upload" || reference.SizeBytes != 5678 {
+		t.Fatalf("unexpected dimension-only image reference: %+v", reference)
+	}
+}
+
+func TestImageReferencesFromMessageInfersImageFromProxyURLPath(t *testing.T) {
+	message := disgoDiscord.Message{
+		Attachments: []disgoDiscord.Attachment{
+			{
+				ID:       snowflake.MustParse("100000000000000015"),
+				Filename: "discord-upload",
+				ProxyURL: "https://media.discordapp.net/attachments/100/200/discord-upload.heic?ex=1",
+				Size:     6789,
+			},
+		},
+	}
+
+	references := imageReferencesFromMessage(message, "reply")
+	if len(references) != 1 {
+		t.Fatalf("expected proxy URL image extension to become an image reference, got %+v", references)
+	}
+	reference := references[0]
+	if reference.ID != "reply:100000000000000015" || reference.MIMEType != "image/heic" || reference.URL != "https://media.discordapp.net/attachments/100/200/discord-upload.heic?ex=1" {
+		t.Fatalf("unexpected proxy URL image reference: %+v", reference)
+	}
+}
+
+func TestImageReferencesFromMessageIncludesSnapshotProxyImages(t *testing.T) {
+	jpegType := "image/jpeg"
+	message := disgoDiscord.Message{
+		MessageSnapshots: []disgoDiscord.MessageSnapshot{
+			{
+				Message: disgoDiscord.PartialMessage{
+					Attachments: []disgoDiscord.Attachment{
+						{
+							ID:          snowflake.MustParse("100000000000000014"),
+							Filename:    "quoted-image.jpg",
+							ContentType: &jpegType,
+							ProxyURL:    "https://media.discordapp.net/attachments/quoted-image.jpg",
+							Size:        4567,
+						},
+					},
+				},
+			},
+		},
+	}
+
+	references := imageReferencesFromMessage(message, "current")
+	if len(references) != 1 {
+		t.Fatalf("expected one snapshot image reference, got %+v", references)
+	}
+	reference := references[0]
+	if reference.ID != "current_snapshot_1:100000000000000014" || reference.MIMEType != "image/jpeg" || reference.URL != "https://media.discordapp.net/attachments/quoted-image.jpg" || reference.SizeBytes != 4567 {
+		t.Fatalf("unexpected snapshot reference: %+v", reference)
+	}
+}
+
+func TestImageReferencesFromMessageIncludesEmbedMediaReferences(t *testing.T) {
+	message := disgoDiscord.Message{
+		Embeds: []disgoDiscord.Embed{
+			{
+				Type: disgoDiscord.EmbedTypeGifV,
+				Video: &disgoDiscord.EmbedResource{
+					URL:         "https://media.tenor.example/reaction.mp4",
+					ContentType: "video/mp4",
+					Width:       498,
+					Height:      498,
+				},
+				Thumbnail: &disgoDiscord.EmbedResource{
+					ProxyURL: "https://media.discordapp.net/external/reaction.jpg",
+					Width:    498,
+					Height:   498,
+				},
+			},
+			{
+				Type: disgoDiscord.EmbedTypeImage,
+				Image: &disgoDiscord.EmbedResource{
+					URL:   "https://cdn.example.test/photo.png?width=640",
+					Width: 640,
+				},
+			},
+			{
+				Type: disgoDiscord.EmbedTypeLink,
+				URL:  "https://example.test/post-without-direct-media",
+			},
+		},
+	}
+
+	references := imageReferencesFromMessage(message, "reply")
+	if len(references) != 2 {
+		t.Fatalf("expected two embed media references, got %+v", references)
+	}
+	if references[0].ID != "reply_embed_1" || references[0].MIMEType != "video/mp4" || references[0].URL != "https://media.tenor.example/reaction.mp4" {
+		t.Fatalf("unexpected gifv video reference: %+v", references[0])
+	}
+	if strings.Contains(strings.ToLower(references[0].ID), "video") {
+		t.Fatalf("embed reference ID should not expose media kind to the model: %+v", references[0])
+	}
+	if references[1].ID != "reply_embed_2" || references[1].MIMEType != "image/png" || references[1].URL != "https://cdn.example.test/photo.png?width=640" {
+		t.Fatalf("unexpected image embed reference: %+v", references[1])
+	}
+}
+
+func TestImageReferencesFromMessageIncludesSnapshotEmbedMediaReferences(t *testing.T) {
+	message := disgoDiscord.Message{
+		MessageSnapshots: []disgoDiscord.MessageSnapshot{
+			{
+				Message: disgoDiscord.PartialMessage{
+					Embeds: []disgoDiscord.Embed{
+						{
+							Type: disgoDiscord.EmbedTypeRich,
+							Thumbnail: &disgoDiscord.EmbedResource{
+								ProxyURL: "https://media.discordapp.net/external/snapshot.webp",
+								Width:    400,
+								Height:   300,
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	references := imageReferencesFromMessage(message, "current")
+	if len(references) != 1 {
+		t.Fatalf("expected one snapshot embed reference, got %+v", references)
+	}
+	reference := references[0]
+	if reference.ID != "current_snapshot_1_embed_1" || reference.MIMEType != "image/webp" || reference.URL != "https://media.discordapp.net/external/snapshot.webp" {
+		t.Fatalf("unexpected snapshot embed reference: %+v", reference)
+	}
+}
+
+func TestImageReferencesFromMessageIncludesStickerMediaReferences(t *testing.T) {
+	stickerID := snowflake.MustParse("100000000000000099")
+	message := disgoDiscord.Message{
+		StickerItems: []disgoDiscord.MessageSticker{
+			{ID: stickerID, Name: "dance", FormatType: disgoDiscord.StickerFormatTypeGIF},
+			{ID: snowflake.MustParse("100000000000000100"), Name: "vector", FormatType: disgoDiscord.StickerFormatTypeLottie},
+		},
+	}
+
+	references := imageReferencesFromMessage(message, "current")
+	if len(references) != 1 {
+		t.Fatalf("expected one sticker image reference, got %+v", references)
+	}
+	reference := references[0]
+	if reference.ID != "current_sticker:"+stickerID.String() || reference.MIMEType != "image/gif" || reference.Filename != "dance.gif" {
+		t.Fatalf("unexpected sticker reference metadata: %+v", reference)
+	}
+	if !strings.Contains(reference.URL, "/stickers/"+stickerID.String()+".gif") {
+		t.Fatalf("expected sticker GIF CDN URL, got %q", reference.URL)
 	}
 }
 
@@ -426,6 +605,12 @@ func TestQueueNaturalMessageStoresPayload(t *testing.T) {
 		GuildID:   guildID.String(),
 		ChannelID: channelID.String(),
 		UserID:    "user-1",
+		ImageReferences: []generated.ImageReference{{
+			ID:       "reply:100000000000000004",
+			Filename: "cat.png",
+			MIMEType: "image/png",
+			URL:      "https://cdn.discordapp.com/attachments/cat.png",
+		}},
 	}
 
 	if err := bot.queueNaturalMessage(context.Background(), channelID, reference, request); err != nil {
@@ -443,6 +628,9 @@ func TestQueueNaturalMessageStoresPayload(t *testing.T) {
 	}
 	if payload.Reference == nil || payload.Reference.MessageID != messageID.String() || payload.Reference.ChannelID != channelID.String() || payload.Reference.GuildID != guildID.String() {
 		t.Fatalf("unexpected natural message reference: %+v", payload.Reference)
+	}
+	if len(payload.Request.ImageReferences) != 1 || payload.Request.ImageReferences[0].ID != "reply:100000000000000004" {
+		t.Fatalf("expected queued natural message to preserve image references, got %+v", payload.Request.ImageReferences)
 	}
 }
 
@@ -490,6 +678,88 @@ func TestAddReplyContextOptionsKeepsOtherUserReplyContext(t *testing.T) {
 	}
 	if options["reply_author_is_current_user"] != "" {
 		t.Fatalf("expected no self-reply marker for another user's message, got %+v", options)
+	}
+}
+
+func TestAddReplyContextOptionsReturnsReplyImageReferences(t *testing.T) {
+	currentUserID := snowflake.MustParse("100000000000000003")
+	referencedUserID := snowflake.MustParse("100000000000000005")
+	messageID := snowflake.MustParse("100000000000000004")
+	attachmentID := snowflake.MustParse("100000000000000006")
+	imageType := "image/png"
+	options := map[string]string{}
+	bot := &Bot{}
+
+	references := bot.addReplyContextOptions(context.Background(), options, disgoDiscord.Message{
+		Author: disgoDiscord.User{ID: currentUserID, Username: "sn0w"},
+		ReferencedMessage: &disgoDiscord.Message{
+			ID:      messageID,
+			Content: "",
+			Author:  disgoDiscord.User{ID: referencedUserID, Username: "xer0"},
+			Attachments: []disgoDiscord.Attachment{
+				{ID: attachmentID, Filename: "cat.png", ContentType: &imageType, URL: "https://cdn.discordapp.com/attachments/cat.png", Size: 1234},
+			},
+		},
+	})
+
+	if options["reply_message_id"] != messageID.String() {
+		t.Fatalf("expected reply message id, got %+v", options)
+	}
+	if len(references) != 1 {
+		t.Fatalf("expected one reply image reference, got %+v", references)
+	}
+	reference := references[0]
+	if reference.ID != "reply:"+attachmentID.String() || reference.MIMEType != "image/png" || reference.URL != "https://cdn.discordapp.com/attachments/cat.png" {
+		t.Fatalf("unexpected reply image reference: %+v", reference)
+	}
+}
+
+func TestHydrateReplyContextOptionsFindsImagesMissingFromPartialReferencedMessage(t *testing.T) {
+	currentUserID := snowflake.MustParse("100000000000000003")
+	referencedUserID := snowflake.MustParse("100000000000000005")
+	channelID := snowflake.MustParse("100000000000000002")
+	messageID := snowflake.MustParse("100000000000000004")
+	attachmentID := snowflake.MustParse("100000000000000006")
+	imageType := "image/png"
+	options := map[string]string{}
+	bot := &Bot{messages: fakeMessageFetcher{message: &disgoDiscord.Message{
+		ID:        messageID,
+		ChannelID: channelID,
+		Content:   "",
+		Author:    disgoDiscord.User{ID: referencedUserID, Username: "xer0"},
+		Attachments: []disgoDiscord.Attachment{
+			{ID: attachmentID, Filename: "cat.png", ContentType: &imageType, URL: "https://cdn.discordapp.com/attachments/cat.png", Size: 1234},
+		},
+	}}}
+	reference := &disgoDiscord.MessageReference{
+		MessageID: &messageID,
+		ChannelID: &channelID,
+	}
+	current := disgoDiscord.Message{
+		ChannelID:        channelID,
+		Author:           disgoDiscord.User{ID: currentUserID, Username: "sn0w"},
+		MessageReference: reference,
+		ReferencedMessage: &disgoDiscord.Message{
+			ID:      messageID,
+			Content: "",
+			Author:  disgoDiscord.User{ID: referencedUserID, Username: "xer0"},
+		},
+	}
+
+	partialReferences := bot.addReplyContextOptions(context.Background(), options, current)
+	if len(partialReferences) != 0 {
+		t.Fatalf("partial gateway reference should not have image refs in this fixture, got %+v", partialReferences)
+	}
+	hydratedReferences := bot.hydrateReplyContextOptions(context.Background(), options, current)
+	if options["reply_message_id"] != messageID.String() {
+		t.Fatalf("expected reply message id, got %+v", options)
+	}
+	if len(hydratedReferences) != 1 {
+		t.Fatalf("expected one hydrated reply image reference, got %+v", hydratedReferences)
+	}
+	hydrated := hydratedReferences[0]
+	if hydrated.ID != "reply:"+attachmentID.String() || hydrated.MIMEType != "image/png" || hydrated.URL != "https://cdn.discordapp.com/attachments/cat.png" {
+		t.Fatalf("unexpected hydrated reply image reference: %+v", hydrated)
 	}
 }
 

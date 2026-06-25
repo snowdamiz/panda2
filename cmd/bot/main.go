@@ -32,6 +32,7 @@ func main() {
 	}
 
 	logger := observability.NewLogger(cfg.LogLevel, os.Stdout)
+	slog.SetDefault(logger)
 	for _, warning := range warnings {
 		logger.Warn("configuration warning", slog.String("warning", warning))
 	}

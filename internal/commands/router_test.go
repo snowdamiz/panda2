@@ -4281,7 +4281,7 @@ func TestNaturalMessageAboutPandaDeclineDoesNotStartResponse(t *testing.T) {
 		"The grammatical addressee must be Panda/the bot/the assistant",
 		"how are you guys feeling about the new panda bot",
 		"Panda is the topic, not the addressee",
-		"Bot mention is only a wake signal",
+		"Bot mention is a wake signal",
 	} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("expected natural gate to include %q, got:\n%s", want, joined)

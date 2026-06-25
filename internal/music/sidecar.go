@@ -89,6 +89,31 @@ func (m *SidecarManager) Ensure(ctx context.Context) (ToolPaths, error) {
 	return m.tools, nil
 }
 
+func (m *SidecarManager) EnsureFFmpeg(ctx context.Context) (string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if path, ok := executablePath(m.tools.FFmpegPath); ok {
+		return path, nil
+	}
+	if path, ok := executablePath(m.ffmpegPath); ok {
+		m.tools.FFmpegPath = path
+		return path, nil
+	}
+	dir := strings.TrimSpace(m.dir)
+	if dir == "" {
+		return "", errors.New("music sidecar dir is not configured")
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", fmt.Errorf("create music sidecar dir: %w", err)
+	}
+	ffmpegPath, err := m.ensureTool(ctx, toolSpecFFmpeg(), m.ffmpegPath)
+	if err != nil {
+		return "", err
+	}
+	m.tools.FFmpegPath = ffmpegPath
+	return ffmpegPath, nil
+}
+
 func (m *SidecarManager) ensureTool(ctx context.Context, spec sidecarToolSpec, configuredPath string) (string, error) {
 	if path, ok := executablePath(configuredPath); ok {
 		return path, nil
