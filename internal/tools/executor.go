@@ -217,6 +217,7 @@ type ExecutionResult struct {
 	SourceLinks       []SourceLink
 	GeneratedFiles    []generated.File
 	UsageReservations []billing.Reservation
+	Terminal          bool
 }
 
 type SourceLink struct {

@@ -3513,6 +3513,9 @@ func answerConfirmations(answer assistant.AskResponse) []assistant.InteractionCo
 }
 
 func assistantAnswerHasPayload(answer assistant.AskResponse) bool {
+	if answer.Terminal {
+		return true
+	}
 	if strings.TrimSpace(answer.Content) != "" || len(answerConfirmations(answer)) > 0 || len(answer.GeneratedFiles) > 0 {
 		return true
 	}
