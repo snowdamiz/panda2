@@ -2855,6 +2855,103 @@ func TestCompleteTaskRetriesWhenImageMemeRequestAsksForCaptionsInsteadOfTool(t *
 	}
 }
 
+func TestCompleteTaskRepairsImageGenerationMissingReferenceIDs(t *testing.T) {
+	ctx := context.Background()
+	client := &fakeClient{responses: []llm.ChatResponse{
+		{
+			Model: "fixture/model",
+			ToolCalls: []llm.ToolCall{{
+				ID:   "call-image-missing-ref",
+				Type: "function",
+				Function: llm.ToolCallFunction{
+					Name:      "panda_generate_image",
+					Arguments: `{"prompt":"Create a humorous meme from the referenced image. Add fitting meme text if useful.","filename_hint":"meme"}`,
+				},
+			}},
+		},
+		{
+			Model: "fixture/model",
+			ToolCalls: []llm.ToolCall{{
+				ID:   "call-image-with-ref",
+				Type: "function",
+				Function: llm.ToolCallFunction{
+					Name:      "panda_generate_image",
+					Arguments: `{"prompt":"Create a humorous meme from the referenced image. Add fitting meme text if useful.","reference_image_ids":["reply:100"],"reference_usage":"use_available","filename_hint":"meme"}`,
+				},
+			}},
+		},
+		{Model: "fixture/model"},
+	}}
+	service, db := newTestService(t, client)
+	configs := repository.NewGuildConfigRepository(db.DB)
+	registry, err := tools.NewDefaultRegistry()
+	if err != nil {
+		t.Fatalf("NewDefaultRegistry: %v", err)
+	}
+	imageGenerator := &fakeAssistantImageGenerator{
+		configured: true,
+		response: llm.ImageGenerationResponse{
+			Images: []llm.GeneratedImage{{
+				Bytes:    []byte("meme-bytes"),
+				MIMEType: "image/png",
+			}},
+		},
+	}
+	service.WithToolExecutor(tools.NewExecutor(registry, nil, configs).WithImageGenerator(imageGenerator))
+	if _, err := configs.EnsureDefault(ctx, "guild-1"); err != nil {
+		t.Fatalf("EnsureDefault: %v", err)
+	}
+	if _, err := configs.UpdateBehaviorSettings(ctx, "guild-1", map[string]any{"tool_policy": tools.ToolPolicyAssistive}); err != nil {
+		t.Fatalf("UpdateBehaviorSettings: %v", err)
+	}
+
+	answer, err := service.CompleteTask(ctx, TaskRequest{
+		RequestID: "request-1",
+		GuildID:   "guild-1",
+		UserID:    "user-1",
+		ChannelID: "channel-1",
+		Command:   "chat",
+		Input:     "panda make a meme out of this",
+		ImageReferences: []generated.ImageReference{{
+			ID:       "reply:100",
+			Filename: "cat.png",
+			MIMEType: "image/png",
+			URL:      "https://cdn.example.test/cat.png",
+		}},
+		FeatureGateActive: true,
+		AllowedPermissions: map[string]struct{}{
+			admin.PermissionAssistantImageGeneration: {},
+		},
+		EnabledFeatures: map[string]struct{}{
+			features.ImageGeneration: {},
+		},
+	})
+	if err != nil {
+		t.Fatalf("CompleteTask: %v", err)
+	}
+	if len(client.requests) < 3 {
+		t.Fatalf("expected initial request, missing-reference repair request, and generated-media followup, got %d", len(client.requests))
+	}
+	retryMessages := joinMessages(client.requests[1].Messages)
+	for _, want := range []string{`"reference_decision_required":true`, "reply:100", "reference_image_ids", "intentionally_unrelated"} {
+		if !strings.Contains(retryMessages, want) {
+			t.Fatalf("retry request should contain %q, got:\n%s", want, retryMessages)
+		}
+	}
+	if strings.Contains(retryMessages, "https://cdn.example.test/cat.png") || strings.Contains(retryMessages, "cat.png") {
+		t.Fatalf("retry request leaked image metadata: %s", retryMessages)
+	}
+	if len(imageGenerator.requests) != 1 {
+		t.Fatalf("expected only repaired tool call to reach image generator, got %+v", imageGenerator.requests)
+	}
+	if len(imageGenerator.requests[0].InputReferences) != 1 || imageGenerator.requests[0].InputReferences[0].URL != "https://cdn.example.test/cat.png" {
+		t.Fatalf("expected repaired request to use reply image ref, got %+v", imageGenerator.requests[0].InputReferences)
+	}
+	if len(answer.GeneratedFiles) != 1 || answer.GeneratedFiles[0].Filename != "meme.png" {
+		t.Fatalf("expected generated meme file, got %+v", answer.GeneratedFiles)
+	}
+}
+
 func TestCompleteTaskRepairsImagePromptWithInternalRoutingMetadata(t *testing.T) {
 	ctx := context.Background()
 	client := &fakeClient{responses: []llm.ChatResponse{
@@ -2947,6 +3044,103 @@ func TestCompleteTaskRepairsImagePromptWithInternalRoutingMetadata(t *testing.T)
 	retryMessages := joinMessages(client.requests[1].Messages)
 	if !strings.Contains(retryMessages, `"retryable":true`) || !strings.Contains(retryMessages, "clean visual prompt") {
 		t.Fatalf("expected retryable prompt-repair tool message, got %s", retryMessages)
+	}
+}
+
+func TestCompleteTaskRepairsImagePromptWithAssistantRequestMeta(t *testing.T) {
+	ctx := context.Background()
+	client := &fakeClient{responses: []llm.ChatResponse{
+		{
+			Model: "fixture/model",
+			ToolCalls: []llm.ToolCall{{
+				ID:   "call-image-bad",
+				Type: "function",
+				Function: llm.ToolCallFunction{
+					Name:      "panda_generate_image",
+					Arguments: `{"prompt":"A meme with top text \"WHEN YOU ASK PANDA TO MAKE A MEME\" and bottom text \"AND IT ACTUALLY DOES!\"","reference_image_ids":["reply:100"],"reference_usage":"use_available","filename_hint":"meme"}`,
+				},
+			}},
+		},
+		{
+			Model: "fixture/model",
+			ToolCalls: []llm.ToolCall{{
+				ID:   "call-image-clean",
+				Type: "function",
+				Function: llm.ToolCallFunction{
+					Name:      "panda_generate_image",
+					Arguments: `{"prompt":"Create a humorous meme from the referenced image. Add fitting meme text based on the image content.","reference_image_ids":["reply:100"],"reference_usage":"use_available","filename_hint":"meme"}`,
+				},
+			}},
+		},
+		{Model: "fixture/model"},
+	}}
+	service, db := newTestService(t, client)
+	configs := repository.NewGuildConfigRepository(db.DB)
+	registry, err := tools.NewDefaultRegistry()
+	if err != nil {
+		t.Fatalf("NewDefaultRegistry: %v", err)
+	}
+	imageGenerator := &fakeAssistantImageGenerator{
+		configured: true,
+		response: llm.ImageGenerationResponse{
+			Images: []llm.GeneratedImage{{
+				Bytes:    []byte("meme-bytes"),
+				MIMEType: "image/png",
+			}},
+		},
+	}
+	service.WithToolExecutor(tools.NewExecutor(registry, nil, configs).WithImageGenerator(imageGenerator))
+	if _, err := configs.EnsureDefault(ctx, "guild-1"); err != nil {
+		t.Fatalf("EnsureDefault: %v", err)
+	}
+
+	answer, err := service.CompleteTask(ctx, TaskRequest{
+		RequestID: "request-1",
+		GuildID:   "guild-1",
+		UserID:    "user-1",
+		ChannelID: "channel-1",
+		Command:   "chat",
+		Input:     "panda make a meme out of this",
+		ImageReferences: []generated.ImageReference{{
+			ID:       "reply:100",
+			Filename: "cat.png",
+			MIMEType: "image/png",
+			URL:      "https://cdn.example.test/cat.png",
+		}},
+		FeatureGateActive: true,
+		AllowedPermissions: map[string]struct{}{
+			admin.PermissionAssistantImageGeneration: {},
+		},
+		EnabledFeatures: map[string]struct{}{
+			features.ImageGeneration: {},
+		},
+	})
+	if err != nil {
+		t.Fatalf("CompleteTask: %v", err)
+	}
+	if len(imageGenerator.requests) != 1 {
+		t.Fatalf("expected only the repaired prompt to reach image generator, got %+v", imageGenerator.requests)
+	}
+	gotPrompt := strings.ToLower(imageGenerator.requests[0].Prompt)
+	for _, forbidden := range []string{"when you ask panda", "panda to make a meme", "and it actually does"} {
+		if strings.Contains(gotPrompt, forbidden) {
+			t.Fatalf("clean image prompt still contains assistant request meta %q: %q", forbidden, imageGenerator.requests[0].Prompt)
+		}
+	}
+	if len(imageGenerator.requests[0].InputReferences) != 1 || imageGenerator.requests[0].InputReferences[0].URL != "https://cdn.example.test/cat.png" {
+		t.Fatalf("expected repaired request to keep reply image ref, got %+v", imageGenerator.requests[0].InputReferences)
+	}
+	if len(answer.GeneratedFiles) != 1 || answer.GeneratedFiles[0].Filename != "meme.png" {
+		t.Fatalf("expected generated meme file after clean retry, got %+v", answer.GeneratedFiles)
+	}
+	if len(client.requests) < 2 {
+		t.Fatalf("expected a retry request after rejected prompt, got %d", len(client.requests))
+	}
+	retryMessages := joinMessages(client.requests[1].Messages)
+	for _, want := range []string{`"retryable":true`, "clean visual prompt", "referenced image content", "Do not make the image about Panda"} {
+		if !strings.Contains(retryMessages, want) {
+			t.Fatalf("retry request should contain %q, got:\n%s", want, retryMessages)
+		}
 	}
 }
 

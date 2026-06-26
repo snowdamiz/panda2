@@ -2,6 +2,7 @@ package repository
 
 import (
 	"context"
+	"strings"
 	"time"
 
 	"github.com/sn0w/panda2/internal/store"
@@ -78,6 +79,47 @@ func (r *GuildConfigRepository) SetMemoryEnabled(ctx context.Context, guildID st
 		"memory_enabled": enabled,
 		"updated_at":     time.Now().UTC(),
 	})
+}
+
+func (r *GuildConfigRepository) SetAssistantTimeoutUntil(ctx context.Context, guildID string, until time.Time, actor string) (store.GuildConfig, error) {
+	until = until.UTC()
+	return r.update(ctx, guildID, map[string]any{
+		"assistant_timeout_until": &until,
+		"assistant_timeout_by":    strings.TrimSpace(actor),
+		"updated_at":              time.Now().UTC(),
+	})
+}
+
+func (r *GuildConfigRepository) ClearAssistantTimeout(ctx context.Context, guildID string) (store.GuildConfig, error) {
+	return r.update(ctx, guildID, map[string]any{
+		"assistant_timeout_until": nil,
+		"assistant_timeout_by":    "",
+		"updated_at":              time.Now().UTC(),
+	})
+}
+
+func (r *GuildConfigRepository) ResolveAssistantTimeout(ctx context.Context, guildID string, now time.Time) (store.GuildConfig, bool, error) {
+	config, ok, err := r.Get(ctx, guildID)
+	if err != nil || !ok {
+		return config, false, err
+	}
+	if !AssistantTimeoutActive(config, now) {
+		if config.AssistantTimeoutUntil != nil {
+			config, err = r.ClearAssistantTimeout(ctx, guildID)
+		}
+		return config, false, err
+	}
+	return config, true, nil
+}
+
+func AssistantTimeoutActive(config store.GuildConfig, now time.Time) bool {
+	if config.AssistantTimeoutUntil == nil {
+		return false
+	}
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	return now.UTC().Before(config.AssistantTimeoutUntil.UTC())
 }
 
 func (r *GuildConfigRepository) update(ctx context.Context, guildID string, values map[string]any) (store.GuildConfig, error) {

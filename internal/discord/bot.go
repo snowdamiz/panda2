@@ -592,6 +592,9 @@ func (b *Bot) respondToInteraction(event *events.ApplicationCommandInteractionCr
 		}
 		return
 	}
+	if !hasChannelResponsePayload(response) {
+		return
+	}
 	chunks := splitDiscordContent(response.Content)
 	if err := event.CreateMessage(messageCreateFromResponsePart(response, chunks[0], len(chunks) == 1)); err != nil {
 		b.logger.Warn("failed to respond to command", slog.Any("err", err), slog.String("request_id", requestID), slog.String("command", request.Command))

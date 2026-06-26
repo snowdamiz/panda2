@@ -423,7 +423,7 @@ func DefaultDefinitions() []Definition {
 		},
 		{
 			Name:                  "panda.generate_image",
-			Description:           "Generate one image file for the current Discord response when the user asks Panda to create, make, draw, generate, design, edit, restyle, or render visual output such as a meme, sprite sheet, icon, illustration, sticker, logo, avatar, poster, or similar asset. For requests like \"make me a random meme\", create an original image instead of searching for meme pages. If image reference IDs are provided in the current Discord context and the user asks to use, modify, make something out of, or base generation on an attached/replied-to/referenced image, include those IDs in reference_image_ids. Pronouns and phrases like \"this\", \"that\", \"it\", \"this image\", or \"out of this\" can refer to those image reference IDs. Referenced media is prepared internally, so pass reference IDs as-is. The prompt argument must describe only the desired visual output and user-visible image text; do not copy reference IDs, filenames, MIME types, Discord media metadata, tool names, or routing instructions into the prompt. If the edit depends on understanding visual details first, call panda.inspect_image before this tool. Do not use this for plain text answers or requests to find existing images.",
+			Description:           "Generate one image file for the current Discord response when the user asks Panda to create, make, draw, generate, design, edit, restyle, or render visual output such as a meme, sprite sheet, icon, illustration, sticker, logo, avatar, poster, or similar asset. For requests like \"make me a random meme\", create an original image instead of searching for meme pages. If image reference IDs are provided in the current Discord context and the user asks to use, modify, make something out of, or base generation on an attached/replied-to/referenced image, include those IDs in reference_image_ids and set reference_usage to use_available. Pronouns and phrases like \"this\", \"that\", \"it\", \"this image\", or \"out of this\" can refer to those image reference IDs. If references are present but the user explicitly asks for an unrelated/original image, omit reference_image_ids and set reference_usage to intentionally_unrelated. Referenced media is prepared internally, so pass reference IDs as-is. The prompt argument must describe only the desired visual output and user-visible image text; do not copy reference IDs, filenames, MIME types, Discord media metadata, tool names, provider details, or routing/system instructions into the prompt. For referenced-image memes, derive the visual idea and meme text from the referenced image and the user's request; do not make the meme about Panda, Discord, the assistant, the bot, tool use, or the act of requesting/generating a meme unless the user explicitly asks for that subject. If the edit depends on understanding visual details first, call panda.inspect_image before this tool. Do not use this for plain text answers or requests to find existing images.",
 			RequiredPermission:    admin.PermissionAssistantImageGeneration,
 			FeatureID:             features.ImageGeneration,
 			ToolClass:             ToolClassMedia,
@@ -566,6 +566,7 @@ func DefaultDefinitions() []Definition {
 		ownerOpsTool(),
 		soulManagementTool(),
 		promptManagementTool(),
+		quietModeManagementTool(),
 		adminWrite("panda.manage_budget_limit", "Set, remove, or list Panda budget limits for a guild, channel, or user.", []string{"action"}),
 		knowledgeAdminWrite("panda.manage_knowledge", "List, add, search, or delete server knowledge documents.", []string{"action"}),
 		rolePermissionManagementTool(),
@@ -694,6 +695,12 @@ func promptManagementTool() Definition {
 	return definition
 }
 
+func quietModeManagementTool() Definition {
+	definition := adminSetupWrite("panda.manage_quiet_mode", "Read, set, or clear a server-wide Panda quiet timeout. Use this when an admin asks Panda/the bot to take a timeout, go quiet, pause all replies, stop responding to everyone, or resume after a server-wide timeout. Use action=set with duration_seconds or duration for a finite timeout; this makes Panda return no responses to anyone in the server until the timeout expires. Use panda.manage_safety instead when the admin wants only one user timed out from Panda. Use panda.manage_tool_access with tool_name=panda.chat for indefinite user/role chat blocks.", []string{"action"})
+	definition.InputSchema = quietModeManagementSchema()
+	return definition
+}
+
 func ownerOpsTool() Definition {
 	return Definition{
 		Name:                  "panda.manage_ops",
@@ -775,6 +782,24 @@ func promptManagementSchema() json.RawMessage {
 		"prompt":       map[string]string{"type": "string", "description": "Server-level assistant instructions to save when action is set or update."},
 		"instructions": map[string]string{"type": "string", "description": "Alias for prompt."},
 		"dry_run":      map[string]string{"type": "boolean"},
+	})
+}
+
+func quietModeManagementSchema() json.RawMessage {
+	return schemaWithProperties([]string{"action"}, map[string]any{
+		"action": map[string]any{
+			"type":        "string",
+			"enum":        []string{"status", "set", "clear"},
+			"description": "Use status to inspect quiet mode, set to start or extend a finite server-wide quiet timeout, and clear to end it.",
+		},
+		"duration_seconds": map[string]any{
+			"type":        "integer",
+			"minimum":     1,
+			"description": "Quiet timeout length in seconds for action=set. Prefer this by converting the admin's requested duration.",
+		},
+		"duration": map[string]string{"type": "string", "description": "Quiet timeout length for action=set, such as 30m, 2h, 1 day, or 30 minutes."},
+		"until":    map[string]string{"type": "string", "description": "Optional RFC3339 UTC expiration timestamp for action=set."},
+		"dry_run":  map[string]string{"type": "boolean"},
 	})
 }
 
@@ -879,7 +904,7 @@ func imageGenerationSchema() json.RawMessage {
 			"type":        "string",
 			"minLength":   1,
 			"maxLength":   4000,
-			"description": "Concise visual prompt to send to the image model. Describe only the desired image and any user-visible text that should appear in it. Do not include reference IDs, filenames, MIME types, Discord media metadata, tool names, provider details, or routing/system instructions.",
+			"description": "Concise visual prompt to send to the image model. Describe only the desired image and any user-visible text that should appear in it. For referenced-image memes, do not turn Panda, Discord, the assistant, the bot, tool use, or the request itself into the subject unless the user explicitly asked for that. Do not include reference IDs, filenames, MIME types, Discord media metadata, tool names, provider details, or routing/system instructions.",
 		},
 		"reference_image_ids": map[string]any{
 			"type": "array",
@@ -887,7 +912,12 @@ func imageGenerationSchema() json.RawMessage {
 				"type": "string",
 			},
 			"maxItems":    14,
-			"description": "Optional image reference IDs from the current Discord context. Use these when the user asks to edit, restyle, remix, or base generation on attached images. Pass IDs exactly as listed; do not describe their filenames, media type, or internal preprocessing in the prompt.",
+			"description": "Image reference IDs from the current Discord context. Required when image references are present and the user asks to edit, restyle, remix, make a meme out of, or base generation on attached/replied-to images. Pass IDs exactly as listed; do not describe their filenames, media type, or internal preprocessing in the prompt.",
+		},
+		"reference_usage": map[string]any{
+			"type":        "string",
+			"enum":        []string{"use_available", "intentionally_unrelated"},
+			"description": "Structured decision for requests with available image references. Use use_available when passing reference_image_ids. Use intentionally_unrelated only when the user explicitly wants an original/unrelated image despite available references.",
 		},
 		"caption": map[string]any{
 			"type":        "string",

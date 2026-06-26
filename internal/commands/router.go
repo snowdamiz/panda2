@@ -271,6 +271,9 @@ func (r *Router) finishResponseUsage(ctx context.Context, response Response, com
 }
 
 func (r *Router) Handle(ctx context.Context, request Request) Response {
+	if !quietModeExempt(request) && r.quietModeActive(ctx, request) {
+		return Response{}
+	}
 	if !maintenanceExempt(request) {
 		if response := r.maintenanceResponse(ctx); response.Content != "" {
 			return response
@@ -463,6 +466,9 @@ func (r *Router) handleNaturalMessageStream(ctx context.Context, request Request
 		slog.Int("image_ref_count", len(request.ImageReferences)),
 		slog.Any("image_ref_ids", commandImageReferenceIDs(request.ImageReferences)),
 	)
+	if r.quietModeActive(ctx, request) {
+		return Response{}, nil
+	}
 	if response := r.maintenanceResponse(ctx); response.Content != "" {
 		return response, nil
 	}
@@ -918,6 +924,8 @@ func (r *Router) handleAdmin(ctx context.Context, request Request) Response {
 		return r.handleAdminPrompt(ctx, request)
 	case "soul":
 		return r.handleAdminSoul(ctx, request)
+	case "quiet", "quiet-mode", "quiet_mode", "timeout":
+		return r.handleAdminQuietMode(ctx, request)
 	case "audit":
 		return r.handleAdminAudit(ctx, request)
 	case "status":
@@ -1613,6 +1621,72 @@ func (r *Router) handleAdminToggle(ctx context.Context, request Request, enabled
 	return Response{Content: "Assistant responses are disabled.", Ephemeral: true}
 }
 
+func (r *Router) handleAdminQuietMode(ctx context.Context, request Request) Response {
+	action := strings.ToLower(strings.TrimSpace(firstNonEmpty(request.Options["action"], "status")))
+	now := time.Now().UTC()
+	switch action {
+	case "status", "get", "show", "":
+		status, err := r.admin.QuietModeStatus(ctx, request.GuildID, now)
+		if err != nil {
+			return Response{Content: "Quiet mode status lookup failed.", Ephemeral: true}
+		}
+		return Response{Content: renderQuietModeStatus(status), Ephemeral: true}
+	case "set", "enable", "start", "timeout", "pause":
+		duration, response := adminQuietModeDuration(request.Options)
+		if response.Content != "" {
+			return response
+		}
+		until := now.Add(duration)
+		if dryRunRequested(request) {
+			return dryRunResponse("quiet mode would be active for %s, until `%s`.", durationSecondsDisplayLabel(int64(duration/time.Second)), until.Format(time.RFC3339))
+		}
+		status, err := r.admin.SetQuietModeUntil(ctx, request.GuildID, request.UserID, until, now)
+		if err != nil {
+			return Response{Content: "Quiet mode could not be started.", Ephemeral: true}
+		}
+		return Response{Content: fmt.Sprintf("Panda quiet mode is active for %s, until `%s`.", durationSecondsDisplayLabel(int64(status.Remaining/time.Second)), quietModeUntilLabel(status)), Ephemeral: true, Presentation: Presentation{Title: "Quiet mode started", Accent: AccentWarning}}
+	case "clear", "disable", "stop", "resume", "cancel":
+		if dryRunRequested(request) {
+			return dryRunResponse("quiet mode would be cleared.")
+		}
+		if _, err := r.admin.ClearQuietMode(ctx, request.GuildID, request.UserID, now); err != nil {
+			return Response{Content: "Quiet mode could not be cleared.", Ephemeral: true}
+		}
+		return Response{Content: "Panda quiet mode is cleared.", Ephemeral: true, Presentation: Presentation{Title: "Quiet mode cleared", Accent: AccentSuccess}}
+	default:
+		return Response{Content: "`action` must be `status`, `set`, or `clear`.", Ephemeral: true}
+	}
+}
+
+func adminQuietModeDuration(options map[string]string) (time.Duration, Response) {
+	if seconds, err := positiveInt64Option(options["duration_seconds"]); err == nil {
+		return time.Duration(seconds) * time.Second, Response{}
+	}
+	raw := strings.TrimSpace(firstNonEmpty(options["duration"], options["for"]))
+	if raw == "" {
+		return 0, Response{Content: "Provide `duration_seconds` or `duration` for quiet mode.", Ephemeral: true}
+	}
+	duration, err := time.ParseDuration(raw)
+	if err != nil || duration <= 0 {
+		return 0, Response{Content: "`duration` must be a positive Go duration like `30m` or `2h`.", Ephemeral: true}
+	}
+	return duration.Round(time.Second), Response{}
+}
+
+func renderQuietModeStatus(status admin.QuietModeStatus) string {
+	if !status.Active {
+		return "Panda quiet mode is not active."
+	}
+	return fmt.Sprintf("Panda quiet mode is active for %s, until `%s`.", durationSecondsDisplayLabel(int64(status.Remaining/time.Second)), quietModeUntilLabel(status))
+}
+
+func quietModeUntilLabel(status admin.QuietModeStatus) string {
+	if status.Until == nil {
+		return "the configured timeout"
+	}
+	return status.Until.UTC().Format(time.RFC3339)
+}
+
 func (r *Router) handleAdminAudit(ctx context.Context, request Request) Response {
 	events, err := r.admin.RecentAudit(ctx, request.GuildID, 10)
 	if err != nil {
@@ -1913,11 +1987,17 @@ func (r *Router) handleTask(ctx context.Context, request Request) Response {
 
 func (r *Router) HandleBackgroundTask(ctx context.Context, task BackgroundTask) Response {
 	request := Request{
-		RequestID: task.RequestID,
-		Command:   task.Command,
-		GuildID:   task.GuildID,
-		ChannelID: task.ChannelID,
-		UserID:    task.UserID,
+		RequestID:    task.RequestID,
+		Command:      task.Command,
+		GuildID:      task.GuildID,
+		ChannelID:    task.ChannelID,
+		UserID:       task.UserID,
+		RoleIDs:      append([]string(nil), task.RoleIDs...),
+		IsGuildAdmin: task.IsGuildAdmin,
+		IsOwner:      task.IsOwner,
+	}
+	if r.quietModeActive(ctx, request) {
+		return Response{}
 	}
 	if response := r.maintenanceResponse(ctx); response.Content != "" {
 		return response
@@ -2332,6 +2412,11 @@ func (r *Router) HandleToolConfirmation(ctx context.Context, request ToolConfirm
 			return toolConfirmationError(err, "Channel rule could not be removed.", "That channel rule was not found.")
 		}
 		return Response{Content: fmt.Sprintf("Removed channel access rule for %s.", r.channelDisplay(ctx, request.Request, channelID, request.Options["channel_display"])), Ephemeral: true}
+	case toolActionQuietModeSet, toolActionQuietModeClear:
+		if denied := r.ensureToolConfirmationPermission(ctx, request.Request, r.admin.CanWriteConfig, "You do not have permission to manage quiet mode."); denied.Content != "" {
+			return denied
+		}
+		return r.handleQuietModeConfirmation(ctx, request)
 	case toolActionSafetyTimeout, toolActionSafetyStrikeRemove, toolActionSafetyClear:
 		if denied := r.ensureToolConfirmationPermission(ctx, request.Request, r.admin.CanWriteConfig, "You do not have permission to manage safety state."); denied.Content != "" {
 			return denied
@@ -2426,9 +2511,14 @@ func toolConfirmationFeature(action string) string {
 		toolActionToolAccessOpen,
 		toolActionChannelRuleSet,
 		toolActionChannelRuleRemove,
+		toolActionQuietModeSet,
+		toolActionQuietModeClear,
 		toolActionSafetyTimeout,
 		toolActionSafetyStrikeRemove,
 		toolActionSafetyClear:
+		if action == toolActionQuietModeSet || action == toolActionQuietModeClear {
+			return features.AdminSetup
+		}
 		return features.AdminAccessControl
 	case toolActionDiscordRoleCreate,
 		toolActionMemberRoleAdd,
@@ -2530,6 +2620,73 @@ func (r *Router) handleDiscordWriteConfirmation(ctx context.Context, request Too
 		return Response{Content: "Discord write could not be completed: " + message, Ephemeral: true, Presentation: Presentation{Title: "Discord write failed", Accent: AccentWarning}}
 	}
 	return Response{Content: fmt.Sprintf("Completed `%s`.", toolName), Ephemeral: true, Presentation: Presentation{Title: "Discord write completed", Accent: AccentSuccess}}
+}
+
+func (r *Router) handleQuietModeConfirmation(ctx context.Context, request ToolConfirmationRequest) Response {
+	if r.tools == nil {
+		return Response{Content: "Quiet mode management is not configured for this runtime.", Ephemeral: true}
+	}
+	arguments := map[string]any{"action": "clear"}
+	if request.Action == toolActionQuietModeSet {
+		durationSeconds, err := positiveInt64Option(request.Options["duration_seconds"])
+		if err != nil {
+			return Response{Content: "That quiet-mode confirmation is invalid.", Ephemeral: true}
+		}
+		arguments["action"] = "set"
+		arguments["duration_seconds"] = durationSeconds
+	}
+	data, err := json.Marshal(arguments)
+	if err != nil {
+		return Response{Content: "That quiet-mode confirmation is invalid.", Ephemeral: true}
+	}
+	result, err := r.tools.Execute(ctx, toolsvc.ExecutionRequest{
+		GuildID:              request.Request.GuildID,
+		ChannelID:            request.Request.ChannelID,
+		ActorID:              request.Request.UserID,
+		RequestID:            request.Request.RequestID,
+		InvocationType:       "tool_confirmation",
+		RoleIDs:              append([]string(nil), request.Request.RoleIDs...),
+		IsGuildAdmin:         request.Request.IsGuildAdmin,
+		IsOwner:              request.Request.IsOwner,
+		Access:               r.toolAccess(ctx, request.Request, toolsvc.ToolPolicyWriteConfirmed),
+		AllowConfirmedWrites: true,
+		Call: llm.ToolCall{
+			ID:   "confirmed-quiet-mode",
+			Type: "function",
+			Function: llm.ToolCallFunction{
+				Name:      "panda_manage_quiet_mode",
+				Arguments: string(data),
+			},
+		},
+	})
+	if err != nil {
+		return Response{Content: "Quiet mode could not be updated.", Ephemeral: true}
+	}
+	if message := toolExecutionErrorMessage(result.Message.Content); message != "" {
+		return Response{Content: "Quiet mode could not be updated: " + message, Ephemeral: true}
+	}
+	if request.Action == toolActionQuietModeSet {
+		durationSeconds, _ := positiveInt64Option(request.Options["duration_seconds"])
+		timeoutUntil := quietModeTimeoutUntilFromToolContent(result.Message.Content)
+		content := fmt.Sprintf("Panda is taking a server-wide timeout for %s.", durationSecondsDisplayLabel(durationSeconds))
+		if timeoutUntil != "" {
+			content += fmt.Sprintf(" Quiet mode expires at `%s`.", timeoutUntil)
+		}
+		return Response{Content: content, Ephemeral: true, Presentation: Presentation{Title: "Quiet mode started", Accent: AccentWarning}}
+	}
+	return Response{Content: "Panda quiet mode is cleared.", Ephemeral: true, Presentation: Presentation{Title: "Quiet mode cleared", Accent: AccentSuccess}}
+}
+
+func quietModeTimeoutUntilFromToolContent(content string) string {
+	var payload struct {
+		Result struct {
+			TimeoutUntil string `json:"timeout_until"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal([]byte(content), &payload); err != nil {
+		return ""
+	}
+	return strings.TrimSpace(payload.Result.TimeoutUntil)
 }
 
 func (r *Router) handleSafetyConfirmation(ctx context.Context, request ToolConfirmationRequest) Response {
@@ -2816,6 +2973,57 @@ func (r *Router) maintenanceResponse(ctx context.Context) Response {
 
 func maintenanceExempt(request Request) bool {
 	return strings.EqualFold(strings.TrimSpace(request.Command), "ops") && request.IsOwner
+}
+
+func (r *Router) quietModeActive(ctx context.Context, request Request) bool {
+	if r == nil || r.admin == nil || strings.TrimSpace(request.GuildID) == "" {
+		return false
+	}
+	if r.quietModeBypassAllowed(ctx, request) {
+		return false
+	}
+	status, err := r.admin.QuietModeStatus(ctx, request.GuildID, time.Now().UTC())
+	if err != nil {
+		slog.Warn("quiet mode status lookup failed",
+			slog.Any("err", err),
+			slog.String("guild_id", request.GuildID),
+			slog.String("channel_id", request.ChannelID),
+			slog.String("request_id", request.RequestID),
+			slog.String("user_id", request.UserID),
+		)
+		return false
+	}
+	return status.Active
+}
+
+func (r *Router) quietModeBypassAllowed(ctx context.Context, request Request) bool {
+	if request.IsOwner || request.IsGuildAdmin {
+		return true
+	}
+	allowed, err := r.admin.HasGuildControl(ctx, assistantAccessRequest(request))
+	if err != nil {
+		slog.Warn("quiet mode bypass permission lookup failed",
+			slog.Any("err", err),
+			slog.String("guild_id", request.GuildID),
+			slog.String("channel_id", request.ChannelID),
+			slog.String("request_id", request.RequestID),
+			slog.String("user_id", request.UserID),
+		)
+		return false
+	}
+	return allowed
+}
+
+func quietModeExempt(request Request) bool {
+	if !strings.EqualFold(strings.TrimSpace(request.Command), "admin") {
+		return false
+	}
+	switch strings.ToLower(strings.TrimSpace(request.Subcommand)) {
+	case "quiet", "quiet-mode", "quiet_mode", "timeout":
+		return true
+	default:
+		return false
+	}
 }
 
 func (r *Router) ensureThreadsAllowed(ctx context.Context, request Request) Response {

@@ -41,7 +41,7 @@ func adminFeatureForSubcommand(subcommand string) string {
 	switch strings.ToLower(strings.TrimSpace(subcommand)) {
 	case "feature", "features":
 		return ""
-	case "", "status", "setup", "behavior", "prompt", "soul", "billing", "enable", "disable", "alerts", "alert":
+	case "", "status", "setup", "behavior", "prompt", "soul", "billing", "enable", "disable", "quiet", "quiet-mode", "quiet_mode", "timeout", "alerts", "alert":
 		return features.AdminSetup
 	case "role", "user", "member", "tool", "channel", "channels":
 		return features.AdminAccessControl
@@ -924,6 +924,9 @@ func adminStatusWarnings(config store.GuildConfig, roles []store.GuildRole, user
 	var warnings []string
 	if !config.AssistantEnabled {
 		warnings = append(warnings, "Assistant responses are disabled.")
+	}
+	if repository.AssistantTimeoutActive(config, time.Now().UTC()) {
+		warnings = append(warnings, fmt.Sprintf("Quiet mode is active until %s.", config.AssistantTimeoutUntil.UTC().Format(time.RFC3339)))
 	}
 	if len(roleIDsForPermission(roles, admin.PermissionAdminBadge)) == 0 && len(userIDsForPermission(users, admin.PermissionAdminBadge)) == 0 {
 		warnings = append(warnings, "No Panda admin role or user is configured; only server admins/owners can manage Panda.")

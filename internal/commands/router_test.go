@@ -278,7 +278,8 @@ func newTestRouter(t *testing.T, client *fakeLLM, limit int, configureExecutor .
 }
 
 type testRouterDeps struct {
-	guilds *repository.GuildRepository
+	guilds  *repository.GuildRepository
+	configs *repository.GuildConfigRepository
 }
 
 func newTestRouterWithDeps(t *testing.T, client *fakeLLM, limit int, configureExecutor ...func(*tools.Executor)) (*Router, testRouterDeps) {
@@ -331,7 +332,7 @@ func newTestRouterWithDeps(t *testing.T, client *fakeLLM, limit int, configureEx
 		opsService,
 		ratelimit.New(limit, time.Minute),
 	).WithComposedService(composedService).WithScheduler(schedulerService).WithDataRepository(repository.NewGuildDataRepository(db.DB)).WithToolExecutor(toolExecutor)
-	return router, testRouterDeps{guilds: guilds}
+	return router, testRouterDeps{guilds: guilds, configs: configs}
 }
 
 func attachTestBilling(t *testing.T, router *Router, guildID string) (*billing.Service, billing.Entitlement) {
@@ -4605,6 +4606,164 @@ func TestNaturalMessageDoesNotReachLLMWhenUserDeniedChatAccess(t *testing.T) {
 	}
 	if len(client.requests) != 0 {
 		t.Fatalf("denied natural chat should not call the LLM, got %d request(s)", len(client.requests))
+	}
+}
+
+func TestQuietModeShortCircuitsUserFacingResponses(t *testing.T) {
+	ctx := context.Background()
+	client := &fakeLLM{response: llm.ChatResponse{Content: "model should not answer"}}
+	router := newTestRouter(t, client, 5)
+	now := time.Now().UTC()
+	if _, err := router.admin.SetQuietModeUntil(ctx, "guild-1", "admin-1", now.Add(30*time.Minute), now); err != nil {
+		t.Fatalf("SetQuietModeUntil: %v", err)
+	}
+
+	command := router.Handle(ctx, Request{
+		Command:   "ask",
+		GuildID:   "guild-1",
+		ChannelID: "channel-1",
+		UserID:    "user-1",
+		Options:   map[string]string{"question": "hi panda"},
+	})
+	if command.Content != "" || command.Confirmation != nil || len(command.Followups) != 0 || command.Poll != nil {
+		t.Fatalf("expected quiet command to stay silent, got %+v", command)
+	}
+
+	natural := router.HandleNaturalMessage(ctx, Request{
+		GuildID:   "guild-1",
+		ChannelID: "channel-1",
+		UserID:    "user-1",
+		Options:   map[string]string{"message": "Panda can you help?", "bot_mentioned": "true"},
+	})
+	if natural.Content != "" || natural.Confirmation != nil || len(natural.Followups) != 0 || natural.Poll != nil {
+		t.Fatalf("expected quiet natural message to stay silent, got %+v", natural)
+	}
+
+	background := router.HandleBackgroundTask(ctx, BackgroundTask{
+		RequestID: "request-1",
+		Command:   "summarize",
+		GuildID:   "guild-1",
+		ChannelID: "channel-1",
+		UserID:    "user-1",
+		Input:     "long text",
+	})
+	if background.Content != "" || background.Confirmation != nil || len(background.Followups) != 0 || background.Poll != nil {
+		t.Fatalf("expected quiet background task to stay silent, got %+v", background)
+	}
+	if len(client.requests) != 0 {
+		t.Fatalf("quiet mode should not call LLM, got %d requests", len(client.requests))
+	}
+}
+
+func TestQuietModeDoesNotAffectAdminPrivilegedUsers(t *testing.T) {
+	ctx := context.Background()
+	client := &fakeLLM{response: llm.ChatResponse{Content: "<panda_respond>\nAdmin answer."}}
+	router := newTestRouter(t, client, 5)
+	now := time.Now().UTC()
+	if _, err := router.admin.SetQuietModeUntil(ctx, "guild-1", "admin-1", now.Add(30*time.Minute), now); err != nil {
+		t.Fatalf("SetQuietModeUntil: %v", err)
+	}
+
+	discordAdmin := router.HandleNaturalMessage(ctx, Request{
+		GuildID:      "guild-1",
+		ChannelID:    "channel-1",
+		UserID:       "discord-admin",
+		IsGuildAdmin: true,
+		Options:      map[string]string{"message": "Panda can you help?", "bot_mentioned": "true"},
+	})
+	if !strings.Contains(discordAdmin.Content, "Admin answer") {
+		t.Fatalf("expected Discord admin to bypass quiet mode, got %+v", discordAdmin)
+	}
+
+	if _, err := router.admin.ApplyUserProfile(ctx, "guild-1", "admin-1", "panda-admin", admin.RoleProfileAdmin); err != nil {
+		t.Fatalf("ApplyUserProfile: %v", err)
+	}
+	pandaAdmin := router.HandleNaturalMessage(ctx, Request{
+		GuildID:   "guild-1",
+		ChannelID: "channel-1",
+		UserID:    "panda-admin",
+		Options:   map[string]string{"message": "Panda still around?", "bot_mentioned": "true"},
+	})
+	if !strings.Contains(pandaAdmin.Content, "Admin answer") {
+		t.Fatalf("expected delegated Panda admin to bypass quiet mode, got %+v", pandaAdmin)
+	}
+
+	background := router.HandleBackgroundTask(ctx, BackgroundTask{
+		RequestID:    "request-admin-bg",
+		Command:      "summarize",
+		GuildID:      "guild-1",
+		ChannelID:    "channel-1",
+		UserID:       "discord-admin",
+		IsGuildAdmin: true,
+		Input:        "long text",
+	})
+	if !strings.Contains(background.Content, "Admin answer") {
+		t.Fatalf("expected admin background task to bypass quiet mode, got %+v", background)
+	}
+	if len(client.requests) != 3 {
+		t.Fatalf("expected admin requests to reach LLM, got %d", len(client.requests))
+	}
+}
+
+func TestQuietModeAllowsAdminQuietClearEscapeHatch(t *testing.T) {
+	ctx := context.Background()
+	client := &fakeLLM{response: llm.ChatResponse{Content: "<panda_respond>\nBack online."}}
+	router := newTestRouter(t, client, 5)
+	now := time.Now().UTC()
+	if _, err := router.admin.SetQuietModeUntil(ctx, "guild-1", "admin-1", now.Add(30*time.Minute), now); err != nil {
+		t.Fatalf("SetQuietModeUntil: %v", err)
+	}
+
+	cleared := router.Handle(ctx, Request{
+		Command:      "admin",
+		Subcommand:   "quiet",
+		GuildID:      "guild-1",
+		ChannelID:    "channel-1",
+		UserID:       "admin-1",
+		IsGuildAdmin: true,
+		Options:      map[string]string{"action": "clear"},
+	})
+	if !cleared.Ephemeral || !strings.Contains(cleared.Content, "cleared") {
+		t.Fatalf("expected admin quiet clear response, got %+v", cleared)
+	}
+
+	response := router.HandleNaturalMessage(ctx, Request{
+		GuildID:   "guild-1",
+		ChannelID: "channel-1",
+		UserID:    "user-1",
+		Options:   map[string]string{"message": "Panda are you back?", "bot_mentioned": "true"},
+	})
+	if response.Content == "" {
+		t.Fatalf("expected natural message after clear to reach assistant, got %+v", response)
+	}
+}
+
+func TestExpiredQuietModeDoesNotShortCircuit(t *testing.T) {
+	ctx := context.Background()
+	client := &fakeLLM{response: llm.ChatResponse{Content: "<panda_respond>\nI'm awake."}}
+	router, deps := newTestRouterWithDeps(t, client, 5)
+	if _, err := deps.configs.EnsureDefault(ctx, "guild-1"); err != nil {
+		t.Fatalf("EnsureDefault: %v", err)
+	}
+	if _, err := deps.configs.SetAssistantTimeoutUntil(ctx, "guild-1", time.Now().UTC().Add(-time.Minute), "admin-1"); err != nil {
+		t.Fatalf("SetAssistantTimeoutUntil: %v", err)
+	}
+
+	response := router.HandleNaturalMessage(ctx, Request{
+		GuildID:   "guild-1",
+		ChannelID: "channel-1",
+		UserID:    "user-1",
+		Options:   map[string]string{"message": "Panda are you awake?", "bot_mentioned": "true"},
+	})
+	if response.Content == "" {
+		t.Fatalf("expected expired quiet mode to allow response, got %+v", response)
+	}
+	config, ok, err := deps.configs.Get(ctx, "guild-1")
+	if err != nil || !ok {
+		t.Fatalf("Get config: ok=%t err=%v", ok, err)
+	}
+	if config.AssistantTimeoutUntil != nil {
+		t.Fatalf("expected expired quiet timeout to be cleared, got %+v", config.AssistantTimeoutUntil)
 	}
 }
 

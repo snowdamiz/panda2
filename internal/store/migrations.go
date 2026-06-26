@@ -1509,6 +1509,15 @@ var migrations = []Migration{
 			`CREATE INDEX IF NOT EXISTS idx_user_safety_states_timeout_until ON user_safety_states(timeout_until)`,
 		},
 	},
+	{
+		Version: 37,
+		Name:    "guild_assistant_timeouts",
+		SQL: []string{
+			`ALTER TABLE guild_configs ADD COLUMN assistant_timeout_until DATETIME`,
+			`ALTER TABLE guild_configs ADD COLUMN assistant_timeout_by TEXT NOT NULL DEFAULT ''`,
+			`CREATE INDEX IF NOT EXISTS idx_guild_configs_assistant_timeout_until ON guild_configs(assistant_timeout_until)`,
+		},
+	},
 }
 
 func RunMigrations(db *gorm.DB) error {

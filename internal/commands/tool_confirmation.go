@@ -36,6 +36,8 @@ const (
 	toolConfirmationOpToolUserAccessDeny   = "tw"
 	toolConfirmationOpChannelRuleSet       = "cs"
 	toolConfirmationOpChannelRuleRemove    = "cr"
+	toolConfirmationOpQuietModeSet         = "qs"
+	toolConfirmationOpQuietModeClear       = "qc"
 	toolConfirmationOpSafetyTimeout        = "st"
 	toolConfirmationOpSafetyStrikeRemove   = "sr"
 	toolConfirmationOpSafetyClear          = "sc"
@@ -63,6 +65,8 @@ const (
 	toolActionToolAccessOpen               = "tool_access.open"
 	toolActionChannelRuleSet               = "channel_rule.set"
 	toolActionChannelRuleRemove            = "channel_rule.remove"
+	toolActionQuietModeSet                 = "quiet_mode.set"
+	toolActionQuietModeClear               = "quiet_mode.clear"
 	toolActionSafetyTimeout                = "safety.timeout"
 	toolActionSafetyStrikeRemove           = "safety.remove"
 	toolActionSafetyClear                  = "safety.clear"
@@ -347,6 +351,18 @@ func RequestFromToolConfirmationID(id string, base Request) (ToolConfirmationReq
 		}
 		request.Action = toolActionChannelRuleRemove
 		request.Options["channel_id"] = decodeToolConfirmationPart(parts[3])
+	case toolConfirmationOpQuietModeSet:
+		if len(parts) != 5 {
+			return ToolConfirmationRequest{}, false
+		}
+		request.Action = toolActionQuietModeSet
+		request.Options["duration_seconds"] = decodeToolConfirmationPart(parts[3])
+		request.Options["timeout_until"] = decodeToolConfirmationPart(parts[4])
+	case toolConfirmationOpQuietModeClear:
+		if len(parts) != 4 {
+			return ToolConfirmationRequest{}, false
+		}
+		request.Action = toolActionQuietModeClear
 	case toolConfirmationOpSafetyTimeout:
 		if len(parts) != 5 {
 			return ToolConfirmationRequest{}, false
@@ -588,6 +604,15 @@ func toolConfirmationID(userID, action string, arguments map[string]string) stri
 		}
 		prefix[1] = toolConfirmationOpChannelRuleRemove
 		return strings.Join(append(prefix, encodeToolConfirmationPart(arguments["channel_id"])), ":")
+	case toolActionQuietModeSet:
+		if strings.TrimSpace(arguments["duration_seconds"]) == "" || strings.TrimSpace(arguments["timeout_until"]) == "" {
+			return ""
+		}
+		prefix[1] = toolConfirmationOpQuietModeSet
+		return strings.Join(append(prefix, encodeToolConfirmationPart(arguments["duration_seconds"]), encodeToolConfirmationPart(arguments["timeout_until"])), ":")
+	case toolActionQuietModeClear:
+		prefix[1] = toolConfirmationOpQuietModeClear
+		return strings.Join(append(prefix, toolConfirmationEmptyValue), ":")
 	case toolActionSafetyTimeout:
 		if strings.TrimSpace(arguments["user_id"]) == "" || strings.TrimSpace(arguments["duration_seconds"]) == "" {
 			return ""
