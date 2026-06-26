@@ -20,6 +20,7 @@ import (
 	"github.com/sn0w/panda2/internal/llm"
 	"github.com/sn0w/panda2/internal/memory"
 	"github.com/sn0w/panda2/internal/ops"
+	"github.com/sn0w/panda2/internal/pandainfo"
 	"github.com/sn0w/panda2/internal/repository"
 	"github.com/sn0w/panda2/internal/security"
 	"github.com/sn0w/panda2/internal/store"
@@ -586,6 +587,8 @@ func (e *Executor) Execute(ctx context.Context, request ExecutionRequest) (Execu
 		payload, generatedFiles, usageReservations, err = e.generateImage(toolCtx, request, arguments)
 	case "summarize_text_file":
 		payload, err = e.summarizeTextFile(toolCtx, request.GuildID, arguments)
+	case "panda.about":
+		payload, err = e.aboutPanda(), nil
 	case "read_config":
 		payload, err = e.readConfig(toolCtx, request, arguments)
 	case "manage_memory_consent":
@@ -3044,6 +3047,11 @@ func (e *Executor) canonicalToolDefinition(name string) (Definition, bool, error
 	return Definition{Name: normalizeToolName(name)}, false, nil
 }
 
+func (e *Executor) TerminalCardTool(name string) bool {
+	definition, known, err := e.canonicalToolDefinition(name)
+	return err == nil && known && definition.TerminalCard
+}
+
 func imageToolGroupAlias(value string) bool {
 	switch normalizedAccessAlias(value) {
 	case "imagetools", "images", "imagegeneration", "image", "imagegenerationtool", "imagetool":
@@ -4323,10 +4331,24 @@ func (e *Executor) canExecute(name string) bool {
 		return e.safety != nil
 	case "panda.manage_ops":
 		return e.ops != nil
-	case "draft_moderator_note", "generate_workflow_json", "panda.list_tools":
+	case "draft_moderator_note", "generate_workflow_json", "panda.about", "panda.list_tools":
 		return true
 	default:
 		return strings.HasPrefix(name, "discord.") && e.discord != nil
+	}
+}
+
+func (e *Executor) aboutPanda() map[string]any {
+	return map[string]any{
+		"result": map[string]any{
+			"title":   "I'm Panda, a Discord-native assistant.",
+			"accent":  "info",
+			"content": "In the flow of chat I answer questions, search the web, explain, summarize, translate, and read files and images — and I can generate images when you ask.\n\nI also help your server run: reminders, polls, music in voice, threads for longer conversations, and searchable server knowledge when admins enable it.\n\nWhen the server allows it I can take action too — managing messages, roles, channels, events, moderation, and saved automations — always after you confirm.\n\nI'm open source.\n\nCreated by " + pandainfo.CreatorHandle,
+			"actions": []map[string]any{
+				{"label": "Github", "url": pandainfo.RepositoryURL},
+				{"label": "X", "url": pandainfo.CreatorURL},
+			},
+		},
 	}
 }
 

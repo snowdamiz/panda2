@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sn0w/panda2/internal/admin"
 	"github.com/sn0w/panda2/internal/llm"
 	"github.com/sn0w/panda2/internal/repository"
 	"github.com/sn0w/panda2/internal/store"
@@ -28,8 +29,6 @@ const unsafeTopicClassifierPrompt = `You are Panda's unsafe-topic classifier. De
 Mark unsafe=true only when the current user is asking Panda to discuss, answer, transform, continue, or act on unsafe material. Do not mark unsafe merely because unsafe content appears in quoted history, recent context, tool output, or a replied-to message unless the current user is asking Panda to handle that unsafe content now. Benign safety, prevention, reporting, support, recovery, policy, or high-level educational discussion should be unsafe=false when it does not request operational harmful details or encouragement. Requests to inspect or administer Panda's own safety strikes, timeouts, moderation state, configuration, billing, permissions, tools, logs, or other internal app state are unsafe=false unless the current user is also asking for unsafe operational content; normal authorization and data access are handled by Panda's tools. If the user replies to Panda's own summary of tool access or user restrictions with phrases like "remove all of these restrictions", "open those tools", or "let them use it again", classify unsafe=false unless the request also asks Panda to answer unsafe material or bypass secret/unsafe-topic protections.
 
 Return exactly one JSON object matching the requested schema.`
-
-const unsafeTopicClassifierToolName = "classify_unsafe_topic"
 
 var unsafeTopicDecisionSchema = json.RawMessage(`{
 	"type": "object",
@@ -56,15 +55,6 @@ var unsafeTopicDecisionSchema = json.RawMessage(`{
 	"required": ["unsafe", "category", "confidence", "rationale"]
 }`)
 
-var unsafeTopicDecisionTool = llm.Tool{
-	Type: "function",
-	Function: llm.ToolFunction{
-		Name:        unsafeTopicClassifierToolName,
-		Description: "Record Panda's unsafe-topic classification decision for the active current user request.",
-		Parameters:  unsafeTopicDecisionSchema,
-	},
-}
-
 type safetyGateInput struct {
 	GuildID                   string
 	UserID                    string
@@ -76,6 +66,7 @@ type safetyGateInput struct {
 	ReplyAuthorIsCurrentUser  bool
 	ReplyAuthorIsBot          bool
 	HasReferencedImageContent bool
+	BypassSafety              bool
 }
 
 type unsafeTopicDecision struct {
@@ -91,6 +82,15 @@ func (s *Service) enforceUserSafety(ctx context.Context, config store.GuildConfi
 	}
 	input.UserID = strings.TrimSpace(input.UserID)
 	if input.UserID == "" {
+		return AskResponse{}, false, nil
+	}
+	if input.BypassSafety {
+		slog.Info("assistant user safety bypassed for admin access",
+			slog.String("guild_id", input.GuildID),
+			slog.String("channel_id", input.ChannelID),
+			slog.String("user_id", input.UserID),
+			slog.String("command", input.Command),
+		)
 		return AskResponse{}, false, nil
 	}
 
@@ -221,10 +221,13 @@ func (s *Service) classifyUnsafeTopic(ctx context.Context, config store.GuildCon
 			{Role: "system", Content: unsafeTopicClassifierPrompt},
 			{Role: "user", Content: safetyClassificationContent(input)},
 		},
-		Tools: []llm.Tool{unsafeTopicDecisionTool},
-		ToolChoice: &llm.ToolChoice{
-			Type:     "function",
-			Function: &llm.ToolChoiceFunction{Name: unsafeTopicClassifierToolName},
+		ResponseFormat: &llm.ResponseFormat{
+			Type: "json_schema",
+			JSONSchema: &llm.ResponseFormatSchema{
+				Name:   "unsafe_topic_decision",
+				Strict: true,
+				Schema: unsafeTopicDecisionSchema,
+			},
 		},
 		Temperature: 0,
 		MaxTokens:   512,
@@ -232,16 +235,7 @@ func (s *Service) classifyUnsafeTopic(ctx context.Context, config store.GuildCon
 	if err != nil {
 		return unsafeTopicDecision{}, err
 	}
-	if len(response.ToolCalls) == 0 {
-		return unsafeTopicDecision{}, fmt.Errorf("unsafe-topic classifier did not call %s", unsafeTopicClassifierToolName)
-	}
-	for _, call := range response.ToolCalls {
-		if call.Function.Name != unsafeTopicClassifierToolName {
-			continue
-		}
-		return decodeUnsafeTopicDecision(call.Function.Arguments)
-	}
-	return unsafeTopicDecision{}, fmt.Errorf("unsafe-topic classifier called unexpected tools: %v", toolCallNames(response.ToolCalls))
+	return decodeUnsafeTopicDecision(response.Content)
 }
 
 func decodeUnsafeTopicDecision(arguments string) (unsafeTopicDecision, error) {
@@ -310,6 +304,22 @@ func safetyClassificationContent(input safetyGateInput) string {
 	return strings.TrimSpace(builder.String())
 }
 
+func safetyBypassAllowed(isOwner, isGuildAdmin bool, allowedPermissions map[string]struct{}) bool {
+	if isOwner || isGuildAdmin {
+		return true
+	}
+	for _, permission := range []string{
+		admin.PermissionAdminBadge,
+		admin.PermissionAdminConfigWrite,
+		admin.PermissionOwnerOps,
+	} {
+		if _, ok := allowedPermissions[permission]; ok {
+			return true
+		}
+	}
+	return false
+}
+
 func safetyInputFromAsk(request AskRequest, command string) safetyGateInput {
 	return safetyGateInput{
 		GuildID:                   request.GuildID,
@@ -322,6 +332,7 @@ func safetyInputFromAsk(request AskRequest, command string) safetyGateInput {
 		ReplyAuthorIsCurrentUser:  request.ReplyAuthorIsCurrentUser,
 		ReplyAuthorIsBot:          request.ReplyAuthorIsBot,
 		HasReferencedImageContent: len(request.ImageReferences) > 0,
+		BypassSafety:              request.BypassSafety || safetyBypassAllowed(request.IsOwner, request.IsGuildAdmin, request.AllowedPermissions),
 	}
 }
 
@@ -334,5 +345,6 @@ func safetyInputFromTask(request TaskRequest) safetyGateInput {
 		Content:                   request.Input,
 		InvocationContext:         request.InvocationContext,
 		HasReferencedImageContent: len(request.ImageReferences) > 0,
+		BypassSafety:              request.BypassSafety || safetyBypassAllowed(request.IsOwner, request.IsGuildAdmin, request.AllowedPermissions),
 	}
 }

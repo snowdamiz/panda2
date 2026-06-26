@@ -17,6 +17,7 @@ import (
 	"github.com/sn0w/panda2/internal/generated"
 	"github.com/sn0w/panda2/internal/llm"
 	"github.com/sn0w/panda2/internal/memory"
+	"github.com/sn0w/panda2/internal/pandainfo"
 	"github.com/sn0w/panda2/internal/repository"
 	"github.com/sn0w/panda2/internal/store"
 	"github.com/sn0w/panda2/internal/websearch"
@@ -251,6 +252,72 @@ func TestOpenRouterToolsFiltersByPermission(t *testing.T) {
 		if strings.Contains(tool.Function.Name, ".") {
 			t.Fatalf("wire tool name should be provider-safe: %s", tool.Function.Name)
 		}
+	}
+}
+
+func TestPandaAboutToolIsCallableForAssistantUsers(t *testing.T) {
+	registry, err := NewDefaultRegistry()
+	if err != nil {
+		t.Fatalf("NewDefaultRegistry: %v", err)
+	}
+	definition, ok := registry.Get("panda.about")
+	if !ok {
+		t.Fatal("panda.about not registered")
+	}
+	if definition.ModelName() != "panda_about" || !definition.IncludeInModelContext || !definition.BypassToolPolicy || !definition.TerminalCard {
+		t.Fatalf("unexpected panda.about definition: %+v", definition)
+	}
+	available := NewExecutor(registry, nil, nil).OpenRouterTools(testAccess(ToolPolicyAssistive, admin.PermissionAssistantUse))
+	if !toolNames(available)["panda_about"] {
+		t.Fatalf("panda.about should be exposed to assistant users, got %+v", toolNames(available))
+	}
+}
+
+func TestPandaAboutToolReturnsCardWithButtons(t *testing.T) {
+	registry, err := NewDefaultRegistry()
+	if err != nil {
+		t.Fatalf("NewDefaultRegistry: %v", err)
+	}
+	result, err := NewExecutor(registry, nil, nil).Execute(context.Background(), ExecutionRequest{
+		Access: testAccess(ToolPolicyAssistive, admin.PermissionAssistantUse),
+		Call: llm.ToolCall{
+			ID:   "call-about",
+			Type: "function",
+			Function: llm.ToolCallFunction{
+				Name:      "panda_about",
+				Arguments: `{}`,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Execute panda.about: %v", err)
+	}
+	var payload struct {
+		Result struct {
+			Title   string `json:"title"`
+			Content string `json:"content"`
+			Actions []struct {
+				Label string `json:"label"`
+				URL   string `json:"url"`
+			} `json:"actions"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal([]byte(result.Message.Content), &payload); err != nil {
+		t.Fatalf("decode tool payload: %v\n%s", err, result.Message.Content)
+	}
+	if !strings.Contains(payload.Result.Title, "Discord-native assistant") ||
+		!strings.Contains(payload.Result.Content, "I'm open source") ||
+		!strings.Contains(payload.Result.Content, "Created by "+pandainfo.CreatorHandle) ||
+		strings.Contains(payload.Result.Content, pandainfo.RepositoryURL) ||
+		strings.Contains(payload.Result.Content, pandainfo.CreatorURL) {
+		t.Fatalf("unexpected about content: %+v", payload.Result)
+	}
+	if len(payload.Result.Actions) != 2 ||
+		payload.Result.Actions[0].Label != "Github" ||
+		payload.Result.Actions[0].URL != pandainfo.RepositoryURL ||
+		payload.Result.Actions[1].Label != "X" ||
+		payload.Result.Actions[1].URL != pandainfo.CreatorURL {
+		t.Fatalf("unexpected about actions: %+v", payload.Result.Actions)
 	}
 }
 

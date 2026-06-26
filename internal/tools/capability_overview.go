@@ -51,6 +51,9 @@ func CapabilityOverviewForTools(availableTools []llm.Tool, hasAdminAccess bool) 
 			continue
 		}
 		delete(available, modelName)
+		if definition.Name == "panda.about" {
+			continue
+		}
 		featureID := firstCapabilityNonEmpty(featureIDByToolName[modelName], definition.FeatureID)
 		group := capabilityGroupForDefinition(definition, featureID, featuresByID, featureOrder, hasAdminAccess)
 		if group.label != "" {
