@@ -937,7 +937,7 @@ func (s *Service) completeWithToolsWithOptions(ctx context.Context, config store
 				}
 			}
 			sourceLinks = append(sourceLinks, result.SourceLinks...)
-			messages = append(messages, assistantVisibleToolMessage(message, result.Confirmation))
+			messages = append(messages, assistantVisibleToolMessage(call, message, result.Confirmation))
 		}
 		if card != nil {
 			messages = append(messages, llm.Message{Role: "system", Content: standaloneCardFollowupPrompt()})
@@ -1497,8 +1497,11 @@ func sanitizeToolMessage(message llm.Message) llm.Message {
 	return message
 }
 
-func assistantVisibleToolMessage(message llm.Message, confirmation *tools.InteractionConfirmation) llm.Message {
+func assistantVisibleToolMessage(call llm.ToolCall, message llm.Message, confirmation *tools.InteractionConfirmation) llm.Message {
 	if confirmation == nil {
+		if card := toolCardFromToolResult(call, message); card != nil {
+			message.Content = toolCardVisibleContent(card)
+		}
 		return sanitizeToolMessage(message)
 	}
 	var payload any
@@ -1572,9 +1575,48 @@ func internalConfirmationKey(key string) bool {
 	}
 }
 
+func toolCardVisibleContent(card *ToolCard) string {
+	if card == nil {
+		return ""
+	}
+	lines := make([]string, 0, 2+len(card.Fields)+len(card.Actions))
+	if title := strings.TrimSpace(card.Title); title != "" {
+		lines = append(lines, title)
+	}
+	if content := strings.TrimSpace(card.Content); content != "" {
+		lines = append(lines, content)
+	}
+	for _, field := range card.Fields {
+		name := strings.TrimSpace(field.Name)
+		value := strings.TrimSpace(field.Value)
+		if name == "" || value == "" {
+			continue
+		}
+		lines = append(lines, name+": "+value)
+	}
+	for _, action := range card.Actions {
+		if label := strings.TrimSpace(action.Label); label != "" {
+			lines = append(lines, label)
+		}
+	}
+	return strings.TrimSpace(strings.Join(lines, "\n"))
+}
+
 func containsTextToolCallMarkup(content string) bool {
 	content = strings.TrimSpace(content)
 	return strings.Contains(content, "<tool_call>") || strings.Contains(content, "</tool_call>")
+}
+
+func containsCardMarkupArtifact(content string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(content))
+	return strings.HasPrefix(normalized, "<card>") ||
+		strings.HasPrefix(normalized, "```<card>") ||
+		strings.Contains(normalized, "\n<card>") ||
+		strings.Contains(normalized, "</card>")
+}
+
+func ResponseContentLooksInternalArtifact(content string) bool {
+	return containsTextToolCallMarkup(content) || containsCardMarkupArtifact(content)
 }
 
 func textToolCallUnavailableMessage() string {
@@ -1587,6 +1629,9 @@ const maxAppendedWebSourceLinks = 10
 func finalizeAssistantContent(content string, sourceLinks []tools.SourceLink, sourceLimit int) string {
 	if containsTextToolCallMarkup(content) {
 		content = textToolCallUnavailableMessage()
+	}
+	if containsCardMarkupArtifact(content) {
+		content = ""
 	}
 	content = cleanupAssistantModelArtifacts(stripNaturalGateMarkerPrefix(content))
 	return appendWebSearchSourceLinks(security.SanitizeDiscordContent(content), sourceLinks, sourceLimit)

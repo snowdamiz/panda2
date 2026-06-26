@@ -1253,11 +1253,17 @@ func (r *Router) handleAdminToolAccess(ctx context.Context, request Request) Res
 			if err != nil {
 				return toolAccessWriteError(err)
 			}
+			if toolNameIsPandaChat(toolUser.ToolName) {
+				return Response{Content: fmt.Sprintf("Panda can reply to %s.", r.userDisplay(ctx, request, toolUser.UserID, firstNonEmpty(request.Options["member_user_name"], request.Options["user_name"]))), Ephemeral: true}
+			}
 			return Response{Content: fmt.Sprintf("Allowed %s to use `%s`.", r.userDisplay(ctx, request, toolUser.UserID, firstNonEmpty(request.Options["member_user_name"], request.Options["user_name"])), toolUser.ToolName), Ephemeral: true}
 		}
 		toolRole, err := r.admin.AddToolRole(ctx, request.GuildID, request.UserID, toolName, target.id)
 		if err != nil {
 			return toolAccessWriteError(err)
+		}
+		if toolNameIsPandaChat(toolRole.ToolName) {
+			return Response{Content: fmt.Sprintf("Panda can reply to %s.", r.roleDisplay(ctx, request, toolRole.RoleID, request.Options["role_name"])), Ephemeral: true}
 		}
 		return Response{Content: fmt.Sprintf("Allowed %s to use `%s`.", r.roleDisplay(ctx, request, toolRole.RoleID, request.Options["role_name"]), toolRole.ToolName), Ephemeral: true}
 	case "deny", "block", "disallow", "disable":
@@ -1273,11 +1279,17 @@ func (r *Router) handleAdminToolAccess(ctx context.Context, request Request) Res
 			if err != nil {
 				return toolAccessWriteError(err)
 			}
+			if toolNameIsPandaChat(toolUser.ToolName) {
+				return Response{Content: fmt.Sprintf("Panda will not reply to %s.", r.userDisplay(ctx, request, toolUser.UserID, firstNonEmpty(request.Options["member_user_name"], request.Options["user_name"]))), Ephemeral: true}
+			}
 			return Response{Content: fmt.Sprintf("Denied %s from `%s`.", r.userDisplay(ctx, request, toolUser.UserID, firstNonEmpty(request.Options["member_user_name"], request.Options["user_name"])), toolUser.ToolName), Ephemeral: true}
 		}
 		toolRole, err := r.admin.DenyToolRole(ctx, request.GuildID, request.UserID, toolName, target.id)
 		if err != nil {
 			return toolAccessWriteError(err)
+		}
+		if toolNameIsPandaChat(toolRole.ToolName) {
+			return Response{Content: fmt.Sprintf("Panda will not reply to %s.", r.roleDisplay(ctx, request, toolRole.RoleID, request.Options["role_name"])), Ephemeral: true}
 		}
 		return Response{Content: fmt.Sprintf("Denied %s from `%s`.", r.roleDisplay(ctx, request, toolRole.RoleID, request.Options["role_name"]), toolRole.ToolName), Ephemeral: true}
 	case "remove":
@@ -1295,6 +1307,9 @@ func (r *Router) handleAdminToolAccess(ctx context.Context, request Request) Res
 				}
 				return Response{Content: "Tool access could not be removed.", Ephemeral: true}
 			}
+			if toolNameIsPandaChat(toolName) {
+				return Response{Content: fmt.Sprintf("Panda can reply to %s again.", r.userDisplay(ctx, request, target.id, firstNonEmpty(request.Options["member_user_name"], request.Options["user_name"]))), Ephemeral: true}
+			}
 			return Response{Content: fmt.Sprintf("Removed %s from `%s`.", r.userDisplay(ctx, request, target.id, firstNonEmpty(request.Options["member_user_name"], request.Options["user_name"])), toolName), Ephemeral: true}
 		}
 		if err := r.admin.RemoveToolRole(ctx, request.GuildID, request.UserID, toolName, target.id); err != nil {
@@ -1302,6 +1317,9 @@ func (r *Router) handleAdminToolAccess(ctx context.Context, request Request) Res
 				return Response{Content: "That tool access rule was not found.", Ephemeral: true}
 			}
 			return Response{Content: "Tool access could not be removed.", Ephemeral: true}
+		}
+		if toolNameIsPandaChat(toolName) {
+			return Response{Content: fmt.Sprintf("Panda can reply to %s again.", r.roleDisplay(ctx, request, target.id, request.Options["role_name"])), Ephemeral: true}
 		}
 		return Response{Content: fmt.Sprintf("Removed %s from `%s`.", r.roleDisplay(ctx, request, target.id, request.Options["role_name"]), toolName), Ephemeral: true}
 	case "open", "public", "everyone", "allow_everyone":
@@ -1396,6 +1414,10 @@ func toolAccessWriteError(err error) Response {
 		return Response{Content: err.Error(), Ephemeral: true}
 	}
 	return Response{Content: "Tool access could not be saved.", Ephemeral: true}
+}
+
+func toolNameIsPandaChat(toolName string) bool {
+	return strings.EqualFold(strings.TrimSpace(toolName), toolsvc.ToolNamePandaChat)
 }
 
 func (r *Router) toolAccessRuleTargetDisplay(ctx context.Context, request Request, rule admin.ToolAccessRule) string {
@@ -2182,10 +2204,16 @@ func (r *Router) HandleToolConfirmation(ctx context.Context, request ToolConfirm
 				if _, err := r.admin.AddToolUser(ctx, request.Request.GuildID, request.Request.UserID, toolName, userID); err != nil {
 					return toolAccessWriteError(err)
 				}
+				if toolNameIsPandaChat(toolName) {
+					return Response{Content: fmt.Sprintf("Panda can reply to %s.", r.userDisplay(ctx, request.Request, userID, request.Options["user_display"])), Ephemeral: true}
+				}
 				return Response{Content: fmt.Sprintf("Allowed %s to use `%s`.", r.userDisplay(ctx, request.Request, userID, request.Options["user_display"]), toolName), Ephemeral: true}
 			}
 			if _, err := r.admin.AddToolRole(ctx, request.Request.GuildID, request.Request.UserID, toolName, roleID); err != nil {
 				return toolAccessWriteError(err)
+			}
+			if toolNameIsPandaChat(toolName) {
+				return Response{Content: fmt.Sprintf("Panda can reply to %s.", r.roleDisplay(ctx, request.Request, roleID, request.Options["role_display"])), Ephemeral: true}
 			}
 			return Response{Content: fmt.Sprintf("Allowed %s to use `%s`.", r.roleDisplay(ctx, request.Request, roleID, request.Options["role_display"]), toolName), Ephemeral: true}
 		}
@@ -2194,10 +2222,16 @@ func (r *Router) HandleToolConfirmation(ctx context.Context, request ToolConfirm
 				if _, err := r.admin.DenyToolUser(ctx, request.Request.GuildID, request.Request.UserID, toolName, userID); err != nil {
 					return toolAccessWriteError(err)
 				}
+				if toolNameIsPandaChat(toolName) {
+					return Response{Content: fmt.Sprintf("Panda will not reply to %s.", r.userDisplay(ctx, request.Request, userID, request.Options["user_display"])), Ephemeral: true}
+				}
 				return Response{Content: fmt.Sprintf("Denied %s from `%s`.", r.userDisplay(ctx, request.Request, userID, request.Options["user_display"]), toolName), Ephemeral: true}
 			}
 			if _, err := r.admin.DenyToolRole(ctx, request.Request.GuildID, request.Request.UserID, toolName, roleID); err != nil {
 				return toolAccessWriteError(err)
+			}
+			if toolNameIsPandaChat(toolName) {
+				return Response{Content: fmt.Sprintf("Panda will not reply to %s.", r.roleDisplay(ctx, request.Request, roleID, request.Options["role_display"])), Ephemeral: true}
 			}
 			return Response{Content: fmt.Sprintf("Denied %s from `%s`.", r.roleDisplay(ctx, request.Request, roleID, request.Options["role_display"]), toolName), Ephemeral: true}
 		}
@@ -2205,10 +2239,16 @@ func (r *Router) HandleToolConfirmation(ctx context.Context, request ToolConfirm
 			if err := r.admin.RemoveToolUser(ctx, request.Request.GuildID, request.Request.UserID, toolName, userID); err != nil {
 				return toolConfirmationError(err, "Tool access could not be removed.", "That tool access rule was not found.")
 			}
+			if toolNameIsPandaChat(toolName) {
+				return Response{Content: fmt.Sprintf("Panda can reply to %s again.", r.userDisplay(ctx, request.Request, userID, request.Options["user_display"])), Ephemeral: true}
+			}
 			return Response{Content: fmt.Sprintf("Removed %s from `%s`.", r.userDisplay(ctx, request.Request, userID, request.Options["user_display"]), toolName), Ephemeral: true}
 		}
 		if err := r.admin.RemoveToolRole(ctx, request.Request.GuildID, request.Request.UserID, toolName, roleID); err != nil {
 			return toolConfirmationError(err, "Tool access could not be removed.", "That tool access rule was not found.")
+		}
+		if toolNameIsPandaChat(toolName) {
+			return Response{Content: fmt.Sprintf("Panda can reply to %s again.", r.roleDisplay(ctx, request.Request, roleID, request.Options["role_display"])), Ephemeral: true}
 		}
 		return Response{Content: fmt.Sprintf("Removed %s from `%s`.", r.roleDisplay(ctx, request.Request, roleID, request.Options["role_display"]), toolName), Ephemeral: true}
 	case toolActionToolAccessOpen:
@@ -2263,6 +2303,11 @@ func (r *Router) HandleToolConfirmation(ctx context.Context, request ToolConfirm
 			return toolConfirmationError(err, "Channel rule could not be removed.", "That channel rule was not found.")
 		}
 		return Response{Content: fmt.Sprintf("Removed channel access rule for %s.", r.channelDisplay(ctx, request.Request, channelID, request.Options["channel_display"])), Ephemeral: true}
+	case toolActionSafetyTimeout, toolActionSafetyStrikeRemove, toolActionSafetyClear:
+		if denied := r.ensureToolConfirmationPermission(ctx, request.Request, r.admin.CanWriteConfig, "You do not have permission to manage safety state."); denied.Content != "" {
+			return denied
+		}
+		return r.handleSafetyConfirmation(ctx, request)
 	case toolActionComposedToolApprove:
 		if denied := r.ensureToolConfirmationPermission(ctx, request.Request, r.admin.CanApproveComposedTool, "You do not have permission to approve composed tools."); denied.Content != "" {
 			return denied
@@ -2351,7 +2396,10 @@ func toolConfirmationFeature(action string) string {
 		toolActionToolAccessDeny,
 		toolActionToolAccessOpen,
 		toolActionChannelRuleSet,
-		toolActionChannelRuleRemove:
+		toolActionChannelRuleRemove,
+		toolActionSafetyTimeout,
+		toolActionSafetyStrikeRemove,
+		toolActionSafetyClear:
 		return features.AdminAccessControl
 	case toolActionDiscordRoleCreate,
 		toolActionMemberRoleAdd,
@@ -2453,6 +2501,112 @@ func (r *Router) handleDiscordWriteConfirmation(ctx context.Context, request Too
 		return Response{Content: "Discord write could not be completed: " + message, Ephemeral: true, Presentation: Presentation{Title: "Discord write failed", Accent: AccentWarning}}
 	}
 	return Response{Content: fmt.Sprintf("Completed `%s`.", toolName), Ephemeral: true, Presentation: Presentation{Title: "Discord write completed", Accent: AccentSuccess}}
+}
+
+func (r *Router) handleSafetyConfirmation(ctx context.Context, request ToolConfirmationRequest) Response {
+	if r.tools == nil {
+		return Response{Content: "Safety state management is not configured for this runtime.", Ephemeral: true}
+	}
+	userID := normalizeDiscordUserID(request.Options["user_id"])
+	if userID == "" {
+		return Response{Content: "That safety confirmation is invalid.", Ephemeral: true}
+	}
+	arguments := map[string]any{
+		"action":  "clear",
+		"user_id": userID,
+	}
+	count := 0
+	if request.Action == toolActionSafetyStrikeRemove {
+		count = intOption(request.Options["count"], 1)
+		if count <= 0 || count > 100 {
+			return Response{Content: "That safety confirmation is invalid.", Ephemeral: true}
+		}
+		arguments["action"] = "remove"
+		arguments["count"] = count
+	} else if request.Action == toolActionSafetyTimeout {
+		durationSeconds, err := positiveInt64Option(request.Options["duration_seconds"])
+		if err != nil {
+			return Response{Content: "That safety confirmation is invalid.", Ephemeral: true}
+		}
+		arguments["action"] = "timeout"
+		arguments["duration_seconds"] = durationSeconds
+	}
+	data, err := json.Marshal(arguments)
+	if err != nil {
+		return Response{Content: "That safety confirmation is invalid.", Ephemeral: true}
+	}
+	result, err := r.tools.Execute(ctx, toolsvc.ExecutionRequest{
+		GuildID:              request.Request.GuildID,
+		ChannelID:            request.Request.ChannelID,
+		ActorID:              request.Request.UserID,
+		RequestID:            request.Request.RequestID,
+		InvocationType:       "tool_confirmation",
+		RoleIDs:              append([]string(nil), request.Request.RoleIDs...),
+		IsGuildAdmin:         request.Request.IsGuildAdmin,
+		IsOwner:              request.Request.IsOwner,
+		Access:               r.toolAccess(ctx, request.Request, toolsvc.ToolPolicyWriteConfirmed),
+		AllowConfirmedWrites: true,
+		Call: llm.ToolCall{
+			ID:   "confirmed-safety",
+			Type: "function",
+			Function: llm.ToolCallFunction{
+				Name:      "panda_manage_safety",
+				Arguments: string(data),
+			},
+		},
+	})
+	if err != nil {
+		if errors.Is(err, repository.ErrNotFound) {
+			return Response{Content: "That user does not have safety strike state to remove.", Ephemeral: true}
+		}
+		return Response{Content: "Safety state could not be updated.", Ephemeral: true}
+	}
+	if message := toolExecutionErrorMessage(result.Message.Content); message != "" {
+		return Response{Content: "Safety state could not be updated: " + message, Ephemeral: true}
+	}
+	if request.Action == toolActionSafetyTimeout {
+		durationSeconds, _ := positiveInt64Option(request.Options["duration_seconds"])
+		return Response{Content: fmt.Sprintf("Timed out %s from Panda for %s.", r.userDisplay(ctx, request.Request, userID, request.Options["user_display"]), durationSecondsDisplayLabel(durationSeconds)), Ephemeral: true}
+	}
+	if request.Action == toolActionSafetyClear {
+		return Response{Content: fmt.Sprintf("Cleared safety strikes and timeout state for %s.", r.userDisplay(ctx, request.Request, userID, request.Options["user_display"])), Ephemeral: true}
+	}
+	return Response{Content: fmt.Sprintf("Removed %d safety strike(s) from %s.", count, r.userDisplay(ctx, request.Request, userID, request.Options["user_display"])), Ephemeral: true}
+}
+
+func positiveInt64Option(raw string) (int64, error) {
+	value, err := strconv.ParseInt(strings.TrimSpace(raw), 10, 64)
+	if err != nil || value <= 0 {
+		return 0, fmt.Errorf("positive integer is required")
+	}
+	return value, nil
+}
+
+func durationSecondsDisplayLabel(seconds int64) string {
+	if seconds <= 0 {
+		return "the requested duration"
+	}
+	duration := (time.Duration(seconds) * time.Second).Round(time.Second)
+	units := []struct {
+		name string
+		size time.Duration
+	}{
+		{"week", 7 * 24 * time.Hour},
+		{"day", 24 * time.Hour},
+		{"hour", time.Hour},
+		{"minute", time.Minute},
+		{"second", time.Second},
+	}
+	for _, unit := range units {
+		if duration >= unit.size && duration%unit.size == 0 {
+			count := int64(duration / unit.size)
+			if count == 1 {
+				return "1 " + unit.name
+			}
+			return fmt.Sprintf("%d %ss", count, unit.name)
+		}
+	}
+	return duration.String()
 }
 
 func toolExecutionErrorMessage(content string) string {
@@ -3041,7 +3195,7 @@ func (r *Router) responseFromAssistantAnswer(ctx context.Context, request Reques
 
 func standaloneCardFollowupContent(content string) string {
 	content = strings.TrimSpace(content)
-	if content == "" || placeholderOnlyAssistantContent(content) {
+	if content == "" || placeholderOnlyAssistantContent(content) || assistant.ResponseContentLooksInternalArtifact(content) {
 		return ""
 	}
 	return content

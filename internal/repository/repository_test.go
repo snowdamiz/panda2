@@ -258,6 +258,109 @@ func TestUserSafetyStrikesAreScopedByGuildAndUser(t *testing.T) {
 	}
 }
 
+func TestUserSafetyRemoveStrikeDecrementsActiveAndTotal(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(ctx, "file::memory:?cache=shared")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer db.Close()
+
+	repo := NewUserSafetyRepository(db.DB)
+	now := time.Date(2026, 6, 25, 20, 0, 0, 0, time.UTC)
+	if _, err := repo.AddStrike(ctx, "guild-1", "user-1", 3, 10*time.Minute, now); err != nil {
+		t.Fatalf("AddStrike: %v", err)
+	}
+
+	status, err := repo.RemoveStrike(ctx, "guild-1", "user-1", 1, now.Add(time.Minute))
+	if err != nil {
+		t.Fatalf("RemoveStrike: %v", err)
+	}
+	if status.TimedOut || status.State.ActiveStrikes != 0 || status.State.TotalStrikes != 0 || status.State.LastStrikeAt != nil || status.State.TimeoutUntil != nil {
+		t.Fatalf("expected strike state to be cleared, got %+v", status)
+	}
+	listed, err := repo.List(ctx, "guild-1", 25)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(listed) != 0 {
+		t.Fatalf("cleared safety state should not appear in list, got %+v", listed)
+	}
+	if _, err := repo.RemoveStrike(ctx, "guild-1", "user-1", 1, now.Add(2*time.Minute)); err != ErrNotFound {
+		t.Fatalf("expected ErrNotFound removing an empty safety state, got %v", err)
+	}
+}
+
+func TestUserSafetyRemoveStrikeClearsTimeout(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(ctx, "file::memory:?cache=shared")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer db.Close()
+
+	repo := NewUserSafetyRepository(db.DB)
+	now := time.Date(2026, 6, 25, 20, 30, 0, 0, time.UTC)
+	for i := 0; i < 3; i++ {
+		if _, err := repo.AddStrike(ctx, "guild-1", "user-1", 3, 10*time.Minute, now.Add(time.Duration(i)*time.Minute)); err != nil {
+			t.Fatalf("AddStrike %d: %v", i+1, err)
+		}
+	}
+
+	status, err := repo.RemoveStrike(ctx, "guild-1", "user-1", 1, now.Add(4*time.Minute))
+	if err != nil {
+		t.Fatalf("RemoveStrike: %v", err)
+	}
+	if status.TimedOut || status.State.TimeoutUntil != nil || status.State.TotalStrikes != 2 {
+		t.Fatalf("expected timeout cleared and total decremented, got %+v", status)
+	}
+
+	cleared, err := repo.Clear(ctx, "guild-1", "user-1", now.Add(5*time.Minute))
+	if err != nil {
+		t.Fatalf("Clear: %v", err)
+	}
+	if cleared.State.ActiveStrikes != 0 || cleared.State.TotalStrikes != 0 || cleared.State.LastStrikeAt != nil || cleared.State.TimeoutUntil != nil {
+		t.Fatalf("expected all safety state cleared, got %+v", cleared)
+	}
+}
+
+func TestUserSafetySetTimeoutUsesRequestedDuration(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(ctx, "file::memory:?cache=shared")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer db.Close()
+
+	repo := NewUserSafetyRepository(db.DB)
+	now := time.Date(2026, 6, 25, 21, 0, 0, 0, time.UTC)
+	status, err := repo.SetTimeout(ctx, "guild-1", "user-1", 30*time.Minute, now)
+	if err != nil {
+		t.Fatalf("SetTimeout: %v", err)
+	}
+	if !status.TimedOut || status.State.TimeoutUntil == nil || !status.State.TimeoutUntil.Equal(now.Add(30*time.Minute)) {
+		t.Fatalf("expected 30 minute timeout, got %+v", status)
+	}
+	if status.State.ActiveStrikes != 0 || status.State.TotalStrikes != 0 || status.State.LastStrikeAt != nil {
+		t.Fatalf("manual timeout should not add strikes, got %+v", status)
+	}
+
+	active, err := repo.Status(ctx, "guild-1", "user-1", now.Add(29*time.Minute))
+	if err != nil {
+		t.Fatalf("Status during timeout: %v", err)
+	}
+	if !active.TimedOut {
+		t.Fatalf("expected timeout to remain active, got %+v", active)
+	}
+	expired, err := repo.Status(ctx, "guild-1", "user-1", now.Add(31*time.Minute))
+	if err != nil {
+		t.Fatalf("Status after timeout: %v", err)
+	}
+	if expired.TimedOut || expired.State.TimeoutUntil != nil {
+		t.Fatalf("expected expired timeout to clear, got %+v", expired)
+	}
+}
+
 func TestBillingUsageTotalsMissingPeriodDoesNotLogRecordNotFound(t *testing.T) {
 	ctx := context.Background()
 	repo, logs, cleanup := newBillingRepositoryWithLogBuffer(t)
