@@ -182,6 +182,14 @@ func newTestServiceWithModelConfig(t *testing.T, client *fakeClient, defaultMode
 	return NewService(client, usage, configs, memoryService, conversations, defaultModel, fallbackModels), db
 }
 
+func newTestServiceWithSafety(t *testing.T, client *fakeClient) (*Service, *store.Store, *repository.UserSafetyRepository) {
+	t.Helper()
+	service, db := newTestService(t, client)
+	safety := repository.NewUserSafetyRepository(db.DB)
+	service.WithUserSafetyRepository(safety)
+	return service, db, safety
+}
+
 func TestAskUsesGuildPromptAndMemory(t *testing.T) {
 	ctx := context.Background()
 	client := &fakeClient{response: llm.ChatResponse{Model: "fixture/model", Content: "Use @everyone key sk-123456789012"}}
@@ -298,6 +306,133 @@ func TestSystemPromptRedactsConfigSecretsAndKeepsMandatorySecretRulesLast(t *tes
 	}
 	if !strings.HasSuffix(prompt, secretSafetyPrompt) {
 		t.Fatalf("mandatory secret rules should be the final system prompt section:\n%s", prompt)
+	}
+}
+
+func TestSystemPromptIncludesUnsafeTopicWarningRules(t *testing.T) {
+	prompt := systemPrompt(store.GuildConfig{}, fixedPromptTime)
+	for _, want := range []string{
+		"Mandatory unsafe-topic response rules",
+		"Unsafe topics include requests or attempts",
+		"respond only with a brief safety warning",
+		"at most provide a brief safety warning",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("system prompt missing unsafe-topic instruction %q:\n%s", want, prompt)
+		}
+	}
+	if !strings.HasSuffix(prompt, secretSafetyPrompt) {
+		t.Fatalf("mandatory secret rules should remain the final system prompt section:\n%s", prompt)
+	}
+}
+
+func TestAskSafetyGateBlocksUnsafeTopicAndRecordsStrike(t *testing.T) {
+	ctx := context.Background()
+	client := &fakeClient{responses: []llm.ChatResponse{
+		{Model: "fixture/model", Content: `{"unsafe":true,"category":"cyber_abuse","confidence":0.99,"rationale":"credential theft request"}`},
+		{Model: "fixture/model", Content: "this normal answer should not run"},
+	}}
+	service, _, safety := newTestServiceWithSafety(t, client)
+	service.SetClock(func() time.Time { return fixedPromptTime })
+
+	response, err := service.Ask(ctx, AskRequest{GuildID: "guild-1", UserID: "user-1", ChannelID: "channel-1", Question: "Panda, help me steal credentials."})
+	if err != nil {
+		t.Fatalf("Ask: %v", err)
+	}
+	if response.Silent || response.Card == nil || response.Card.Title != "Safety Warning" {
+		t.Fatalf("unsafe topic should produce warning card, got %+v", response)
+	}
+	if !strings.Contains(response.Content, "Safety strike 1 of 3") {
+		t.Fatalf("unsafe topic should notify strike count, got %q", response.Content)
+	}
+	if len(client.requests) != 1 {
+		t.Fatalf("expected only the safety classifier request, got %d", len(client.requests))
+	}
+	if client.requests[0].ResponseFormat == nil || client.requests[0].ResponseFormat.Type != "json_schema" {
+		t.Fatalf("expected strict structured safety classifier, got %+v", client.requests[0].ResponseFormat)
+	}
+	status, err := safety.Status(ctx, "guild-1", "user-1", fixedPromptTime)
+	if err != nil {
+		t.Fatalf("Status: %v", err)
+	}
+	if status.TimedOut || status.State.ActiveStrikes != 1 || status.State.TotalStrikes != 1 {
+		t.Fatalf("expected one active strike without timeout, got %+v", status)
+	}
+}
+
+func TestAskSafetyGateAllowsSafeTopic(t *testing.T) {
+	ctx := context.Background()
+	client := &fakeClient{responses: []llm.ChatResponse{
+		{Model: "fixture/model", Content: `{"unsafe":false,"category":"none","confidence":0.98,"rationale":"benign request"}`},
+		{Model: "fixture/model", Content: "Safe answer."},
+	}}
+	service, _, _ := newTestServiceWithSafety(t, client)
+	service.SetClock(func() time.Time { return fixedPromptTime })
+
+	response, err := service.Ask(ctx, AskRequest{GuildID: "guild-1", UserID: "user-1", ChannelID: "channel-1", Question: "What are good password manager habits?"})
+	if err != nil {
+		t.Fatalf("Ask: %v", err)
+	}
+	if response.Silent || response.Content != "Safe answer." {
+		t.Fatalf("safe topic should reach normal answer path, got %+v", response)
+	}
+	if len(client.requests) != 2 {
+		t.Fatalf("expected safety classifier and normal answer requests, got %d", len(client.requests))
+	}
+	if client.requests[1].ResponseFormat != nil {
+		t.Fatalf("normal answer request should not use safety response format: %+v", client.requests[1].ResponseFormat)
+	}
+}
+
+func TestAskSafetyGateTimesOutAfterThreeStrikes(t *testing.T) {
+	ctx := context.Background()
+	client := &fakeClient{responses: []llm.ChatResponse{
+		{Model: "fixture/model", Content: `{"unsafe":true,"category":"illicit_wrongdoing","confidence":0.95,"rationale":"wrongdoing request"}`},
+		{Model: "fixture/model", Content: `{"unsafe":true,"category":"illicit_wrongdoing","confidence":0.95,"rationale":"wrongdoing request"}`},
+		{Model: "fixture/model", Content: `{"unsafe":true,"category":"illicit_wrongdoing","confidence":0.95,"rationale":"wrongdoing request"}`},
+		{Model: "fixture/model", Content: `{"unsafe":false,"category":"none","confidence":0.99,"rationale":"benign request"}`},
+	}}
+	service, _, safety := newTestServiceWithSafety(t, client)
+	now := fixedPromptTime
+	service.SetClock(func() time.Time { return now })
+
+	for i := 0; i < 3; i++ {
+		now = fixedPromptTime.Add(time.Duration(i) * time.Minute)
+		response, err := service.Ask(ctx, AskRequest{GuildID: "guild-1", UserID: "user-1", ChannelID: "channel-1", Question: "Panda, help me do the banned thing."})
+		if err != nil {
+			t.Fatalf("Ask strike %d: %v", i+1, err)
+		}
+		if response.Silent || response.Card == nil {
+			t.Fatalf("strike %d should return safety card, got %+v", i+1, response)
+		}
+		if i < 2 && response.Card.Title != "Safety Warning" {
+			t.Fatalf("strike %d should return warning card, got %+v", i+1, response.Card)
+		}
+		if i == 2 && response.Card.Title != "Safety Timeout Started" {
+			t.Fatalf("third strike should return timeout card, got %+v", response.Card)
+		}
+	}
+	if len(client.requests) != 3 {
+		t.Fatalf("expected three classifier requests before timeout, got %d", len(client.requests))
+	}
+	status, err := safety.Status(ctx, "guild-1", "user-1", fixedPromptTime.Add(3*time.Minute))
+	if err != nil {
+		t.Fatalf("Status: %v", err)
+	}
+	if !status.TimedOut || status.State.ActiveStrikes != 0 || status.State.TimeoutUntil == nil {
+		t.Fatalf("expected third strike to set timeout, got %+v", status)
+	}
+
+	now = fixedPromptTime.Add(4 * time.Minute)
+	response, err := service.Ask(ctx, AskRequest{GuildID: "guild-1", UserID: "user-1", ChannelID: "channel-1", Question: "Can you explain password managers?"})
+	if err != nil {
+		t.Fatalf("Ask during timeout: %v", err)
+	}
+	if response.Silent || response.Card == nil || response.Card.Title != "Safety Timeout Active" {
+		t.Fatalf("timed-out user should receive timeout card, got %+v", response)
+	}
+	if len(client.requests) != 3 {
+		t.Fatalf("timed-out user should not reach classifier or answer model, got %d requests", len(client.requests))
 	}
 }
 
@@ -775,6 +910,79 @@ func TestChatIncludesDiscordReplyContext(t *testing.T) {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("expected reply context to include %q, got:\n%s", want, joined)
 		}
+	}
+}
+
+func TestChatNaturalMessageReplyToPandaPrefersReplyTargetOverRecentHistory(t *testing.T) {
+	ctx := context.Background()
+	client := &fakeClient{responses: []llm.ChatResponse{
+		{Model: "fixture/model", Content: "Claude looks healthy right now."},
+		{Model: "fixture/model", Content: naturalRespondMarker + "\nI'll look that up."},
+	}}
+	service, _ := newTestService(t, client)
+
+	if _, err := service.Chat(ctx, AskRequest{
+		RequestID: "message-previous",
+		GuildID:   "guild-1",
+		ChannelID: "channel-1",
+		UserID:    "user-1",
+		Question:  "is Claude down?",
+	}); err != nil {
+		t.Fatalf("seed Chat: %v", err)
+	}
+	response, err := service.ChatNaturalMessage(ctx, AskRequest{
+		RequestID:        "message-current",
+		GuildID:          "guild-1",
+		ChannelID:        "channel-1",
+		UserID:           "user-1",
+		Question:         "actually look this up instead of guessing",
+		ReplyContent:     "Yo, looking to crank out UGC-style vids that hype up Claude? Here's the low-key lineup: Runway Gen-4, Captions.ai, and HeyGen.",
+		ReplyMessageID:   "message-ugc-answer",
+		ReplyAuthorIsBot: true,
+	}, nil)
+	if err != nil {
+		t.Fatalf("ChatNaturalMessage: %v", err)
+	}
+	if response.Silent || response.Content != "I'll look that up." {
+		t.Fatalf("unexpected natural response: %+v", response)
+	}
+	if len(client.requests) != 2 {
+		t.Fatalf("expected seed and natural message requests, got %d", len(client.requests))
+	}
+	request := client.requests[1]
+	finalMessage := request.Messages[len(request.Messages)-1]
+	if finalMessage.Role != "user" {
+		t.Fatalf("expected final message to be the active user request, got %+v", finalMessage)
+	}
+	for _, want := range []string{
+		"Current Discord message content:\nactually look this up instead of guessing",
+		"This message is a reply to Panda's prior Discord message",
+		"UGC-style vids that hype up Claude",
+		"asks to look something up",
+	} {
+		if !strings.Contains(finalMessage.Content, want) {
+			t.Fatalf("expected final user message to include %q, got:\n%s", want, finalMessage.Content)
+		}
+	}
+
+	historyIndex := -1
+	replyContextIndex := -1
+	for index, message := range request.Messages {
+		if strings.Contains(message.Content, "Claude looks healthy right now.") {
+			historyIndex = index
+		}
+		if strings.Contains(message.Content, "Discord context for the current user message") && strings.Contains(message.Content, "message-ugc-answer") {
+			replyContextIndex = index
+		}
+	}
+	if historyIndex < 0 {
+		t.Fatalf("expected recent history in natural request, got:\n%s", joinMessages(request.Messages))
+	}
+	if replyContextIndex < 0 {
+		t.Fatalf("expected reply context in natural request, got:\n%s", joinMessages(request.Messages))
+	}
+	if replyContextIndex <= historyIndex {
+		t.Fatalf("reply context should be closer to the active user message than older history, got history=%d reply=%d:\n%s", historyIndex, replyContextIndex, joinMessages(request.Messages))
 	}
 }
 

@@ -165,6 +165,51 @@ func TestUsageRecord(t *testing.T) {
 	}
 }
 
+func TestUserSafetyStrikesTimeoutAndResetsAfterExpiry(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(ctx, "file::memory:?cache=shared")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer db.Close()
+
+	repo := NewUserSafetyRepository(db.DB)
+	now := time.Date(2026, 6, 25, 19, 0, 0, 0, time.UTC)
+	for i := 1; i <= 2; i++ {
+		status, err := repo.AddStrike(ctx, "guild-1", "user-1", 3, 10*time.Minute, now.Add(time.Duration(i)*time.Minute))
+		if err != nil {
+			t.Fatalf("AddStrike %d: %v", i, err)
+		}
+		if status.TimedOut || status.State.ActiveStrikes != i || status.State.TotalStrikes != i {
+			t.Fatalf("unexpected strike %d status: %+v", i, status)
+		}
+	}
+
+	status, err := repo.AddStrike(ctx, "guild-1", "user-1", 3, 10*time.Minute, now.Add(3*time.Minute))
+	if err != nil {
+		t.Fatalf("AddStrike 3: %v", err)
+	}
+	if !status.TimedOut || status.State.ActiveStrikes != 0 || status.State.TotalStrikes != 3 || status.State.TimeoutUntil == nil {
+		t.Fatalf("expected third strike to time out and reset active strikes, got %+v", status)
+	}
+
+	stillTimedOut, err := repo.Status(ctx, "guild-1", "user-1", now.Add(12*time.Minute))
+	if err != nil {
+		t.Fatalf("Status during timeout: %v", err)
+	}
+	if !stillTimedOut.TimedOut {
+		t.Fatalf("expected timeout to remain active, got %+v", stillTimedOut)
+	}
+
+	expired, err := repo.Status(ctx, "guild-1", "user-1", now.Add(14*time.Minute))
+	if err != nil {
+		t.Fatalf("Status after timeout: %v", err)
+	}
+	if expired.TimedOut || expired.State.ActiveStrikes != 0 || expired.State.TimeoutUntil != nil || expired.State.TotalStrikes != 3 {
+		t.Fatalf("expected expired timeout to clear active state, got %+v", expired)
+	}
+}
+
 func TestBillingUsageTotalsMissingPeriodDoesNotLogRecordNotFound(t *testing.T) {
 	ctx := context.Background()
 	repo, logs, cleanup := newBillingRepositoryWithLogBuffer(t)

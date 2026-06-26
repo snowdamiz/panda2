@@ -138,6 +138,18 @@ type User struct {
 	UpdatedAt time.Time `gorm:"not null"`
 }
 
+type UserSafetyState struct {
+	ID            uint       `gorm:"primaryKey"`
+	GuildID       string     `gorm:"uniqueIndex:idx_user_safety_states_guild_user;index;not null;default:'';size:32"`
+	UserID        string     `gorm:"uniqueIndex:idx_user_safety_states_guild_user;index;not null;size:32"`
+	ActiveStrikes int        `gorm:"not null;default:0"`
+	TotalStrikes  int        `gorm:"not null;default:0"`
+	LastStrikeAt  *time.Time `gorm:"index"`
+	TimeoutUntil  *time.Time `gorm:"index"`
+	CreatedAt     time.Time  `gorm:"not null"`
+	UpdatedAt     time.Time  `gorm:"not null"`
+}
+
 type GuildMember struct {
 	ID               uint      `gorm:"primaryKey"`
 	GuildID          string    `gorm:"index;not null;size:32"`

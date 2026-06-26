@@ -1170,6 +1170,9 @@ func messageUpdateFromResponse(response commands.Response) disgoDiscord.MessageU
 }
 
 func (b *Bot) updateInteractionResponse(applicationID snowflake.ID, token string, response commands.Response) error {
+	if !hasChannelResponsePayload(response) {
+		return b.client.Rest.DeleteInteractionResponse(applicationID, token)
+	}
 	chunks := splitDiscordContent(response.Content)
 	_, err := b.client.Rest.UpdateInteractionResponse(
 		applicationID,

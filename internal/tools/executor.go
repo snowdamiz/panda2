@@ -2915,12 +2915,7 @@ type toolAccessSelection struct {
 }
 
 func (e *Executor) singleToolAccessName(toolName string) (string, error) {
-	toolName = strings.TrimSpace(toolName)
-	if imageGenerationToolAlias(toolName) {
-		toolName = "panda.generate_image"
-	} else if imageInspectionToolAlias(toolName) {
-		toolName = "panda.inspect_image"
-	}
+	toolName = canonicalAccessToolNameAlias(toolName)
 	if toolName == "" {
 		return "", nil
 	}
@@ -2967,6 +2962,7 @@ func (e *Executor) toolAccessSelection(args map[string]any, toolName string) (to
 	if toolName == "" {
 		return toolAccessSelection{}, nil
 	}
+	toolName = canonicalAccessToolNameAlias(toolName)
 	return e.toolSelectionForNames(toolName)
 }
 
@@ -3022,6 +3018,20 @@ func imageToolGroupAlias(value string) bool {
 	}
 }
 
+func canonicalAccessToolNameAlias(value string) string {
+	value = strings.TrimSpace(value)
+	switch {
+	case imageGenerationToolAlias(value):
+		return "panda.generate_image"
+	case imageInspectionToolAlias(value):
+		return "panda.inspect_image"
+	case naturalChatToolAlias(value):
+		return ToolNamePandaChat
+	default:
+		return value
+	}
+}
+
 func imageGenerationToolAlias(value string) bool {
 	switch normalizedAccessAlias(value) {
 	case "generateimage", "imagegeneration", "imagegenerationtool", "generativeimage", "pandagenerateimage":
@@ -3034,6 +3044,17 @@ func imageGenerationToolAlias(value string) bool {
 func imageInspectionToolAlias(value string) bool {
 	switch normalizedAccessAlias(value) {
 	case "inspectimage", "imageinspection", "imageinspectiontool", "analyzeimage", "imageanalysis":
+		return true
+	default:
+		return false
+	}
+}
+
+func naturalChatToolAlias(value string) bool {
+	switch normalizedAccessAlias(value) {
+	case "chat", "naturalchat", "assistantchat", "normalchat", "conversation", "conversations",
+		"reply", "replies", "replying", "respond", "responding", "responses", "response",
+		"naturalreplies", "naturalresponses", "discordchat", "discordreplies", "discordresponses":
 		return true
 	default:
 		return false

@@ -2229,6 +2229,51 @@ func TestNaturalDenyNamedUserToolAccessResolvesMember(t *testing.T) {
 	}
 }
 
+func TestNaturalDenyNamedUserChatAccessResolvesMember(t *testing.T) {
+	client := &fakeLLM{responses: []llm.ChatResponse{
+		{ToolCalls: []llm.ToolCall{{
+			ID:   "call-deny-chat-user-access",
+			Type: "function",
+			Function: llm.ToolCallFunction{
+				Name:      "panda_manage_tool_access",
+				Arguments: `{"action":"deny","tool_name":"responding","user":"@xer0"}`,
+			},
+		}}},
+		{Content: "Prepared user chat denial."},
+	}}
+	provider := &fakeCommandDiscordProvider{
+		result: map[string]any{"members": []map[string]any{{
+			"user": map[string]any{
+				"id":          "100000000000000999",
+				"username":    "xer0",
+				"global_name": "xer0",
+				"effective":   "xer0",
+			},
+		}}},
+	}
+	router := newTestRouter(t, client, 20, func(executor *tools.Executor) {
+		executor.WithDiscordToolProvider(provider)
+	})
+
+	response := router.HandleNaturalMessage(context.Background(), Request{
+		GuildID:      "guild-1",
+		ChannelID:    "channel-1",
+		UserID:       "admin",
+		IsGuildAdmin: true,
+		Options:      map[string]string{"message": "panda don't respond to @xer0 for now", "bot_mentioned": "true"},
+	})
+	if response.Confirmation == nil || response.Confirmation.ConfirmLabel != "Deny tool access" {
+		t.Fatalf("expected deny chat access confirmation, got %+v", response)
+	}
+	confirmationRequest, ok := RequestFromToolConfirmationID(response.Confirmation.ID, Request{UserID: "admin"})
+	if !ok || confirmationRequest.Action != toolActionToolAccessDeny || confirmationRequest.Options["tool_name"] != tools.ToolNamePandaChat || confirmationRequest.Options["user_id"] != "100000000000000999" {
+		t.Fatalf("unexpected deny chat access confirmation id: request=%+v ok=%t", confirmationRequest, ok)
+	}
+	if len(provider.requests) != 1 || provider.requests[0].ToolName != "discord.list_members" {
+		t.Fatalf("expected Discord member lookup, got %+v", provider.requests)
+	}
+}
+
 func TestNaturalOpenImageToolAccessRendersConfirmationThroughAgentTool(t *testing.T) {
 	client := &fakeLLM{responses: []llm.ChatResponse{
 		{ToolCalls: []llm.ToolCall{{
@@ -4183,6 +4228,28 @@ func TestNaturalMessageDoesNotRespondWhenGateDeclines(t *testing.T) {
 	}
 	if len(client.requests) != 1 {
 		t.Fatalf("expected only streamed natural chat request, got %d", len(client.requests))
+	}
+}
+
+func TestNaturalMessageDoesNotReachLLMWhenUserDeniedChatAccess(t *testing.T) {
+	ctx := context.Background()
+	client := &fakeLLM{response: llm.ChatResponse{Content: "<panda_respond>\nYo, I'm here."}}
+	router := newTestRouter(t, client, 5)
+	if _, err := router.admin.DenyToolUser(ctx, "guild-1", "admin", tools.ToolNamePandaChat, "user-xer0"); err != nil {
+		t.Fatalf("DenyToolUser: %v", err)
+	}
+
+	response := router.HandleNaturalMessage(ctx, Request{
+		GuildID:   "guild-1",
+		ChannelID: "channel-1",
+		UserID:    "user-xer0",
+		Options:   map[string]string{"message": "yo panda", "bot_mentioned": "true"},
+	})
+	if response.Content != "" || response.Confirmation != nil || len(response.Followups) != 0 || response.Poll != nil {
+		t.Fatalf("expected denied natural chat to stay silent, got %+v", response)
+	}
+	if len(client.requests) != 0 {
+		t.Fatalf("denied natural chat should not call the LLM, got %d request(s)", len(client.requests))
 	}
 }
 
