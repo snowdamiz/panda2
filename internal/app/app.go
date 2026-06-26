@@ -92,6 +92,7 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 	featureRepo := repository.NewFeatureRepository(dataStore.DB)
 	composedRepo := repository.NewComposedToolRepository(dataStore.DB)
 	runtimeStatuses := repository.NewRuntimeStatusRepository(dataStore.DB)
+	userSafety := repository.NewUserSafetyRepository(dataStore.DB)
 	runtimeService := runtimecontrol.NewService(runtimeStatuses)
 	featureService := features.NewService(featureRepo)
 	openRouter := llm.NewOpenRouterClient(llm.OpenRouterConfig{
@@ -189,6 +190,7 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 	assistantService := assistant.NewService(openRouter, usage, guildConfigs, memoryService, conversations, cfg.OpenRouterModel, cfg.OpenRouterFallbackModels).
 		WithToolExecutor(toolExecutor).
 		WithBilling(billingService).
+		WithUserSafetyRepository(userSafety).
 		WithCurator(curator)
 	installService := discordbot.NewInstallService(guilds, audit).
 		WithBilling(billingService).

@@ -1487,6 +1487,28 @@ var migrations = []Migration{
 			`CREATE INDEX IF NOT EXISTS idx_guild_tool_users_rule ON guild_tool_users(rule)`,
 		},
 	},
+	{
+		Version: 36,
+		Name:    "user_safety_states",
+		SQL: []string{
+			`CREATE TABLE IF NOT EXISTS user_safety_states (
+				id INTEGER PRIMARY KEY AUTOINCREMENT,
+				guild_id TEXT NOT NULL DEFAULT '',
+				user_id TEXT NOT NULL,
+				active_strikes INTEGER NOT NULL DEFAULT 0,
+				total_strikes INTEGER NOT NULL DEFAULT 0,
+				last_strike_at DATETIME,
+				timeout_until DATETIME,
+				created_at DATETIME NOT NULL,
+				updated_at DATETIME NOT NULL,
+				UNIQUE(guild_id, user_id)
+			)`,
+			`CREATE INDEX IF NOT EXISTS idx_user_safety_states_guild_id ON user_safety_states(guild_id)`,
+			`CREATE INDEX IF NOT EXISTS idx_user_safety_states_user_id ON user_safety_states(user_id)`,
+			`CREATE INDEX IF NOT EXISTS idx_user_safety_states_last_strike_at ON user_safety_states(last_strike_at)`,
+			`CREATE INDEX IF NOT EXISTS idx_user_safety_states_timeout_until ON user_safety_states(timeout_until)`,
+		},
+	},
 }
 
 func RunMigrations(db *gorm.DB) error {

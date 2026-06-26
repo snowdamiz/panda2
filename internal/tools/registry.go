@@ -54,6 +54,8 @@ const (
 	ToolPolicyOwnerOps       = "owner_ops"
 )
 
+const ToolNamePandaChat = "panda.chat"
+
 type ToolAccess struct {
 	Policy                       string
 	Permissions                  map[string]struct{}
@@ -473,6 +475,20 @@ func DefaultDefinitions() []Definition {
 			IncludeInModelContext: true,
 		},
 		{
+			Name:                  ToolNamePandaChat,
+			Description:           "Access target for Panda's normal natural Discord chat/reply behavior. This is not a callable model tool; use panda.manage_tool_access to allow, deny, remove, or open this target when admins ask Panda to stop or resume responding to a user or role.",
+			RequiredPermission:    admin.PermissionAssistantUse,
+			FeatureID:             features.AssistantChat,
+			ToolClass:             ToolClassWorkflow,
+			InputSchema:           objectSchema(),
+			OutputSchema:          objectSchema("result"),
+			Timeout:               time.Second,
+			Redaction:             RedactNone,
+			Audit:                 AuditNone,
+			IncludeInModelContext: false,
+			BypassToolPolicy:      true,
+		},
+		{
 			Name:                  "panda.manage_reminder",
 			Description:           "Create, list, cancel, complete, or snooze the user's reminders from natural-language reminder requests. Use this for reminders and follow-ups that should notify the user later.",
 			RequiredPermission:    admin.PermissionAssistantUse,
@@ -691,7 +707,7 @@ func userPermissionManagementTool() Definition {
 }
 
 func toolAccessManagementTool() Definition {
-	definition := adminWrite("panda.manage_tool_access", "Allow, deny/block, remove, list/status, or open access to native or composed Panda tools. Preserve the user's requested target type: use user_id/user/member/user_name for user-specific tool access and role_id/role/role_name for role-specific tool access. Use action=deny when the user says do not allow, block, disable, or revoke a user's/role's tool use; deny creates a blocking rule and does not require a previous allow rule. Use action=remove only when deleting an explicit tool access rule. Use action=open with tool_name for any single tool when the user asks to let everyone/the public use it; use tool_group=image_tools for the image tool bundle. Do not grant the @everyone role or the guild ID as a role. Use action=status/list with tool_name for any tool or tool_group=image_tools for image tools. If the user says Panda admins, first inspect Panda admin role/user mappings with panda.manage_role_permission and panda.manage_user_permission; do not infer Panda admins from Discord Administrator roles.", []string{"action"})
+	definition := adminWrite("panda.manage_tool_access", "Allow, deny/block, remove, list/status, or open access to native or composed Panda tools. Preserve the user's requested target type: use user_id/user/member/user_name for user-specific tool access and role_id/role/role_name for role-specific tool access. Use tool_name=panda.chat for Panda's normal natural chat/reply behavior when an admin asks Panda not to respond to a user/role, to hold off on replying, or to resume responding later; do not draft a composed tool for that. Use action=deny when the user says do not allow, block, disable, stop responding to, or revoke a user's/role's tool use; deny creates a blocking rule and does not require a previous allow rule. Use action=remove only when deleting an explicit tool access rule. Use action=open with tool_name for any single tool when the user asks to let everyone/the public use it; use tool_group=image_tools for the image tool bundle. Do not grant the @everyone role or the guild ID as a role. Use action=status/list with tool_name for any tool or tool_group=image_tools for image tools. If the user says Panda admins, first inspect Panda admin role/user mappings with panda.manage_role_permission and panda.manage_user_permission; do not infer Panda admins from Discord Administrator roles.", []string{"action"})
 	definition.InputSchema = toolAccessManagementSchema()
 	return definition
 }
@@ -765,7 +781,7 @@ func userPermissionManagementSchema() json.RawMessage {
 func toolAccessManagementSchema() json.RawMessage {
 	return schemaWithProperties([]string{"action"}, map[string]any{
 		"action":           map[string]string{"type": "string", "description": "Action: list/status/who, add/allow, deny/block/disallow/disable, remove, or open/public/everyone/allow_everyone. Use deny/block when the user says not to allow a user or role; this creates a blocking rule even if no allow rule exists. Use remove only to delete an explicit tool access rule. Use open/everyone to make any tool available to everyone by clearing matching Panda permission mappings for registered native tools and tool-specific allowlist rules for all selected tools."},
-		"tool_name":        map[string]string{"type": "string", "description": "Native or composed Panda tool name, such as panda.generate_image, web.search, or welcome_builder."},
+		"tool_name":        map[string]string{"type": "string", "description": "Native or composed Panda tool name, such as panda.generate_image, web.search, welcome_builder, or panda.chat for Panda's normal natural chat/reply behavior."},
 		"tool":             map[string]string{"type": "string", "description": "Alias for tool_name."},
 		"tool_group":       map[string]string{"type": "string", "description": "Tool bundle for status/open requests. Currently supported: image_tools for both panda.generate_image and panda.inspect_image. For every other tool, use tool_name."},
 		"group":            map[string]string{"type": "string", "description": "Alias for tool_group."},

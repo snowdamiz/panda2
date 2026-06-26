@@ -499,10 +499,21 @@ func (r *Router) canHandleNaturalMessage(ctx context.Context, request Request) b
 		)
 		return false
 	}
-	if allowed {
-		return true
+	if !allowed && !r.canWriteSoul(ctx, request) {
+		return false
 	}
-	return r.canWriteSoul(ctx, request)
+	denied, err := r.naturalChatDenied(ctx, request)
+	if err != nil {
+		slog.Warn("natural message chat access lookup failed",
+			slog.Any("err", err),
+			slog.String("guild_id", request.GuildID),
+			slog.String("channel_id", request.ChannelID),
+			slog.String("request_id", request.RequestID),
+			slog.String("user_id", request.UserID),
+		)
+		return false
+	}
+	return !denied
 }
 
 func (r *Router) canWriteSoul(ctx context.Context, request Request) bool {
@@ -511,6 +522,27 @@ func (r *Router) canWriteSoul(ctx context.Context, request Request) bool {
 	}
 	allowed, err := r.admin.CanWriteSoul(ctx, assistantAccessRequest(request))
 	return err == nil && allowed
+}
+
+func (r *Router) naturalChatDenied(ctx context.Context, request Request) (bool, error) {
+	if r == nil || r.admin == nil || strings.TrimSpace(request.GuildID) == "" {
+		return false, nil
+	}
+	accessRequest := assistantAccessRequest(request)
+	hasControl, err := r.admin.HasGuildControl(ctx, accessRequest)
+	if err != nil || hasControl {
+		return false, err
+	}
+	access, err := r.admin.ToolUserRoleAccess(ctx, request.GuildID, request.UserID, request.RoleIDs)
+	if err != nil {
+		return false, err
+	}
+	for _, toolName := range access.DeniedTools {
+		if strings.EqualFold(strings.TrimSpace(toolName), toolsvc.ToolNamePandaChat) {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func (r *Router) handleOps(ctx context.Context, request Request) Response {
@@ -1620,6 +1652,10 @@ func (r *Router) handleAsk(ctx context.Context, request Request, command string)
 		r.releaseAIUsage(ctx, reservation)
 		return assistantError(err)
 	}
+	if answer.Silent {
+		r.releaseAIUsage(ctx, reservation)
+		return Response{}
+	}
 	if !assistantAnswerHasPayload(answer) {
 		r.releaseAIUsage(ctx, reservation)
 		return Response{Content: "Panda returned an empty response. Please try again.", Ephemeral: true}
@@ -1806,6 +1842,13 @@ func (r *Router) handleTask(ctx context.Context, request Request) Response {
 		RequireExplicitComposedTools: toolFilter.requireExplicitComposed,
 	}
 	if shouldBackgroundTask(request, input) {
+		safety, err := r.assistant.CheckTaskSafety(ctx, assistantTaskRequestFromBackgroundTask(task, enabledFeatures, featureGateActive))
+		if err != nil {
+			return assistantError(err)
+		}
+		if safety.Silent {
+			return Response{}
+		}
 		if denied := r.checkAIUsageAvailable(ctx, request); denied.Content != "" {
 			return denied
 		}
@@ -1847,7 +1890,31 @@ func (r *Router) HandleBackgroundTask(ctx context.Context, task BackgroundTask) 
 		enabledFeatures = permissionsFromNames(task.EnabledFeatures)
 		featureGateActive = true
 	}
-	answer, err := r.assistant.CompleteTask(ctx, assistant.TaskRequest{
+	answer, err := r.assistant.CompleteTask(ctx, assistantTaskRequestFromBackgroundTask(task, enabledFeatures, featureGateActive))
+	if err != nil {
+		r.releaseAIUsage(ctx, reservation)
+		return assistantError(err)
+	}
+	if answer.Silent {
+		r.releaseAIUsage(ctx, reservation)
+		return Response{}
+	}
+	if !assistantAnswerHasPayload(answer) {
+		r.releaseAIUsage(ctx, reservation)
+		return Response{Content: "Panda returned an empty response. Please try again.", Ephemeral: true}
+	}
+	r.commitAIUsage(ctx, reservation)
+	return r.responseFromAssistantAnswer(ctx, Request{
+		RequestID: task.RequestID,
+		Command:   task.Command,
+		GuildID:   task.GuildID,
+		ChannelID: task.ChannelID,
+		UserID:    task.UserID,
+	}, answer, "", "")
+}
+
+func assistantTaskRequestFromBackgroundTask(task BackgroundTask, enabledFeatures map[string]struct{}, featureGateActive bool) assistant.TaskRequest {
+	return assistant.TaskRequest{
 		RequestID:                    task.RequestID,
 		GuildID:                      task.GuildID,
 		UserID:                       task.UserID,
@@ -1869,23 +1936,7 @@ func (r *Router) HandleBackgroundTask(ctx context.Context, task BackgroundTask) 
 		ImageReferences:              generated.CloneImageReferences(task.ImageReferences),
 		FeatureGateActive:            featureGateActive,
 		RequireExplicitComposedTools: task.RequireExplicitComposedTools,
-	})
-	if err != nil {
-		r.releaseAIUsage(ctx, reservation)
-		return assistantError(err)
 	}
-	if !assistantAnswerHasPayload(answer) {
-		r.releaseAIUsage(ctx, reservation)
-		return Response{Content: "Panda returned an empty response. Please try again.", Ephemeral: true}
-	}
-	r.commitAIUsage(ctx, reservation)
-	return r.responseFromAssistantAnswer(ctx, Request{
-		RequestID: task.RequestID,
-		Command:   task.Command,
-		GuildID:   task.GuildID,
-		ChannelID: task.ChannelID,
-		UserID:    task.UserID,
-	}, answer, "", "")
 }
 
 func (r *Router) HandleToolConfirmation(ctx context.Context, request ToolConfirmationRequest) Response {
@@ -2297,6 +2348,8 @@ func toolConfirmationFeature(action string) string {
 		toolActionUserProfileRemove,
 		toolActionToolAccessAdd,
 		toolActionToolAccessRemove,
+		toolActionToolAccessDeny,
+		toolActionToolAccessOpen,
 		toolActionChannelRuleSet,
 		toolActionChannelRuleRemove:
 		return features.AdminAccessControl

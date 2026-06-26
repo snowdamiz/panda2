@@ -36,6 +36,7 @@ type Service struct {
 	configs               *repository.GuildConfigRepository
 	memory                *memory.Service
 	conversations         *repository.ConversationRepository
+	safety                *repository.UserSafetyRepository
 	toolExecutor          *tools.Executor
 	curator               *curation.Service
 	billing               *billing.Service
@@ -262,6 +263,11 @@ func (s *Service) WithBilling(billingService *billing.Service) *Service {
 	return s
 }
 
+func (s *Service) WithUserSafetyRepository(safety *repository.UserSafetyRepository) *Service {
+	s.safety = safety
+	return s
+}
+
 func (s *Service) WithCurator(curator *curation.Service) *Service {
 	s.curator = curator
 	return s
@@ -282,6 +288,9 @@ func (s *Service) chat(ctx context.Context, request AskRequest, options chatOpti
 	}
 	if ok && !config.AssistantEnabled {
 		return AskResponse{}, ErrAssistantDisabled
+	}
+	if safetyResponse, blocked, err := s.enforceUserSafety(ctx, config, safetyInputFromAsk(request, "chat")); err != nil || blocked {
+		return safetyResponse, err
 	}
 
 	conversation, err := s.conversations.GetOrCreateActive(ctx, repository.ConversationKey{
@@ -305,12 +314,6 @@ func (s *Service) chat(ctx context.Context, request AskRequest, options chatOpti
 	if contextMessage := invocationContextMessage(request.InvocationContext); contextMessage.Content != "" {
 		messages = append(messages, contextMessage)
 	}
-	if replyContext := chatReplyContextMessage(request); replyContext.Content != "" {
-		messages = append(messages, replyContext)
-	}
-	if imageContext := imageReferenceContextMessage(request.ImageReferences); imageContext.Content != "" {
-		messages = append(messages, imageContext)
-	}
 	if options.NaturalMessage {
 		if metadata := naturalMessageMetadataMessage(request); metadata.Content != "" {
 			messages = append(messages, metadata)
@@ -322,6 +325,12 @@ func (s *Service) chat(ctx context.Context, request AskRequest, options chatOpti
 			continue
 		}
 		messages = append(messages, llm.Message{Role: item.Role, Content: sanitizePromptInput(item.ContentPreview)})
+	}
+	if replyContext := chatReplyContextMessage(request); replyContext.Content != "" {
+		messages = append(messages, replyContext)
+	}
+	if imageContext := imageReferenceContextMessage(request.ImageReferences); imageContext.Content != "" {
+		messages = append(messages, imageContext)
 	}
 	messages = append(messages, llm.Message{Role: "user", Content: chatUserMessageContent(request)})
 
@@ -416,6 +425,8 @@ func chatReplyContextMessage(request AskRequest) llm.Message {
 			builder.WriteString("If the current message is only a wake word or short summon such as \"panda\", treat it as the current user asking Panda to handle the replied-to message as the actual request. Do not ask what they want unless the replied-to message is not actionable.\n")
 		} else if !request.ReplyAuthorIsBot {
 			builder.WriteString("If the current message is only a wake word or short summon such as \"panda\", treat it as the author asking Panda to handle the replied-to non-Panda message as the actual request. Do not answer with a generic capability overview unless the replied-to message is genuinely asking what Panda can do.\n")
+		} else {
+			builder.WriteString("This is a reply to Panda's own prior message. Treat the replied-to Panda message as the specific turn the current user is correcting, continuing, questioning, or asking Panda to redo. Prefer it over unrelated recent chat history when resolving what \"this\", \"that\", \"it\", or an elliptical correction refers to.\n")
 		}
 	}
 	if value := strings.TrimSpace(request.ReplyContent); value != "" {
@@ -448,17 +459,23 @@ func imageReferenceContextMessage(references []generated.ImageReference) llm.Mes
 func chatUserMessageContent(request AskRequest) string {
 	question := strings.TrimSpace(request.Question)
 	replyContent := strings.TrimSpace(request.ReplyContent)
-	if replyContent != "" && !request.ReplyAuthorIsBot {
+	if replyContent != "" {
 		var builder strings.Builder
 		builder.WriteString("Current Discord message content:\n")
 		builder.WriteString(sanitizePromptInput(question))
-		if request.ReplyAuthorIsCurrentUser {
+		if request.ReplyAuthorIsBot {
+			builder.WriteString("\n\nThis message is a reply to Panda's prior Discord message:\n")
+		} else if request.ReplyAuthorIsCurrentUser {
 			builder.WriteString("\n\nThis message is a reply to the current user's own prior Discord message:\n")
 		} else {
 			builder.WriteString("\n\nThis message is a reply to another user's prior Discord message:\n")
 		}
 		builder.WriteString(sanitizePromptInput(replyContent))
-		builder.WriteString("\n\nResolve the active user request from both messages. If the current message is only a wake word or short summon, the replied-to message is the request to handle now. If the current message adds, corrects, narrows, or asks about the prior message, combine them. If the current message asks an unrelated direct question, answer the current message and use the reply only as context. Use every suitable function tool needed for each independent part of the resolved request.")
+		if request.ReplyAuthorIsBot {
+			builder.WriteString("\n\nResolve the active user request from the current message and this replied-to Panda message. If the current message corrects, challenges, narrows, asks to redo, asks to look something up, asks for sources, or otherwise refers to what Panda just said, apply it to that replied-to Panda message. If the current message asks an unrelated direct question, answer the current message and use the reply only as context. Use every suitable function tool needed for each independent part of the resolved request.")
+		} else {
+			builder.WriteString("\n\nResolve the active user request from both messages. If the current message is only a wake word or short summon, the replied-to message is the request to handle now. If the current message adds, corrects, narrows, or asks about the prior message, combine them. If the current message asks an unrelated direct question, answer the current message and use the reply only as context. Use every suitable function tool needed for each independent part of the resolved request.")
+		}
 		return strings.TrimSpace(builder.String())
 	}
 	return sanitizePromptInput(request.Question)
@@ -468,6 +485,18 @@ func (s *Service) CompleteTask(ctx context.Context, request TaskRequest) (AskRes
 	return s.complete(ctx, request)
 }
 
+func (s *Service) CheckTaskSafety(ctx context.Context, request TaskRequest) (AskResponse, error) {
+	config, ok, err := s.guildConfig(ctx, request.GuildID)
+	if err != nil {
+		return AskResponse{}, err
+	}
+	if ok && !config.AssistantEnabled {
+		return AskResponse{}, ErrAssistantDisabled
+	}
+	safetyResponse, _, err := s.enforceUserSafety(ctx, config, safetyInputFromTask(request))
+	return safetyResponse, err
+}
+
 func (s *Service) complete(ctx context.Context, request TaskRequest) (AskResponse, error) {
 	config, ok, err := s.guildConfig(ctx, request.GuildID)
 	if err != nil {
@@ -475,6 +504,9 @@ func (s *Service) complete(ctx context.Context, request TaskRequest) (AskRespons
 	}
 	if ok && !config.AssistantEnabled {
 		return AskResponse{}, ErrAssistantDisabled
+	}
+	if safetyResponse, blocked, err := s.enforceUserSafety(ctx, config, safetyInputFromTask(request)); err != nil || blocked {
+		return safetyResponse, err
 	}
 
 	start := time.Now()
