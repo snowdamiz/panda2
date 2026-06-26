@@ -52,6 +52,14 @@ type fakeGuildGetter struct {
 	err        error
 }
 
+type fakeMemberGetter struct {
+	guildID snowflake.ID
+	userID  snowflake.ID
+	calls   int
+	member  *disgoDiscord.Member
+	err     error
+}
+
 type syncedGuildCommands struct {
 	applicationID snowflake.ID
 	guildID       snowflake.ID
@@ -104,6 +112,13 @@ func (f *fakeGuildGetter) GetGuild(guildID snowflake.ID, withCounts bool, _ ...r
 	f.guildID = guildID
 	f.withCounts = withCounts
 	return f.guild, f.err
+}
+
+func (f *fakeMemberGetter) GetMember(guildID snowflake.ID, userID snowflake.ID, _ ...rest.RequestOpt) (*disgoDiscord.Member, error) {
+	f.calls++
+	f.guildID = guildID
+	f.userID = userID
+	return f.member, f.err
 }
 
 func (f *fakeCommandSyncer) SetGlobalCommands(applicationID snowflake.ID, commands []disgoDiscord.ApplicationCommandCreate, _ ...rest.RequestOpt) ([]disgoDiscord.ApplicationCommand, error) {
@@ -921,11 +936,40 @@ func TestConfiguredBotOwnerCountsAsPandaGuildAdmin(t *testing.T) {
 	if !bot.isBotOwner(ownerID) {
 		t.Fatal("expected configured owner user id to count as bot owner")
 	}
-	if !bot.isMessageGuildAdmin(event, ownerID) {
+	if !bot.isMessageGuildAdmin(event, ownerID, event.Message.Member) {
 		t.Fatal("expected configured bot owner to count as Panda guild admin")
 	}
-	if bot.isMessageGuildAdmin(event, regularID) {
+	if bot.isMessageGuildAdmin(event, regularID, event.Message.Member) {
 		t.Fatal("expected unconfigured user to not count as Panda guild admin")
+	}
+}
+
+func TestResolveMessageMemberFetchesMissingGuildMember(t *testing.T) {
+	guildID := snowflake.MustParse("200000000000000001")
+	userID := snowflake.MustParse("100000000000000001")
+	roleID := snowflake.MustParse("300000000000000001")
+	getter := &fakeMemberGetter{member: &disgoDiscord.Member{
+		User:    disgoDiscord.User{ID: userID},
+		RoleIDs: []snowflake.ID{roleID},
+	}}
+	event := &events.MessageCreate{GenericMessage: &events.GenericMessage{
+		GuildID: &guildID,
+		Message: disgoDiscord.Message{
+			GuildID: &guildID,
+			Author:  disgoDiscord.User{ID: userID},
+			Member:  nil,
+		},
+	}}
+
+	member := resolveMessageMember(context.Background(), event, getter)
+	if member == nil {
+		t.Fatal("expected missing message member to be fetched from REST")
+	}
+	if getter.calls != 1 || getter.guildID != guildID || getter.userID != userID {
+		t.Fatalf("unexpected member lookup metadata: calls=%d guildID=%s userID=%s", getter.calls, getter.guildID, getter.userID)
+	}
+	if got := strings.Join(messageRoleIDs(member), ","); got != roleID.String() {
+		t.Fatalf("expected fetched member roles to populate request role IDs, got %q", got)
 	}
 }
 

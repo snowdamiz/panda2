@@ -78,6 +78,10 @@ type guildGetter interface {
 	GetGuild(guildID snowflake.ID, withCounts bool, opts ...rest.RequestOpt) (*disgoDiscord.RestGuild, error)
 }
 
+type memberGetter interface {
+	GetMember(guildID snowflake.ID, userID snowflake.ID, opts ...rest.RequestOpt) (*disgoDiscord.Member, error)
+}
+
 type commandSyncer interface {
 	SetGlobalCommands(applicationID snowflake.ID, commands []disgoDiscord.ApplicationCommandCreate, opts ...rest.RequestOpt) ([]disgoDiscord.ApplicationCommand, error)
 	SetGuildCommands(applicationID snowflake.ID, guildID snowflake.ID, commands []disgoDiscord.ApplicationCommandCreate, opts ...rest.RequestOpt) ([]disgoDiscord.ApplicationCommand, error)
@@ -1589,11 +1593,12 @@ func (b *Bot) onMessageCreate(event *events.MessageCreate) {
 	if b.client == nil {
 		return
 	}
-	b.recordMessageEvent(context.Background(), "message_create", event.Message)
+	ctx := context.Background()
+	b.recordMessageEvent(ctx, "message_create", event.Message)
 	if event.Message.Author.Bot {
 		return
 	}
-	b.captureAttachments(context.Background(), event.Message)
+	b.captureAttachments(ctx, event.Message)
 	content := strings.TrimSpace(event.Message.Content)
 	if content == "" {
 		return
@@ -1607,7 +1612,7 @@ func (b *Bot) onMessageCreate(event *events.MessageCreate) {
 	if messageMentionsUser(event.Message, b.client.ID().String()) {
 		options["bot_mentioned"] = "true"
 	}
-	replyImageReferences := b.addReplyContextOptions(context.Background(), options, event.Message)
+	replyImageReferences := b.addReplyContextOptions(ctx, options, event.Message)
 	currentImageReferences := imageReferencesFromMessage(event.Message, "current")
 	if !shouldHandleNaturalMessage(content, options) {
 		if b.logger != nil && (len(currentImageReferences) > 0 || len(replyImageReferences) > 0 || event.Message.ReferencedMessage != nil || event.Message.MessageReference != nil) {
@@ -1629,7 +1634,7 @@ func (b *Bot) onMessageCreate(event *events.MessageCreate) {
 		return
 	}
 	if len(replyImageReferences) == 0 && event.Message.ReferencedMessage != nil {
-		replyImageReferences = b.hydrateReplyContextOptions(context.Background(), options, event.Message)
+		replyImageReferences = b.hydrateReplyContextOptions(ctx, options, event.Message)
 	}
 	imageReferences := append(currentImageReferences, replyImageReferences...)
 	if b.logger != nil {
@@ -1654,29 +1659,30 @@ func (b *Bot) onMessageCreate(event *events.MessageCreate) {
 			slog.Any("image_ref_ids", imageReferenceIDs(imageReferences)),
 		)
 	}
+	member := b.messageMember(ctx, event)
 	isOwner := b.cfg.IsOwner(event.Message.Author.ID.String())
-	isGuildAdmin := b.isMessageGuildAdmin(event, event.Message.Author.ID)
+	isGuildAdmin := b.isMessageGuildAdmin(event, event.Message.Author.ID, member)
 	request := commands.Request{
 		RequestID:       event.Message.ID.String(),
 		Options:         options,
 		GuildID:         guildID,
 		ChannelID:       event.ChannelID.String(),
-		VoiceChannelID:  b.userVoiceChannelID(context.Background(), guildID, event.Message.Author.ID),
+		VoiceChannelID:  b.userVoiceChannelID(ctx, guildID, event.Message.Author.ID),
 		UserID:          event.Message.Author.ID.String(),
-		RoleIDs:         messageRoleIDs(event.Message.Member),
+		RoleIDs:         messageRoleIDs(member),
 		IsOwner:         isOwner,
 		IsGuildAdmin:    isGuildAdmin,
 		ImageReferences: imageReferences,
 	}
 	reference := messageReferenceFromMessage(event.Message)
-	if err := b.queueNaturalMessage(context.Background(), event.ChannelID, reference, request); err != nil {
+	if err := b.queueNaturalMessage(ctx, event.ChannelID, reference, request); err != nil {
 		b.logger.Warn("failed to queue natural message; responding inline",
 			slog.Any("err", err),
 			slog.String("guild_id", request.GuildID),
 			slog.String("channel_id", request.ChannelID),
 			slog.String("request_id", request.RequestID),
 		)
-		b.respondToNaturalMessageAsync(context.Background(), event.ChannelID, reference, request)
+		b.respondToNaturalMessageAsync(ctx, event.ChannelID, reference, request)
 	}
 }
 
@@ -2752,18 +2758,54 @@ func (b *Bot) isModalGuildAdmin(event *events.ModalSubmitInteractionCreate) bool
 	return b.userOwnsEventGuild(event.User().ID, guild, ok, event.GuildID())
 }
 
-func (b *Bot) isMessageGuildAdmin(event *events.MessageCreate, userID snowflake.ID) bool {
+func (b *Bot) isMessageGuildAdmin(event *events.MessageCreate, userID snowflake.ID, member *disgoDiscord.Member) bool {
 	if event == nil {
 		return false
 	}
 	if b.isBotOwner(userID) {
 		return true
 	}
-	if guildID := messageEventGuildID(event); guildID != nil && memberHasAdministratorRole(event.Message.Member, *guildID, b.messageRole) {
+	if member == nil {
+		member = event.Message.Member
+	}
+	if guildID := messageEventGuildID(event); guildID != nil && memberHasAdministratorRole(member, *guildID, b.messageRole) {
 		return true
 	}
 	guild, ok := event.Guild()
 	return b.userOwnsEventGuild(userID, guild, ok, messageEventGuildID(event))
+}
+
+func (b *Bot) messageMember(ctx context.Context, event *events.MessageCreate) *disgoDiscord.Member {
+	var getter memberGetter
+	if b != nil && b.client != nil {
+		getter = b.client.Rest
+	}
+	return resolveMessageMember(ctx, event, getter)
+}
+
+func resolveMessageMember(ctx context.Context, event *events.MessageCreate, getter memberGetter) *disgoDiscord.Member {
+	if event == nil {
+		return nil
+	}
+	if event.Message.Member != nil {
+		return event.Message.Member
+	}
+	guildID := messageEventGuildID(event)
+	if guildID == nil {
+		return nil
+	}
+	return fetchGuildMember(ctx, getter, *guildID, event.Message.Author.ID)
+}
+
+func fetchGuildMember(ctx context.Context, getter memberGetter, guildID, userID snowflake.ID) *disgoDiscord.Member {
+	if getter == nil || guildID == 0 || userID == 0 {
+		return nil
+	}
+	member, err := getter.GetMember(guildID, userID, rest.WithCtx(ctx))
+	if err != nil || member == nil {
+		return nil
+	}
+	return member
 }
 
 func (b *Bot) isBotOwner(userID snowflake.ID) bool {
