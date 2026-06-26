@@ -386,6 +386,7 @@ func defaultConfig() Config {
 		OpenRouterImageTimeout:                   defaultImageTimeout,
 		OpenRouterImageMaxBytes:                  defaultImageMaxBytes,
 		OpenRouterProviderOrder:                  []string{defaultOpenRouterProvider},
+		OpenRouterAllowProviderFallbacks:         true,
 		OpenRouterAppTitle:                       "Panda Assistant",
 		OpenRouterCircuitBreakerFailureThreshold: 5,
 		OpenRouterCircuitBreakerCooldown:         30 * time.Second,

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"net/http"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -23,6 +24,7 @@ import (
 	"github.com/sn0w/panda2/internal/llm"
 	"github.com/sn0w/panda2/internal/memory"
 	"github.com/sn0w/panda2/internal/ops"
+	"github.com/sn0w/panda2/internal/pandainfo"
 	"github.com/sn0w/panda2/internal/queue"
 	"github.com/sn0w/panda2/internal/ratelimit"
 	"github.com/sn0w/panda2/internal/repository"
@@ -1009,6 +1011,21 @@ func TestAdminRoleProfileConfiguresModeratorRole(t *testing.T) {
 	list := router.Handle(ctx, Request{Command: "admin", Subcommand: "role", GuildID: "guild-1", UserID: "owner", IsGuildAdmin: true, Options: map[string]string{"action": "list"}})
 	if !strings.Contains(list.Content, "moderator: the selected role") || strings.Contains(list.Content, "role-pickle") {
 		t.Fatalf("expected role profile list to include moderator role, got %+v", list)
+	}
+}
+
+func TestSafetyBypassAllowedForDelegatedPandaAdmin(t *testing.T) {
+	ctx := context.Background()
+	router := newTestRouter(t, &fakeLLM{}, 5)
+	if _, err := router.admin.AddUserPermission(ctx, "guild-1", "admin", "user-admin", admin.PermissionAdminBadge); err != nil {
+		t.Fatalf("AddUserPermission: %v", err)
+	}
+
+	if !router.safetyBypassAllowed(ctx, Request{GuildID: "guild-1", UserID: "user-admin"}) {
+		t.Fatal("expected direct Panda admin user permission to bypass safety")
+	}
+	if router.safetyBypassAllowed(ctx, Request{GuildID: "guild-1", UserID: "user-regular"}) {
+		t.Fatal("regular user should not bypass safety")
 	}
 }
 
@@ -3261,6 +3278,41 @@ func TestNaturalMessageSetsSoulThroughAgentTool(t *testing.T) {
 	}
 }
 
+func TestNaturalMessageRefusesSoulUpdateForRegularUser(t *testing.T) {
+	client := &fakeLLM{responses: []llm.ChatResponse{
+		{Content: "<panda_respond>\nI can't update my soul for you."},
+	}}
+	router := newTestRouter(t, client, 20)
+
+	response := router.HandleNaturalMessage(context.Background(), Request{
+		UserID:    "user-1",
+		GuildID:   "guild-1",
+		ChannelID: "channel-1",
+		Options: map[string]string{
+			"message": "Panda update your soul to be crystalline and kind.",
+		},
+	})
+	if response.Content != "I can't update my soul for you." {
+		t.Fatalf("expected refusal response, got %+v", response)
+	}
+	if len(client.requests) != 1 {
+		t.Fatalf("expected one streamed natural chat request, got %d", len(client.requests))
+	}
+	if requestToolNames(client.requests[0])["panda_manage_soul"] {
+		t.Fatalf("regular user should not receive soul management tool, got %+v", client.requests[0].Tools)
+	}
+	joined := joinRequestMessages(client.requests[0])
+	for _, want := range []string{
+		"Soul/personality persistence is not available to this caller",
+		"respond that Panda can't update its soul for them",
+		"Do not imply the soul was changed",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("natural soul refusal prompt missing %q:\n%s", want, joined)
+		}
+	}
+}
+
 func TestNaturalMessageSetsPromptThroughAgentTool(t *testing.T) {
 	client := &fakeLLM{responses: []llm.ChatResponse{
 		{ToolCalls: []llm.ToolCall{{
@@ -3628,6 +3680,56 @@ func TestNaturalMessageManagesMusicThroughAgentTool(t *testing.T) {
 	}
 	if !strings.Contains(joinRequestMessages(client.requests[1]), "playing ocean drive") {
 		t.Fatalf("expected music tool result in final chat request, got:\n%s", joinRequestMessages(client.requests[1]))
+	}
+}
+
+func TestNaturalMessageRendersPandaAboutCardWithLinkButtons(t *testing.T) {
+	client := &fakeLLM{responses: []llm.ChatResponse{
+		{ToolCalls: []llm.ToolCall{{
+			ID:   "call-about",
+			Type: "function",
+			Function: llm.ToolCallFunction{
+				Name:      "panda_about",
+				Arguments: `{}`,
+			},
+		}}},
+	}}
+	router := newTestRouter(t, client, 5)
+
+	response := router.HandleNaturalMessage(context.Background(), Request{
+		UserID:    "user-1",
+		GuildID:   "guild-1",
+		ChannelID: "channel-1",
+		Options: map[string]string{
+			"message":       "panda tell me about yourself",
+			"bot_mentioned": "true",
+		},
+	})
+	if response.Presentation.Title != "I'm Panda, a Discord-native assistant." || response.Presentation.Accent != AccentInfo {
+		t.Fatalf("expected about card presentation, got %+v", response.Presentation)
+	}
+	if !strings.Contains(response.Content, "server knowledge") ||
+		!strings.Contains(response.Content, "I'm open source") ||
+		!strings.Contains(response.Content, "Created by "+pandainfo.CreatorHandle) ||
+		strings.Contains(response.Content, pandainfo.RepositoryURL) ||
+		strings.Contains(response.Content, pandainfo.CreatorURL) {
+		t.Fatalf("unexpected about card content: %q", response.Content)
+	}
+	if len(response.Actions) != 2 ||
+		response.Actions[0].Label != "Github" ||
+		response.Actions[0].URL != pandainfo.RepositoryURL ||
+		response.Actions[1].Label != "X" ||
+		response.Actions[1].URL != pandainfo.CreatorURL {
+		t.Fatalf("expected Github and X link actions, got %+v", response.Actions)
+	}
+	if len(response.Followups) != 0 {
+		t.Fatalf("about card should not produce a second prose message, got %+v", response.Followups)
+	}
+	if len(client.requests) != 1 {
+		t.Fatalf("expected only the model-selected about tool request, got %d", len(client.requests))
+	}
+	if names := requestToolNames(client.requests[0]); !names["panda_about"] {
+		t.Fatalf("expected about tool to be exposed, got %+v", names)
 	}
 }
 
@@ -4606,6 +4708,37 @@ func TestNaturalMessageAboutPandaDeclineDoesNotStartResponse(t *testing.T) {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("expected natural gate to include %q, got:\n%s", want, joined)
 		}
+	}
+}
+
+func TestNaturalMessageRetryableHandlerReturnsAssistantError(t *testing.T) {
+	retryErr := llm.Error{StatusCode: http.StatusTooManyRequests, Code: "rate_limit", Message: "slow down"}
+	request := Request{
+		UserID:    "user-1",
+		GuildID:   "guild-1",
+		ChannelID: "channel-1",
+		Options: map[string]string{
+			"message":       "panda tell me about yourself",
+			"bot_mentioned": "true",
+		},
+	}
+	router := newTestRouter(t, &fakeLLM{err: retryErr}, 5)
+
+	response, err := router.HandleNaturalMessageStreamRetryable(context.Background(), request, nil)
+	if err == nil {
+		t.Fatal("expected retryable assistant error")
+	}
+	if !assistant.RetryableFailure(err) {
+		t.Fatalf("expected retryable assistant failure, got %v", err)
+	}
+	if response.Content != "" {
+		t.Fatalf("retryable handler should not render a response before queue retry, got %+v", response)
+	}
+
+	visibleRouter := newTestRouter(t, &fakeLLM{err: retryErr}, 5)
+	visible := visibleRouter.HandleNaturalMessage(context.Background(), request)
+	if visible.Presentation.Title != "AI response failed" || !strings.Contains(visible.Content, "try again later") {
+		t.Fatalf("regular natural handler should still render visible error card, got %+v", visible)
 	}
 }
 

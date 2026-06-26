@@ -361,6 +361,43 @@ func TestOpenRouterStreamChatParsesContentAndUsage(t *testing.T) {
 	}
 }
 
+func TestOpenRouterStreamChatRetriesTransientPreStreamErrors(t *testing.T) {
+	var attempts atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if attempts.Add(1) == 1 {
+			w.WriteHeader(http.StatusTooManyRequests)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"error": map[string]any{"code": "rate_limit", "message": "slow down"},
+			})
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(`data: {"id":"gen-stream-retry","model":"provider/model","choices":[{"delta":{"content":"recovered"}}]}` + "\n\n"))
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+	}))
+	defer server.Close()
+
+	client := NewOpenRouterClient(OpenRouterConfig{
+		APIKey:     "key",
+		BaseURL:    server.URL,
+		MaxRetries: 1,
+		RetryDelay: time.Nanosecond,
+	})
+	response, err := client.StreamChat(context.Background(), ChatRequest{
+		Model:    "openrouter/auto",
+		Messages: []Message{{Role: "user", Content: "hi"}},
+	}, nil)
+	if err != nil {
+		t.Fatalf("StreamChat returned error: %v", err)
+	}
+	if response.Content != "recovered" {
+		t.Fatalf("unexpected streamed response: %+v", response)
+	}
+	if attempts.Load() != 2 {
+		t.Fatalf("expected two stream attempts, got %d", attempts.Load())
+	}
+}
+
 func TestOpenRouterStreamChatParsesToolCallDeltas(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
@@ -422,6 +459,17 @@ func TestOpenRouterErrorParsesMessage(t *testing.T) {
 	}
 	if openRouterErr.StatusCode != http.StatusTooManyRequests || openRouterErr.Code != "rate_limit" {
 		t.Fatalf("unexpected parsed error: %+v", openRouterErr)
+	}
+}
+
+func TestOpenRouterErrorParsesRetryAfter(t *testing.T) {
+	err := parseOpenRouterError(http.StatusTooManyRequests, []byte(`{"error":{"code":"rate_limit","message":"slow down"}}`), "2")
+	var openRouterErr Error
+	if !errors.As(err, &openRouterErr) {
+		t.Fatalf("expected OpenRouter error, got %T %v", err, err)
+	}
+	if openRouterErr.RetryAfter != 2*time.Second || RetryAfter(err) != 2*time.Second {
+		t.Fatalf("unexpected retry-after: %+v", openRouterErr)
 	}
 }
 

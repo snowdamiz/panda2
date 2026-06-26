@@ -84,6 +84,7 @@ type Definition struct {
 	RequiresConfirmation  bool
 	SupportsDryRun        bool
 	BypassToolPolicy      bool
+	TerminalCard          bool
 	MaxLimit              int
 	DiscordPermissions    []string
 }
@@ -436,7 +437,7 @@ func DefaultDefinitions() []Definition {
 		},
 		{
 			Name:                  "panda.inspect_image",
-			Description:           "Inspect attached image references and return a concise textual answer for Panda's normal response model. Use this before answering when the user's request depends on image pixels, visible text in an image, visual comparison, critique, transcription, description, or details of an attached image. Use reference_image_ids from the current Discord image reference context. Referenced media is prepared internally, so pass reference IDs as-is. Do not use this to generate images, browse the web, or inspect images that were not attached to this request or its reply context.",
+			Description:           "Inspect attached image references and return a concise textual answer for Panda's normal response model. When a Discord message addressed to Panda includes an attached image, GIF, sticker, embed, or replied-to visual reference, assume it is intentional context and use this before composing a normal text answer whenever the visual could affect the answer, including casual reactions, opinion questions, jokes, status checks, visible text, visual comparison, critique, transcription, description, or details of an attached image. Use this even when the user's text does not explicitly say \"image\". Use reference_image_ids from the current Discord image reference context. Referenced media is prepared internally, so pass reference IDs as-is. Do not use this to generate images, browse the web, or inspect images that were not attached to this request or its reply context.",
 			RequiredPermission:    admin.PermissionAssistantImageGeneration,
 			FeatureID:             features.ImageGeneration,
 			ToolClass:             ToolClassMedia,
@@ -460,6 +461,21 @@ func DefaultDefinitions() []Definition {
 			Redaction:             RedactContent,
 			Audit:                 AuditOnUse,
 			IncludeInModelContext: true,
+		},
+		{
+			Name:                  "panda.about",
+			Description:           "Render Panda's short self-introduction with the required open-source repository and creator links as Discord link buttons. Use this whenever the user asks Panda what it is, who made it, where the source code lives, or to tell them about itself. After calling this tool, do not add a separate prose restatement.",
+			RequiredPermission:    admin.PermissionAssistantUse,
+			FeatureID:             features.AssistantChat,
+			ToolClass:             ToolClassMetadata,
+			InputSchema:           objectSchema(),
+			OutputSchema:          objectSchema("result"),
+			Timeout:               time.Second,
+			Redaction:             RedactNone,
+			Audit:                 AuditNone,
+			IncludeInModelContext: true,
+			BypassToolPolicy:      true,
+			TerminalCard:          true,
 		},
 		{
 			Name:                  "manage_memory_consent",

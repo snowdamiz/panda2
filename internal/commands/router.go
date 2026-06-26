@@ -437,9 +437,21 @@ func (r *Router) HandleNaturalMessage(ctx context.Context, request Request) Resp
 }
 
 func (r *Router) HandleNaturalMessageStream(ctx context.Context, request Request, onRespond func()) Response {
+	response, err := r.handleNaturalMessageStream(ctx, request, onRespond, false)
+	if err != nil {
+		return assistantError(err)
+	}
+	return response
+}
+
+func (r *Router) HandleNaturalMessageStreamRetryable(ctx context.Context, request Request, onRespond func()) (Response, error) {
+	return r.handleNaturalMessageStream(ctx, request, onRespond, true)
+}
+
+func (r *Router) handleNaturalMessageStream(ctx context.Context, request Request, onRespond func(), retryableAssistantErrorsAsError bool) (Response, error) {
 	message := strings.TrimSpace(firstNonEmpty(request.Options["message"], request.Options["question"]))
 	if message == "" {
-		return Response{}
+		return Response{}, nil
 	}
 	slog.Info("natural message router received",
 		slog.String("guild_id", request.GuildID),
@@ -452,24 +464,25 @@ func (r *Router) HandleNaturalMessageStream(ctx context.Context, request Request
 		slog.Any("image_ref_ids", commandImageReferenceIDs(request.ImageReferences)),
 	)
 	if response := r.maintenanceResponse(ctx); response.Content != "" {
-		return response
+		return response, nil
 	}
 	if !r.canHandleNaturalMessage(ctx, request) {
-		return Response{}
+		return Response{}, nil
 	}
 	if denied := r.checkAIUsageAvailable(ctx, request); denied.Content != "" {
-		return denied
+		return denied, nil
 	}
 	request.Command = "chat"
 	if request.Options == nil {
 		request.Options = map[string]string{}
 	}
 	request.Options["question"] = message
-	return r.handleChatModeWithOptions(ctx, request, chatModeOptions{
-		threaded:        false,
-		allowSoulWriter: true,
-		naturalMessage:  true,
-		onRespond:       onRespond,
+	return r.handleChatModeWithOptionsResult(ctx, request, chatModeOptions{
+		threaded:                        false,
+		allowSoulWriter:                 true,
+		naturalMessage:                  true,
+		onRespond:                       onRespond,
+		retryableAssistantErrorsAsError: retryableAssistantErrorsAsError,
 	})
 }
 
@@ -1662,6 +1675,7 @@ func (r *Router) handleAsk(ctx context.Context, request Request, command string)
 		RoleIDs:                      request.RoleIDs,
 		IsGuildAdmin:                 request.IsGuildAdmin,
 		IsOwner:                      request.IsOwner,
+		BypassSafety:                 r.safetyBypassAllowed(ctx, request),
 		AllowedPermissions:           r.allowedToolPermissions(ctx, request),
 		AllowedTools:                 toolFilter.allowed,
 		RestrictedTools:              toolFilter.restricted,
@@ -1695,10 +1709,11 @@ func (r *Router) handleChatMode(ctx context.Context, request Request, threaded b
 }
 
 type chatModeOptions struct {
-	threaded        bool
-	allowSoulWriter bool
-	naturalMessage  bool
-	onRespond       func()
+	threaded                        bool
+	allowSoulWriter                 bool
+	naturalMessage                  bool
+	onRespond                       func()
+	retryableAssistantErrorsAsError bool
 }
 
 func (r *Router) handleChatModeWithAccess(ctx context.Context, request Request, threaded bool, allowSoulWriter bool) Response {
@@ -1706,29 +1721,37 @@ func (r *Router) handleChatModeWithAccess(ctx context.Context, request Request, 
 }
 
 func (r *Router) handleChatModeWithOptions(ctx context.Context, request Request, options chatModeOptions) Response {
+	response, err := r.handleChatModeWithOptionsResult(ctx, request, options)
+	if err != nil {
+		return assistantError(err)
+	}
+	return response
+}
+
+func (r *Router) handleChatModeWithOptionsResult(ctx context.Context, request Request, options chatModeOptions) (Response, error) {
 	question := strings.TrimSpace(request.Options["question"])
 	if question == "" {
-		return Response{Content: "Please include a message.", Ephemeral: true}
+		return Response{Content: "Please include a message.", Ephemeral: true}, nil
 	}
 	if denied := r.ensureAssistantAllowed(ctx, request); denied.Content != "" {
 		if !options.allowSoulWriter || !r.canWriteSoul(ctx, request) {
-			return denied
+			return denied, nil
 		}
 	}
 	if options.threaded && r.threads != nil && request.GuildID != "" {
 		if denied := r.ensureThreadsAllowed(ctx, request); denied.Content != "" {
-			return denied
+			return denied, nil
 		}
 	}
 	if limited := r.allowUser(request.UserID); limited.Content != "" {
-		return limited
+		return limited, nil
 	}
 	if denied := r.ensureBudgetAvailable(ctx, request); denied.Content != "" {
-		return denied
+		return denied, nil
 	}
 	reservation, denied := r.beginAIUsage(ctx, request)
 	if denied.Content != "" {
-		return denied
+		return denied, nil
 	}
 
 	chatChannelID := request.ChannelID
@@ -1743,7 +1766,7 @@ func (r *Router) handleChatModeWithOptions(ctx context.Context, request Request,
 		})
 		if err != nil {
 			r.releaseAIUsage(ctx, reservation)
-			return Response{Content: "I could not create a chat thread here. Please check my thread permissions.", Ephemeral: true}
+			return Response{Content: "I could not create a chat thread here. Please check my thread permissions.", Ephemeral: true}, nil
 		}
 		chatChannelID = thread.ID
 		threadID = thread.ID
@@ -1771,6 +1794,7 @@ func (r *Router) handleChatModeWithOptions(ctx context.Context, request Request,
 		RoleIDs:                      request.RoleIDs,
 		IsGuildAdmin:                 request.IsGuildAdmin,
 		IsOwner:                      request.IsOwner,
+		BypassSafety:                 r.safetyBypassAllowed(ctx, request),
 		AllowedPermissions:           allowedPermissions,
 		AllowedTools:                 toolFilter.allowed,
 		RestrictedTools:              toolFilter.restricted,
@@ -1808,18 +1832,21 @@ func (r *Router) handleChatModeWithOptions(ctx context.Context, request Request,
 	}
 	if err != nil {
 		r.releaseAIUsage(ctx, reservation)
-		return assistantError(err)
+		if options.retryableAssistantErrorsAsError && assistant.RetryableFailure(err) {
+			return Response{}, err
+		}
+		return assistantError(err), nil
 	}
 	if answer.Silent {
 		r.releaseAIUsage(ctx, reservation)
-		return Response{}
+		return Response{}, nil
 	}
 	if !assistantAnswerHasPayload(answer) {
 		r.releaseAIUsage(ctx, reservation)
-		return Response{Content: "Panda returned an empty response. Please try again.", Ephemeral: true}
+		return Response{Content: "Panda returned an empty response. Please try again.", Ephemeral: true}, nil
 	}
 	r.commitAIUsage(ctx, reservation)
-	return r.responseFromAssistantAnswer(ctx, request, answer, threadID, threadName)
+	return r.responseFromAssistantAnswer(ctx, request, answer, threadID, threadName), nil
 }
 
 func (r *Router) handleTask(ctx context.Context, request Request) Response {
@@ -1855,6 +1882,7 @@ func (r *Router) handleTask(ctx context.Context, request Request) Response {
 		RoleIDs:                      request.RoleIDs,
 		IsGuildAdmin:                 request.IsGuildAdmin,
 		IsOwner:                      request.IsOwner,
+		BypassSafety:                 r.safetyBypassAllowed(ctx, request),
 		AllowedPermissions:           permissionNames(r.allowedToolPermissions(ctx, request)),
 		AllowedTools:                 permissionNames(toolFilter.allowed),
 		RestrictedTools:              permissionNames(toolFilter.restricted),
@@ -1951,6 +1979,7 @@ func assistantTaskRequestFromBackgroundTask(task BackgroundTask, enabledFeatures
 		RoleIDs:                      task.RoleIDs,
 		IsGuildAdmin:                 task.IsGuildAdmin,
 		IsOwner:                      task.IsOwner,
+		BypassSafety:                 task.BypassSafety,
 		AllowedPermissions:           permissionsFromNames(task.AllowedPermissions),
 		AllowedTools:                 permissionsFromNames(task.AllowedTools),
 		RestrictedTools:              permissionsFromNames(task.RestrictedTools),
@@ -2879,6 +2908,25 @@ func (r *Router) ensureGuildControl(ctx context.Context, request Request, denial
 		return Response{Content: denial, Ephemeral: true}
 	}
 	return Response{}
+}
+
+func (r *Router) safetyBypassAllowed(ctx context.Context, request Request) bool {
+	if request.IsOwner || request.IsGuildAdmin {
+		return true
+	}
+	if r == nil || r.admin == nil || strings.TrimSpace(request.GuildID) == "" {
+		return false
+	}
+	allowed, err := r.admin.HasGuildControl(ctx, assistantAccessRequest(request))
+	if err != nil {
+		slog.Warn("safety bypass permission lookup failed",
+			slog.Any("err", err),
+			slog.String("guild_id", request.GuildID),
+			slog.String("user_id", request.UserID),
+		)
+		return false
+	}
+	return allowed
 }
 
 func assistantAccessRequest(request Request) admin.AssistantAccessRequest {

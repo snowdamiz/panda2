@@ -73,6 +73,14 @@ func FailedModel(err error) (string, string, bool) {
 	return modelErr.Model, modelErr.Task, true
 }
 
+func RetryableFailure(err error) bool {
+	var modelErr *ModelRequestError
+	if errors.As(err, &modelErr) && modelErr != nil {
+		err = modelErr.Err
+	}
+	return llm.IsRetryable(err) || errors.Is(err, llm.ErrCircuitOpen)
+}
+
 type AskRequest struct {
 	RequestID                    string
 	GuildID                      string
@@ -90,6 +98,7 @@ type AskRequest struct {
 	RoleIDs                      []string
 	IsGuildAdmin                 bool
 	IsOwner                      bool
+	BypassSafety                 bool
 	AllowedPermissions           map[string]struct{}
 	AllowedTools                 map[string]struct{}
 	RestrictedTools              map[string]struct{}
@@ -128,6 +137,7 @@ type ToolCard struct {
 	Fields     []ToolCardField
 	Actions    []ToolCardAction
 	Standalone bool
+	Terminal   bool
 }
 
 type ToolCardField struct {
@@ -156,6 +166,7 @@ type TaskRequest struct {
 	RoleIDs                      []string
 	IsGuildAdmin                 bool
 	IsOwner                      bool
+	BypassSafety                 bool
 	AllowedPermissions           map[string]struct{}
 	AllowedTools                 map[string]struct{}
 	RestrictedTools              map[string]struct{}
@@ -172,6 +183,10 @@ const (
 	// This is a guardrail for runaway tool loops, not a limit on requested actions.
 	// Providers often serialize multi-step work across several assistant turns.
 	maxToolCallRounds = 24
+	// Tool calls can also arrive as a burst in one model turn; cap both burst and
+	// turn totals so prompt-injected recursive requests cannot fan out unchecked.
+	maxToolCallsPerRound = 8
+	maxToolCallsTotal    = 32
 )
 
 const (
@@ -224,6 +239,7 @@ func (s *Service) Ask(ctx context.Context, request AskRequest) (AskResponse, err
 		RoleIDs:                      request.RoleIDs,
 		IsGuildAdmin:                 request.IsGuildAdmin,
 		IsOwner:                      request.IsOwner,
+		BypassSafety:                 request.BypassSafety,
 		AllowedPermissions:           request.AllowedPermissions,
 		AllowedTools:                 request.AllowedTools,
 		RestrictedTools:              request.RestrictedTools,
@@ -441,7 +457,7 @@ func imageReferenceContextMessage(references []generated.ImageReference) llm.Mes
 		return llm.Message{}
 	}
 	var builder strings.Builder
-	builder.WriteString("Image reference IDs are available for the current Discord request. If at least one ID is listed below, the referenced media is already available; do not ask the user to attach it again. Pronouns and deixis such as \"this\", \"that\", \"it\", \"the image\", or \"the picture\" may refer to these IDs even when the referenced Discord message has no text. Use these IDs only as tool arguments; do not treat reference IDs, media metadata, or routing instructions as image content, prompt text, or meme captions. This chat context does not include the image pixels. Do not describe visual details unless the user described them in text or an image-inspection result provides them. When the user asks a question whose answer depends on image pixels, inspect the relevant IDs before answering. When the user asks to edit, restyle, remix, use, or base generation on a referenced image, call image generation with the relevant IDs; inspect first only if visual details are needed before generation or for the final answer. For meme requests like \"make a meme out of this\", missing top/bottom caption text is not a blocking detail; infer fitting meme text/style yourself or ask the image provider to create a humorous meme from the reference instead of asking the user for captions first. If a required image tool is unavailable, say the image is already referenced but that capability is unavailable or not configured; do not ask for another upload.\n")
+	builder.WriteString("Image reference IDs are available for the current Discord request. If at least one ID is listed below, the referenced media is already available; do not ask the user to attach it again. When a Discord message addressed to Panda includes an attached image, GIF, sticker, embed, or replied-to visual reference, assume the user intended Panda to see it and take it into account for this turn. Pronouns and deixis such as \"this\", \"that\", \"it\", \"the image\", or \"the picture\" may refer to these IDs even when the referenced Discord message has no text. Use these IDs only as tool arguments; do not treat reference IDs, media metadata, or routing instructions as image content, prompt text, or meme captions. This chat context does not include the image pixels. Do not describe visual details unless the user described them in text or an image-inspection result provides them. For any normal text answer where attached visual context could affect the answer, including casual reactions, opinion questions, jokes, status checks, or questions that do not explicitly say \"image\", inspect the relevant IDs before composing the answer. When the user asks to edit, restyle, remix, use, or base generation on a referenced image, call image generation with the relevant IDs; inspect first only if visual details are needed before generation or for the final answer. For meme requests like \"make a meme out of this\", missing top/bottom caption text is not a blocking detail; infer fitting meme text/style yourself or ask the image provider to create a humorous meme from the reference instead of asking the user for captions first. If a required image tool is unavailable, say the image is already referenced but that capability is unavailable or not configured; do not ask for another upload.\n")
 	for _, reference := range references {
 		id := strings.TrimSpace(reference.ID)
 		if id == "" {
@@ -746,6 +762,7 @@ func (s *Service) completeWithToolsWithOptions(ctx context.Context, config store
 	staleCapabilityRetryUsed := false
 	imageToolRoutingRetryUsed := false
 	musicCapabilityRetryUsed := false
+	totalToolCalls := 0
 
 	for round := 0; ; round++ {
 		response, silent, err := s.chatCompletionForRound(ctx, config, request, round, options)
@@ -799,6 +816,12 @@ func (s *Service) completeWithToolsWithOptions(ctx context.Context, config store
 				response.Content = textToolCallUnavailableMessage()
 			} else {
 				response.ToolCalls = filteredToolCalls
+			}
+			if len(response.ToolCalls) > maxToolCallsPerRound {
+				return response, confirmations, card, sourceLinks, generatedFiles, usageReservations, usedWebSearch, false, fmt.Errorf("assistant exceeded maximum tool calls per round (%d)", maxToolCallsPerRound)
+			}
+			if totalToolCalls+len(response.ToolCalls) > maxToolCallsTotal {
+				return response, confirmations, card, sourceLinks, generatedFiles, usageReservations, usedWebSearch, false, fmt.Errorf("assistant exceeded maximum tool calls per turn (%d)", maxToolCallsTotal)
 			}
 		}
 		if len(response.ToolCalls) == 0 {
@@ -880,6 +903,7 @@ func (s *Service) completeWithToolsWithOptions(ctx context.Context, config store
 		if round >= maxToolCallRounds {
 			return response, confirmations, card, sourceLinks, generatedFiles, usageReservations, usedWebSearch, false, fmt.Errorf("assistant exceeded maximum tool-call rounds (%d)", maxToolCallRounds)
 		}
+		totalToolCalls += len(response.ToolCalls)
 
 		messages := append([]llm.Message{}, request.Messages...)
 		messages = append(messages, llm.Message{
@@ -888,6 +912,7 @@ func (s *Service) completeWithToolsWithOptions(ctx context.Context, config store
 			ToolCalls: response.ToolCalls,
 		})
 		generatedFileCountBeforeRound := len(generatedFiles)
+		terminalCardRound := len(response.ToolCalls) > 0
 		for _, call := range response.ToolCalls {
 			usedWebSearch = usedWebSearch || isWebSearchToolName(call.Function.Name)
 			result, err := s.toolExecutor.Execute(ctx, tools.ExecutionRequest{
@@ -922,15 +947,19 @@ func (s *Service) completeWithToolsWithOptions(ctx context.Context, config store
 					ToolCallID: call.ID,
 					Content:    fmt.Sprintf(`{"error":%q}`, security.RedactSecrets(err.Error())),
 				}
+				terminalCardRound = false
 			} else if result.Confirmation != nil {
 				confirmations = append(confirmations, confirmationFromTool(*result.Confirmation))
+				terminalCardRound = false
 			}
 			if toolCard := toolCardFromToolResult(call, message); toolCard != nil {
 				if !cardContentEligible {
 					toolCard.Standalone = true
 				}
 				card = toolCard
+				terminalCardRound = terminalCardRound && s.toolExecutor.TerminalCardTool(call.Function.Name)
 			} else {
+				terminalCardRound = false
 				cardContentEligible = false
 				if card != nil {
 					card.Standalone = true
@@ -938,6 +967,10 @@ func (s *Service) completeWithToolsWithOptions(ctx context.Context, config store
 			}
 			sourceLinks = append(sourceLinks, result.SourceLinks...)
 			messages = append(messages, assistantVisibleToolMessage(call, message, result.Confirmation))
+		}
+		if terminalCardRound && card != nil {
+			response.Content = ""
+			return response, confirmations, card, sourceLinks, generatedFiles, usageReservations, usedWebSearch, false, nil
 		}
 		if card != nil {
 			messages = append(messages, llm.Message{Role: "system", Content: standaloneCardFollowupPrompt()})
@@ -1390,7 +1423,7 @@ func filterUnavailableToolCalls(toolCalls []llm.ToolCall, availableTools []llm.T
 
 func toolCardFromToolResult(call llm.ToolCall, message llm.Message) *ToolCard {
 	toolName := strings.TrimSpace(call.Function.Name)
-	if toolName != "panda_manage_music" && toolName != "panda.manage_music" {
+	if !toolResultRendersCard(toolName) {
 		return nil
 	}
 	var payload map[string]any
@@ -1402,17 +1435,47 @@ func toolCardFromToolResult(call llm.ToolCall, message llm.Message) *ToolCard {
 		return nil
 	}
 	card := &ToolCard{
-		Content: stringValue(result["content"]),
-		Title:   stringValue(result["title"]),
-		URL:     stringValue(result["url"]),
-		Accent:  firstNonEmpty(stringValue(result["accent"]), "music"),
-		Fields:  toolCardFields(result["fields"]),
-		Actions: toolCardActions(result["actions"]),
+		Content:  stringValue(result["content"]),
+		Title:    stringValue(result["title"]),
+		URL:      stringValue(result["url"]),
+		Accent:   firstNonEmpty(stringValue(result["accent"]), toolCardDefaultAccent(toolName)),
+		Fields:   toolCardFields(result["fields"]),
+		Actions:  toolCardActions(result["actions"]),
+		Terminal: toolCardTerminal(toolName),
 	}
 	if strings.TrimSpace(card.Content) == "" && strings.TrimSpace(card.Title) == "" {
 		return nil
 	}
 	return card
+}
+
+func toolResultRendersCard(toolName string) bool {
+	switch strings.TrimSpace(toolName) {
+	case "panda_manage_music", "panda.manage_music", "panda_about", "panda.about":
+		return true
+	default:
+		return false
+	}
+}
+
+func toolCardDefaultAccent(toolName string) string {
+	switch strings.TrimSpace(toolName) {
+	case "panda_manage_music", "panda.manage_music":
+		return "music"
+	case "panda_about", "panda.about":
+		return "info"
+	default:
+		return ""
+	}
+}
+
+func toolCardTerminal(toolName string) bool {
+	switch strings.TrimSpace(toolName) {
+	case "panda_about", "panda.about":
+		return true
+	default:
+		return false
+	}
 }
 
 func toolCardFields(value any) []ToolCardField {
@@ -1641,6 +1704,9 @@ func finalAssistantResponseContent(content string, sourceLinks []tools.SourceLin
 	content = finalizeAssistantContent(content, sourceLinks, sourceLimit)
 	if card == nil || strings.TrimSpace(card.Content) == "" {
 		return content
+	}
+	if card.Terminal {
+		return ""
 	}
 	if card.Standalone {
 		if cardCoversAssistantContent(content, card) {
@@ -2046,20 +2112,24 @@ func toolAvailabilityMessage(availableTools []llm.Tool, access tools.ToolAccess)
 	contextResolutionNotice := " If recent Discord context resolves a short or elliptical summon to a specific prior question, action, or request for Panda's opinion, answer that resolved request with the current tool constraints. Do not replace it with a generic capability rundown unless the resolved request is genuinely asking what Panda can do."
 	imageInspectionNotice := ""
 	if _, ok := nameSet["panda_inspect_image"]; ok {
-		imageInspectionNotice = " Attached image use: this chat context does not include image pixels. When the user's request asks what is in an attached image, references visible text, needs visual comparison, critique, transcription, or otherwise depends on image content, call the image inspection tool with the provided reference_image_ids before answering. Do not guess from filenames or surrounding text."
+		imageInspectionNotice = " Attached image use: this chat context does not include image pixels. When image reference IDs are present on a Discord request addressed to Panda, assume any attached image or GIF is intentional context for Panda's answer; call the image inspection tool with the provided reference_image_ids before composing a normal text answer whenever the visual could affect the answer, including casual reactions, opinion questions, jokes, status checks, visible text, visual comparison, critique, transcription, or other image-dependent details. Do this even when the user's text does not explicitly say \"image\". Do not guess from filenames or surrounding text."
 	}
 	imageCreationNotice := ""
 	if _, ok := nameSet["panda_generate_image"]; ok {
 		imageCreationNotice = " Visual creation: when the user asks Panda to create, make, draw, generate, design, edit, restyle, or render a visual asset such as a meme, sticker, icon, illustration, sprite sheet, logo, avatar, or poster, call the image generation tool. For attached-image edits or variations, pass the provided reference_image_ids. If image references are present, phrases like \"this\", \"that\", \"it\", \"this image\", or \"out of this\" can refer to those IDs even when the replied-to message has no text; call image generation with those reference_image_ids instead of asking for another upload. For meme requests, do not ask the user for top/bottom captions or meme text unless they explicitly ask to choose the text themselves; infer appropriate meme text/style or ask the image provider to create a humorous meme from the reference. In the tool's prompt argument, describe only the desired image and any user-visible image text; do not copy reference IDs, filenames, MIME types, Discord media metadata, tool names, or routing instructions into the visual prompt. Treat old assistant replies about image-generation quota, budget, rate limits, provider availability, or unsupported settings as stale for new image requests; re-check through the current tool instead of repeating those old failures. Do not satisfy those creation requests by searching for or linking existing image pages unless the user explicitly asks to find, browse, compare, or cite existing images."
 	}
+	soulWriteNotice := " Soul/personality persistence: if the user asks Panda to save, set, update, change, apply, or remember Panda's soul, personality, voice, or tone, only claim that it changed after the current `panda_manage_soul` tool returns a successful result."
+	if _, ok := nameSet["panda_manage_soul"]; !ok {
+		soulWriteNotice = " Soul/personality persistence is not available to this caller. If the user asks Panda to save, set, update, change, apply, or remember Panda's soul, personality, voice, or tone, respond that Panda can't update its soul for them. Do not imply the soul was changed, queued, remembered, applied, or will take effect later."
+	}
 	if len(names) == 0 {
-		return "Tool availability for this request and user: no function tools are currently exposed to Panda. If asked what tools or capabilities Panda has, answer for the current user only, say that no function tools are available in this context, and do not list generic model/platform tools." + contextResolutionNotice + accessNotice + adminOnlyNotice + disabledFeatureNotice
+		return "Tool availability for this request and user: no function tools are currently exposed to Panda. If asked what tools or capabilities Panda has, answer for the current user only, say that no function tools are available in this context, and do not list generic model/platform tools." + contextResolutionNotice + soulWriteNotice + accessNotice + adminOnlyNotice + disabledFeatureNotice
 	}
 	overview := tools.CapabilityOverviewForTools(availableTools, hasAdminAccess)
 	if strings.TrimSpace(overview) == "" {
 		overview = "Custom tools\n- Custom or specialized server capabilities are available."
 	}
-	return "Internal tool availability for this request and user. Do not reproduce or summarize this block unless the user explicitly asks what Panda can do. current user-scoped capability overview derived from the actual exposed function tools:\n" + overview + "\nAnswer capability questions directly from this overview and the provided function definitions; do not call a tool only to list capabilities. For direct action requests, use the relevant current function tools instead of summarizing available capabilities." + contextResolutionNotice + imageInspectionNotice + imageCreationNotice + " This current availability block overrides older chat history, reply context, or previous assistant capability answers. If history contains different capabilities, exact tool IDs, internal listing/debug wording, or a different enabled/disabled state, treat that history as stale and do not copy it. Use Discord-supported markdown only; do not emit markdown tables or pipe-table syntax. For broad questions like \"what can you do\", answer in natural user-facing categories with short bullets, not tables. When more than three overview sections are present, use the overview's section labels as headings and include the meaningful bullets under each; do not collapse the answer into one-line categories. Do not say \"I can help with N things\" because the categories may contain multiple capabilities. Do not present internal listing/debug helpers as user-facing capabilities. Mention exact function/tool names only when the user explicitly asks for exact tool names, API names, or internal tool IDs. When the user's request contains multiple actions, call all needed function tools in the same assistant turn and preserve the requested order for dependent actions. When the user says Panda admins, inspect or use Panda admin role/user mappings (`admin.badge`) rather than Discord Administrator roles unless they explicitly ask for Discord/server administrators. When the user asks to let everyone or the public use a Panda tool, use the current tool-access open/everyone action instead of granting access to the Discord @everyone role or guild ID. Do not describe tools available to other users or roles. Do not claim arbitrary webpage browsing, image generation or analysis, code execution, hidden tools, or platform abilities unless they are represented by the current function tools." + accessNotice + adminOnlyNotice + disabledFeatureNotice
+	return "Internal tool availability for this request and user. Do not reproduce or summarize this block unless the user explicitly asks what Panda can do. current user-scoped capability overview derived from the actual exposed function tools:\n" + overview + "\nAnswer capability questions directly from this overview and the provided function definitions; do not call a tool only to list capabilities. For direct action requests, use the relevant current function tools instead of summarizing available capabilities." + contextResolutionNotice + imageInspectionNotice + imageCreationNotice + soulWriteNotice + " This current availability block overrides older chat history, reply context, or previous assistant capability answers. If history contains different capabilities, exact tool IDs, internal listing/debug wording, or a different enabled/disabled state, treat that history as stale and do not copy it. Use Discord-supported markdown only; do not emit markdown tables or pipe-table syntax. For broad questions like \"what can you do\", answer in natural user-facing categories with short bullets, not tables. When more than three overview sections are present, use the overview's section labels as headings and include the meaningful bullets under each; do not collapse the answer into one-line categories. Do not say \"I can help with N things\" because the categories may contain multiple capabilities. Do not present internal listing/debug helpers as user-facing capabilities. Mention exact function/tool names only when the user explicitly asks for exact tool names, API names, or internal tool IDs. When the user's request contains multiple actions, call all needed function tools in the same assistant turn and preserve the requested order for dependent actions. When the user says Panda admins, inspect or use Panda admin role/user mappings (`admin.badge`) rather than Discord Administrator roles unless they explicitly ask for Discord/server administrators. When the user asks to let everyone or the public use a Panda tool, use the current tool-access open/everyone action instead of granting access to the Discord @everyone role or guild ID. Do not describe tools available to other users or roles. Do not claim arbitrary webpage browsing, image generation or analysis, code execution, hidden tools, or platform abilities unless they are represented by the current function tools." + accessNotice + adminOnlyNotice + disabledFeatureNotice
 }
 
 func toolAccessHasAdminPermission(access tools.ToolAccess) bool {
@@ -2288,7 +2358,13 @@ func errorCode(err error) string {
 	}
 	var openRouterErr llm.Error
 	if errors.As(err, &openRouterErr) {
-		return openRouterErr.Code
+		if code := strings.TrimSpace(openRouterErr.Code); code != "" {
+			return code
+		}
+		if openRouterErr.StatusCode > 0 {
+			return strconv.Itoa(openRouterErr.StatusCode)
+		}
+		return "openrouter"
 	}
 	if errors.Is(err, llm.ErrNotConfigured) {
 		return "not_configured"

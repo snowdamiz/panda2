@@ -135,6 +135,7 @@ type BackgroundTask struct {
 	RoleIDs                      []string                   `json:"role_ids,omitempty"`
 	IsGuildAdmin                 bool                       `json:"is_guild_admin,omitempty"`
 	IsOwner                      bool                       `json:"is_owner,omitempty"`
+	BypassSafety                 bool                       `json:"bypass_safety,omitempty"`
 	AllowedPermissions           []string                   `json:"allowed_permissions,omitempty"`
 	AllowedTools                 []string                   `json:"allowed_tools,omitempty"`
 	RestrictedTools              []string                   `json:"restricted_tools,omitempty"`

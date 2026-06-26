@@ -21,6 +21,7 @@ import (
 	"github.com/sn0w/panda2/internal/composed"
 	"github.com/sn0w/panda2/internal/config"
 	"github.com/sn0w/panda2/internal/generated"
+	"github.com/sn0w/panda2/internal/pandainfo"
 	"github.com/sn0w/panda2/internal/polls"
 	"github.com/sn0w/panda2/internal/store"
 )
@@ -1235,6 +1236,37 @@ func TestResponseMessageCreatesPandaEmbed(t *testing.T) {
 	button, ok := row.Components[0].(disgoDiscord.ButtonComponent)
 	if !ok || button.Style != disgoDiscord.ButtonStyleLink || button.URL != "https://example.com/commands" {
 		t.Fatalf("unexpected link button: %+v", row.Components[0])
+	}
+}
+
+func TestPandaAboutResponseRendersGithubAndXButtons(t *testing.T) {
+	response := commands.Response{
+		Content: "I help Discord servers stay organized.\n\nCreated by @andrew_da_miz",
+		Presentation: commands.Presentation{
+			Title:  "I'm Panda, a Discord-native assistant.",
+			Accent: commands.AccentInfo,
+		},
+		Actions: []commands.Action{
+			{Label: "Github", URL: pandainfo.RepositoryURL},
+			{Label: "X", URL: pandainfo.CreatorURL},
+		},
+	}
+
+	message := messageCreateFromResponsePart(response, response.Content, true)
+	if len(message.Components) != 1 {
+		t.Fatalf("expected one action row, got %+v", message.Components)
+	}
+	row, ok := message.Components[0].(disgoDiscord.ActionRowComponent)
+	if !ok || len(row.Components) != 2 {
+		t.Fatalf("expected Github and X buttons, got %+v", message.Components)
+	}
+	github, ok := row.Components[0].(disgoDiscord.ButtonComponent)
+	if !ok || github.Style != disgoDiscord.ButtonStyleLink || github.Label != "Github" || github.URL != pandainfo.RepositoryURL {
+		t.Fatalf("unexpected Github button: %+v", row.Components[0])
+	}
+	x, ok := row.Components[1].(disgoDiscord.ButtonComponent)
+	if !ok || x.Style != disgoDiscord.ButtonStyleLink || x.Label != "X" || x.URL != pandainfo.CreatorURL {
+		t.Fatalf("unexpected X button: %+v", row.Components[1])
 	}
 }
 

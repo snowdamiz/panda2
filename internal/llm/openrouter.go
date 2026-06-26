@@ -9,8 +9,10 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math/rand"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -318,7 +320,7 @@ func (c *OpenRouterClient) post(ctx context.Context, path string, body []byte) (
 				c.circuitBreaker.recordFailure()
 				return nil, err
 			}
-			if waitErr := c.waitBeforeRetry(ctx); waitErr != nil {
+			if waitErr := c.waitBeforeRetry(ctx, path, attempt, err); waitErr != nil {
 				return nil, waitErr
 			}
 			continue
@@ -337,14 +339,14 @@ func (c *OpenRouterClient) post(ctx context.Context, path string, body []byte) (
 			return data, nil
 		}
 
-		lastErr = parseOpenRouterError(resp.StatusCode, data)
+		lastErr = parseOpenRouterError(resp.StatusCode, data, resp.Header.Get("Retry-After"))
 		if !retryableStatus(resp.StatusCode) || attempt == c.maxRetries {
 			if retryableStatus(resp.StatusCode) {
 				c.circuitBreaker.recordFailure()
 			}
 			return nil, lastErr
 		}
-		if waitErr := c.waitBeforeRetry(ctx); waitErr != nil {
+		if waitErr := c.waitBeforeRetry(ctx, path, attempt, lastErr); waitErr != nil {
 			return nil, waitErr
 		}
 	}
@@ -356,6 +358,32 @@ func (c *OpenRouterClient) postStream(ctx context.Context, path string, body []b
 		return err
 	}
 
+	var lastErr error
+	for attempt := 0; attempt <= c.maxRetries; attempt++ {
+		eventSeen := false
+		err := c.postStreamOnce(ctx, path, body, func(data []byte) error {
+			eventSeen = true
+			return handleEvent(data)
+		})
+		if err == nil {
+			c.circuitBreaker.recordSuccess()
+			return nil
+		}
+		lastErr = err
+		if ctx.Err() != nil || attempt == c.maxRetries || !retryableStreamError(err, eventSeen) {
+			if retryableStreamError(err, eventSeen) {
+				c.circuitBreaker.recordFailure()
+			}
+			return lastErr
+		}
+		if waitErr := c.waitBeforeRetry(ctx, path, attempt, err); waitErr != nil {
+			return waitErr
+		}
+	}
+	return lastErr
+}
+
+func (c *OpenRouterClient) postStreamOnce(ctx context.Context, path string, body []byte, handleEvent func([]byte) error) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+path, bytes.NewReader(body))
 	if err != nil {
 		return err
@@ -372,7 +400,6 @@ func (c *OpenRouterClient) postStream(ctx context.Context, path string, body []b
 
 	resp, err := c.client.Do(req)
 	if err != nil {
-		c.circuitBreaker.recordFailure()
 		return err
 	}
 	defer resp.Body.Close()
@@ -382,18 +409,12 @@ func (c *OpenRouterClient) postStream(ctx context.Context, path string, body []b
 		if readErr != nil {
 			return readErr
 		}
-		streamErr := parseOpenRouterError(resp.StatusCode, data)
-		if retryableStatus(resp.StatusCode) {
-			c.circuitBreaker.recordFailure()
-		}
-		return streamErr
+		return parseOpenRouterError(resp.StatusCode, data, resp.Header.Get("Retry-After"))
 	}
 
 	if err := readServerSentEvents(resp.Body, handleEvent); err != nil {
-		c.circuitBreaker.recordFailure()
 		return err
 	}
-	c.circuitBreaker.recordSuccess()
 	return nil
 }
 
@@ -461,16 +482,26 @@ func (c *OpenRouterClient) get(ctx context.Context, path string) ([]byte, error)
 		return nil, err
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, parseOpenRouterError(resp.StatusCode, data)
+		return nil, parseOpenRouterError(resp.StatusCode, data, resp.Header.Get("Retry-After"))
 	}
 	return data, nil
 }
 
-func (c *OpenRouterClient) waitBeforeRetry(ctx context.Context) error {
+func (c *OpenRouterClient) waitBeforeRetry(ctx context.Context, path string, attempt int, err error) error {
 	if c.retryDelay <= 0 {
 		return nil
 	}
-	timer := time.NewTimer(c.retryDelay)
+	retryAfter := RetryAfter(err)
+	delay := c.retryDelayForAttempt(attempt, retryAfter)
+	slog.Warn("openrouter request retrying",
+		slog.String("path", path),
+		slog.Int("attempt", attempt+1),
+		slog.Int("max_retries", c.maxRetries),
+		slog.Duration("delay", delay),
+		slog.Duration("retry_after", retryAfter),
+		slog.Any("err", err),
+	)
+	timer := time.NewTimer(delay)
 	defer timer.Stop()
 	select {
 	case <-ctx.Done():
@@ -478,6 +509,26 @@ func (c *OpenRouterClient) waitBeforeRetry(ctx context.Context) error {
 	case <-timer.C:
 		return nil
 	}
+}
+
+func (c *OpenRouterClient) retryDelayForAttempt(attempt int, retryAfter time.Duration) time.Duration {
+	if retryAfter > 0 {
+		return retryAfter
+	}
+	delay := c.retryDelay
+	for i := 0; i < attempt && delay < 5*time.Second; i++ {
+		delay *= 2
+	}
+	if delay > 5*time.Second {
+		delay = 5 * time.Second
+	}
+	if delay > time.Millisecond {
+		jitterMax := int64(delay / 2)
+		if jitterMax > 0 {
+			delay += time.Duration(rand.Int63n(jitterMax + 1))
+		}
+	}
+	return delay
 }
 
 func retryableStatus(statusCode int) bool {
@@ -495,6 +546,29 @@ func IsRetryable(err error) bool {
 		return retryableStatus(openRouterErr.StatusCode)
 	}
 	return false
+}
+
+func RetryAfter(err error) time.Duration {
+	var openRouterErr Error
+	if errors.As(err, &openRouterErr) {
+		return openRouterErr.RetryAfter
+	}
+	var circuitErr CircuitOpenError
+	if errors.As(err, &circuitErr) {
+		return circuitErr.RetryAfter
+	}
+	return 0
+}
+
+func retryableStreamError(err error, eventSeen bool) bool {
+	var openRouterErr Error
+	if errors.As(err, &openRouterErr) {
+		return retryableStatus(openRouterErr.StatusCode)
+	}
+	if eventSeen {
+		return false
+	}
+	return err != nil
 }
 
 type circuitBreaker struct {
@@ -748,6 +822,7 @@ type Error struct {
 	StatusCode int
 	Code       string
 	Message    string
+	RetryAfter time.Duration
 }
 
 type CircuitOpenError struct {
@@ -772,7 +847,8 @@ func (e Error) Error() string {
 	return fmt.Sprintf("openrouter error %d: %s", e.StatusCode, e.Message)
 }
 
-func parseOpenRouterError(statusCode int, data []byte) error {
+func parseOpenRouterError(statusCode int, data []byte, retryAfterValues ...string) error {
+	retryAfter := parseRetryAfter(firstString(retryAfterValues...))
 	var decoded struct {
 		Error struct {
 			Code    any    `json:"code"`
@@ -780,17 +856,22 @@ func parseOpenRouterError(statusCode int, data []byte) error {
 		} `json:"error"`
 	}
 	if err := json.Unmarshal(data, &decoded); err == nil && decoded.Error.Message != "" {
+		code := ""
+		if decoded.Error.Code != nil {
+			code = fmt.Sprint(decoded.Error.Code)
+		}
 		return Error{
 			StatusCode: statusCode,
-			Code:       fmt.Sprint(decoded.Error.Code),
+			Code:       code,
 			Message:    decoded.Error.Message,
+			RetryAfter: retryAfter,
 		}
 	}
 	message := strings.TrimSpace(string(data))
 	if message == "" {
 		message = http.StatusText(statusCode)
 	}
-	return Error{StatusCode: statusCode, Message: message}
+	return Error{StatusCode: statusCode, Message: message, RetryAfter: retryAfter}
 }
 
 func firstNonEmpty(value, fallback string) string {
@@ -798,6 +879,34 @@ func firstNonEmpty(value, fallback string) string {
 		return fallback
 	}
 	return value
+}
+
+func firstString(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func parseRetryAfter(value string) time.Duration {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return 0
+	}
+	if seconds, err := strconv.Atoi(value); err == nil && seconds > 0 {
+		return time.Duration(seconds) * time.Second
+	}
+	when, err := http.ParseTime(value)
+	if err != nil {
+		return 0
+	}
+	delay := time.Until(when)
+	if delay <= 0 {
+		return 0
+	}
+	return delay
 }
 
 func normalizeStringList(values []string) []string {

@@ -759,7 +759,7 @@ func (b *Bot) HandleNaturalMessageJob(ctx context.Context, job store.Job) error 
 	if err != nil {
 		return err
 	}
-	return b.respondToNaturalMessage(ctx, channelID, reference, payload.Request)
+	return b.respondToNaturalMessage(ctx, channelID, reference, payload.Request, job.Attempts < job.MaxAttempts)
 }
 
 func naturalMessageReferencePayloadFrom(reference *disgoDiscord.MessageReference) *naturalMessageReferencePayload {
@@ -1727,7 +1727,7 @@ func (b *Bot) queueNaturalMessage(ctx context.Context, channelID snowflake.ID, r
 
 func (b *Bot) respondToNaturalMessageAsync(ctx context.Context, channelID snowflake.ID, reference *disgoDiscord.MessageReference, request commands.Request) {
 	go func() {
-		if err := b.respondToNaturalMessage(ctx, channelID, reference, request); err != nil && b.logger != nil {
+		if err := b.respondToNaturalMessage(ctx, channelID, reference, request, false); err != nil && b.logger != nil {
 			b.logger.Warn("natural message response failed",
 				slog.Any("err", err),
 				slog.String("guild_id", request.GuildID),
@@ -1738,7 +1738,7 @@ func (b *Bot) respondToNaturalMessageAsync(ctx context.Context, channelID snowfl
 	}()
 }
 
-func (b *Bot) respondToNaturalMessage(ctx context.Context, channelID snowflake.ID, reference *disgoDiscord.MessageReference, request commands.Request) error {
+func (b *Bot) respondToNaturalMessage(ctx context.Context, channelID snowflake.ID, reference *disgoDiscord.MessageReference, request commands.Request, retryableAssistantErrorsAsError bool) error {
 	if b == nil || b.client == nil || b.router == nil {
 		return nil
 	}
@@ -1768,7 +1768,16 @@ func (b *Bot) respondToNaturalMessage(ctx context.Context, channelID snowflake.I
 			stopTyping()
 		}
 	}()
-	response := b.router.HandleNaturalMessageStream(ctx, request, startTyping)
+	var response commands.Response
+	var err error
+	if retryableAssistantErrorsAsError {
+		response, err = b.router.HandleNaturalMessageStreamRetryable(ctx, request, startTyping)
+		if err != nil {
+			return err
+		}
+	} else {
+		response = b.router.HandleNaturalMessageStream(ctx, request, startTyping)
+	}
 	if b.logger != nil {
 		b.logger.Info("natural message router completed",
 			slog.String("guild_id", request.GuildID),
