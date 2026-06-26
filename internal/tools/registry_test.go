@@ -46,6 +46,7 @@ func TestDefaultRegistryDefinitionsAreValid(t *testing.T) {
 		"panda.manage_discord_role":    true,
 		"panda.manage_tool_access":     true,
 		"panda.manage_prompt":          true,
+		"panda.manage_quiet_mode":      true,
 		"panda.manage_safety":          true,
 		"panda.manage_ops":             true,
 		"panda.manage_composed_tool":   true,
@@ -97,6 +98,7 @@ func TestAdminSetupToolSchemasExposeNaturalLanguageFields(t *testing.T) {
 	assertToolSchemaContains("panda.manage_tool_access", "tool_name", "tool_group", "role_name", "role", "target_type", "user_id", "member_user_id")
 	assertToolSchemaContains("panda.manage_safety", "action", "user_id", "member", "limit")
 	assertToolSchemaContains("panda.manage_prompt", "prompt", "instructions")
+	assertToolSchemaContains("panda.manage_quiet_mode", "duration_seconds", "duration", "until", "status", "set", "clear")
 	assertToolSchemaContains("panda.manage_soul", "soul", "enum", "status", "set", "update")
 	assertToolSchemaContains("panda.manage_music", "voice_channel_id", "voice_channel_name", "voice_channel", "vc")
 	assertToolSchemaContains("panda.manage_composed_tool", "voice_channel_id", "voice_channel_name", "voice_channel")
@@ -117,9 +119,9 @@ func TestImageGenerationSchemaMatchesOpenRouterImageModelSettings(t *testing.T) 
 	if err := json.Unmarshal(definition.InputSchema, &schema); err != nil {
 		t.Fatalf("decode schema: %v", err)
 	}
-	for _, want := range []string{"prompt", "reference_image_ids", "caption", "aspect_ratio", "resolution", "count", "filename_hint"} {
+	for _, want := range []string{"prompt", "reference_image_ids", "reference_usage", "caption", "aspect_ratio", "resolution", "count", "filename_hint"} {
 		if _, ok := schema.Properties[want]; !ok {
-			t.Fatalf("image generation schema missing provider-supported field %q: %s", want, string(definition.InputSchema))
+			t.Fatalf("image generation schema missing field %q: %s", want, string(definition.InputSchema))
 		}
 	}
 	for _, legacy := range []string{"size", "quality", "output_format", "transparent_background"} {
@@ -1465,6 +1467,159 @@ func TestExecutorGenerateImageRejectsPromptWithInternalRoutingMetadata(t *testin
 	}
 }
 
+func TestExecutorGenerateImageRejectsPromptWithAssistantRequestMeta(t *testing.T) {
+	registry, err := NewDefaultRegistry()
+	if err != nil {
+		t.Fatalf("NewDefaultRegistry: %v", err)
+	}
+	generator := &fakeImageGenerator{configured: true}
+	executor := NewExecutor(registry, nil, nil).WithImageGenerator(generator)
+	access := testAccess(ToolPolicyAssistive, admin.PermissionAssistantImageGeneration)
+	access.FeatureGateActive = true
+	access.EnabledFeatures = map[string]struct{}{features.ImageGeneration: {}}
+
+	result, err := executor.Execute(context.Background(), ExecutionRequest{
+		GuildID:        "guild-1",
+		ChannelID:      "channel-1",
+		ActorID:        "user-1",
+		RequestID:      "request-1",
+		InvocationType: "chat_tool",
+		ImageReferences: []generated.ImageReference{{
+			ID:       "reply:100",
+			Filename: "cat.png",
+			MIMEType: "image/png",
+			URL:      "https://cdn.example.test/cat.png",
+		}},
+		Access: access,
+		Call: llm.ToolCall{
+			ID:   "call-image",
+			Type: "function",
+			Function: llm.ToolCallFunction{
+				Name:      "panda.generate_image",
+				Arguments: `{"prompt":"A meme with top text \"WHEN YOU ASK PANDA TO MAKE A MEME\" and bottom text \"AND IT ACTUALLY DOES!\"","reference_image_ids":["reply:100"],"reference_usage":"use_available","filename_hint":"meme"}`,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if len(generator.requests) != 0 {
+		t.Fatalf("prompt with assistant request meta should not reach provider, got %+v", generator.requests)
+	}
+	for _, want := range []string{`"provider_status":"invalid_request"`, `"retryable":true`, "clean visual prompt", "referenced image content"} {
+		if !strings.Contains(result.Message.Content, want) {
+			t.Fatalf("expected retryable assistant-meta prompt payload to contain %q, got %s", want, result.Message.Content)
+		}
+	}
+	if strings.Contains(result.Message.Content, "https://cdn.example.test") || strings.Contains(result.Message.Content, "cat.png") {
+		t.Fatalf("prompt repair payload leaked media metadata: %s", result.Message.Content)
+	}
+}
+
+func TestExecutorGenerateImageRequiresReferenceDecisionWhenRefsAvailable(t *testing.T) {
+	registry, err := NewDefaultRegistry()
+	if err != nil {
+		t.Fatalf("NewDefaultRegistry: %v", err)
+	}
+	generator := &fakeImageGenerator{configured: true}
+	executor := NewExecutor(registry, nil, nil).WithImageGenerator(generator)
+	access := testAccess(ToolPolicyAssistive, admin.PermissionAssistantImageGeneration)
+	access.FeatureGateActive = true
+	access.EnabledFeatures = map[string]struct{}{features.ImageGeneration: {}}
+
+	result, err := executor.Execute(context.Background(), ExecutionRequest{
+		GuildID:        "guild-1",
+		ChannelID:      "channel-1",
+		ActorID:        "user-1",
+		RequestID:      "request-1",
+		InvocationType: "chat_tool",
+		ImageReferences: []generated.ImageReference{{
+			ID:       "reply:100",
+			Filename: "cat.png",
+			MIMEType: "image/png",
+			URL:      "https://cdn.example.test/cat.png",
+		}},
+		Access: access,
+		Call: llm.ToolCall{
+			ID:   "call-image",
+			Type: "function",
+			Function: llm.ToolCallFunction{
+				Name:      "panda.generate_image",
+				Arguments: `{"prompt":"Create a humorous meme from the referenced image.","filename_hint":"meme"}`,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if len(generator.requests) != 0 {
+		t.Fatalf("missing image reference decision should fail before provider call, got %+v", generator.requests)
+	}
+	for _, want := range []string{`"provider_status":"invalid_request"`, `"retryable":true`, `"reference_decision_required":true`, `"reply:100"`, "reference_image_ids", "intentionally_unrelated"} {
+		if !strings.Contains(result.Message.Content, want) {
+			t.Fatalf("expected missing-reference repair payload to contain %q, got %s", want, result.Message.Content)
+		}
+	}
+	if strings.Contains(result.Message.Content, "https://cdn.example.test") || strings.Contains(result.Message.Content, "cat.png") {
+		t.Fatalf("reference repair payload leaked media metadata: %s", result.Message.Content)
+	}
+}
+
+func TestExecutorGenerateImageAllowsExplicitUnrelatedGenerationWhenRefsAvailable(t *testing.T) {
+	registry, err := NewDefaultRegistry()
+	if err != nil {
+		t.Fatalf("NewDefaultRegistry: %v", err)
+	}
+	generator := &fakeImageGenerator{
+		configured: true,
+		response: llm.ImageGenerationResponse{
+			Images: []llm.GeneratedImage{{
+				Bytes:    []byte("image-bytes"),
+				MIMEType: "image/png",
+			}},
+		},
+	}
+	executor := NewExecutor(registry, nil, nil).WithImageGenerator(generator)
+	access := testAccess(ToolPolicyAssistive, admin.PermissionAssistantImageGeneration)
+	access.FeatureGateActive = true
+	access.EnabledFeatures = map[string]struct{}{features.ImageGeneration: {}}
+
+	result, err := executor.Execute(context.Background(), ExecutionRequest{
+		GuildID:        "guild-1",
+		ChannelID:      "channel-1",
+		ActorID:        "user-1",
+		RequestID:      "request-1",
+		InvocationType: "chat_tool",
+		ImageReferences: []generated.ImageReference{{
+			ID:       "reply:100",
+			Filename: "cat.png",
+			MIMEType: "image/png",
+			URL:      "https://cdn.example.test/cat.png",
+		}},
+		Access: access,
+		Call: llm.ToolCall{
+			ID:   "call-image",
+			Type: "function",
+			Function: llm.ToolCallFunction{
+				Name:      "panda.generate_image",
+				Arguments: `{"prompt":"Create an original panda meme unrelated to the attached image.","reference_usage":"intentionally_unrelated","filename_hint":"meme"}`,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if len(generator.requests) != 1 {
+		t.Fatalf("expected explicit unrelated generation to reach provider, got %+v", generator.requests)
+	}
+	if len(generator.requests[0].InputReferences) != 0 {
+		t.Fatalf("explicit unrelated generation should not pass input references, got %+v", generator.requests[0].InputReferences)
+	}
+	if !strings.Contains(result.Message.Content, `"generated":true`) {
+		t.Fatalf("expected generated payload, got %s", result.Message.Content)
+	}
+}
+
 func TestExecutorGenerateImageRejectsGIFReferenceWithoutExtractor(t *testing.T) {
 	registry, err := NewDefaultRegistry()
 	if err != nil {
@@ -2421,6 +2576,119 @@ func TestExecutorPreparesAndConfirmsManualUserSafetyTimeout(t *testing.T) {
 	}
 	if !status.TimedOut || status.State.TimeoutUntil == nil {
 		t.Fatalf("expected safety timeout to be active, got %+v", status)
+	}
+}
+
+func TestExecutorPreparesConfirmsAndClearsQuietMode(t *testing.T) {
+	ctx := context.Background()
+	registry, err := NewDefaultRegistry()
+	if err != nil {
+		t.Fatalf("NewDefaultRegistry: %v", err)
+	}
+	adminOps := newToolAdminService(t)
+	executor := NewExecutor(registry, nil, nil).WithAdminOperations(adminOps)
+	access := testAccess(ToolPolicyWriteConfirmed, admin.PermissionAdminConfigWrite)
+
+	prepared, err := executor.Execute(ctx, ExecutionRequest{
+		GuildID: "guild-1",
+		ActorID: "admin-1",
+		Access:  access,
+		Call: llm.ToolCall{
+			ID:   "call-quiet-set",
+			Type: "function",
+			Function: llm.ToolCallFunction{
+				Name:      "panda_manage_quiet_mode",
+				Arguments: `{"action":"set","duration":"30 minutes"}`,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Prepare quiet mode: %v", err)
+	}
+	if prepared.Confirmation == nil || prepared.Confirmation.Action != "quiet_mode.set" || prepared.Confirmation.Arguments["duration_seconds"] != "1800" || strings.TrimSpace(prepared.Confirmation.Arguments["timeout_until"]) == "" {
+		t.Fatalf("expected quiet mode confirmation, got %+v", prepared.Confirmation)
+	}
+	status, err := adminOps.QuietModeStatus(ctx, "guild-1", time.Now().UTC())
+	if err != nil {
+		t.Fatalf("QuietModeStatus before confirmation: %v", err)
+	}
+	if status.Active {
+		t.Fatalf("prepare should not activate quiet mode, got %+v", status)
+	}
+
+	confirmed, err := executor.Execute(ctx, ExecutionRequest{
+		GuildID:              "guild-1",
+		ActorID:              "admin-1",
+		Access:               access,
+		AllowConfirmedWrites: true,
+		Call: llm.ToolCall{
+			ID:   "call-confirmed-quiet-set",
+			Type: "function",
+			Function: llm.ToolCallFunction{
+				Name:      "panda_manage_quiet_mode",
+				Arguments: `{"action":"set","duration_seconds":1800}`,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Confirm quiet mode: %v", err)
+	}
+	for _, want := range []string{`"action":"quiet_mode.set"`, `"active":true`, `"remaining_seconds"`} {
+		if !strings.Contains(confirmed.Message.Content, want) {
+			t.Fatalf("expected confirmed quiet payload %s, got %s", want, confirmed.Message.Content)
+		}
+	}
+	status, err = adminOps.QuietModeStatus(ctx, "guild-1", time.Now().UTC())
+	if err != nil {
+		t.Fatalf("QuietModeStatus after confirmation: %v", err)
+	}
+	if !status.Active || status.Until == nil {
+		t.Fatalf("expected quiet mode to be active, got %+v", status)
+	}
+
+	clearPreview, err := executor.Execute(ctx, ExecutionRequest{
+		GuildID: "guild-1",
+		ActorID: "admin-1",
+		Access:  access,
+		Call: llm.ToolCall{
+			ID:   "call-quiet-clear",
+			Type: "function",
+			Function: llm.ToolCallFunction{
+				Name:      "panda_manage_quiet_mode",
+				Arguments: `{"action":"clear"}`,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Prepare quiet clear: %v", err)
+	}
+	if clearPreview.Confirmation == nil || clearPreview.Confirmation.Action != "quiet_mode.clear" {
+		t.Fatalf("expected quiet clear confirmation, got %+v", clearPreview.Confirmation)
+	}
+
+	_, err = executor.Execute(ctx, ExecutionRequest{
+		GuildID:              "guild-1",
+		ActorID:              "admin-1",
+		Access:               access,
+		AllowConfirmedWrites: true,
+		Call: llm.ToolCall{
+			ID:   "call-confirmed-quiet-clear",
+			Type: "function",
+			Function: llm.ToolCallFunction{
+				Name:      "panda_manage_quiet_mode",
+				Arguments: `{"action":"clear"}`,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Confirm quiet clear: %v", err)
+	}
+	status, err = adminOps.QuietModeStatus(ctx, "guild-1", time.Now().UTC())
+	if err != nil {
+		t.Fatalf("QuietModeStatus after clear: %v", err)
+	}
+	if status.Active || status.Until != nil {
+		t.Fatalf("expected quiet mode to be clear, got %+v", status)
 	}
 }
 

@@ -130,6 +130,13 @@ type ToolAccessClearResult struct {
 	RemovedUserRules int64
 }
 
+type QuietModeStatus struct {
+	Active    bool
+	Until     *time.Time
+	Remaining time.Duration
+	UpdatedBy string
+}
+
 func NormalizeRoleProfile(profile string) (string, bool) {
 	switch strings.ToLower(strings.TrimSpace(profile)) {
 	case RoleProfileAdmin, "administrator":
@@ -340,6 +347,96 @@ func (s *Service) SetAssistantEnabled(ctx context.Context, guildID, actorID stri
 		TargetID:   guildID,
 	})
 	return config, nil
+}
+
+func (s *Service) QuietModeStatus(ctx context.Context, guildID string, now time.Time) (QuietModeStatus, error) {
+	if strings.TrimSpace(guildID) == "" {
+		return QuietModeStatus{}, fmt.Errorf("guild id is required")
+	}
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	config, active, err := s.configs.ResolveAssistantTimeout(ctx, guildID, now)
+	if err != nil {
+		return QuietModeStatus{}, err
+	}
+	status := QuietModeStatus{Active: active, UpdatedBy: strings.TrimSpace(config.AssistantTimeoutBy)}
+	if config.AssistantTimeoutUntil != nil {
+		until := config.AssistantTimeoutUntil.UTC()
+		status.Until = &until
+		if active {
+			status.Remaining = until.Sub(now.UTC()).Round(time.Second)
+		}
+	}
+	return status, nil
+}
+
+func (s *Service) SetQuietModeUntil(ctx context.Context, guildID, actorID string, until time.Time, now time.Time) (QuietModeStatus, error) {
+	if strings.TrimSpace(guildID) == "" {
+		return QuietModeStatus{}, fmt.Errorf("guild id is required")
+	}
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	until = until.UTC()
+	if !until.After(now.UTC()) {
+		return QuietModeStatus{}, fmt.Errorf("quiet mode expiration must be in the future")
+	}
+	if _, err := s.ensureGuildConfig(ctx, guildID); err != nil {
+		return QuietModeStatus{}, err
+	}
+	config, err := s.configs.SetAssistantTimeoutUntil(ctx, guildID, until, actorID)
+	if err != nil {
+		return QuietModeStatus{}, err
+	}
+	_ = s.audit.Record(ctx, store.AuditEvent{
+		GuildID:    guildID,
+		ActorID:    actorID,
+		Action:     "admin.quiet_mode.set",
+		TargetType: "guild_config",
+		TargetID:   guildID,
+		Metadata: metadata(map[string]string{
+			"timeout_until": until.Format(time.RFC3339),
+			"duration":      until.Sub(now.UTC()).Round(time.Second).String(),
+		}),
+	})
+	return quietModeStatusFromConfig(config, true, now), nil
+}
+
+func (s *Service) ClearQuietMode(ctx context.Context, guildID, actorID string, now time.Time) (QuietModeStatus, error) {
+	if strings.TrimSpace(guildID) == "" {
+		return QuietModeStatus{}, fmt.Errorf("guild id is required")
+	}
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	if _, err := s.ensureGuildConfig(ctx, guildID); err != nil {
+		return QuietModeStatus{}, err
+	}
+	config, err := s.configs.ClearAssistantTimeout(ctx, guildID)
+	if err != nil {
+		return QuietModeStatus{}, err
+	}
+	_ = s.audit.Record(ctx, store.AuditEvent{
+		GuildID:    guildID,
+		ActorID:    actorID,
+		Action:     "admin.quiet_mode.clear",
+		TargetType: "guild_config",
+		TargetID:   guildID,
+	})
+	return quietModeStatusFromConfig(config, false, now), nil
+}
+
+func quietModeStatusFromConfig(config store.GuildConfig, active bool, now time.Time) QuietModeStatus {
+	status := QuietModeStatus{Active: active, UpdatedBy: strings.TrimSpace(config.AssistantTimeoutBy)}
+	if config.AssistantTimeoutUntil != nil {
+		until := config.AssistantTimeoutUntil.UTC()
+		status.Until = &until
+		if active && until.After(now.UTC()) {
+			status.Remaining = until.Sub(now.UTC()).Round(time.Second)
+		}
+	}
+	return status
 }
 
 func (s *Service) SetMemoryEnabled(ctx context.Context, guildID, actorID string, enabled bool) (store.GuildConfig, error) {

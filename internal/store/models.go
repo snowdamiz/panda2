@@ -9,16 +9,18 @@ type SchemaMigration struct {
 }
 
 type GuildConfig struct {
-	GuildID             string    `gorm:"primaryKey;size:32"`
-	Temperature         float64   `gorm:"not null;default:0.3"`
-	MaxResponseTokens   int       `gorm:"not null;default:900"`
-	ToolPolicy          string    `gorm:"not null;default:'admin_only'"`
-	SystemPromptOverlay string    `gorm:"not null;default:''"`
-	AgentSoul           string    `gorm:"not null;default:''"`
-	AssistantEnabled    bool      `gorm:"not null;default:true"`
-	MemoryEnabled       bool      `gorm:"not null;default:true"`
-	CreatedAt           time.Time `gorm:"not null"`
-	UpdatedAt           time.Time `gorm:"not null"`
+	GuildID               string     `gorm:"primaryKey;size:32"`
+	Temperature           float64    `gorm:"not null;default:0.3"`
+	MaxResponseTokens     int        `gorm:"not null;default:900"`
+	ToolPolicy            string     `gorm:"not null;default:'admin_only'"`
+	SystemPromptOverlay   string     `gorm:"not null;default:''"`
+	AgentSoul             string     `gorm:"not null;default:''"`
+	AssistantEnabled      bool       `gorm:"not null;default:true"`
+	MemoryEnabled         bool       `gorm:"not null;default:true"`
+	AssistantTimeoutUntil *time.Time `gorm:"index"`
+	AssistantTimeoutBy    string     `gorm:"not null;default:'';size:32"`
+	CreatedAt             time.Time  `gorm:"not null"`
+	UpdatedAt             time.Time  `gorm:"not null"`
 }
 
 type UsageEvent struct {

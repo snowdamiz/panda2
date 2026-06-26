@@ -122,6 +122,9 @@ type AdminOperations interface {
 	UsageReport(ctx context.Context, guildID string, window time.Duration, dimension string, limit int) (admin.UsageReport, error)
 	SetPrompt(ctx context.Context, guildID, actorID, prompt string) (store.GuildConfig, error)
 	SetSoul(ctx context.Context, guildID, actorID, soul string) (store.GuildConfig, error)
+	QuietModeStatus(ctx context.Context, guildID string, now time.Time) (admin.QuietModeStatus, error)
+	SetQuietModeUntil(ctx context.Context, guildID, actorID string, until time.Time, now time.Time) (admin.QuietModeStatus, error)
+	ClearQuietMode(ctx context.Context, guildID, actorID string, now time.Time) (admin.QuietModeStatus, error)
 	SetMemoryEnabled(ctx context.Context, guildID, actorID string, enabled bool) (store.GuildConfig, error)
 	AddMemoryDocument(ctx context.Context, request memory.AddDocumentRequest) (store.KnowledgeDocument, error)
 	SearchMemory(ctx context.Context, guildID, query string, limit int) ([]repository.KnowledgeSearchResult, error)
@@ -599,6 +602,8 @@ func (e *Executor) Execute(ctx context.Context, request ExecutionRequest) (Execu
 		payload, err = e.manageSoul(toolCtx, request, arguments)
 	case "panda.manage_prompt":
 		payload, err = e.managePrompt(toolCtx, request, arguments)
+	case "panda.manage_quiet_mode":
+		payload, err = e.manageQuietMode(toolCtx, request, arguments)
 	case "panda.manage_budget_limit":
 		payload, err = e.manageBudgetLimit(toolCtx, request, arguments)
 	case "panda.manage_knowledge":
@@ -1142,6 +1147,29 @@ func (e *Executor) generateImage(ctx context.Context, request ExecutionRequest, 
 	if count > 1 {
 		return imageToolPayload(false, 0, "", caption, llm.ImageProviderStatusInvalid, "This Panda rollout can generate one image at a time. Please ask for one image."), nil, nil, nil
 	}
+	requestedReferenceIDs := stringListArgument(args, "reference_image_ids")
+	referenceUsage := imageReferenceUsage(args)
+	if len(requestedReferenceIDs) == 0 {
+		availableReferenceIDs := selectableImageReferenceIDs(request.ImageReferences)
+		if len(availableReferenceIDs) > 0 && referenceUsage != "intentionally_unrelated" {
+			slog.Warn("image generation reference decision required",
+				slog.String("guild_id", request.GuildID),
+				slog.String("channel_id", request.ChannelID),
+				slog.String("request_id", request.RequestID),
+				slog.String("user_id", request.ActorID),
+				slog.Int("available_image_ref_count", len(request.ImageReferences)),
+				slog.Any("available_image_ref_ids", availableReferenceIDs),
+				slog.String("reference_usage", referenceUsage),
+			)
+			e.recordImageAudit(ctx, request, "image_generation.reference_selection_required", map[string]any{
+				"reason":                    "missing_reference_image_ids",
+				"prompt_chars":              len([]rune(prompt)),
+				"available_reference_count": len(availableReferenceIDs),
+				"reference_usage":           referenceUsage,
+			})
+			return imageReferenceSelectionRequiredPayload(caption, availableReferenceIDs), nil, nil, nil
+		}
+	}
 	references, err := e.selectedImageInputReferences(ctx, request, args)
 	if err != nil {
 		slog.Warn("image generation reference selection failed",
@@ -1454,8 +1482,38 @@ func imageToolPayload(generated bool, imageCount int, filename, caption string, 
 func imagePromptRejectedPayload(caption string) map[string]any {
 	payload := imageToolPayload(false, 0, "", caption, llm.ImageProviderStatusInvalid, "The image prompt picked up internal routing text, so I need to retry with a cleaner visual prompt.")
 	payload["retryable"] = true
-	payload["model_instruction"] = "Call the image generation tool again with a clean visual prompt based only on the user's creative request and any intended visible image text. Keep the same reference IDs. Do not answer the user yet."
+	payload["model_instruction"] = "Call the image generation tool again with a clean visual prompt based only on the user's creative request, referenced image content, and any intended visible image text. Keep the same reference IDs. Do not make the image about Panda, Discord, the assistant, the bot, tool use, or the act of requesting/generating the image unless the user explicitly asked for that visual subject. Do not answer the user yet."
 	return payload
+}
+
+func imageReferenceSelectionRequiredPayload(caption string, availableReferenceIDs []string) map[string]any {
+	payload := imageToolPayload(false, 0, "", caption, llm.ImageProviderStatusInvalid, "The image request has available Discord image references, so I need to retry with an explicit reference decision.")
+	payload["retryable"] = true
+	payload["reference_decision_required"] = true
+	payload["available_reference_ids"] = append([]string(nil), availableReferenceIDs...)
+	payload["model_instruction"] = "Call the image generation tool again. If the user's creative request uses the attached or replied-to image, include the relevant IDs in reference_image_ids and set reference_usage to use_available. If the user explicitly wants an original or unrelated image despite the available references, omit reference_image_ids and set reference_usage to intentionally_unrelated. Do not answer the user yet."
+	return payload
+}
+
+func imageReferenceUsage(arguments map[string]any) string {
+	value := strings.ToLower(strings.TrimSpace(stringArgument(arguments, "reference_usage")))
+	switch value {
+	case "use_available", "intentionally_unrelated":
+		return value
+	default:
+		return ""
+	}
+}
+
+func selectableImageReferenceIDs(references []generated.ImageReference) []string {
+	ids := make([]string, 0, len(references))
+	for _, reference := range references {
+		id := strings.TrimSpace(reference.ID)
+		if id != "" && strings.TrimSpace(reference.URL) != "" {
+			ids = append(ids, id)
+		}
+	}
+	return ids
 }
 
 func imagePromptInternalMetadataFlags(prompt string) []string {
@@ -1486,6 +1544,18 @@ func imagePromptInternalMetadataFlags(prompt string) []string {
 		{flag: "provider_status", pattern: "provider_status"},
 		{flag: "routing_instruction", pattern: "routing instruction"},
 		{flag: "media_metadata", pattern: "media metadata"},
+		{flag: "assistant_request_meta", pattern: "when you ask panda"},
+		{flag: "assistant_request_meta", pattern: "when u ask panda"},
+		{flag: "assistant_request_meta", pattern: "ask panda to make"},
+		{flag: "assistant_request_meta", pattern: "asks panda to make"},
+		{flag: "assistant_request_meta", pattern: "asked panda to make"},
+		{flag: "assistant_request_meta", pattern: "panda to make a meme"},
+		{flag: "assistant_request_meta", pattern: "panda make a meme out of this"},
+		{flag: "assistant_request_meta", pattern: "panda generated"},
+		{flag: "assistant_request_meta", pattern: "panda delivers"},
+		{flag: "assistant_request_meta", pattern: "panda actually does"},
+		{flag: "assistant_caption_meta", pattern: "here's your meme"},
+		{flag: "assistant_caption_meta", pattern: "here is your meme"},
 	}
 	seen := map[string]struct{}{}
 	flags := []string{}
@@ -1703,10 +1773,13 @@ func (e *Executor) readConfig(ctx context.Context, request ExecutionRequest, arg
 	if !ok {
 		return map[string]any{"configured": false}, nil
 	}
+	timeoutActive := repository.AssistantTimeoutActive(config, time.Now().UTC())
 	return map[string]any{
 		"configured":            true,
 		"guild_id":              config.GuildID,
 		"assistant_enabled":     config.AssistantEnabled,
+		"quiet_mode_active":     timeoutActive,
+		"quiet_mode_until":      timePointerString(config.AssistantTimeoutUntil),
 		"memory_enabled":        config.MemoryEnabled,
 		"tool_policy":           config.ToolPolicy,
 		"answer_length":         answerLengthFromMaxTokens(config.MaxResponseTokens),
@@ -1812,6 +1885,71 @@ func (e *Executor) managePrompt(ctx context.Context, request ExecutionRequest, a
 		}}, nil
 	default:
 		return nil, fmt.Errorf("action must be status, set, or update")
+	}
+}
+
+func (e *Executor) manageQuietMode(ctx context.Context, request ExecutionRequest, arguments string) (any, error) {
+	if e.adminOps == nil {
+		return nil, fmt.Errorf("admin operations are not configured")
+	}
+	args, err := parseArguments(arguments)
+	if err != nil {
+		return nil, err
+	}
+	action := strings.ToLower(firstNonEmpty(stringArgument(args, "action"), "status"))
+	now := time.Now().UTC()
+	switch action {
+	case "status", "get", "show":
+		status, err := e.adminOps.QuietModeStatus(ctx, request.GuildID, now)
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{"result": quietModeStatusPayload(status)}, nil
+	case "set", "enable", "start", "timeout", "time_out", "pause":
+		until, duration, err := quietModeUntilArgument(args, now)
+		if err != nil {
+			return nil, err
+		}
+		duration = duration.Round(time.Second)
+		if duration < time.Second {
+			duration = time.Second
+		}
+		durationSeconds := int64(duration / time.Second)
+		preview := map[string]any{
+			"duration_seconds": durationSeconds,
+			"duration_label":   durationDisplayLabel(duration),
+			"timeout_until":    until.UTC().Format(time.RFC3339),
+		}
+		if boolArgument(args, "dry_run") {
+			return dryRunToolResult("quiet_mode.set", preview), nil
+		}
+		if !request.AllowConfirmedWrites {
+			return confirmationRequiredWithArguments("quiet_mode.set", preview, preview), nil
+		}
+		status, err := e.adminOps.SetQuietModeUntil(ctx, request.GuildID, request.ActorID, until, now)
+		if err != nil {
+			return nil, err
+		}
+		payload := quietModeStatusPayload(status)
+		payload["action"] = "quiet_mode.set"
+		return map[string]any{"result": payload}, nil
+	case "clear", "disable", "stop", "resume", "cancel":
+		preview := map[string]any{"quiet_mode": "clear"}
+		if boolArgument(args, "dry_run") {
+			return dryRunToolResult("quiet_mode.clear", preview), nil
+		}
+		if !request.AllowConfirmedWrites {
+			return confirmationRequiredWithArguments("quiet_mode.clear", preview, preview), nil
+		}
+		status, err := e.adminOps.ClearQuietMode(ctx, request.GuildID, request.ActorID, now)
+		if err != nil {
+			return nil, err
+		}
+		payload := quietModeStatusPayload(status)
+		payload["action"] = "quiet_mode.clear"
+		return map[string]any{"result": payload}, nil
+	default:
+		return nil, fmt.Errorf("action must be status, set, or clear")
 	}
 }
 
@@ -3579,6 +3717,33 @@ func safetyTimeoutDurationArgument(args map[string]any) (time.Duration, error) {
 	return 0, fmt.Errorf("duration is required")
 }
 
+func quietModeUntilArgument(args map[string]any, now time.Time) (time.Time, time.Duration, error) {
+	if value, ok := args["until"]; ok && value != nil {
+		raw := strings.TrimSpace(fmt.Sprint(value))
+		if raw == "" {
+			return time.Time{}, 0, fmt.Errorf("until is required")
+		}
+		until, err := time.Parse(time.RFC3339, raw)
+		if err != nil {
+			return time.Time{}, 0, fmt.Errorf("until must be an RFC3339 timestamp")
+		}
+		duration := until.UTC().Sub(now.UTC())
+		if duration <= 0 {
+			return time.Time{}, 0, fmt.Errorf("quiet mode expiration must be in the future")
+		}
+		return until.UTC(), duration, nil
+	}
+	duration, err := safetyTimeoutDurationArgument(args)
+	if err != nil {
+		return time.Time{}, 0, err
+	}
+	duration = duration.Round(time.Second)
+	if duration < time.Second {
+		duration = time.Second
+	}
+	return now.UTC().Add(duration), duration, nil
+}
+
 func secondsDurationArgument(name string, value any) (time.Duration, error) {
 	seconds, ok := numericArgumentSeconds(value)
 	if !ok {
@@ -3709,6 +3874,21 @@ func userSafetyStatusPayload(state store.UserSafetyState, timedOut bool, now tim
 			remaining = 0
 		}
 		payload["timeout_remaining_seconds"] = remaining
+	}
+	return payload
+}
+
+func quietModeStatusPayload(status admin.QuietModeStatus) map[string]any {
+	payload := map[string]any{
+		"active":     status.Active,
+		"updated_by": strings.TrimSpace(status.UpdatedBy),
+	}
+	if status.Until != nil {
+		payload["timeout_until"] = status.Until.UTC().Format(time.RFC3339)
+	}
+	if status.Active && status.Remaining > 0 {
+		payload["remaining_seconds"] = int64(status.Remaining.Round(time.Second) / time.Second)
+		payload["remaining_label"] = durationDisplayLabel(status.Remaining)
 	}
 	return payload
 }
@@ -4255,6 +4435,9 @@ func userNativeCapabilities(definitions map[string]Definition) []map[string]any 
 	if has("panda.manage_ops") {
 		add("owner_operations", "Owner operations", "Read operational status or prepare drain, resume, and incident-mode changes for confirmation.", true)
 	}
+	if has("panda.manage_quiet_mode") {
+		add("manage_quiet_mode", "Quiet mode", "Read or prepare server-wide quiet timeouts for confirmation.", true)
+	}
 	return capabilities
 }
 
@@ -4313,7 +4496,7 @@ func (e *Executor) canExecute(name string) bool {
 		return e.attachments != nil
 	case "read_config":
 		return e.configs != nil
-	case "manage_memory_consent", "panda.usage_report", "panda.manage_soul", "panda.manage_prompt", "panda.manage_budget_limit", "panda.manage_knowledge", "panda.manage_role_permission", "panda.manage_user_permission", "panda.manage_tool_access", "panda.manage_channel_rule":
+	case "manage_memory_consent", "panda.usage_report", "panda.manage_soul", "panda.manage_prompt", "panda.manage_quiet_mode", "panda.manage_budget_limit", "panda.manage_knowledge", "panda.manage_role_permission", "panda.manage_user_permission", "panda.manage_tool_access", "panda.manage_channel_rule":
 		return e.adminOps != nil
 	case "panda.manage_member_role":
 		return e.discord != nil
@@ -4498,6 +4681,10 @@ func confirmationArguments(action string, preview map[string]any) map[string]str
 		return stringArgumentsWithOptional(preview, []string{"channel_id", "rule"}, "channel_display")
 	case "channel_rule.remove":
 		return stringArgumentsWithOptional(preview, []string{"channel_id"}, "channel_display")
+	case "quiet_mode.set":
+		return stringArguments(preview, "duration_seconds", "timeout_until")
+	case "quiet_mode.clear":
+		return stringArguments(preview, "quiet_mode")
 	case "safety.timeout":
 		return stringArgumentsWithOptional(preview, []string{"user_id", "duration_seconds"}, "user_display", "duration_label")
 	case "safety.remove":
@@ -4687,6 +4874,10 @@ func confirmationCopy(action string, arguments map[string]string) (string, strin
 		return "Panda prepared enabling incident mode.", "Enable incident"
 	case "owner_ops.incident_disable":
 		return "Panda prepared disabling incident mode.", "Disable incident"
+	case "quiet_mode.set":
+		return fmt.Sprintf("Panda prepared a server-wide quiet timeout for %s. After confirmation, Panda will not respond in this server until `%s`.", safetyConfirmationDurationLabel(arguments), arguments["timeout_until"]), "Start timeout"
+	case "quiet_mode.clear":
+		return "Panda prepared clearing the server-wide quiet timeout.", "Clear timeout"
 	default:
 		return "", ""
 	}

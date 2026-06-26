@@ -66,6 +66,15 @@ func TestOpenRunsMigrationsAndPragmas(t *testing.T) {
 		}
 	}
 
+	for _, column := range []string{"assistant_timeout_until", "assistant_timeout_by"} {
+		if err := store.DB.Raw("SELECT COUNT(*) FROM pragma_table_info('guild_configs') WHERE name = ?", column).Scan(&tableCount).Error; err != nil {
+			t.Fatalf("%s column lookup failed: %v", column, err)
+		}
+		if tableCount != 1 {
+			t.Fatalf("expected guild_configs.%s column, got %d", column, tableCount)
+		}
+	}
+
 	for _, table := range []string{"composed_tools", "composed_tool_versions", "composed_tool_runs", "composed_tool_dedupes"} {
 		if err := store.DB.Raw("SELECT COUNT(*) FROM sqlite_master WHERE name = ?", table).Scan(&tableCount).Error; err != nil {
 			t.Fatalf("%s table lookup failed: %v", table, err)
