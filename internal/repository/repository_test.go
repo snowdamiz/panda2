@@ -210,6 +210,54 @@ func TestUserSafetyStrikesTimeoutAndResetsAfterExpiry(t *testing.T) {
 	}
 }
 
+func TestUserSafetyStrikesAreScopedByGuildAndUser(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(ctx, "file::memory:?cache=shared")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer db.Close()
+
+	repo := NewUserSafetyRepository(db.DB)
+	now := time.Date(2026, 6, 25, 19, 30, 0, 0, time.UTC)
+
+	for i := 0; i < 2; i++ {
+		if _, err := repo.AddStrike(ctx, "guild-1", "user-1", 3, 10*time.Minute, now.Add(time.Duration(i)*time.Minute)); err != nil {
+			t.Fatalf("AddStrike user-1 guild-1 %d: %v", i+1, err)
+		}
+	}
+	if _, err := repo.AddStrike(ctx, "guild-1", "user-2", 3, 10*time.Minute, now.Add(2*time.Minute)); err != nil {
+		t.Fatalf("AddStrike user-2 guild-1: %v", err)
+	}
+	if _, err := repo.AddStrike(ctx, "guild-2", "user-1", 3, 10*time.Minute, now.Add(3*time.Minute)); err != nil {
+		t.Fatalf("AddStrike user-1 guild-2: %v", err)
+	}
+
+	userOneGuildOne, err := repo.Status(ctx, "guild-1", "user-1", now.Add(4*time.Minute))
+	if err != nil {
+		t.Fatalf("Status user-1 guild-1: %v", err)
+	}
+	if userOneGuildOne.TimedOut || userOneGuildOne.State.ActiveStrikes != 2 || userOneGuildOne.State.TotalStrikes != 2 {
+		t.Fatalf("expected guild-1/user-1 to keep two strikes, got %+v", userOneGuildOne)
+	}
+
+	userTwoGuildOne, err := repo.Status(ctx, "guild-1", "user-2", now.Add(4*time.Minute))
+	if err != nil {
+		t.Fatalf("Status user-2 guild-1: %v", err)
+	}
+	if userTwoGuildOne.TimedOut || userTwoGuildOne.State.ActiveStrikes != 1 || userTwoGuildOne.State.TotalStrikes != 1 {
+		t.Fatalf("expected guild-1/user-2 to keep one isolated strike, got %+v", userTwoGuildOne)
+	}
+
+	userOneGuildTwo, err := repo.Status(ctx, "guild-2", "user-1", now.Add(4*time.Minute))
+	if err != nil {
+		t.Fatalf("Status user-1 guild-2: %v", err)
+	}
+	if userOneGuildTwo.TimedOut || userOneGuildTwo.State.ActiveStrikes != 1 || userOneGuildTwo.State.TotalStrikes != 1 {
+		t.Fatalf("expected guild-2/user-1 to keep one isolated strike, got %+v", userOneGuildTwo)
+	}
+}
+
 func TestBillingUsageTotalsMissingPeriodDoesNotLogRecordNotFound(t *testing.T) {
 	ctx := context.Background()
 	repo, logs, cleanup := newBillingRepositoryWithLogBuffer(t)

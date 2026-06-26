@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sn0w/panda2/internal/store"
 	toolsvc "github.com/sn0w/panda2/internal/tools"
 )
 
@@ -116,6 +117,52 @@ func (p *frameOpusFrameProvider) ProvideOpusFrame() ([]byte, error) {
 
 func (p *frameOpusFrameProvider) Close() {}
 
+type recordingStreamer struct {
+	mu      sync.Mutex
+	tracks  []Track
+	factory func(Track) OpusFrameProvider
+}
+
+func (s *recordingStreamer) Stream(_ context.Context, track Track) (OpusFrameProvider, error) {
+	s.mu.Lock()
+	s.tracks = append(s.tracks, track)
+	s.mu.Unlock()
+	if s.factory != nil {
+		return s.factory(track), nil
+	}
+	return &frameOpusFrameProvider{remaining: playbackPrebufferFrames}, nil
+}
+
+func (s *recordingStreamer) playedTracks() []Track {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]Track(nil), s.tracks...)
+}
+
+type infiniteOpusFrameProvider struct {
+	closeOnce sync.Once
+	closed    chan struct{}
+}
+
+func newInfiniteOpusFrameProvider() *infiniteOpusFrameProvider {
+	return &infiniteOpusFrameProvider{closed: make(chan struct{})}
+}
+
+func (p *infiniteOpusFrameProvider) ProvideOpusFrame() ([]byte, error) {
+	select {
+	case <-p.closed:
+		return nil, io.EOF
+	default:
+		return []byte{0x01, 0x02, 0x03}, nil
+	}
+}
+
+func (p *infiniteOpusFrameProvider) Close() {
+	p.closeOnce.Do(func() {
+		close(p.closed)
+	})
+}
+
 type fakeVoiceConnector struct {
 	mu       sync.Mutex
 	sessions []*fakeVoiceSession
@@ -135,6 +182,72 @@ type failingVoiceConnector struct {
 
 func (c failingVoiceConnector) Connect(context.Context, string, string) (VoiceSession, error) {
 	return nil, c.err
+}
+
+type fakeMusicStore struct {
+	mu       sync.Mutex
+	queue    []store.MusicQueueItem
+	settings store.MusicSettings
+}
+
+func (s *fakeMusicStore) ReplaceQueue(_ context.Context, guildID string, items []store.MusicQueueItem) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.queue = append([]store.MusicQueueItem(nil), items...)
+	for index := range s.queue {
+		s.queue[index].GuildID = guildID
+		s.queue[index].Position = index + 1
+	}
+	return nil
+}
+
+func (s *fakeMusicStore) Queue(context.Context, string) ([]store.MusicQueueItem, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]store.MusicQueueItem(nil), s.queue...), nil
+}
+
+func (s *fakeMusicStore) ClearQueue(context.Context, string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.queue = nil
+	return nil
+}
+
+func (s *fakeMusicStore) EnsureSettings(context.Context, string) (store.MusicSettings, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.settings.LoopMode == "" {
+		s.settings = store.MusicSettings{LoopMode: "off", DefaultVolume: 100, VoteSkipThreshold: 0.5}
+	}
+	return s.settings, nil
+}
+
+func (s *fakeMusicStore) UpdateSettings(_ context.Context, _ string, values map[string]any) (store.MusicSettings, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.settings.LoopMode == "" {
+		s.settings = store.MusicSettings{LoopMode: "off", DefaultVolume: 100, VoteSkipThreshold: 0.5}
+	}
+	if mode, ok := values["loop_mode"].(string); ok {
+		s.settings.LoopMode = mode
+	}
+	if volume, ok := values["default_volume"].(int); ok {
+		s.settings.DefaultVolume = volume
+	}
+	return s.settings, nil
+}
+
+func (s *fakeMusicStore) SavePlaylist(context.Context, store.MusicPlaylist) (store.MusicPlaylist, error) {
+	return store.MusicPlaylist{}, nil
+}
+
+func (s *fakeMusicStore) Playlist(context.Context, string, string) (store.MusicPlaylist, bool, error) {
+	return store.MusicPlaylist{}, false, nil
+}
+
+func (s *fakeMusicStore) Playlists(context.Context, string, int) ([]store.MusicPlaylist, error) {
+	return nil, nil
 }
 
 func TestManagerDisconnectsAfterVoiceChannelEmpties(t *testing.T) {
@@ -283,20 +396,29 @@ func TestSkipWithEmptyQueueKeepsVoiceForImmediatePlay(t *testing.T) {
 }
 
 func TestSkipPlayReplacesCurrentTrackWithoutLeavingVoice(t *testing.T) {
-	manager := NewManager(fakeResolver{track: Track{Title: "replacement track"}}, eofStreamer{}, &fakeVoiceConnector{}, nil)
-	session := newFakeVoiceSession("voice-1")
-	cancelled := false
-	manager.players["guild-1"] = &guildPlayer{
-		manager:        manager,
-		guildID:        "guild-1",
-		session:        session,
-		voiceChannelID: "voice-1",
-		current:        &Track{Title: "old track"},
-		playing:        true,
-		trackCancel: func() {
-			cancelled = true
+	connector := &fakeVoiceConnector{}
+	streamer := &recordingStreamer{
+		factory: func(Track) OpusFrameProvider {
+			return newInfiniteOpusFrameProvider()
 		},
-		queueItems: []Track{{Title: "older queued track"}},
+	}
+	manager := NewManager(fakeResolver{}, streamer, connector, nil)
+	t.Cleanup(func() {
+		manager.Close(context.Background())
+	})
+
+	_, err := manager.Handle(context.Background(), Request{
+		GuildID:        "guild-1",
+		TextChannelID:  "channel-1",
+		UserID:         "user-1",
+		VoiceChannelID: "voice-1",
+		Intent: Intent{
+			Action: ActionPlay,
+			Query:  "old track",
+		},
+	})
+	if err != nil {
+		t.Fatalf("play old track: %v", err)
 	}
 
 	response, err := manager.Handle(context.Background(), Request{
@@ -315,23 +437,64 @@ func TestSkipPlayReplacesCurrentTrackWithoutLeavingVoice(t *testing.T) {
 	if response.Title != "Track replaced" || !strings.Contains(response.Content, "replacement track") {
 		t.Fatalf("unexpected skip_play response: %+v", response)
 	}
-	if !cancelled {
-		t.Fatal("expected skip_play to cancel current playback")
+	tracks := streamer.playedTracks()
+	if len(tracks) < 2 || tracks[0].Title != "old track" || tracks[1].Title != "replacement track" {
+		t.Fatalf("expected old track then replacement to start, got %+v", tracks)
 	}
+	if len(connector.sessions) != 1 {
+		t.Fatalf("expected skip_play to reuse the existing voice session, got %d session(s)", len(connector.sessions))
+	}
+	session := connector.sessions[0]
 	select {
 	case <-session.closedCh:
 		t.Fatal("expected skip_play to keep the voice session open")
 	default:
 	}
-	player := manager.existingPlayer("guild-1")
-	if player == nil {
-		t.Fatal("expected skip_play to keep existing player")
+}
+
+func TestSkipPlayReturnsFailureWhenReplacementHasNoAudioFrames(t *testing.T) {
+	streamer := &recordingStreamer{
+		factory: func(track Track) OpusFrameProvider {
+			if track.Title == "replacement track" {
+				return eofOpusFrameProvider{}
+			}
+			return newInfiniteOpusFrameProvider()
+		},
 	}
-	player.mu.Lock()
-	queued := append([]Track(nil), player.queueItems...)
-	player.mu.Unlock()
-	if len(queued) != 2 || queued[0].Title != "replacement track" || queued[1].Title != "older queued track" {
-		t.Fatalf("expected replacement at front of queue, got %+v", queued)
+	manager := NewManager(fakeResolver{}, streamer, &fakeVoiceConnector{}, nil)
+	t.Cleanup(func() {
+		manager.Close(context.Background())
+	})
+
+	_, err := manager.Handle(context.Background(), Request{
+		GuildID:        "guild-1",
+		TextChannelID:  "channel-1",
+		UserID:         "user-1",
+		VoiceChannelID: "voice-1",
+		Intent: Intent{
+			Action: ActionPlay,
+			Query:  "old track",
+		},
+	})
+	if err != nil {
+		t.Fatalf("play old track: %v", err)
+	}
+
+	response, err := manager.Handle(context.Background(), Request{
+		GuildID:        "guild-1",
+		TextChannelID:  "channel-1",
+		UserID:         "user-1",
+		VoiceChannelID: "voice-1",
+		Intent: Intent{
+			Action: ActionSkipPlay,
+			Query:  "replacement track",
+		},
+	})
+	if !errors.Is(err, ErrTrackStreamFailed) {
+		t.Fatalf("expected replacement stream failure, got response=%+v err=%v", response, err)
+	}
+	if response.Title != "" || response.Content != "" {
+		t.Fatalf("failed replacement should not return a success response: %+v", response)
 	}
 }
 
@@ -381,6 +544,46 @@ func TestQueuedTrackDropsTransientStreamURL(t *testing.T) {
 	}
 }
 
+func TestPlayStartsRequestedTrackInsteadOfStalePersistedQueue(t *testing.T) {
+	store := &fakeMusicStore{queue: []store.MusicQueueItem{
+		{Title: "stale queued one", Position: 1},
+		{Title: "stale queued two", Position: 2},
+	}}
+	streamer := &recordingStreamer{}
+	manager := NewManager(fakeResolver{}, streamer, &fakeVoiceConnector{}, nil).WithRepository(store)
+	t.Cleanup(func() {
+		manager.Close(context.Background())
+	})
+
+	response, err := manager.Handle(context.Background(), Request{
+		GuildID:        "guild-1",
+		TextChannelID:  "channel-1",
+		UserID:         "user-1",
+		VoiceChannelID: "voice-1",
+		Intent: Intent{
+			Action: ActionPlay,
+			Query:  "fresh request",
+		},
+	})
+	if err != nil {
+		t.Fatalf("play: %v", err)
+	}
+	if response.Title != "Connected to voice" || !strings.Contains(response.Content, "fresh request") {
+		t.Fatalf("expected fresh request to start immediately, got %+v", response)
+	}
+	tracks := streamer.playedTracks()
+	if len(tracks) == 0 || tracks[0].Title != "fresh request" {
+		t.Fatalf("expected fresh request to be streamed first, got %+v", tracks)
+	}
+	items, err := store.Queue(context.Background(), "guild-1")
+	if err != nil {
+		t.Fatalf("queue: %v", err)
+	}
+	if len(items) != 0 {
+		t.Fatalf("expected fresh play to clear stale persisted queue, got %+v", items)
+	}
+}
+
 func TestPlayWaitsForInitialPrebufferSuccess(t *testing.T) {
 	manager := NewManager(
 		fakeResolver{track: Track{Title: "ready track"}},
@@ -404,6 +607,41 @@ func TestPlayWaitsForInitialPrebufferSuccess(t *testing.T) {
 	}
 	if response.Title != "Connected to voice" || !strings.Contains(response.Content, "started **ready track**") {
 		t.Fatalf("expected response after startup prebuffer, got %+v", response)
+	}
+}
+
+func TestPlayReturnsInitialEOFBeforeAudioAsStreamFailure(t *testing.T) {
+	connector := &fakeVoiceConnector{}
+	manager := NewManager(
+		fakeResolver{track: Track{Title: "empty track"}},
+		eofStreamer{},
+		connector,
+		nil,
+	)
+
+	response, err := manager.Handle(context.Background(), Request{
+		GuildID:        "guild-1",
+		TextChannelID:  "channel-1",
+		UserID:         "user-1",
+		VoiceChannelID: "voice-1",
+		Intent: Intent{
+			Action: ActionPlay,
+			Query:  "empty track",
+		},
+	})
+	if !errors.Is(err, ErrTrackStreamFailed) {
+		t.Fatalf("expected EOF before audio to fail startup, got response=%+v err=%v", response, err)
+	}
+	if response.Content != "" || response.Title != "" {
+		t.Fatalf("failed startup should not return a success response: %+v", response)
+	}
+	if len(connector.sessions) != 1 {
+		t.Fatalf("expected one voice session attempt, got %+v", connector.sessions)
+	}
+	select {
+	case <-connector.sessions[0].closedCh:
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("expected empty startup to close the voice session")
 	}
 }
 

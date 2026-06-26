@@ -45,6 +45,7 @@ func TestDefaultRegistryDefinitionsAreValid(t *testing.T) {
 		"panda.manage_discord_role":    true,
 		"panda.manage_tool_access":     true,
 		"panda.manage_prompt":          true,
+		"panda.manage_safety":          true,
 		"panda.manage_ops":             true,
 		"panda.manage_composed_tool":   true,
 		"panda.manage_schedule":        true,
@@ -93,6 +94,7 @@ func TestAdminSetupToolSchemasExposeNaturalLanguageFields(t *testing.T) {
 	assertToolSchemaContains("panda.manage_user_permission", "profile", "user_id", "member_user_id")
 	assertToolSchemaContains("panda.manage_channel_rule", "channel_name", "channel")
 	assertToolSchemaContains("panda.manage_tool_access", "tool_name", "tool_group", "role_name", "role", "target_type", "user_id", "member_user_id")
+	assertToolSchemaContains("panda.manage_safety", "action", "user_id", "member", "limit")
 	assertToolSchemaContains("panda.manage_prompt", "prompt", "instructions")
 	assertToolSchemaContains("panda.manage_soul", "soul", "enum", "status", "set", "update")
 	assertToolSchemaContains("panda.manage_music", "voice_channel_id", "voice_channel_name", "voice_channel", "vc")
@@ -754,6 +756,17 @@ func newToolAdminService(t *testing.T) *admin.Service {
 	budgets := repository.NewBudgetRepository(dataStore.DB)
 	members := repository.NewMemberRepository(dataStore.DB)
 	return admin.NewService(configs, usage, audit, memoryService, access, budgets, members)
+}
+
+func newToolSafetyRepository(t *testing.T) (*store.Store, *repository.UserSafetyRepository) {
+	t.Helper()
+	ctx := context.Background()
+	dataStore, err := store.Open(ctx, filepath.Join(t.TempDir(), "safety.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = dataStore.Close() })
+	return dataStore, repository.NewUserSafetyRepository(dataStore.DB)
 }
 
 type fakeAuditRecorder struct {
@@ -2135,6 +2148,72 @@ func TestExecutorCreatePrivateThreadUsesPrivateThreadPermission(t *testing.T) {
 	confirmedPermissions := strings.Join(provider.requests[0].Permissions, ",")
 	if !strings.Contains(confirmedPermissions, "CREATE_PRIVATE_THREADS") || strings.Contains(confirmedPermissions, "CREATE_PUBLIC_THREADS") {
 		t.Fatalf("confirmed private thread should use private permission, got %+v", provider.requests[0].Permissions)
+	}
+}
+
+func TestExecutorReadsUserSafetyStatus(t *testing.T) {
+	ctx := context.Background()
+	registry, err := NewDefaultRegistry()
+	if err != nil {
+		t.Fatalf("NewDefaultRegistry: %v", err)
+	}
+	_, safety := newToolSafetyRepository(t)
+	if _, err := safety.AddStrike(ctx, "guild-1", "100000000000000222", 3, 10*time.Minute, time.Date(2026, time.June, 25, 18, 0, 0, 0, time.UTC)); err != nil {
+		t.Fatalf("AddStrike: %v", err)
+	}
+	executor := NewExecutor(registry, nil, nil).WithUserSafetyRepository(safety)
+	access := testAccess(ToolPolicyAdminOnly, admin.PermissionAdminAuditRead)
+	names := toolNames(executor.OpenRouterTools(access))
+	if !names["panda_manage_safety"] {
+		t.Fatalf("expected safety status tool to be exposed, got %+v", names)
+	}
+	moderatorNames := toolNames(executor.OpenRouterTools(testAccess(ToolPolicyModerator, admin.PermissionModerationUse)))
+	if !moderatorNames["panda_manage_safety"] {
+		t.Fatalf("expected safety status tool to be exposed for moderators, got %+v", moderatorNames)
+	}
+
+	result, err := executor.Execute(ctx, ExecutionRequest{
+		GuildID: "guild-1",
+		ActorID: "admin-1",
+		Access:  access,
+		Call: llm.ToolCall{
+			ID:   "call-safety-status",
+			Type: "function",
+			Function: llm.ToolCallFunction{
+				Name:      "panda_manage_safety",
+				Arguments: `{"action":"status","user":"<@100000000000000222>"}`,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Execute safety status: %v", err)
+	}
+	for _, want := range []string{`"user_id":"100000000000000222"`, `"active_strikes":1`, `"total_strikes":1`, `"timed_out":false`} {
+		if !strings.Contains(result.Message.Content, want) {
+			t.Fatalf("expected safety status payload %s, got %s", want, result.Message.Content)
+		}
+	}
+
+	missing, err := executor.Execute(ctx, ExecutionRequest{
+		GuildID: "guild-1",
+		ActorID: "admin-1",
+		Access:  access,
+		Call: llm.ToolCall{
+			ID:   "call-missing-safety-status",
+			Type: "function",
+			Function: llm.ToolCallFunction{
+				Name:      "panda_manage_safety",
+				Arguments: `{"action":"status","user_id":"100000000000000333"}`,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Execute missing safety status: %v", err)
+	}
+	for _, want := range []string{`"user_id":"100000000000000333"`, `"active_strikes":0`, `"total_strikes":0`} {
+		if !strings.Contains(missing.Message.Content, want) {
+			t.Fatalf("expected empty safety status payload %s, got %s", want, missing.Message.Content)
+		}
 	}
 }
 

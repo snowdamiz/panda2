@@ -163,6 +163,7 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 		WithImageGenerator(openRouterImages).
 		WithImageAnalyzer(openRouterImages).
 		WithGIFFrameExtractor(tools.NewFFmpegGIFFrameExtractor(musicSidecars)).
+		WithUserSafetyRepository(userSafety).
 		WithBilling(billingService).
 		WithOpsManager(opsService)
 	composedService := composed.NewService(composedRepo, toolRegistry, toolExecutor, openRouter, cfg.OpenRouterModel).

@@ -105,7 +105,7 @@ func (c *OpenRouterClient) Chat(ctx context.Context, request ChatRequest) (ChatR
 		slog.Bool("provider_allow_fallbacks", payload.ProviderAllowFallbacks()),
 		slog.Bool("provider_require_parameters", payload.Provider != nil && payload.Provider.RequireParameters),
 		slog.Bool("structured_outputs", payload.StructuredOutputs != nil && *payload.StructuredOutputs),
-		slog.Bool("tool_choice_present", false),
+		slog.Bool("tool_choice_present", request.ToolChoice != nil),
 	)
 
 	data, err := c.post(ctx, "/chat/completions", body)
@@ -156,7 +156,7 @@ func (c *OpenRouterClient) StreamChat(ctx context.Context, request ChatRequest, 
 		slog.Bool("provider_allow_fallbacks", payload.ProviderAllowFallbacks()),
 		slog.Bool("provider_require_parameters", payload.Provider != nil && payload.Provider.RequireParameters),
 		slog.Bool("structured_outputs", payload.StructuredOutputs != nil && *payload.StructuredOutputs),
-		slog.Bool("tool_choice_present", false),
+		slog.Bool("tool_choice_present", request.ToolChoice != nil),
 	)
 
 	builder := chatStreamBuilder{fallbackModel: request.Model}
@@ -181,6 +181,7 @@ func (c *OpenRouterClient) chatCompletionPayload(request ChatRequest) chatComple
 		Model:          request.Model,
 		Messages:       request.Messages,
 		Tools:          request.Tools,
+		ToolChoice:     request.ToolChoice,
 		ResponseFormat: request.ResponseFormat,
 		Temperature:    request.Temperature,
 		MaxTokens:      request.MaxTokens,
@@ -194,7 +195,7 @@ func (c *OpenRouterClient) chatCompletionPayload(request ChatRequest) chatComple
 }
 
 func (c *OpenRouterClient) providerPreferences(request ChatRequest) *providerPreferences {
-	requireParameters := len(request.Tools) > 0 || request.ResponseFormat != nil
+	requireParameters := len(request.Tools) > 0 || request.ToolChoice != nil || request.ResponseFormat != nil
 	order := normalizeStringList(c.providerOrder)
 	if len(order) == 0 && !requireParameters {
 		return nil
@@ -544,6 +545,7 @@ type chatCompletionRequest struct {
 	Model             string               `json:"model"`
 	Messages          []Message            `json:"messages"`
 	Tools             []Tool               `json:"tools,omitempty"`
+	ToolChoice        *ToolChoice          `json:"tool_choice,omitempty"`
 	ResponseFormat    *ResponseFormat      `json:"response_format,omitempty"`
 	StructuredOutputs *bool                `json:"structured_outputs,omitempty"`
 	Provider          *providerPreferences `json:"provider,omitempty"`

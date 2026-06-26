@@ -225,7 +225,6 @@ func (m *Manager) play(ctx context.Context, request Request) (Response, error) {
 	track.RequestedBy = request.UserID
 	track.TextChannelID = request.TextChannelID
 	player := m.player(request.GuildID)
-	player.loadPersistedQueue(ctx)
 	response, err := player.enqueue(ctx, track, request.VoiceChannelID)
 	if err != nil {
 		m.logger.Warn("music voice enqueue failed", slog.Any("err", err), slog.String("guild_id", request.GuildID), slog.String("voice_channel_id", request.VoiceChannelID), slog.String("track", track.Title))
@@ -252,10 +251,8 @@ func (m *Manager) skipPlay(ctx context.Context, request Request) (Response, erro
 	player := m.existingPlayer(request.GuildID)
 	if player == nil {
 		player = m.player(request.GuildID)
-		player.loadPersistedQueue(ctx)
 		return player.enqueue(ctx, track, request.VoiceChannelID)
 	}
-	player.loadPersistedQueue(ctx)
 	response, err := player.skipAndPlay(ctx, track, request.VoiceChannelID)
 	if err != nil {
 		m.logger.Warn("music skip-and-play failed", slog.Any("err", err), slog.String("guild_id", request.GuildID), slog.String("voice_channel_id", request.VoiceChannelID), slog.String("track", track.Title))
@@ -522,11 +519,11 @@ type guildPlayer struct {
 	paused         bool
 	stopping       bool
 	trackCancel    context.CancelFunc
+	nextStart      chan error
 
 	emptyDisconnectTimer *time.Timer
 	emptyDisconnectToken *emptyDisconnectToken
 	emptySkipWaitUntil   time.Time
-	loadedPersisted      bool
 	skipVotes            map[string]struct{}
 }
 
@@ -607,7 +604,11 @@ func (p *guildPlayer) run(firstStart chan<- error) {
 		p.skipVotes = map[string]struct{}{}
 		p.mu.Unlock()
 
-		err := p.playTrack(ctx, track, firstStart)
+		started := firstStart
+		if started == nil {
+			started = p.takeNextStartWaiter()
+		}
+		err := p.playTrack(ctx, track, started)
 		firstStart = nil
 		cancel()
 
@@ -849,17 +850,31 @@ func (p *guildPlayer) skipAndPlay(ctx context.Context, track Track, voiceChannel
 	}
 	skippedTitle := trackTitle(*p.current)
 	cancel := p.trackCancel
+	if cancel == nil {
+		p.mu.Unlock()
+		return Response{}, ErrTrackStreamFailed
+	}
+	started := make(chan error, 1)
+	previousStart := p.nextStart
 	p.queueItems = append([]Track{track}, p.queueItems...)
 	p.paused = false
 	p.emptySkipWaitUntil = time.Time{}
+	p.nextStart = started
 	snapshot := append([]Track(nil), p.queueItems...)
 	p.mu.Unlock()
 
+	signalPlaybackStart(previousStart, context.Canceled)
 	p.persistQueueSnapshot(snapshot)
-	if cancel != nil {
-		cancel()
+	cancel()
+	select {
+	case err := <-started:
+		if err != nil {
+			return Response{}, err
+		}
+	case <-ctx.Done():
+		return Response{}, ctx.Err()
 	}
-	return trackResponse("Track replaced", fmt.Sprintf("Skipped **%s** and started buffering **%s**.", skippedTitle, trackTitle(track)), track), nil
+	return trackResponse("Track replaced", fmt.Sprintf("Skipped **%s** and started **%s**.", skippedTitle, trackTitle(track)), track), nil
 }
 
 func (p *guildPlayer) stop(ctx context.Context) (Response, error) {
@@ -871,10 +886,13 @@ func (p *guildPlayer) stop(ctx context.Context) (Response, error) {
 	p.stopping = true
 	timer := p.clearEmptyVoiceDisconnectLocked()
 	cancel := p.trackCancel
+	nextStart := p.nextStart
+	p.nextStart = nil
 	p.mu.Unlock()
 	if timer != nil {
 		timer.Stop()
 	}
+	signalPlaybackStart(nextStart, context.Canceled)
 	if cancel != nil {
 		cancel()
 	}
@@ -1057,29 +1075,6 @@ func (p *guildPlayer) allTracks() []Track {
 	return tracks
 }
 
-func (p *guildPlayer) loadPersistedQueue(ctx context.Context) {
-	if p.manager.store == nil {
-		return
-	}
-	p.mu.Lock()
-	if p.loadedPersisted || len(p.queueItems) > 0 || p.playing {
-		p.mu.Unlock()
-		return
-	}
-	p.loadedPersisted = true
-	p.mu.Unlock()
-	items, err := p.manager.store.Queue(ctx, p.guildID)
-	if err != nil || len(items) == 0 {
-		return
-	}
-	tracks := tracksFromQueueItems(items)
-	p.mu.Lock()
-	if len(p.queueItems) == 0 && !p.playing {
-		p.queueItems = tracks
-	}
-	p.mu.Unlock()
-}
-
 func (p *guildPlayer) loopCompletedTrack(track Track) {
 	if p.manager.store == nil {
 		return
@@ -1113,13 +1108,23 @@ func (p *guildPlayer) persistQueueSnapshot(tracks []Track) {
 		return
 	}
 	items := queueItemsFromTracks(tracks)
-	_ = p.manager.store.ReplaceQueue(context.Background(), p.guildID, items)
+	if err := p.manager.store.ReplaceQueue(context.Background(), p.guildID, items); err != nil {
+		p.manager.logger.Warn("music queue persist failed", slog.Any("err", err), slog.String("guild_id", p.guildID), slog.Int("track_count", len(tracks)))
+	}
 }
 
 func (p *guildPlayer) currentSession() VoiceSession {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.session
+}
+
+func (p *guildPlayer) takeNextStartWaiter() chan error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	started := p.nextStart
+	p.nextStart = nil
+	return started
 }
 
 func (p *guildPlayer) activeVoiceChannelID() string {

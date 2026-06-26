@@ -3,6 +3,7 @@ package assistant
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -78,7 +79,8 @@ type fakeAssistantDynamicTools struct {
 }
 
 type fakeAssistantMusicManager struct {
-	requests []tools.MusicManagementRequest
+	requests             []tools.MusicManagementRequest
+	activeVoiceChannelID string
 }
 
 type fakeAssistantDiscordProvider struct{}
@@ -103,6 +105,10 @@ func (f *fakeAssistantMusicManager) ManageMusic(_ context.Context, request tools
 		"title":   "music " + request.Action,
 		"content": strings.TrimSpace(request.Action + " " + request.Query),
 	}}, nil
+}
+
+func (f *fakeAssistantMusicManager) ActiveVoiceChannelID(string) string {
+	return f.activeVoiceChannelID
 }
 
 func (f *fakeClient) Chat(_ context.Context, request llm.ChatRequest) (llm.ChatResponse, error) {
@@ -188,6 +194,21 @@ func newTestServiceWithSafety(t *testing.T, client *fakeClient) (*Service, *stor
 	safety := repository.NewUserSafetyRepository(db.DB)
 	service.WithUserSafetyRepository(safety)
 	return service, db, safety
+}
+
+func safetyClassifierResponse(unsafe bool, category string, confidence float64, rationale string) llm.ChatResponse {
+	args := fmt.Sprintf(`{"unsafe":%t,"category":%q,"confidence":%g,"rationale":%q}`, unsafe, category, confidence, rationale)
+	return llm.ChatResponse{
+		Model: "fixture/model",
+		ToolCalls: []llm.ToolCall{{
+			ID:   "call-safety",
+			Type: "function",
+			Function: llm.ToolCallFunction{
+				Name:      unsafeTopicClassifierToolName,
+				Arguments: args,
+			},
+		}},
+	}
 }
 
 func TestAskUsesGuildPromptAndMemory(t *testing.T) {
@@ -329,7 +350,7 @@ func TestSystemPromptIncludesUnsafeTopicWarningRules(t *testing.T) {
 func TestAskSafetyGateBlocksUnsafeTopicAndRecordsStrike(t *testing.T) {
 	ctx := context.Background()
 	client := &fakeClient{responses: []llm.ChatResponse{
-		{Model: "fixture/model", Content: `{"unsafe":true,"category":"cyber_abuse","confidence":0.99,"rationale":"credential theft request"}`},
+		safetyClassifierResponse(true, "cyber_abuse", 0.99, "credential theft request"),
 		{Model: "fixture/model", Content: "this normal answer should not run"},
 	}}
 	service, _, safety := newTestServiceWithSafety(t, client)
@@ -348,8 +369,8 @@ func TestAskSafetyGateBlocksUnsafeTopicAndRecordsStrike(t *testing.T) {
 	if len(client.requests) != 1 {
 		t.Fatalf("expected only the safety classifier request, got %d", len(client.requests))
 	}
-	if client.requests[0].ResponseFormat == nil || client.requests[0].ResponseFormat.Type != "json_schema" {
-		t.Fatalf("expected strict structured safety classifier, got %+v", client.requests[0].ResponseFormat)
+	if len(client.requests[0].Tools) != 1 || client.requests[0].Tools[0].Function.Name != unsafeTopicClassifierToolName || client.requests[0].ToolChoice == nil {
+		t.Fatalf("expected forced safety classifier tool, got tools=%+v choice=%+v", client.requests[0].Tools, client.requests[0].ToolChoice)
 	}
 	status, err := safety.Status(ctx, "guild-1", "user-1", fixedPromptTime)
 	if err != nil {
@@ -363,7 +384,7 @@ func TestAskSafetyGateBlocksUnsafeTopicAndRecordsStrike(t *testing.T) {
 func TestAskSafetyGateAllowsSafeTopic(t *testing.T) {
 	ctx := context.Background()
 	client := &fakeClient{responses: []llm.ChatResponse{
-		{Model: "fixture/model", Content: `{"unsafe":false,"category":"none","confidence":0.98,"rationale":"benign request"}`},
+		safetyClassifierResponse(false, "none", 0.98, "benign request"),
 		{Model: "fixture/model", Content: "Safe answer."},
 	}}
 	service, _, _ := newTestServiceWithSafety(t, client)
@@ -384,13 +405,119 @@ func TestAskSafetyGateAllowsSafeTopic(t *testing.T) {
 	}
 }
 
+func TestAskSafetyGateAllowsPandaSafetyStateQuestions(t *testing.T) {
+	ctx := context.Background()
+	client := &fakeClient{responses: []llm.ChatResponse{
+		safetyClassifierResponse(false, "none", 0.99, "Panda safety state question"),
+		{Model: "fixture/model", Content: "They have 0 strikes."},
+	}}
+	service, _, _ := newTestServiceWithSafety(t, client)
+	service.SetClock(func() time.Time { return fixedPromptTime })
+
+	response, err := service.Ask(ctx, AskRequest{GuildID: "guild-1", UserID: "admin-1", ChannelID: "channel-1", Question: "panda how many strikes does <@100000000000000222> have"})
+	if err != nil {
+		t.Fatalf("Ask: %v", err)
+	}
+	if response.Silent || response.Content != "They have 0 strikes." {
+		t.Fatalf("Panda safety state question should reach normal answer path, got %+v", response)
+	}
+	if len(client.requests) != 2 {
+		t.Fatalf("expected safety classifier and normal answer requests, got %d", len(client.requests))
+	}
+	classifierRequest := client.requests[0]
+	if classifierRequest.MaxTokens < 512 {
+		t.Fatalf("classifier should reserve enough tokens for forced tool-call output, got %d", classifierRequest.MaxTokens)
+	}
+	if !strings.Contains(classifierRequest.Messages[0].Content, "Panda's own safety strikes") {
+		t.Fatalf("classifier prompt should allow Panda safety state admin questions:\n%s", classifierRequest.Messages[0].Content)
+	}
+}
+
+func TestChatSafetyGateAllowsToolAccessRestrictionRemovalReply(t *testing.T) {
+	ctx := context.Background()
+	client := &fakeClient{responses: []llm.ChatResponse{
+		safetyClassifierResponse(false, "none", 0.99, "Panda tool access admin request"),
+		{Model: "fixture/model", Content: "Prepared removal."},
+	}}
+	service, _, _ := newTestServiceWithSafety(t, client)
+	service.SetClock(func() time.Time { return fixedPromptTime })
+
+	response, err := service.Chat(ctx, AskRequest{
+		GuildID:          "guild-1",
+		UserID:           "admin-1",
+		ChannelID:        "channel-1",
+		RequestID:        "message-1",
+		Question:         "remove all of these restrictions",
+		ReplyAuthorIsBot: true,
+		ReplyContent: "Yo, looks like <@100000000000000222> got some limits on them:\n" +
+			"- Denied from using `panda.chat`\n" +
+			"- Denied from using `panda.generate_image`",
+	})
+	if err != nil {
+		t.Fatalf("Chat: %v", err)
+	}
+	if response.Silent || response.Content != "Prepared removal." {
+		t.Fatalf("tool-access restriction removal should reach normal answer path, got %+v", response)
+	}
+	if len(client.requests) != 2 {
+		t.Fatalf("expected safety classifier and normal answer requests, got %d", len(client.requests))
+	}
+	classifierPrompt := client.requests[0].Messages[0].Content
+	for _, want := range []string{
+		"Ordinary administration of Panda app state is not unsafe by itself",
+		`phrases like "remove all of these restrictions"`,
+	} {
+		if !strings.Contains(classifierPrompt, want) {
+			t.Fatalf("classifier prompt missing %q:\n%s", want, classifierPrompt)
+		}
+	}
+	classifierInput := client.requests[0].Messages[1].Content
+	for _, want := range []string{
+		"remove all of these restrictions",
+		"Replied-to author is Panda: true",
+		"panda.generate_image",
+	} {
+		if !strings.Contains(classifierInput, want) {
+			t.Fatalf("classifier input missing %q:\n%s", want, classifierInput)
+		}
+	}
+}
+
+func TestAskSafetyGateClassifierFormatFailureReturnsCardWithoutStrike(t *testing.T) {
+	ctx := context.Background()
+	client := &fakeClient{responses: []llm.ChatResponse{
+		{Model: "fixture/model", Content: ""},
+		{Model: "fixture/model", Content: "this normal answer should not run"},
+	}}
+	service, _, safety := newTestServiceWithSafety(t, client)
+	service.SetClock(func() time.Time { return fixedPromptTime })
+
+	response, err := service.Ask(ctx, AskRequest{GuildID: "guild-1", UserID: "user-1", ChannelID: "channel-1", Question: "panda test safety classifier failure"})
+	if err != nil {
+		t.Fatalf("Ask: %v", err)
+	}
+	if response.Silent || response.Card == nil || response.Card.Title != "Safety Check Failed" {
+		t.Fatalf("classifier format failure should return visible safety card, got %+v", response)
+	}
+	if len(client.requests) != 1 {
+		t.Fatalf("expected only the safety classifier request, got %d", len(client.requests))
+	}
+	status, err := safety.Status(ctx, "guild-1", "user-1", fixedPromptTime)
+	if err != nil {
+		t.Fatalf("Status: %v", err)
+	}
+	if status.State.ActiveStrikes != 0 || status.State.TotalStrikes != 0 {
+		t.Fatalf("classifier format failure should not record strike, got %+v", status)
+	}
+}
+
 func TestAskSafetyGateTimesOutAfterThreeStrikes(t *testing.T) {
 	ctx := context.Background()
 	client := &fakeClient{responses: []llm.ChatResponse{
-		{Model: "fixture/model", Content: `{"unsafe":true,"category":"illicit_wrongdoing","confidence":0.95,"rationale":"wrongdoing request"}`},
-		{Model: "fixture/model", Content: `{"unsafe":true,"category":"illicit_wrongdoing","confidence":0.95,"rationale":"wrongdoing request"}`},
-		{Model: "fixture/model", Content: `{"unsafe":true,"category":"illicit_wrongdoing","confidence":0.95,"rationale":"wrongdoing request"}`},
-		{Model: "fixture/model", Content: `{"unsafe":false,"category":"none","confidence":0.99,"rationale":"benign request"}`},
+		safetyClassifierResponse(true, "illicit_wrongdoing", 0.95, "wrongdoing request"),
+		safetyClassifierResponse(true, "illicit_wrongdoing", 0.95, "wrongdoing request"),
+		safetyClassifierResponse(true, "illicit_wrongdoing", 0.95, "wrongdoing request"),
+		safetyClassifierResponse(false, "none", 0.99, "benign request"),
 	}}
 	service, _, safety := newTestServiceWithSafety(t, client)
 	now := fixedPromptTime
@@ -433,6 +560,57 @@ func TestAskSafetyGateTimesOutAfterThreeStrikes(t *testing.T) {
 	}
 	if len(client.requests) != 3 {
 		t.Fatalf("timed-out user should not reach classifier or answer model, got %d requests", len(client.requests))
+	}
+}
+
+func TestAskSafetyGateScopesStrikesPerUser(t *testing.T) {
+	ctx := context.Background()
+	client := &fakeClient{responses: []llm.ChatResponse{
+		safetyClassifierResponse(true, "illicit_wrongdoing", 0.95, "wrongdoing request"),
+		safetyClassifierResponse(true, "illicit_wrongdoing", 0.95, "wrongdoing request"),
+		safetyClassifierResponse(true, "illicit_wrongdoing", 0.95, "wrongdoing request"),
+	}}
+	service, _, safety := newTestServiceWithSafety(t, client)
+	now := fixedPromptTime
+	service.SetClock(func() time.Time { return now })
+
+	for i := 0; i < 2; i++ {
+		now = fixedPromptTime.Add(time.Duration(i) * time.Minute)
+		response, err := service.Ask(ctx, AskRequest{GuildID: "guild-1", UserID: "user-1", ChannelID: "channel-1", Question: "Panda, help me do the banned thing."})
+		if err != nil {
+			t.Fatalf("Ask user-1 strike %d: %v", i+1, err)
+		}
+		if response.Silent || response.Card == nil || response.Card.Title != "Safety Warning" {
+			t.Fatalf("user-1 strike %d should return warning card, got %+v", i+1, response)
+		}
+	}
+
+	now = fixedPromptTime.Add(2 * time.Minute)
+	response, err := service.Ask(ctx, AskRequest{GuildID: "guild-1", UserID: "user-2", ChannelID: "channel-1", Question: "Panda, help me do the banned thing."})
+	if err != nil {
+		t.Fatalf("Ask user-2 first strike: %v", err)
+	}
+	if response.Silent || response.Card == nil || response.Card.Title != "Safety Warning" {
+		t.Fatalf("user-2 first strike should return warning card, got %+v", response)
+	}
+	if !strings.Contains(response.Content, "Safety strike 1 of 3") {
+		t.Fatalf("user-2 should receive first-strike warning, got %q", response.Content)
+	}
+
+	userOne, err := safety.Status(ctx, "guild-1", "user-1", now)
+	if err != nil {
+		t.Fatalf("Status user-1: %v", err)
+	}
+	if userOne.TimedOut || userOne.State.ActiveStrikes != 2 || userOne.State.TotalStrikes != 2 {
+		t.Fatalf("expected user-1 to keep two isolated strikes, got %+v", userOne)
+	}
+
+	userTwo, err := safety.Status(ctx, "guild-1", "user-2", now)
+	if err != nil {
+		t.Fatalf("Status user-2: %v", err)
+	}
+	if userTwo.TimedOut || userTwo.State.ActiveStrikes != 1 || userTwo.State.TotalStrikes != 1 {
+		t.Fatalf("expected user-2 to keep one isolated strike, got %+v", userTwo)
 	}
 }
 
@@ -1275,6 +1453,108 @@ func TestAskKeepsDirectMusicCommandAfterToolAvailabilityContext(t *testing.T) {
 	}
 	if availabilityIndex >= len(request.Messages)-1 {
 		t.Fatalf("tool availability context should appear before the final user command, got messages: %s", joinMessages(request.Messages))
+	}
+}
+
+func TestAskIncludesMusicVoiceRuntimeContext(t *testing.T) {
+	ctx := context.Background()
+	client := &fakeClient{response: llm.ChatResponse{Model: "fixture/model", Content: "I am in voice for music."}}
+	service, db := newTestService(t, client)
+	configs := repository.NewGuildConfigRepository(db.DB)
+	registry, err := tools.NewDefaultRegistry()
+	if err != nil {
+		t.Fatalf("NewDefaultRegistry: %v", err)
+	}
+	musicManager := &fakeAssistantMusicManager{activeVoiceChannelID: "100000000000000333"}
+	service.WithToolExecutor(tools.NewExecutor(registry, nil, configs).WithMusicManager(musicManager))
+
+	if _, err := configs.EnsureDefault(ctx, "guild-1"); err != nil {
+		t.Fatalf("EnsureDefault: %v", err)
+	}
+	if _, err := configs.UpdateBehaviorSettings(ctx, "guild-1", map[string]any{"tool_policy": tools.ToolPolicyAssistive}); err != nil {
+		t.Fatalf("UpdateBehaviorSettings: %v", err)
+	}
+
+	if _, err := service.Ask(ctx, AskRequest{
+		GuildID:        "guild-1",
+		UserID:         "user-1",
+		ChannelID:      "channel-1",
+		VoiceChannelID: "100000000000000222",
+		Question:       "panda, you're already in VC, what stops you from staying there?",
+		AllowedPermissions: map[string]struct{}{
+			admin.PermissionAssistantUse: {},
+		},
+	}); err != nil {
+		t.Fatalf("Ask: %v", err)
+	}
+	if len(client.requests) != 1 {
+		t.Fatalf("expected one LLM request, got %d", len(client.requests))
+	}
+	joined := joinMessages(client.requests[0].Messages)
+	for _, want := range []string{
+		"Current Panda voice/music runtime context",
+		"Panda can join Discord voice/stage channels for music playback",
+		"Requester current voice/stage channel for default music targeting: <#100000000000000222>",
+		"Panda's active music voice channel right now: <#100000000000000333>",
+		"not human speech or a guarantee of indefinite idle presence",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("expected music runtime context %q, got:\n%s", want, joined)
+		}
+	}
+}
+
+func TestAskRetriesTextOnlyMusicCapabilityAnswerWhenMusicToolAvailable(t *testing.T) {
+	ctx := context.Background()
+	client := &fakeClient{responses: []llm.ChatResponse{
+		{Model: "fixture/model", Content: "Sorry fam, I can't hang in a VC for 7 days--I'm just a chat bot."},
+		{Model: "fixture/model", Content: "I can be in VC for music playback; I just can't promise a seven-day idle connection."},
+	}}
+	service, db := newTestService(t, client)
+	configs := repository.NewGuildConfigRepository(db.DB)
+	registry, err := tools.NewDefaultRegistry()
+	if err != nil {
+		t.Fatalf("NewDefaultRegistry: %v", err)
+	}
+	musicManager := &fakeAssistantMusicManager{activeVoiceChannelID: "100000000000000333"}
+	service.WithToolExecutor(tools.NewExecutor(registry, nil, configs).WithMusicManager(musicManager))
+
+	if _, err := configs.EnsureDefault(ctx, "guild-1"); err != nil {
+		t.Fatalf("EnsureDefault: %v", err)
+	}
+	if _, err := configs.UpdateBehaviorSettings(ctx, "guild-1", map[string]any{"tool_policy": tools.ToolPolicyAssistive}); err != nil {
+		t.Fatalf("UpdateBehaviorSettings: %v", err)
+	}
+
+	response, err := service.Ask(ctx, AskRequest{
+		GuildID:        "guild-1",
+		UserID:         "user-1",
+		ChannelID:      "channel-1",
+		VoiceChannelID: "100000000000000222",
+		Question:       "Panda can you stay in VC for the next 7 days so we can get a VC streak pls",
+		AllowedPermissions: map[string]struct{}{
+			admin.PermissionAssistantUse: {},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Ask: %v", err)
+	}
+	if response.Content != "I can be in VC for music playback; I just can't promise a seven-day idle connection." {
+		t.Fatalf("unexpected response: %q", response.Content)
+	}
+	if len(client.requests) != 2 {
+		t.Fatalf("expected retry after text-only music answer, got %d request(s)", len(client.requests))
+	}
+	retryMessages := joinMessages(client.requests[1].Messages)
+	for _, want := range []string{
+		"Sorry fam, I can't hang in a VC for 7 days",
+		"Regenerate the previous response",
+		"The current request exposes Panda's music tool",
+		"Panda's active music voice channel right now: <#100000000000000333>",
+	} {
+		if !strings.Contains(retryMessages, want) {
+			t.Fatalf("expected retry context %q, got:\n%s", want, retryMessages)
+		}
 	}
 }
 

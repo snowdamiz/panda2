@@ -702,8 +702,10 @@ func (s *Service) completeWithToolsWithOptions(ctx context.Context, config store
 	availableToolNames := llmToolNames(request.Tools)
 	_, imagePermissionAllowed := access.Permissions[admin.PermissionAssistantImageGeneration]
 	imageRuntime := tools.ImageRuntimeDiagnostics{}
+	musicRuntime := tools.MusicRuntimeContext{}
 	if s.toolExecutor != nil {
 		imageRuntime = s.toolExecutor.ImageRuntimeDiagnostics()
+		musicRuntime = s.toolExecutor.MusicRuntimeContext(config.GuildID)
 	}
 	slog.Info("assistant tool exposure prepared",
 		slog.String("guild_id", config.GuildID),
@@ -722,10 +724,17 @@ func (s *Service) completeWithToolsWithOptions(ctx context.Context, config store
 		slog.Bool("gif_frame_extractor_present", imageRuntime.HasGIFFrameExtractor),
 		slog.Bool("generate_image_tool_exposed", stringSliceContains(availableToolNames, "panda_generate_image")),
 		slog.Bool("inspect_image_tool_exposed", stringSliceContains(availableToolNames, "panda_inspect_image")),
+		slog.Bool("music_tool_exposed", stringSliceContains(availableToolNames, "panda_manage_music")),
+		slog.Bool("music_manager_configured", musicRuntime.MusicManagerConfigured),
+		slog.String("requester_voice_channel_id", toolContext.VoiceChannelID),
+		slog.String("active_music_voice_channel_id", musicRuntime.ActiveVoiceChannelID),
 		slog.Any("available_tool_names", availableToolNames),
 	)
 	availabilityMessage := toolAvailabilityMessage(request.Tools, access)
 	request.Messages = insertSystemBeforeLatestUser(request.Messages, availabilityMessage)
+	if musicRuntimeMessage := musicRuntimeContextMessage(config.GuildID, toolContext, request.Tools, musicRuntime); musicRuntimeMessage != "" {
+		request.Messages = insertSystemBeforeLatestUser(request.Messages, musicRuntimeMessage)
+	}
 
 	var confirmations []InteractionConfirmation
 	var card *ToolCard
@@ -736,6 +745,7 @@ func (s *Service) completeWithToolsWithOptions(ctx context.Context, config store
 	usedWebSearch := false
 	staleCapabilityRetryUsed := false
 	imageToolRoutingRetryUsed := false
+	musicCapabilityRetryUsed := false
 
 	for round := 0; ; round++ {
 		response, silent, err := s.chatCompletionForRound(ctx, config, request, round, options)
@@ -821,6 +831,26 @@ func (s *Service) completeWithToolsWithOptions(ctx context.Context, config store
 				messages = append(messages,
 					llm.Message{Role: "assistant", Content: sanitizePromptInput(response.Content)},
 					llm.Message{Role: "system", Content: staleCapabilityAnswerRetryPrompt()},
+				)
+				request.Messages = messages
+				continue
+			}
+			if !musicCapabilityRetryUsed && shouldRetryMusicCapabilityAnswer(response.Content, availableToolNames) {
+				musicCapabilityRetryUsed = true
+				slog.Warn("assistant music capability answer retrying",
+					slog.String("guild_id", config.GuildID),
+					slog.String("channel_id", toolContext.ChannelID),
+					slog.String("request_id", toolContext.RequestID),
+					slog.String("user_id", toolContext.ActorID),
+					slog.Int("round", round),
+					slog.String("requester_voice_channel_id", toolContext.VoiceChannelID),
+					slog.String("active_music_voice_channel_id", musicRuntime.ActiveVoiceChannelID),
+					slog.Any("capability_flags", assistantMusicCapabilityFlags(response.Content)),
+				)
+				messages := append([]llm.Message{}, request.Messages...)
+				messages = append(messages,
+					llm.Message{Role: "assistant", Content: sanitizePromptInput(response.Content)},
+					llm.Message{Role: "system", Content: musicCapabilityAnswerRetryPrompt()},
 				)
 				request.Messages = messages
 				continue
@@ -1045,7 +1075,7 @@ func stripNaturalGateMarkerPrefix(content string) string {
 }
 
 func standaloneCardFollowupPrompt() string {
-	return "A structured tool result may be rendered as a Discord card. Do not repeat or reformat that card status in final prose. Compare the completed tools against the original user request: if any independent part remains unresolved and a suitable tool is available, call that tool before final prose. Use an available web/search/current-information tool such as web_search for requests involving latest/current prices, stocks, news, scores, schedules, releases, or other time-sensitive facts; do not answer those from memory or omit them. A music/control card only completes the music/control part and never completes a separate lookup, question, or admin instruction. If no non-card work remains, keep final prose empty. Do not include natural response gate markers such as <panda_respond> or <panda_ignore>."
+	return "A structured tool result may be rendered as a Discord card. Do not repeat or reformat that card status in final prose. Compare the completed tools against the original user request: if any independent part remains unresolved and a suitable tool is available, call that tool before final prose. Use an available web/search/current-information tool such as web_search for requests involving latest/current prices, stocks, news, scores, schedules, releases, or other time-sensitive facts; do not answer those from memory or omit them. A music/control card only completes the music/control part and never completes a separate lookup, question, or admin instruction. If no non-card work remains, keep final prose empty; do not emit ellipses, punctuation-only filler, or status words as a placeholder. Do not include natural response gate markers such as <panda_respond> or <panda_ignore>."
 }
 
 func generatedMediaFollowupPrompt() string {
@@ -1171,6 +1201,60 @@ func shouldRetryStaleCapabilityAnswer(content string) bool {
 
 func staleCapabilityAnswerRetryPrompt() string {
 	return "Regenerate the previous answer. It copied stale capability wording from earlier chat history or named an internal listing/debug action. Ignore older conversation history for this answer. Preserve the original user's intent: if they asked for an action, use the relevant current function tool or answer that action request; only answer in natural user-facing capability categories when the original user explicitly asked what Panda can do. Use only the current user-scoped capability overview and current function definitions. Do not include internal listing/debug helpers as capabilities, and do not reduce capability answers to a tiny counted set."
+}
+
+func shouldRetryMusicCapabilityAnswer(content string, availableToolNames []string) bool {
+	if !stringSliceContains(availableToolNames, "panda_manage_music") {
+		return false
+	}
+	flags := assistantMusicCapabilityFlags(content)
+	if flags["positive_music_or_voice_boundary"] {
+		return false
+	}
+	return flags["text_only"] ||
+		flags["just_chat_bot"] ||
+		flags["no_voice_client"] ||
+		flags["cannot_use_voice"] ||
+		flags["cannot_play_music"] ||
+		flags["no_persistent_connection"]
+}
+
+func assistantMusicCapabilityFlags(content string) map[string]bool {
+	normalized := strings.ToLower(strings.TrimSpace(content))
+	return map[string]bool{
+		"text_only": strings.Contains(normalized, "text-only") ||
+			strings.Contains(normalized, "text only"),
+		"just_chat_bot": strings.Contains(normalized, "just a chat bot") ||
+			strings.Contains(normalized, "just a chatbot"),
+		"no_voice_client": strings.Contains(normalized, "no voice client") ||
+			strings.Contains(normalized, "without a voice client"),
+		"cannot_use_voice": strings.Contains(normalized, "can't join voice") ||
+			strings.Contains(normalized, "cannot join voice") ||
+			strings.Contains(normalized, "can't join a vc") ||
+			strings.Contains(normalized, "cannot join a vc") ||
+			strings.Contains(normalized, "can't hang in a vc") ||
+			strings.Contains(normalized, "cannot hang in a vc") ||
+			strings.Contains(normalized, "can't stay in vc") ||
+			strings.Contains(normalized, "cannot stay in vc") ||
+			strings.Contains(normalized, "can't stay in a vc") ||
+			strings.Contains(normalized, "cannot stay in a vc"),
+		"cannot_play_music": strings.Contains(normalized, "can't play music") ||
+			strings.Contains(normalized, "cannot play music") ||
+			strings.Contains(normalized, "can't do music") ||
+			strings.Contains(normalized, "cannot do music"),
+		"no_persistent_connection": strings.Contains(normalized, "no persistent connection"),
+		"positive_music_or_voice_boundary": strings.Contains(normalized, "can play music") ||
+			strings.Contains(normalized, "can join voice") ||
+			strings.Contains(normalized, "can join a vc") ||
+			strings.Contains(normalized, "music playback") ||
+			strings.Contains(normalized, "voice playback") ||
+			strings.Contains(normalized, "control playback") ||
+			strings.Contains(normalized, "manage music"),
+	}
+}
+
+func musicCapabilityAnswerRetryPrompt() string {
+	return "Regenerate the previous response. The current request exposes Panda's music tool, so do not say Panda is text-only, has no voice client, cannot use VC, or cannot play/control music. Distinguish Panda's supported Discord voice capability (joining voice/stage channels for music playback and controls) from unsupported claims like human speech in VC or a guaranteed indefinite idle connection. Use the current Panda voice/music runtime context in this request. If the latest user asked for a music/playback action, call the music tool; otherwise answer the VC/music capability boundary directly."
 }
 
 func shouldRetryImageToolRouting(content string, references []generated.ImageReference, availableToolNames []string) bool {
@@ -1841,6 +1925,55 @@ func markdownSourceLabel(rawURL string) string {
 
 func escapeMarkdownSourceLabel(label string) string {
 	return strings.NewReplacer("[", `\[`, "]", `\]`).Replace(label)
+}
+
+func musicRuntimeContextMessage(guildID string, toolContext toolExecutionContext, availableTools []llm.Tool, runtime tools.MusicRuntimeContext) string {
+	if !availableToolNamed(availableTools, "panda_manage_music") {
+		return ""
+	}
+	lines := []string{
+		"Current Panda voice/music runtime context:",
+		"- Music tool exposed for this request: yes. Panda can join Discord voice/stage channels for music playback and music controls; do not describe Panda as text-only, without a voice client, or unable to use VC/music.",
+	}
+	if voiceChannel := discordChannelReference(toolContext.VoiceChannelID); voiceChannel != "" {
+		lines = append(lines, "- Requester current voice/stage channel for default music targeting: "+voiceChannel+".")
+	} else {
+		lines = append(lines, "- Requester current voice/stage channel is unknown or unavailable; play requests without a target channel may need the user to join a VC or name one.")
+	}
+	if activeVoiceChannel := discordChannelReference(runtime.ActiveVoiceChannelID); activeVoiceChannel != "" {
+		lines = append(lines, "- Panda's active music voice channel right now: "+activeVoiceChannel+". Treat this as current runtime state, not chat history.")
+	} else if runtime.MusicManagerConfigured {
+		lines = append(lines, "- Panda has no active music voice session reported by the music manager right now.")
+	}
+	if strings.TrimSpace(guildID) != "" {
+		lines = append(lines, "- This voice/music state is scoped to the current Discord server.")
+	}
+	lines = append(lines, "- Voice support here means music playback/control, not human speech or a guarantee of indefinite idle presence. If asked to stay in VC or about a VC streak, answer from the active music voice state and this boundary instead of denying all VC capability.")
+	return strings.Join(lines, "\n")
+}
+
+func availableToolNamed(availableTools []llm.Tool, name string) bool {
+	name = strings.ToLower(strings.TrimSpace(name))
+	for _, tool := range availableTools {
+		toolName := strings.ToLower(strings.TrimSpace(tool.Function.Name))
+		if toolName == name {
+			return true
+		}
+	}
+	return false
+}
+
+func discordChannelReference(channelID string) string {
+	channelID = strings.TrimSpace(channelID)
+	if channelID == "" {
+		return ""
+	}
+	for _, char := range channelID {
+		if char < '0' || char > '9' {
+			return sanitizePromptInput(channelID)
+		}
+	}
+	return "<#" + channelID + ">"
 }
 
 func toolAvailabilityMessage(availableTools []llm.Tool, access tools.ToolAccess) string {

@@ -43,6 +43,7 @@ type ChatRequest struct {
 	Model          string
 	Messages       []Message
 	Tools          []Tool
+	ToolChoice     *ToolChoice
 	ResponseFormat *ResponseFormat
 	Temperature    float64
 	MaxTokens      int
@@ -68,6 +69,15 @@ type ToolFunction struct {
 	Name        string          `json:"name"`
 	Description string          `json:"description"`
 	Parameters  json.RawMessage `json:"parameters"`
+}
+
+type ToolChoice struct {
+	Type     string              `json:"type"`
+	Function *ToolChoiceFunction `json:"function,omitempty"`
+}
+
+type ToolChoiceFunction struct {
+	Name string `json:"name"`
 }
 
 type ToolCall struct {

@@ -2169,7 +2169,7 @@ func TestNaturalUserToolAccessRendersConfirmationThroughAgentTool(t *testing.T) 
 		IsGuildAdmin: true,
 		Options:      map[string]string{"message": "panda remove user-target from image tool access", "bot_mentioned": "true"},
 	})
-	if response.Confirmation == nil || response.Confirmation.ConfirmLabel != "Remove tool access" {
+	if response.Confirmation == nil || response.Confirmation.ConfirmLabel != "Remove panda.generate_image" {
 		t.Fatalf("expected user tool access confirmation, got %+v", response)
 	}
 	confirmationRequest, ok := RequestFromToolConfirmationID(response.Confirmation.ID, Request{UserID: "admin"})
@@ -2217,7 +2217,7 @@ func TestNaturalDenyNamedUserToolAccessResolvesMember(t *testing.T) {
 		IsGuildAdmin: true,
 		Options:      map[string]string{"message": "panda dont allow @xer0 to use image generation tool", "bot_mentioned": "true"},
 	})
-	if response.Confirmation == nil || response.Confirmation.ConfirmLabel != "Deny tool access" {
+	if response.Confirmation == nil || response.Confirmation.ConfirmLabel != "Deny panda.generate_image" {
 		t.Fatalf("expected deny tool access confirmation, got %+v", response)
 	}
 	confirmationRequest, ok := RequestFromToolConfirmationID(response.Confirmation.ID, Request{UserID: "admin"})
@@ -2262,7 +2262,7 @@ func TestNaturalDenyNamedUserChatAccessResolvesMember(t *testing.T) {
 		IsGuildAdmin: true,
 		Options:      map[string]string{"message": "panda don't respond to @xer0 for now", "bot_mentioned": "true"},
 	})
-	if response.Confirmation == nil || response.Confirmation.ConfirmLabel != "Deny tool access" {
+	if response.Confirmation == nil || response.Confirmation.ConfirmLabel != "Deny panda.chat" {
 		t.Fatalf("expected deny chat access confirmation, got %+v", response)
 	}
 	confirmationRequest, ok := RequestFromToolConfirmationID(response.Confirmation.ID, Request{UserID: "admin"})
@@ -2628,6 +2628,66 @@ func TestLLMToolConfirmationsRenderMultipleButtons(t *testing.T) {
 	}
 }
 
+func TestLLMToolAccessRemovalConfirmationsNameEachTool(t *testing.T) {
+	const userID = "100000000000000999"
+	client := &fakeLLM{responses: []llm.ChatResponse{
+		{
+			Model:   "fixture/model",
+			Content: "",
+			ToolCalls: []llm.ToolCall{
+				{
+					ID:   "call-remove-chat-access",
+					Type: "function",
+					Function: llm.ToolCallFunction{
+						Name:      "panda_manage_tool_access",
+						Arguments: `{"action":"remove","tool_name":"panda.chat","user_id":"` + userID + `"}`,
+					},
+				},
+				{
+					ID:   "call-remove-image-access",
+					Type: "function",
+					Function: llm.ToolCallFunction{
+						Name:      "panda_manage_tool_access",
+						Arguments: `{"action":"remove","tool_name":"panda.generate_image","user_id":"` + userID + `"}`,
+					},
+				},
+			},
+		},
+		{Model: "fixture/model", Content: "I prepared the tool access removals."},
+	}}
+	router := newTestRouter(t, client, 20)
+
+	response := router.HandleNaturalMessage(context.Background(), Request{
+		GuildID:      "guild-1",
+		ChannelID:    "channel-1",
+		UserID:       "admin",
+		IsGuildAdmin: true,
+		Options:      map[string]string{"message": "remove all of these restrictions for that user", "bot_mentioned": "true"},
+	})
+	if response.Confirmation == nil || len(response.Confirmations) != 2 {
+		t.Fatalf("expected two tool access confirmations, got %+v", response)
+	}
+	labels := map[string]bool{}
+	requestsByTool := map[string]ToolConfirmationRequest{}
+	for _, confirmation := range response.Confirmations {
+		labels[confirmation.ConfirmLabel] = true
+		request, ok := RequestFromToolConfirmationID(confirmation.ID, Request{UserID: "admin"})
+		if !ok {
+			t.Fatalf("confirmation id did not parse: %+v", confirmation)
+		}
+		requestsByTool[request.Options["tool_name"]] = request
+	}
+	if !labels["Remove panda.chat"] || !labels["Remove panda.generate_image"] {
+		t.Fatalf("expected tool-specific confirmation labels, got %+v", response.Confirmations)
+	}
+	for _, toolName := range []string{"panda.chat", "panda.generate_image"} {
+		request, ok := requestsByTool[toolName]
+		if !ok || request.Action != toolActionToolAccessRemove || request.Options["user_id"] != userID {
+			t.Fatalf("unexpected confirmation request for %s: %+v", toolName, requestsByTool)
+		}
+	}
+}
+
 func requireConfirmation(t *testing.T, response Response) string {
 	t.Helper()
 	if !response.Ephemeral || response.Confirmation == nil || response.Confirmation.ID == "" || !response.Confirmation.Danger {
@@ -2766,6 +2826,29 @@ func TestAssistantStandaloneCardWithEmptyContentDoesNotCreateFollowup(t *testing
 	}
 	if len(response.Followups) != 0 {
 		t.Fatalf("empty standalone card prose should not create a followup, got %+v", response.Followups)
+	}
+}
+
+func TestAssistantStandaloneCardWithPlaceholderContentDoesNotCreateFollowup(t *testing.T) {
+	router := &Router{}
+	response := router.responseFromAssistantAnswer(context.Background(), Request{}, assistant.AskResponse{
+		Content: "...",
+		Card: &assistant.ToolCard{
+			Title:      "Music request failed",
+			Content:    "I couldn't complete that music request. Please try again.",
+			Accent:     "warning",
+			Standalone: true,
+		},
+	}, "", "")
+
+	if response.Content != "I couldn't complete that music request. Please try again." {
+		t.Fatalf("expected card content as primary embed description, got %+v", response)
+	}
+	if response.Presentation.Title != "Music request failed" || response.Presentation.Accent != AccentWarning {
+		t.Fatalf("expected warning music failure presentation, got %+v", response.Presentation)
+	}
+	if len(response.Followups) != 0 {
+		t.Fatalf("placeholder standalone card prose should not create a followup, got %+v", response.Followups)
 	}
 }
 

@@ -91,7 +91,7 @@ func TestBufferedOpusProviderDrainsFramesBeforeEndError(t *testing.T) {
 	}
 }
 
-func TestBufferedOpusProviderConvertsEOFToCleanEnd(t *testing.T) {
+func TestBufferedOpusProviderTreatsEOFBeforeFramesAsNotReady(t *testing.T) {
 	source := newChannelOpusProvider()
 	provider := newBufferedOpusProvider(source, 4, 1)
 	defer provider.Close()
@@ -99,8 +99,8 @@ func TestBufferedOpusProviderConvertsEOFToCleanEnd(t *testing.T) {
 	source.sendErr(io.EOF)
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	if err := provider.WaitReady(ctx); err != nil {
-		t.Fatalf("wait ready: %v", err)
+	if err := provider.WaitReady(ctx); !errors.Is(err, io.EOF) {
+		t.Fatalf("expected EOF before frames to fail readiness, got %v", err)
 	}
 	if _, err := provider.ProvideOpusFrame(); !errors.Is(err, io.EOF) {
 		t.Fatalf("expected EOF, got %v", err)
