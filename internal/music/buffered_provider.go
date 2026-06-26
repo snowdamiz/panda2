@@ -44,7 +44,10 @@ func (p *bufferedOpusProvider) WaitReady(ctx context.Context) error {
 	select {
 	case <-p.ready:
 		err := p.storedErr()
-		if err != nil && !errors.Is(err, io.EOF) && len(p.frames) == 0 {
+		if len(p.frames) > 0 {
+			return nil
+		}
+		if err != nil {
 			return err
 		}
 		return nil

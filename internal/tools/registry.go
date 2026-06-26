@@ -546,6 +546,7 @@ func DefaultDefinitions() []Definition {
 		},
 		adminRead("read_config", "Read Panda configuration for the current guild.", []string{}, 2*time.Second, 1),
 		auditRead("panda.usage_report", "Read Panda usage totals and breakdowns for this server.", []string{}, 3*time.Second, 25),
+		safetyStatusTool(),
 		ownerOpsTool(),
 		soulManagementTool(),
 		promptManagementTool(),
@@ -706,6 +707,23 @@ func userPermissionManagementTool() Definition {
 	return definition
 }
 
+func safetyStatusTool() Definition {
+	return Definition{
+		Name:                  "panda.manage_safety",
+		Description:           "Read Panda safety strike and timeout status for Discord users in this server. Use action=status with user_id/user/member for questions like \"how many strikes does @user have\". Use action=list for current users with recorded strike or timeout state.",
+		RequiredPermission:    admin.PermissionAdminAuditRead,
+		AlternatePermissions:  []string{admin.PermissionModerationUse, admin.PermissionAdminConfigRead, admin.PermissionAdminConfigWrite, admin.PermissionOwnerOps},
+		ToolClass:             ToolClassWorkflow,
+		InputSchema:           safetyStatusSchema(),
+		OutputSchema:          objectSchema("result"),
+		Timeout:               2 * time.Second,
+		Redaction:             RedactSecrets,
+		Audit:                 AuditOnUse,
+		IncludeInModelContext: true,
+		MaxLimit:              100,
+	}
+}
+
 func toolAccessManagementTool() Definition {
 	definition := adminWrite("panda.manage_tool_access", "Allow, deny/block, remove, list/status, or open access to native or composed Panda tools. Preserve the user's requested target type: use user_id/user/member/user_name for user-specific tool access and role_id/role/role_name for role-specific tool access. Use tool_name=panda.chat for Panda's normal natural chat/reply behavior when an admin asks Panda not to respond to a user/role, to hold off on replying, or to resume responding later; do not draft a composed tool for that. Use action=deny when the user says do not allow, block, disable, stop responding to, or revoke a user's/role's tool use; deny creates a blocking rule and does not require a previous allow rule. Use action=remove only when deleting an explicit tool access rule. Use action=open with tool_name for any single tool when the user asks to let everyone/the public use it; use tool_group=image_tools for the image tool bundle. Do not grant the @everyone role or the guild ID as a role. Use action=status/list with tool_name for any tool or tool_group=image_tools for image tools. If the user says Panda admins, first inspect Panda admin role/user mappings with panda.manage_role_permission and panda.manage_user_permission; do not infer Panda admins from Discord Administrator roles.", []string{"action"})
 	definition.InputSchema = toolAccessManagementSchema()
@@ -775,6 +793,18 @@ func userPermissionManagementSchema() json.RawMessage {
 		"user_name":        map[string]string{"type": "string", "description": "Optional Discord username for display only; user IDs or mentions are required for writes."},
 		"member_user_name": map[string]string{"type": "string", "description": "Alias for user_name."},
 		"dry_run":          map[string]string{"type": "boolean"},
+	})
+}
+
+func safetyStatusSchema() json.RawMessage {
+	return schemaWithProperties([]string{"action"}, map[string]any{
+		"action":         map[string]string{"type": "string", "description": "Action: status/get/show for one user, or list for users with recorded strike or timeout state."},
+		"user_id":        map[string]string{"type": "string", "description": "Discord user ID or user mention for status."},
+		"user":           map[string]string{"type": "string", "description": "Alias for user_id; may be a Discord mention."},
+		"member_user_id": map[string]string{"type": "string", "description": "Alias for user_id."},
+		"member":         map[string]string{"type": "string", "description": "Alias for user_id; may be a Discord mention."},
+		"user_name":      map[string]string{"type": "string", "description": "Optional Discord username to resolve when Discord member lookup is configured."},
+		"limit":          map[string]any{"type": "integer", "minimum": 1, "maximum": 100, "description": "Maximum rows for action=list."},
 	})
 }
 

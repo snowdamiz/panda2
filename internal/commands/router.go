@@ -3007,7 +3007,9 @@ func (r *Router) responseFromAssistantAnswer(ctx context.Context, request Reques
 			response.ThreadName = threadName
 			response.GeneratedFiles = generated.CloneFiles(answer.GeneratedFiles)
 			response.UsageReservations = append([]billing.Reservation(nil), answer.UsageReservations...)
-			response.Followups = append(response.Followups, Response{Content: answer.Content})
+			if followupContent := standaloneCardFollowupContent(answer.Content); followupContent != "" {
+				response.Followups = append(response.Followups, Response{Content: followupContent})
+			}
 		} else {
 			response.Content = firstNonEmpty(response.Content, answer.Card.Content)
 			response.Presentation = cardResponse.Presentation
@@ -3035,6 +3037,27 @@ func (r *Router) responseFromAssistantAnswer(ctx context.Context, request Reques
 		}
 	}
 	return response
+}
+
+func standaloneCardFollowupContent(content string) string {
+	content = strings.TrimSpace(content)
+	if content == "" || placeholderOnlyAssistantContent(content) {
+		return ""
+	}
+	return content
+}
+
+func placeholderOnlyAssistantContent(content string) bool {
+	trimmed := strings.TrimSpace(content)
+	if trimmed == "" {
+		return true
+	}
+	trimmed = strings.Trim(trimmed, "`*_~")
+	trimmed = strings.TrimSpace(trimmed)
+	if trimmed == "" {
+		return true
+	}
+	return strings.Trim(trimmed, ".\u2026 \t\r\n") == ""
 }
 
 func responseFromAssistantCard(card *assistant.ToolCard) Response {

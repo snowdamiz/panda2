@@ -175,6 +175,67 @@ func TestOpenRouterChatParsesToolCalls(t *testing.T) {
 	}
 }
 
+func TestOpenRouterChatSendsToolChoice(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload chatCompletionRequest
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		if len(payload.Tools) != 1 || payload.Tools[0].Function.Name != "classify_unsafe_topic" {
+			t.Fatalf("unexpected tools payload: %+v", payload.Tools)
+		}
+		if payload.ToolChoice == nil || payload.ToolChoice.Type != "function" || payload.ToolChoice.Function == nil || payload.ToolChoice.Function.Name != "classify_unsafe_topic" {
+			t.Fatalf("expected forced tool choice, got %+v", payload.ToolChoice)
+		}
+		if payload.Provider == nil || !payload.Provider.RequireParameters || payload.Provider.AllowFallbacks == nil || *payload.Provider.AllowFallbacks {
+			t.Fatalf("forced tool choice requests should require provider parameter support and disable provider fallback: %+v", payload.Provider)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id":    "gen-tool-choice",
+			"model": "provider/model",
+			"choices": []map[string]any{{
+				"message": map[string]any{
+					"role":    "assistant",
+					"content": "",
+					"tool_calls": []map[string]any{{
+						"id":   "call-safety",
+						"type": "function",
+						"function": map[string]string{
+							"name":      "classify_unsafe_topic",
+							"arguments": `{"unsafe":true,"category":"illicit_wrongdoing","confidence":0.99,"rationale":"unsafe request"}`,
+						},
+					}},
+				},
+			}},
+		})
+	}))
+	defer server.Close()
+
+	client := NewOpenRouterClient(OpenRouterConfig{APIKey: "key", BaseURL: server.URL})
+	response, err := client.Chat(context.Background(), ChatRequest{
+		Model:    "openrouter/auto",
+		Messages: []Message{{Role: "user", Content: "classify"}},
+		Tools: []Tool{{
+			Type: "function",
+			Function: ToolFunction{
+				Name:        "classify_unsafe_topic",
+				Description: "fixture",
+				Parameters:  json.RawMessage(`{"type":"object"}`),
+			},
+		}},
+		ToolChoice: &ToolChoice{
+			Type:     "function",
+			Function: &ToolChoiceFunction{Name: "classify_unsafe_topic"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Chat returned error: %v", err)
+	}
+	if len(response.ToolCalls) != 1 || response.ToolCalls[0].Function.Name != "classify_unsafe_topic" {
+		t.Fatalf("unexpected tool calls: %+v", response.ToolCalls)
+	}
+}
+
 func TestOpenRouterChatSendsResponseFormat(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var payload chatCompletionRequest

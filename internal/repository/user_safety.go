@@ -50,6 +50,20 @@ func (r *UserSafetyRepository) Status(ctx context.Context, guildID, userID strin
 	return status, err
 }
 
+func (r *UserSafetyRepository) List(ctx context.Context, guildID string, limit int) ([]store.UserSafetyState, error) {
+	guildID = strings.TrimSpace(guildID)
+	if limit <= 0 || limit > 100 {
+		limit = 25
+	}
+	var states []store.UserSafetyState
+	err := r.db.WithContext(ctx).
+		Where("guild_id = ? AND (active_strikes <> 0 OR total_strikes <> 0 OR last_strike_at IS NOT NULL OR timeout_until IS NOT NULL)", guildID).
+		Order("updated_at DESC, id DESC").
+		Limit(limit).
+		Find(&states).Error
+	return states, err
+}
+
 func (r *UserSafetyRepository) AddStrike(ctx context.Context, guildID, userID string, threshold int, timeoutDuration time.Duration, now time.Time) (UserSafetyStatus, error) {
 	guildID, userID = normalizeSafetyKey(guildID, userID)
 	if userID == "" {

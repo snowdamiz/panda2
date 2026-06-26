@@ -25,39 +25,43 @@ const unsafeTopicClassifierPrompt = `You are Panda's unsafe-topic classifier. De
 
 ` + unsafeTopicPolicy + `
 
-Mark unsafe=true only when the current user is asking Panda to discuss, answer, transform, continue, or act on unsafe material. Do not mark unsafe merely because unsafe content appears in quoted history, recent context, tool output, or a replied-to message unless the current user is asking Panda to handle that unsafe content now. Benign safety, prevention, reporting, support, recovery, policy, or high-level educational discussion should be unsafe=false when it does not request operational harmful details or encouragement.
+Mark unsafe=true only when the current user is asking Panda to discuss, answer, transform, continue, or act on unsafe material. Do not mark unsafe merely because unsafe content appears in quoted history, recent context, tool output, or a replied-to message unless the current user is asking Panda to handle that unsafe content now. Benign safety, prevention, reporting, support, recovery, policy, or high-level educational discussion should be unsafe=false when it does not request operational harmful details or encouragement. Requests to inspect or administer Panda's own safety strikes, timeouts, moderation state, configuration, billing, permissions, tools, logs, or other internal app state are unsafe=false unless the current user is also asking for unsafe operational content; normal authorization and data access are handled by Panda's tools. If the user replies to Panda's own summary of tool access or user restrictions with phrases like "remove all of these restrictions", "open those tools", or "let them use it again", classify unsafe=false unless the request also asks Panda to answer unsafe material or bypass secret/unsafe-topic protections.
 
 Return exactly one JSON object matching the requested schema.`
 
-var unsafeTopicDecisionResponseFormat = &llm.ResponseFormat{
-	Type: "json_schema",
-	JSONSchema: &llm.ResponseFormatSchema{
-		Name:   "unsafe_topic_decision",
-		Strict: true,
-		Schema: json.RawMessage(`{
-			"type": "object",
-			"additionalProperties": false,
-			"properties": {
-				"unsafe": {
-					"type": "boolean",
-					"description": "Whether Panda must block the normal response, record a strike, and show a warning card."
-				},
-				"category": {
-					"type": "string",
-					"enum": ["none", "self_harm", "violence", "sexual_minors", "hate_harassment", "cyber_abuse", "privacy_abuse", "illicit_wrongdoing", "regulated_goods", "safety_bypass", "other"]
-				},
-				"confidence": {
-					"type": "number",
-					"minimum": 0,
-					"maximum": 1
-				},
-				"rationale": {
-					"type": "string",
-					"description": "Brief internal reason. Do not include unsafe operational details."
-				}
-			},
-			"required": ["unsafe", "category", "confidence", "rationale"]
-		}`),
+const unsafeTopicClassifierToolName = "classify_unsafe_topic"
+
+var unsafeTopicDecisionSchema = json.RawMessage(`{
+	"type": "object",
+	"additionalProperties": false,
+	"properties": {
+		"unsafe": {
+			"type": "boolean",
+			"description": "Whether Panda must block the normal response, record a strike, and show a warning card."
+		},
+		"category": {
+			"type": "string",
+			"enum": ["none", "self_harm", "violence", "sexual_minors", "hate_harassment", "cyber_abuse", "privacy_abuse", "illicit_wrongdoing", "regulated_goods", "safety_bypass", "other"]
+		},
+		"confidence": {
+			"type": "number",
+			"minimum": 0,
+			"maximum": 1
+		},
+		"rationale": {
+			"type": "string",
+			"description": "Brief internal reason. Do not include unsafe operational details."
+		}
+	},
+	"required": ["unsafe", "category", "confidence", "rationale"]
+}`)
+
+var unsafeTopicDecisionTool = llm.Tool{
+	Type: "function",
+	Function: llm.ToolFunction{
+		Name:        unsafeTopicClassifierToolName,
+		Description: "Record Panda's unsafe-topic classification decision for the active current user request.",
+		Parameters:  unsafeTopicDecisionSchema,
 	},
 }
 
@@ -114,7 +118,7 @@ func (s *Service) enforceUserSafety(ctx context.Context, config store.GuildConfi
 			slog.String("user_id", input.UserID),
 			slog.String("command", input.Command),
 		)
-		return AskResponse{Silent: true}, true, nil
+		return safetyCheckFailedResponse(), true, nil
 	}
 	if !decision.Unsafe {
 		return AskResponse{}, false, nil
@@ -217,15 +221,32 @@ func (s *Service) classifyUnsafeTopic(ctx context.Context, config store.GuildCon
 			{Role: "system", Content: unsafeTopicClassifierPrompt},
 			{Role: "user", Content: safetyClassificationContent(input)},
 		},
-		ResponseFormat: unsafeTopicDecisionResponseFormat,
-		Temperature:    0,
-		MaxTokens:      220,
+		Tools: []llm.Tool{unsafeTopicDecisionTool},
+		ToolChoice: &llm.ToolChoice{
+			Type:     "function",
+			Function: &llm.ToolChoiceFunction{Name: unsafeTopicClassifierToolName},
+		},
+		Temperature: 0,
+		MaxTokens:   512,
 	})
 	if err != nil {
 		return unsafeTopicDecision{}, err
 	}
+	if len(response.ToolCalls) == 0 {
+		return unsafeTopicDecision{}, fmt.Errorf("unsafe-topic classifier did not call %s", unsafeTopicClassifierToolName)
+	}
+	for _, call := range response.ToolCalls {
+		if call.Function.Name != unsafeTopicClassifierToolName {
+			continue
+		}
+		return decodeUnsafeTopicDecision(call.Function.Arguments)
+	}
+	return unsafeTopicDecision{}, fmt.Errorf("unsafe-topic classifier called unexpected tools: %v", toolCallNames(response.ToolCalls))
+}
+
+func decodeUnsafeTopicDecision(arguments string) (unsafeTopicDecision, error) {
 	var decision unsafeTopicDecision
-	decoder := json.NewDecoder(strings.NewReader(strings.TrimSpace(response.Content)))
+	decoder := json.NewDecoder(strings.NewReader(strings.TrimSpace(arguments)))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&decision); err != nil {
 		return unsafeTopicDecision{}, fmt.Errorf("decode unsafe-topic decision: %w", err)
@@ -246,6 +267,21 @@ func (s *Service) classifyUnsafeTopic(ctx context.Context, config store.GuildCon
 		return unsafeTopicDecision{}, fmt.Errorf("unsafe-topic confidence out of range")
 	}
 	return decision, nil
+}
+
+func safetyCheckFailedResponse() AskResponse {
+	return AskResponse{
+		Content: "I can't respond to that because Panda could not complete the safety check.",
+		Card: &ToolCard{
+			Title:  "Safety Check Failed",
+			Accent: "danger",
+			Fields: []ToolCardField{
+				{Name: "Status", Value: "Request blocked", Inline: true},
+				{Name: "Strike", Value: "No strike recorded", Inline: true},
+				{Name: "Reason", Value: "The safety classifier did not return a valid decision.", Inline: false},
+			},
+		},
+	}
 }
 
 func safetyClassificationContent(input safetyGateInput) string {

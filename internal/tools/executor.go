@@ -90,6 +90,16 @@ type MusicManager interface {
 	ManageMusic(ctx context.Context, request MusicManagementRequest) (any, error)
 }
 
+type MusicRuntimeContext struct {
+	MusicManagerConfigured bool
+	ActiveVoiceChannelID   string
+}
+
+type UserSafetyReader interface {
+	Status(ctx context.Context, guildID, userID string, now time.Time) (repository.UserSafetyStatus, error)
+	List(ctx context.Context, guildID string, limit int) ([]store.UserSafetyState, error)
+}
+
 type OpsManager interface {
 	Health(ctx context.Context) (ops.Health, error)
 	Drain()
@@ -173,6 +183,7 @@ type Executor struct {
 	schedule    ScheduleManager
 	reminder    ReminderManager
 	music       MusicManager
+	safety      UserSafetyReader
 	ops         OpsManager
 }
 
@@ -392,6 +403,24 @@ func (e *Executor) WithMusicManager(manager MusicManager) *Executor {
 	return e
 }
 
+func (e *Executor) WithUserSafetyRepository(safety UserSafetyReader) *Executor {
+	e.safety = safety
+	return e
+}
+
+func (e *Executor) MusicRuntimeContext(guildID string) MusicRuntimeContext {
+	if e == nil || e.music == nil {
+		return MusicRuntimeContext{}
+	}
+	runtime := MusicRuntimeContext{MusicManagerConfigured: true}
+	if provider, ok := e.music.(interface {
+		ActiveVoiceChannelID(guildID string) string
+	}); ok {
+		runtime.ActiveVoiceChannelID = strings.TrimSpace(provider.ActiveVoiceChannelID(guildID))
+	}
+	return runtime
+}
+
 func (e *Executor) WithOpsManager(manager OpsManager) *Executor {
 	e.ops = manager
 	return e
@@ -585,6 +614,8 @@ func (e *Executor) Execute(ctx context.Context, request ExecutionRequest) (Execu
 		payload, err = e.manageReminder(toolCtx, request, arguments)
 	case "panda.manage_music":
 		payload, err = e.manageMusic(toolCtx, request, arguments)
+	case "panda.manage_safety":
+		payload, err = e.manageSafety(toolCtx, request, arguments)
 	case "panda.manage_ops":
 		payload, err = e.manageOps(toolCtx, arguments)
 	case "panda.manage_channel_rule":
@@ -3311,6 +3342,84 @@ func (e *Executor) manageMusic(ctx context.Context, request ExecutionRequest, ar
 	})
 }
 
+func (e *Executor) manageSafety(ctx context.Context, request ExecutionRequest, arguments string) (any, error) {
+	if e.safety == nil {
+		return nil, fmt.Errorf("user safety status is not configured")
+	}
+	args, err := parseArguments(arguments)
+	if err != nil {
+		return nil, err
+	}
+	action := strings.ToLower(firstNonEmpty(stringArgument(args, "action"), "status"))
+	now := time.Now().UTC()
+	switch action {
+	case "status", "get", "show":
+		userID, err := e.userIDArgument(ctx, request, args)
+		if err != nil {
+			return nil, err
+		}
+		if userID == "" {
+			return nil, fmt.Errorf("user_id is required")
+		}
+		status, err := e.safety.Status(ctx, request.GuildID, userID, now)
+		if err != nil {
+			return nil, err
+		}
+		state := status.State
+		if state.GuildID == "" {
+			state.GuildID = request.GuildID
+		}
+		if state.UserID == "" {
+			state.UserID = userID
+		}
+		return map[string]any{"result": userSafetyStatusPayload(state, status.TimedOut, now)}, nil
+	case "list":
+		limit := parseToolLimit(args["limit"], 25)
+		if limit <= 0 || limit > 100 {
+			limit = 25
+		}
+		states, err := e.safety.List(ctx, request.GuildID, limit)
+		if err != nil {
+			return nil, err
+		}
+		rows := make([]map[string]any, 0, len(states))
+		for _, state := range states {
+			rows = append(rows, userSafetyStatusPayload(state, state.TimeoutUntil != nil && now.Before(state.TimeoutUntil.UTC()), now))
+		}
+		return map[string]any{"result": map[string]any{"states": rows, "count": len(rows)}}, nil
+	default:
+		return nil, fmt.Errorf("action must be status or list")
+	}
+}
+
+func userSafetyStatusPayload(state store.UserSafetyState, timedOut bool, now time.Time) map[string]any {
+	payload := map[string]any{
+		"guild_id":       state.GuildID,
+		"user_id":        state.UserID,
+		"active_strikes": state.ActiveStrikes,
+		"total_strikes":  state.TotalStrikes,
+		"timed_out":      timedOut,
+		"timeout_active": timedOut,
+		"last_strike_at": timePointerString(state.LastStrikeAt),
+		"timeout_until":  timePointerString(state.TimeoutUntil),
+	}
+	if timedOut && state.TimeoutUntil != nil {
+		remaining := int(state.TimeoutUntil.UTC().Sub(now).Round(time.Second).Seconds())
+		if remaining < 0 {
+			remaining = 0
+		}
+		payload["timeout_remaining_seconds"] = remaining
+	}
+	return payload
+}
+
+func timePointerString(value *time.Time) string {
+	if value == nil {
+		return ""
+	}
+	return value.UTC().Format(time.RFC3339)
+}
+
 func (e *Executor) musicVoiceChannelIDArgument(ctx context.Context, request ExecutionRequest, args map[string]any) (string, error) {
 	for _, name := range []string{"voice_channel_id", "target_voice_channel_id"} {
 		value := strings.TrimSpace(stringArgument(args, name))
@@ -3918,6 +4027,8 @@ func (e *Executor) canExecute(name string) bool {
 		return e.reminder != nil
 	case "panda.manage_music":
 		return e.music != nil
+	case "panda.manage_safety":
+		return e.safety != nil
 	case "panda.manage_ops":
 		return e.ops != nil
 	case "draft_moderator_note", "generate_workflow_json", "panda.list_tools":
@@ -4216,11 +4327,11 @@ func confirmationCopy(action string, arguments map[string]string) (string, strin
 	case "member_role.remove":
 		return fmt.Sprintf("Panda prepared removal of %s from %s.", roleConfirmationDisplay(arguments), userConfirmationDisplay(arguments)), "Remove role"
 	case "tool_access.add":
-		return fmt.Sprintf("Panda prepared tool access for `%s` on %s.", arguments["tool_name"], toolAccessConfirmationTarget(arguments)), "Allow tool"
+		return fmt.Sprintf("Panda prepared tool access for `%s` on %s.", arguments["tool_name"], toolAccessConfirmationTarget(arguments)), toolAccessConfirmationLabel("Allow", arguments["tool_name"])
 	case "tool_access.remove":
-		return fmt.Sprintf("Panda prepared removal of tool access for `%s` from %s.", arguments["tool_name"], toolAccessConfirmationTarget(arguments)), "Remove tool access"
+		return fmt.Sprintf("Panda prepared removal of tool access for `%s` from %s.", arguments["tool_name"], toolAccessConfirmationTarget(arguments)), toolAccessConfirmationLabel("Remove", arguments["tool_name"])
 	case "tool_access.deny":
-		return fmt.Sprintf("Panda prepared denial of tool access for `%s` on %s.", arguments["tool_name"], toolAccessConfirmationTarget(arguments)), "Deny tool access"
+		return fmt.Sprintf("Panda prepared denial of tool access for `%s` on %s.", arguments["tool_name"], toolAccessConfirmationTarget(arguments)), toolAccessConfirmationLabel("Deny", arguments["tool_name"])
 	case "tool_access.open":
 		return fmt.Sprintf("Panda prepared opening %s to everyone.", toolAccessOpenToolList(arguments["tool_names"])), "Open tool access"
 	case "channel_rule.set":
@@ -4244,6 +4355,14 @@ func confirmationCopy(action string, arguments map[string]string) (string, strin
 	default:
 		return "", ""
 	}
+}
+
+func toolAccessConfirmationLabel(verb, toolName string) string {
+	toolName = strings.TrimSpace(toolName)
+	if toolName == "" {
+		return verb + " tool access"
+	}
+	return truncateRunes(verb+" "+toolName, 80)
 }
 
 func toolAccessOpenToolList(value string) string {
