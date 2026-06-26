@@ -341,6 +341,75 @@ func TestNaturalDraftApprovalAdvertiseAndRunUserComposedJoinAutomation(t *testin
 	}
 }
 
+func TestNaturalDraftUserPromptPreservesPublicLinks(t *testing.T) {
+	const appStoreURL = "https://apps.apple.com/us/app/spot-it-all/id6778223189"
+	prompt := naturalDraftUserPrompt(DraftRequest{
+		GuildID:     "guild-1",
+		ActorID:     "admin-1",
+		Text:        "Every time someone asks about Orangiies new app, link them to " + appStoreURL,
+		WelcomeText: "token=abcdefghijklmnopqrstuvwxyz123456",
+	})
+	if !strings.Contains(prompt, appStoreURL) {
+		t.Fatalf("expected public app store URL to reach draft model, got:\n%s", prompt)
+	}
+	if strings.Contains(prompt, "abcdefghijklmnopqrstuvwxyz123456") {
+		t.Fatalf("expected secret-looking welcome text to be redacted, got:\n%s", prompt)
+	}
+	if !strings.Contains(prompt, "[redacted]") {
+		t.Fatalf("expected secret redaction marker, got:\n%s", prompt)
+	}
+}
+
+func TestExecuteDynamicChatSendMessageMarksTerminal(t *testing.T) {
+	ctx := context.Background()
+	service, provider := newComposedTestService(t)
+	service.client = &fakeComposedLLM{response: llm.ChatResponse{Content: mustJSON(memberJoinWelcomeSpec())}}
+	service.WithDiscordResolver(fakeDiscordResolver{
+		channels: map[string]ResolvedDiscordObject{"bot-test": {ID: "channel-bot-test", Name: "bot-test"}},
+	})
+
+	if _, err := service.Draft(ctx, DraftRequest{
+		GuildID:         "guild-1",
+		ActorID:         "moderator-1",
+		Text:            "When asked, send the approved Xero link response in bot-test.",
+		SourceChannelID: "channel-source",
+	}); err != nil {
+		t.Fatalf("Draft: %v", err)
+	}
+	if _, err := service.Approve(ctx, "guild-1", "member_welcome", 1, "admin-1"); err != nil {
+		t.Fatalf("Approve: %v", err)
+	}
+
+	result, err := service.ExecuteDynamicTool(ctx, tools.DynamicExecutionRequest{
+		GuildID:        "guild-1",
+		ActorID:        "user-1",
+		InvocationType: InvocationChatTool,
+		Access: tools.ToolAccess{
+			Policy:                       tools.ToolPolicyAssistive,
+			Permissions:                  map[string]struct{}{admin.PermissionToolComposeInvoke: {}},
+			AllowedTools:                 map[string]struct{}{"member_welcome": {}},
+			RequireExplicitComposedTools: true,
+		},
+		Call: llm.ToolCall{
+			ID:   "call-member-welcome",
+			Type: "function",
+			Function: llm.ToolCallFunction{
+				Name:      "member_welcome",
+				Arguments: `{"user_id":"user-1"}`,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("ExecuteDynamicTool: %v", err)
+	}
+	if !result.Terminal {
+		t.Fatalf("chat send-message composed tool should be terminal, got %+v", result)
+	}
+	if len(provider.calls) != 1 || provider.calls[0].ToolName != "discord.send_message" {
+		t.Fatalf("expected composed tool to post one Discord message, got %+v", provider.calls)
+	}
+}
+
 func TestAgenticRunnerPromptInjectsCurrentDateTimeMetadata(t *testing.T) {
 	spec := memberJoinWelcomeSpec()
 	spec.Runner = RunnerSpec{

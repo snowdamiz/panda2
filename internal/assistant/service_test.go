@@ -76,7 +76,9 @@ func (f *fakeAssistantGIFFrameExtractor) ExtractGIFFrame(_ context.Context, refe
 }
 
 type fakeAssistantDynamicTools struct {
-	tools []llm.Tool
+	tools  []llm.Tool
+	result tools.ExecutionResult
+	err    error
 }
 
 type fakeAssistantMusicManager struct {
@@ -91,6 +93,9 @@ func (f fakeAssistantDynamicTools) OpenRouterTools(context.Context, tools.Dynami
 }
 
 func (f fakeAssistantDynamicTools) ExecuteDynamicTool(context.Context, tools.DynamicExecutionRequest) (tools.ExecutionResult, error) {
+	if f.result.Message.Role != "" || f.result.Terminal || f.err != nil {
+		return f.result, f.err
+	}
 	return tools.ExecutionResult{Message: llm.Message{Role: "tool", Content: `{}`}}, nil
 }
 
@@ -2547,6 +2552,70 @@ func TestAskTerminalAboutCardDoesNotRequestFinalModelRound(t *testing.T) {
 	}
 }
 
+func TestAskTerminalDynamicToolDoesNotRequestFinalModelRound(t *testing.T) {
+	ctx := context.Background()
+	client := &fakeClient{responses: []llm.ChatResponse{
+		{
+			Model: "fixture/model",
+			ToolCalls: []llm.ToolCall{{
+				ID:   "call-xero",
+				Type: "function",
+				Function: llm.ToolCallFunction{
+					Name:      "xero_mention_responder",
+					Arguments: `{}`,
+				},
+			}},
+		},
+		{Model: "fixture/model", Content: "This would duplicate the composed-tool response."},
+	}}
+	service, db := newTestService(t, client)
+	configs := repository.NewGuildConfigRepository(db.DB)
+	registry, err := tools.NewDefaultRegistry()
+	if err != nil {
+		t.Fatalf("NewDefaultRegistry: %v", err)
+	}
+	executor := tools.NewExecutor(registry, nil, configs).WithDynamicToolProvider(fakeAssistantDynamicTools{
+		tools: []llm.Tool{{
+			Type: "function",
+			Function: llm.ToolFunction{
+				Name:        "xero_mention_responder",
+				Description: "Posts the approved Xero response.",
+				Parameters:  []byte(`{"type":"object","additionalProperties":false,"properties":{}}`),
+			},
+		}},
+		result: tools.ExecutionResult{
+			Message:  llm.Message{Role: "tool", ToolCallID: "call-xero", Content: `{"status":"succeeded"}`},
+			Terminal: true,
+		},
+	})
+	service.WithToolExecutor(executor)
+
+	if _, err := configs.EnsureDefault(ctx, "guild-1"); err != nil {
+		t.Fatalf("EnsureDefault: %v", err)
+	}
+
+	response, err := service.Ask(ctx, AskRequest{
+		GuildID:   "guild-1",
+		UserID:    "user-1",
+		ChannelID: "channel-1",
+		Question:  "panda tell me about xero",
+		AllowedPermissions: map[string]struct{}{
+			admin.PermissionAssistantUse:      {},
+			admin.PermissionToolComposeInvoke: {},
+		},
+		AllowedTools: map[string]struct{}{"xero_mention_responder": {}},
+	})
+	if err != nil {
+		t.Fatalf("Ask: %v", err)
+	}
+	if !response.Terminal || response.Content != "" {
+		t.Fatalf("expected terminal dynamic response with no followup content, got %+v", response)
+	}
+	if len(client.requests) != 1 {
+		t.Fatalf("terminal dynamic tool should not request final model round, got %d request(s)", len(client.requests))
+	}
+}
+
 func TestAskRejectsOversizedToolCallBurst(t *testing.T) {
 	ctx := context.Background()
 	toolCalls := make([]llm.ToolCall, 0, maxToolCallsPerRound+1)
@@ -3980,6 +4049,30 @@ func TestAssistantVisibleMusicCardToolMessageHidesRendererPayload(t *testing.T) 
 	}
 	if visible.ToolCallID != "call-music" || visible.Role != "tool" {
 		t.Fatalf("visible music tool message should preserve tool metadata: %+v", visible)
+	}
+}
+
+func TestAssistantVisibleToolMessagePreservesPublicURL(t *testing.T) {
+	const appStoreURL = "https://apps.apple.com/us/app/spot-it-all/id6778223189"
+	message := llm.Message{
+		Role:       "tool",
+		ToolCallID: "call-orangiies",
+		Content:    `{"result":{"status":"succeeded","output":{"link":"` + appStoreURL + `"}}}`,
+	}
+	visible := assistantVisibleToolMessage(llm.ToolCall{
+		ID:   "call-orangiies",
+		Type: "function",
+		Function: llm.ToolCallFunction{
+			Name:      "reply_orangiies_project_link",
+			Arguments: `{}`,
+		},
+	}, message, nil)
+
+	if !strings.Contains(visible.Content, appStoreURL) {
+		t.Fatalf("expected public URL to remain visible to answer model, got %q", visible.Content)
+	}
+	if strings.Contains(visible.Content, "[redacted]") {
+		t.Fatalf("public URL should not be redacted in tool message: %q", visible.Content)
 	}
 }
 

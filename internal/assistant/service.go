@@ -119,6 +119,7 @@ type AskResponse struct {
 	UsageReservations []billing.Reservation
 	UsedWebSearch     bool
 	Silent            bool
+	Terminal          bool
 }
 
 type InteractionConfirmation struct {
@@ -351,7 +352,7 @@ func (s *Service) chat(ctx context.Context, request AskRequest, options chatOpti
 	messages = append(messages, llm.Message{Role: "user", Content: chatUserMessageContent(request)})
 
 	start := time.Now()
-	response, confirmations, card, sourceLinks, generatedFiles, usageReservations, usedWebSearch, silent, err := s.completeWithToolsWithOptions(ctx, config, toolExecutionContext{
+	response, confirmations, card, sourceLinks, generatedFiles, usageReservations, usedWebSearch, silent, terminal, err := s.completeWithToolsWithOptions(ctx, config, toolExecutionContext{
 		RequestID:                    request.RequestID,
 		ActorID:                      request.UserID,
 		ChannelID:                    request.ChannelID,
@@ -381,6 +382,9 @@ func (s *Service) chat(ctx context.Context, request AskRequest, options chatOpti
 	}
 	if silent {
 		return AskResponse{Model: response.Model, Usage: response.Usage, Silent: true}, nil
+	}
+	if terminal {
+		return AskResponse{Model: response.Model, Usage: response.Usage, GeneratedFiles: generated.CloneFiles(generatedFiles), UsageReservations: append([]billing.Reservation(nil), usageReservations...), UsedWebSearch: usedWebSearch, Terminal: true}, nil
 	}
 
 	content := finalAssistantResponseContent(response.Content, sourceLinks, sourceLinkLimitForPrompt(request.Question), card)
@@ -526,7 +530,7 @@ func (s *Service) complete(ctx context.Context, request TaskRequest) (AskRespons
 	}
 
 	start := time.Now()
-	response, confirmations, card, sourceLinks, generatedFiles, usageReservations, usedWebSearch, err := s.completeWithTools(ctx, config, toolExecutionContext{
+	response, confirmations, card, sourceLinks, generatedFiles, usageReservations, usedWebSearch, terminal, err := s.completeWithTools(ctx, config, toolExecutionContext{
 		RequestID:                    request.RequestID,
 		ActorID:                      request.UserID,
 		ChannelID:                    request.ChannelID,
@@ -556,6 +560,9 @@ func (s *Service) complete(ctx context.Context, request TaskRequest) (AskRespons
 
 	if err != nil {
 		return AskResponse{}, err
+	}
+	if terminal {
+		return AskResponse{Model: response.Model, Usage: response.Usage, GeneratedFiles: generated.CloneFiles(generatedFiles), UsageReservations: append([]billing.Reservation(nil), usageReservations...), UsedWebSearch: usedWebSearch, Terminal: true}, nil
 	}
 
 	content := finalAssistantResponseContent(response.Content, sourceLinks, sourceLinkLimitForPrompt(request.Input), card)
@@ -699,12 +706,12 @@ func (s *Service) guildConfig(ctx context.Context, guildID string) (store.GuildC
 	return config, true, nil
 }
 
-func (s *Service) completeWithTools(ctx context.Context, config store.GuildConfig, toolContext toolExecutionContext, request llm.ChatRequest) (llm.ChatResponse, []InteractionConfirmation, *ToolCard, []tools.SourceLink, []generated.File, []billing.Reservation, bool, error) {
-	response, confirmations, card, sourceLinks, generatedFiles, usageReservations, usedWebSearch, _, err := s.completeWithToolsWithOptions(ctx, config, toolContext, request, completionOptions{})
-	return response, confirmations, card, sourceLinks, generatedFiles, usageReservations, usedWebSearch, err
+func (s *Service) completeWithTools(ctx context.Context, config store.GuildConfig, toolContext toolExecutionContext, request llm.ChatRequest) (llm.ChatResponse, []InteractionConfirmation, *ToolCard, []tools.SourceLink, []generated.File, []billing.Reservation, bool, bool, error) {
+	response, confirmations, card, sourceLinks, generatedFiles, usageReservations, usedWebSearch, _, terminal, err := s.completeWithToolsWithOptions(ctx, config, toolContext, request, completionOptions{})
+	return response, confirmations, card, sourceLinks, generatedFiles, usageReservations, usedWebSearch, terminal, err
 }
 
-func (s *Service) completeWithToolsWithOptions(ctx context.Context, config store.GuildConfig, toolContext toolExecutionContext, request llm.ChatRequest, options completionOptions) (llm.ChatResponse, []InteractionConfirmation, *ToolCard, []tools.SourceLink, []generated.File, []billing.Reservation, bool, bool, error) {
+func (s *Service) completeWithToolsWithOptions(ctx context.Context, config store.GuildConfig, toolContext toolExecutionContext, request llm.ChatRequest, options completionOptions) (llm.ChatResponse, []InteractionConfirmation, *ToolCard, []tools.SourceLink, []generated.File, []billing.Reservation, bool, bool, bool, error) {
 	access := toolAccess(config, toolContext.AllowedPermissions, toolContext.AllowedTools, toolContext.RestrictedTools, toolContext.EnabledFeatures, toolContext.FeatureGateActive, toolContext.RequireExplicitComposedTools)
 	if s.toolExecutor != nil && len(access.Permissions) > 0 {
 		request.Tools = modelCallableTools(s.toolExecutor.OpenRouterToolsForRequest(ctx, tools.DynamicToolListRequest{
@@ -767,10 +774,10 @@ func (s *Service) completeWithToolsWithOptions(ctx context.Context, config store
 	for round := 0; ; round++ {
 		response, silent, err := s.chatCompletionForRound(ctx, config, request, round, options)
 		if silent {
-			return response, confirmations, card, sourceLinks, generatedFiles, usageReservations, usedWebSearch, true, nil
+			return response, confirmations, card, sourceLinks, generatedFiles, usageReservations, usedWebSearch, true, false, nil
 		}
 		if err != nil || s.toolExecutor == nil {
-			return response, confirmations, card, sourceLinks, generatedFiles, usageReservations, usedWebSearch, false, err
+			return response, confirmations, card, sourceLinks, generatedFiles, usageReservations, usedWebSearch, false, false, err
 		}
 		if len(response.ToolCalls) == 0 {
 			if containsTextToolCallMarkup(response.Content) {
@@ -818,10 +825,10 @@ func (s *Service) completeWithToolsWithOptions(ctx context.Context, config store
 				response.ToolCalls = filteredToolCalls
 			}
 			if len(response.ToolCalls) > maxToolCallsPerRound {
-				return response, confirmations, card, sourceLinks, generatedFiles, usageReservations, usedWebSearch, false, fmt.Errorf("assistant exceeded maximum tool calls per round (%d)", maxToolCallsPerRound)
+				return response, confirmations, card, sourceLinks, generatedFiles, usageReservations, usedWebSearch, false, false, fmt.Errorf("assistant exceeded maximum tool calls per round (%d)", maxToolCallsPerRound)
 			}
 			if totalToolCalls+len(response.ToolCalls) > maxToolCallsTotal {
-				return response, confirmations, card, sourceLinks, generatedFiles, usageReservations, usedWebSearch, false, fmt.Errorf("assistant exceeded maximum tool calls per turn (%d)", maxToolCallsTotal)
+				return response, confirmations, card, sourceLinks, generatedFiles, usageReservations, usedWebSearch, false, false, fmt.Errorf("assistant exceeded maximum tool calls per turn (%d)", maxToolCallsTotal)
 			}
 		}
 		if len(response.ToolCalls) == 0 {
@@ -898,10 +905,10 @@ func (s *Service) completeWithToolsWithOptions(ctx context.Context, config store
 				request.Messages = messages
 				continue
 			}
-			return response, confirmations, card, sourceLinks, generatedFiles, usageReservations, usedWebSearch, false, nil
+			return response, confirmations, card, sourceLinks, generatedFiles, usageReservations, usedWebSearch, false, false, nil
 		}
 		if round >= maxToolCallRounds {
-			return response, confirmations, card, sourceLinks, generatedFiles, usageReservations, usedWebSearch, false, fmt.Errorf("assistant exceeded maximum tool-call rounds (%d)", maxToolCallRounds)
+			return response, confirmations, card, sourceLinks, generatedFiles, usageReservations, usedWebSearch, false, false, fmt.Errorf("assistant exceeded maximum tool-call rounds (%d)", maxToolCallRounds)
 		}
 		totalToolCalls += len(response.ToolCalls)
 
@@ -913,6 +920,7 @@ func (s *Service) completeWithToolsWithOptions(ctx context.Context, config store
 		})
 		generatedFileCountBeforeRound := len(generatedFiles)
 		terminalCardRound := len(response.ToolCalls) > 0
+		terminalToolRound := false
 		for _, call := range response.ToolCalls {
 			usedWebSearch = usedWebSearch || isWebSearchToolName(call.Function.Name)
 			result, err := s.toolExecutor.Execute(ctx, tools.ExecutionRequest{
@@ -951,6 +959,8 @@ func (s *Service) completeWithToolsWithOptions(ctx context.Context, config store
 			} else if result.Confirmation != nil {
 				confirmations = append(confirmations, confirmationFromTool(*result.Confirmation))
 				terminalCardRound = false
+			} else if result.Terminal {
+				terminalToolRound = true
 			}
 			if toolCard := toolCardFromToolResult(call, message); toolCard != nil {
 				if !cardContentEligible {
@@ -970,7 +980,11 @@ func (s *Service) completeWithToolsWithOptions(ctx context.Context, config store
 		}
 		if terminalCardRound && card != nil {
 			response.Content = ""
-			return response, confirmations, card, sourceLinks, generatedFiles, usageReservations, usedWebSearch, false, nil
+			return response, confirmations, card, sourceLinks, generatedFiles, usageReservations, usedWebSearch, false, false, nil
+		}
+		if terminalToolRound {
+			response.Content = ""
+			return response, confirmations, card, sourceLinks, generatedFiles, usageReservations, usedWebSearch, false, true, nil
 		}
 		if card != nil {
 			messages = append(messages, llm.Message{Role: "system", Content: standaloneCardFollowupPrompt()})

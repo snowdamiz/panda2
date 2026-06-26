@@ -25,6 +25,18 @@ func TestRedactSecretsKeepsSnakeCaseIdentifiers(t *testing.T) {
 	}
 }
 
+func TestRedactSecretsKeepsPublicHTTPURLs(t *testing.T) {
+	link := "https://apps.apple.com/us/app/spot-it-all/id6778223189"
+	content := "Here is the Orangiies app link: " + link
+	got := RedactSecrets(content)
+	if !strings.Contains(got, link) {
+		t.Fatalf("expected public URL to be preserved, got %q", got)
+	}
+	if strings.Contains(got, "[redacted]") {
+		t.Fatalf("public URL should not be redacted: %q", got)
+	}
+}
+
 func TestRedactSecretsRedactsExplicitAndTokenLikeSecrets(t *testing.T) {
 	for _, content := range []string{
 		"sk-abcdefghijklmnopqrstuvwxyz123456",
@@ -36,6 +48,24 @@ func TestRedactSecretsRedactsExplicitAndTokenLikeSecrets(t *testing.T) {
 	} {
 		if got := RedactSecrets(content); !strings.Contains(got, "[redacted]") {
 			t.Fatalf("expected secret redaction for %q, got %q", content, got)
+		}
+	}
+}
+
+func TestRedactSecretsRedactsSecretBearingURLs(t *testing.T) {
+	for _, content := range []string{
+		"https://discord.com/api/webhooks/123456789012345678/abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890",
+		"https://example.com/download?token=abcdefghijklmnopqrstuvwxyz123456",
+		"https://example.com/download?signature=AbCdEfGhIjKlMnOpQrStUvWxYz123456",
+	} {
+		got := RedactSecrets(content)
+		if !strings.Contains(got, "[redacted]") {
+			t.Fatalf("expected secret-bearing URL to be redacted for %q, got %q", content, got)
+		}
+		if strings.Contains(got, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890") ||
+			strings.Contains(got, "abcdefghijklmnopqrstuvwxyz123456") ||
+			strings.Contains(got, "AbCdEfGhIjKlMnOpQrStUvWxYz123456") {
+			t.Fatalf("secret-bearing URL leaked token: %q", got)
 		}
 	}
 }

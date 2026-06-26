@@ -521,7 +521,7 @@ func (s *Service) ExecuteDynamicTool(ctx context.Context, request tools.DynamicE
 		Role:       "tool",
 		ToolCallID: request.Call.ID,
 		Content:    security.RedactSecrets(string(data)),
-	}}, nil
+	}, Terminal: s.runAlreadyPostedChatResponse(result, request.InvocationType, err)}, nil
 }
 
 func (s *Service) Run(ctx context.Context, request RunRequest) (RunResult, error) {
@@ -634,6 +634,36 @@ func (s *Service) beginRunQuota(ctx context.Context, request RunRequest) (billin
 		return s.billing.BeginUsage(ctx, request.GuildID, billing.MetricScheduledRun, 1)
 	default:
 		return billing.Reservation{}, nil
+	}
+}
+
+func (s *Service) runAlreadyPostedChatResponse(result RunResult, invocationType string, err error) bool {
+	if err != nil || result.Status != RunSucceeded || strings.TrimSpace(invocationType) != InvocationChatTool {
+		return false
+	}
+	for _, entry := range result.Transcript {
+		if strings.TrimSpace(entry.Error) != "" {
+			continue
+		}
+		if s.terminalDiscordWriteTool(entry.Tool) {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Service) terminalDiscordWriteTool(toolName string) bool {
+	name := strings.TrimSpace(toolName)
+	if s != nil && s.registry != nil {
+		if definition, ok := s.registry.Get(name); ok {
+			name = definition.Name
+		}
+	}
+	switch name {
+	case "discord.send_message", "discord.reply_message":
+		return true
+	default:
+		return false
 	}
 }
 
