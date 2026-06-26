@@ -635,8 +635,8 @@ func DefaultDefinitions() []Definition {
 		adminDiscordWrite(features.DiscordInvitesEvents, "discord.create_scheduled_event", "Create a scheduled event after confirmation.", []string{"event_json"}, "MANAGE_EVENTS"),
 		adminDiscordWrite(features.DiscordInvitesEvents, "discord.update_scheduled_event", "Update a scheduled event after confirmation.", []string{"event_id", "event_json"}, "MANAGE_EVENTS"),
 		adminDiscordWrite(features.DiscordInvitesEvents, "discord.delete_scheduled_event", "Delete a scheduled event after confirmation.", []string{"event_id"}, "MANAGE_EVENTS"),
-		moderationWrite("discord.timeout_member", "Time out a member after confirmation.", []string{"user_id", "duration"}, "MODERATE_MEMBERS"),
-		moderationWrite("discord.remove_timeout", "Remove a member timeout after confirmation.", []string{"user_id"}, "MODERATE_MEMBERS"),
+		moderationWrite("discord.timeout_member", "Apply a Discord moderation timeout to a member after confirmation. Use panda.manage_safety instead when the admin only wants Panda itself to stop interacting with someone.", []string{"user_id", "duration"}, "MODERATE_MEMBERS"),
+		moderationWrite("discord.remove_timeout", "Remove a Discord moderation timeout from a member after confirmation.", []string{"user_id"}, "MODERATE_MEMBERS"),
 		moderationWrite("discord.kick_member", "Kick a member after confirmation.", []string{"user_id"}, "KICK_MEMBERS"),
 		moderationWrite("discord.ban_member", "Ban a member after confirmation.", []string{"user_id"}, "BAN_MEMBERS"),
 		moderationWrite("discord.unban_member", "Unban a user after confirmation.", []string{"user_id"}, "BAN_MEMBERS"),
@@ -710,7 +710,7 @@ func userPermissionManagementTool() Definition {
 func safetyStatusTool() Definition {
 	return Definition{
 		Name:                  "panda.manage_safety",
-		Description:           "Read Panda safety strike and timeout status for Discord users in this server. Use action=status with user_id/user/member for questions like \"how many strikes does @user have\". Use action=list for current users with recorded strike or timeout state.",
+		Description:           "Read or prepare confirmed admin changes to Panda's own safety strike and interaction timeout status for Discord users in this server. Use action=status with user_id/user/member for questions like \"how many strikes does @user have\". Use action=list for current users with recorded strike or timeout state. Use action=timeout with user_id/user/member plus duration_seconds or duration when an admin asks Panda to timeout, ignore, or stop interacting with a user for a specific length of time; this blocks Panda replies and does not require Discord moderation to be enabled. Use action=remove with user_id/user/member to remove one recorded strike, or action=clear/reset to remove all strike and timeout state for a user; write actions require admin confirmation.",
 		RequiredPermission:    admin.PermissionAdminAuditRead,
 		AlternatePermissions:  []string{admin.PermissionModerationUse, admin.PermissionAdminConfigRead, admin.PermissionAdminConfigWrite, admin.PermissionOwnerOps},
 		ToolClass:             ToolClassWorkflow,
@@ -720,12 +720,13 @@ func safetyStatusTool() Definition {
 		Redaction:             RedactSecrets,
 		Audit:                 AuditOnUse,
 		IncludeInModelContext: true,
+		SupportsDryRun:        true,
 		MaxLimit:              100,
 	}
 }
 
 func toolAccessManagementTool() Definition {
-	definition := adminWrite("panda.manage_tool_access", "Allow, deny/block, remove, list/status, or open access to native or composed Panda tools. Preserve the user's requested target type: use user_id/user/member/user_name for user-specific tool access and role_id/role/role_name for role-specific tool access. Use tool_name=panda.chat for Panda's normal natural chat/reply behavior when an admin asks Panda not to respond to a user/role, to hold off on replying, or to resume responding later; do not draft a composed tool for that. Use action=deny when the user says do not allow, block, disable, stop responding to, or revoke a user's/role's tool use; deny creates a blocking rule and does not require a previous allow rule. Use action=remove only when deleting an explicit tool access rule. Use action=open with tool_name for any single tool when the user asks to let everyone/the public use it; use tool_group=image_tools for the image tool bundle. Do not grant the @everyone role or the guild ID as a role. Use action=status/list with tool_name for any tool or tool_group=image_tools for image tools. If the user says Panda admins, first inspect Panda admin role/user mappings with panda.manage_role_permission and panda.manage_user_permission; do not infer Panda admins from Discord Administrator roles.", []string{"action"})
+	definition := adminWrite("panda.manage_tool_access", "Allow, deny/block, remove, list/status, or open access to native or composed Panda tools. Preserve the user's requested target type: use user_id/user/member/user_name for user-specific tool access and role_id/role/role_name for role-specific tool access. Use tool_name=panda.chat for Panda's normal natural chat/reply behavior when an admin asks Panda not to respond, talk, interact, engage, or chat with a user/role indefinitely, or to resume responding later; do not draft a composed tool for that. If the admin gives a finite duration, prefer panda.manage_safety action=timeout instead. Use action=deny when the user says do not allow, block, disable, stop responding to, or revoke a user's/role's tool use; deny creates a blocking rule and does not require a previous allow rule. Use action=remove only when deleting an explicit tool access rule. Use action=open with tool_name for any single tool when the user asks to let everyone/the public use it; use tool_group=image_tools for the image tool bundle. Do not grant the @everyone role or the guild ID as a role. Use action=status/list with tool_name for any tool or tool_group=image_tools for image tools. If the user says Panda admins, first inspect Panda admin role/user mappings with panda.manage_role_permission and panda.manage_user_permission; do not infer Panda admins from Discord Administrator roles.", []string{"action"})
 	definition.InputSchema = toolAccessManagementSchema()
 	return definition
 }
@@ -798,20 +799,29 @@ func userPermissionManagementSchema() json.RawMessage {
 
 func safetyStatusSchema() json.RawMessage {
 	return schemaWithProperties([]string{"action"}, map[string]any{
-		"action":         map[string]string{"type": "string", "description": "Action: status/get/show for one user, or list for users with recorded strike or timeout state."},
-		"user_id":        map[string]string{"type": "string", "description": "Discord user ID or user mention for status."},
+		"action":         map[string]string{"type": "string", "description": "Action: status/get/show for one user, list for users with recorded strike or timeout state, timeout/set_timeout/manual_timeout to stop Panda interacting with a user for a specific duration with confirmation, remove/remove_strike/decrement to remove one or count strikes with confirmation, or clear/reset/remove_all to clear all safety strike and timeout state with confirmation."},
+		"user_id":        map[string]string{"type": "string", "description": "Discord user ID or user mention for status, timeout, remove, or clear."},
 		"user":           map[string]string{"type": "string", "description": "Alias for user_id; may be a Discord mention."},
 		"member_user_id": map[string]string{"type": "string", "description": "Alias for user_id."},
 		"member":         map[string]string{"type": "string", "description": "Alias for user_id; may be a Discord mention."},
 		"user_name":      map[string]string{"type": "string", "description": "Optional Discord username to resolve when Discord member lookup is configured."},
-		"limit":          map[string]any{"type": "integer", "minimum": 1, "maximum": 100, "description": "Maximum rows for action=list."},
+		"duration_seconds": map[string]any{
+			"type":        "integer",
+			"minimum":     1,
+			"description": "Timeout length in seconds for action=timeout. Prefer this for natural requests like '30 minutes' by converting the requested duration.",
+		},
+		"duration": map[string]string{"type": "string", "description": "Timeout length for action=timeout, such as 30m, 2h, 1 day, or 30 minutes."},
+		"count":    map[string]any{"type": "integer", "minimum": 1, "maximum": 100, "description": "Number of strikes to remove for action=remove; defaults to 1."},
+		"strikes":  map[string]any{"type": "integer", "minimum": 1, "maximum": 100, "description": "Alias for count."},
+		"limit":    map[string]any{"type": "integer", "minimum": 1, "maximum": 100, "description": "Maximum rows for action=list."},
+		"dry_run":  map[string]string{"type": "boolean"},
 	})
 }
 
 func toolAccessManagementSchema() json.RawMessage {
 	return schemaWithProperties([]string{"action"}, map[string]any{
 		"action":           map[string]string{"type": "string", "description": "Action: list/status/who, add/allow, deny/block/disallow/disable, remove, or open/public/everyone/allow_everyone. Use deny/block when the user says not to allow a user or role; this creates a blocking rule even if no allow rule exists. Use remove only to delete an explicit tool access rule. Use open/everyone to make any tool available to everyone by clearing matching Panda permission mappings for registered native tools and tool-specific allowlist rules for all selected tools."},
-		"tool_name":        map[string]string{"type": "string", "description": "Native or composed Panda tool name, such as panda.generate_image, web.search, welcome_builder, or panda.chat for Panda's normal natural chat/reply behavior."},
+		"tool_name":        map[string]string{"type": "string", "description": "Native or composed Panda tool name, such as panda.generate_image, web.search, welcome_builder, or panda.chat for Panda's normal natural chat/reply behavior and indefinite no-interaction rules."},
 		"tool":             map[string]string{"type": "string", "description": "Alias for tool_name."},
 		"tool_group":       map[string]string{"type": "string", "description": "Tool bundle for status/open requests. Currently supported: image_tools for both panda.generate_image and panda.inspect_image. For every other tool, use tool_name."},
 		"group":            map[string]string{"type": "string", "description": "Alias for tool_group."},

@@ -2190,7 +2190,7 @@ func TestAskExecutesMultipleToolCallsFromOneModelTurn(t *testing.T) {
 		t.Fatalf("expected tool batch request and final response request, got %d", len(client.requests))
 	}
 	finalMessages := joinMessages(client.requests[1].Messages)
-	for _, want := range []string{"call-music-skip", "call-music-play", `"action":"skip"`, `"action":"play"`, "bmxxing by mgk"} {
+	for _, want := range []string{"call-music-skip", "call-music-play", "music skip", "music play", "bmxxing by mgk"} {
 		if !strings.Contains(finalMessages, want) {
 			t.Fatalf("final request should include %s from batched tool results, got %s", want, finalMessages)
 		}
@@ -3245,6 +3245,29 @@ func TestFinalAssistantResponseSuppressesStandaloneCardEcho(t *testing.T) {
 	}
 }
 
+func TestFinalAssistantResponseSuppressesCardMarkupArtifact(t *testing.T) {
+	card := &ToolCard{
+		Title:      "Track queued",
+		Content:    "Queued **Edward Maya & Vika Jigulina - Stereo Love** at position 3.",
+		Accent:     "music",
+		Standalone: true,
+	}
+
+	content := finalAssistantResponseContent(
+		`<card>{
+"title":"Track queued",
+"content":"Queued **Edward Maya & Vika Jigulina - Stereo Love** at position 3."
+}`,
+		nil,
+		defaultAppendedWebSourceLinks,
+		card,
+	)
+
+	if content != "" {
+		t.Fatalf("card markup artifact should be suppressed for standalone cards, got %q", content)
+	}
+}
+
 func TestFinalAssistantResponseKeepsStandaloneCardRemainingAnswer(t *testing.T) {
 	card := &ToolCard{
 		Title:      "Connected to voice",
@@ -3265,6 +3288,36 @@ func TestFinalAssistantResponseKeepsStandaloneCardRemainingAnswer(t *testing.T) 
 	}
 	if !card.Standalone {
 		t.Fatalf("card should remain standalone: %+v", card)
+	}
+}
+
+func TestAssistantVisibleMusicCardToolMessageHidesRendererPayload(t *testing.T) {
+	message := llm.Message{
+		Role:       "tool",
+		ToolCallID: "call-music",
+		Content:    `{"result":{"ok":true,"action":"play","title":"Track queued","content":"Queued **Edward Maya & Vika Jigulina - Stereo Love** at position 3.","accent":"music","url":"https://example.com/track","fields":[{"name":"Uploader","value":"Spinnin' Records","inline":true},{"name":"Duration","value":"4:13","inline":true}],"actions":[{"label":"Open track","url":"https://example.com/track"}]}}`,
+	}
+	visible := assistantVisibleToolMessage(llm.ToolCall{
+		ID:   "call-music",
+		Type: "function",
+		Function: llm.ToolCallFunction{
+			Name:      "panda_manage_music",
+			Arguments: `{"action":"play","query":"stereo love"}`,
+		},
+	}, message, nil)
+
+	for _, forbidden := range []string{"{", "}", `"title"`, `"content"`, "<card>"} {
+		if strings.Contains(visible.Content, forbidden) {
+			t.Fatalf("visible music tool message leaked renderer payload token %q: %s", forbidden, visible.Content)
+		}
+	}
+	for _, want := range []string{"Track queued", "Queued **Edward Maya", "Uploader: Spinnin' Records", "Duration: 4:13", "Open track"} {
+		if !strings.Contains(visible.Content, want) {
+			t.Fatalf("visible music tool message missing %q: %s", want, visible.Content)
+		}
+	}
+	if visible.ToolCallID != "call-music" || visible.Role != "tool" {
+		t.Fatalf("visible music tool message should preserve tool metadata: %+v", visible)
 	}
 }
 

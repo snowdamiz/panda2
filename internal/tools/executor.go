@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"net/url"
 	"sort"
 	"strconv"
@@ -98,6 +99,9 @@ type MusicRuntimeContext struct {
 type UserSafetyReader interface {
 	Status(ctx context.Context, guildID, userID string, now time.Time) (repository.UserSafetyStatus, error)
 	List(ctx context.Context, guildID string, limit int) ([]store.UserSafetyState, error)
+	SetTimeout(ctx context.Context, guildID, userID string, duration time.Duration, now time.Time) (repository.UserSafetyStatus, error)
+	RemoveStrike(ctx context.Context, guildID, userID string, count int, now time.Time) (repository.UserSafetyStatus, error)
+	Clear(ctx context.Context, guildID, userID string, now time.Time) (repository.UserSafetyStatus, error)
 }
 
 type OpsManager interface {
@@ -3085,7 +3089,8 @@ func naturalChatToolAlias(value string) bool {
 	switch normalizedAccessAlias(value) {
 	case "chat", "naturalchat", "assistantchat", "normalchat", "conversation", "conversations",
 		"reply", "replies", "replying", "respond", "responding", "responses", "response",
-		"naturalreplies", "naturalresponses", "discordchat", "discordreplies", "discordresponses":
+		"naturalreplies", "naturalresponses", "discordchat", "discordreplies", "discordresponses",
+		"interact", "interacting", "interaction", "interactions", "talk", "talking", "engage", "engaging":
 		return true
 	default:
 		return false
@@ -3387,9 +3392,296 @@ func (e *Executor) manageSafety(ctx context.Context, request ExecutionRequest, a
 			rows = append(rows, userSafetyStatusPayload(state, state.TimeoutUntil != nil && now.Before(state.TimeoutUntil.UTC()), now))
 		}
 		return map[string]any{"result": map[string]any{"states": rows, "count": len(rows)}}, nil
+	case "timeout", "time_out", "set_timeout", "manual_timeout":
+		return e.manageSafetyTimeout(ctx, request, args, now)
+	case "remove", "remove_strike", "decrement":
+		return e.manageSafetyRemoval(ctx, request, args, false, now)
+	case "clear", "clear_all", "reset", "remove_all":
+		return e.manageSafetyRemoval(ctx, request, args, true, now)
 	default:
-		return nil, fmt.Errorf("action must be status or list")
+		return nil, fmt.Errorf("action must be status, list, timeout, remove, or clear")
 	}
+}
+
+func (e *Executor) manageSafetyTimeout(ctx context.Context, request ExecutionRequest, args map[string]any, now time.Time) (any, error) {
+	if !hasSafetyWritePermission(request.Access) {
+		return nil, fmt.Errorf("missing permission %s for safety state changes", admin.PermissionAdminConfigWrite)
+	}
+	userID, err := e.userIDArgument(ctx, request, args)
+	if err != nil {
+		return nil, err
+	}
+	if userID == "" {
+		return nil, fmt.Errorf("user_id is required")
+	}
+	duration, err := safetyTimeoutDurationArgument(args)
+	if err != nil {
+		return nil, err
+	}
+	duration = duration.Round(time.Second)
+	if duration < time.Second {
+		duration = time.Second
+	}
+	durationSeconds := int64(duration / time.Second)
+	durationLabel := durationDisplayLabel(duration)
+	confirmationArgs := e.userConfirmationArguments(ctx, request, userID, userNameArgument(args), map[string]any{
+		"duration_seconds": durationSeconds,
+		"duration_label":   durationLabel,
+	})
+	preview := displayPreview(confirmationArgs, "user_display", "user", "duration_seconds", "duration_label")
+	if boolArgument(args, "dry_run") {
+		return dryRunToolResult("safety.timeout", preview), nil
+	}
+	if !request.AllowConfirmedWrites {
+		return confirmationRequiredWithArguments("safety.timeout", preview, confirmationArgs), nil
+	}
+
+	status, err := e.safety.SetTimeout(ctx, request.GuildID, userID, duration, now)
+	if err != nil {
+		return nil, err
+	}
+	e.recordSafetyAudit(ctx, request, "safety.timeout", userID, map[string]any{
+		"duration_seconds": durationSeconds,
+		"timeout_until":    timePointerString(status.State.TimeoutUntil),
+	}, status.State)
+
+	payload := userSafetyStatusPayload(status.State, status.TimedOut, now)
+	payload["action"] = "safety.timeout"
+	payload["duration_seconds"] = durationSeconds
+	payload["duration_label"] = durationLabel
+	return map[string]any{"result": payload}, nil
+}
+
+func (e *Executor) manageSafetyRemoval(ctx context.Context, request ExecutionRequest, args map[string]any, clear bool, now time.Time) (any, error) {
+	if !hasSafetyWritePermission(request.Access) {
+		return nil, fmt.Errorf("missing permission %s for safety state changes", admin.PermissionAdminConfigWrite)
+	}
+	userID, err := e.userIDArgument(ctx, request, args)
+	if err != nil {
+		return nil, err
+	}
+	if userID == "" {
+		return nil, fmt.Errorf("user_id is required")
+	}
+
+	count := intArgument(args, "count", 1)
+	if value := intArgument(args, "strikes", 0); value > 0 {
+		count = value
+	}
+	if clear {
+		count = 0
+	} else if count <= 0 || count > 100 {
+		return nil, fmt.Errorf("strike count must be between 1 and 100")
+	}
+
+	action := "safety.remove"
+	extras := map[string]any{"count": count}
+	if clear {
+		action = "safety.clear"
+		extras = nil
+	}
+	confirmationArgs := e.userConfirmationArguments(ctx, request, userID, userNameArgument(args), extras)
+	preview := displayPreview(confirmationArgs, "user_display", "user")
+	if !clear {
+		preview["count"] = count
+	}
+	if boolArgument(args, "dry_run") {
+		return dryRunToolResult(action, preview), nil
+	}
+	if !request.AllowConfirmedWrites {
+		return confirmationRequiredWithArguments(action, preview, confirmationArgs), nil
+	}
+
+	var status repository.UserSafetyStatus
+	if clear {
+		status, err = e.safety.Clear(ctx, request.GuildID, userID, now)
+	} else {
+		status, err = e.safety.RemoveStrike(ctx, request.GuildID, userID, count, now)
+	}
+	if err != nil {
+		return nil, err
+	}
+	auditValues := map[string]any{}
+	if !clear {
+		auditValues["count"] = count
+	}
+	e.recordSafetyAudit(ctx, request, action, userID, auditValues, status.State)
+
+	payload := userSafetyStatusPayload(status.State, status.TimedOut, now)
+	payload["action"] = action
+	if clear {
+		payload["cleared"] = true
+	} else {
+		payload["removed_strikes"] = count
+	}
+	return map[string]any{"result": payload}, nil
+}
+
+func hasSafetyWritePermission(access ToolAccess) bool {
+	return hasPermission(access, admin.PermissionAdminConfigWrite) || hasPermission(access, admin.PermissionOwnerOps)
+}
+
+func (e *Executor) recordSafetyAudit(ctx context.Context, request ExecutionRequest, action, userID string, values map[string]any, state store.UserSafetyState) {
+	if e == nil || e.audit == nil {
+		return
+	}
+	if values == nil {
+		values = map[string]any{}
+	}
+	values["request_id"] = request.RequestID
+	values["channel_id"] = request.ChannelID
+	values["active_strikes"] = state.ActiveStrikes
+	values["total_strikes"] = state.TotalStrikes
+	data, _ := json.Marshal(values)
+	_ = e.audit.Record(ctx, store.AuditEvent{
+		GuildID:    request.GuildID,
+		ActorID:    request.ActorID,
+		Action:     action,
+		TargetType: "user_safety_state",
+		TargetID:   userID,
+		Metadata:   string(data),
+	})
+}
+
+func safetyTimeoutDurationArgument(args map[string]any) (time.Duration, error) {
+	for _, name := range []string{"duration_seconds", "timeout_seconds", "seconds"} {
+		if value, ok := args[name]; ok && value != nil {
+			duration, err := secondsDurationArgument(name, value)
+			if err != nil {
+				return 0, err
+			}
+			if duration <= 0 {
+				return 0, fmt.Errorf("duration must be positive")
+			}
+			return duration, nil
+		}
+	}
+	for _, name := range []string{"duration", "timeout_duration", "timeout", "for"} {
+		if value, ok := args[name]; ok && value != nil {
+			duration, err := durationArgumentValue(name, value)
+			if err != nil {
+				return 0, err
+			}
+			if duration <= 0 {
+				return 0, fmt.Errorf("duration must be positive")
+			}
+			return duration, nil
+		}
+	}
+	return 0, fmt.Errorf("duration is required")
+}
+
+func secondsDurationArgument(name string, value any) (time.Duration, error) {
+	seconds, ok := numericArgumentSeconds(value)
+	if !ok {
+		return durationArgumentValue(name, value)
+	}
+	if seconds <= 0 || seconds > float64(math.MaxInt64)/float64(time.Second) {
+		return 0, fmt.Errorf("%s must be a positive duration in seconds", name)
+	}
+	return time.Duration(seconds * float64(time.Second)), nil
+}
+
+func durationArgumentValue(name string, value any) (time.Duration, error) {
+	if seconds, ok := numericArgumentSeconds(value); ok {
+		if seconds <= 0 || seconds > float64(math.MaxInt64)/float64(time.Second) {
+			return 0, fmt.Errorf("%s must be a positive duration", name)
+		}
+		return time.Duration(seconds * float64(time.Second)), nil
+	}
+	raw := strings.TrimSpace(fmt.Sprint(value))
+	if raw == "" {
+		return 0, fmt.Errorf("%s is required", name)
+	}
+	if seconds, err := strconv.ParseFloat(raw, 64); err == nil {
+		if seconds <= 0 || seconds > float64(math.MaxInt64)/float64(time.Second) {
+			return 0, fmt.Errorf("%s must be a positive duration", name)
+		}
+		return time.Duration(seconds * float64(time.Second)), nil
+	}
+	if duration, err := time.ParseDuration(raw); err == nil {
+		return duration, nil
+	}
+	duration, err := humanDuration(raw)
+	if err != nil {
+		return 0, fmt.Errorf("%s must be a duration like 30m, 2h, 86400 seconds, or 30 minutes", name)
+	}
+	return duration, nil
+}
+
+func numericArgumentSeconds(value any) (float64, bool) {
+	switch typed := value.(type) {
+	case float64:
+		return typed, true
+	case float32:
+		return float64(typed), true
+	case int:
+		return float64(typed), true
+	case int64:
+		return float64(typed), true
+	case int32:
+		return float64(typed), true
+	case json.Number:
+		seconds, err := typed.Float64()
+		return seconds, err == nil
+	default:
+		return 0, false
+	}
+}
+
+func humanDuration(raw string) (time.Duration, error) {
+	fields := strings.Fields(strings.ToLower(strings.TrimSpace(raw)))
+	if len(fields) != 2 {
+		return 0, fmt.Errorf("unsupported duration")
+	}
+	amount, err := strconv.ParseFloat(fields[0], 64)
+	if err != nil || amount <= 0 {
+		return 0, fmt.Errorf("duration amount must be positive")
+	}
+	unit := strings.TrimSuffix(fields[1], "s")
+	var unitDuration time.Duration
+	switch unit {
+	case "s", "sec", "second":
+		unitDuration = time.Second
+	case "m", "min", "minute":
+		unitDuration = time.Minute
+	case "h", "hr", "hour":
+		unitDuration = time.Hour
+	case "d", "day":
+		unitDuration = 24 * time.Hour
+	case "w", "week":
+		unitDuration = 7 * 24 * time.Hour
+	default:
+		return 0, fmt.Errorf("unsupported duration unit")
+	}
+	if amount > float64(math.MaxInt64)/float64(unitDuration) {
+		return 0, fmt.Errorf("duration is too large")
+	}
+	return time.Duration(amount * float64(unitDuration)), nil
+}
+
+func durationDisplayLabel(duration time.Duration) string {
+	duration = duration.Round(time.Second)
+	units := []struct {
+		name string
+		size time.Duration
+	}{
+		{"week", 7 * 24 * time.Hour},
+		{"day", 24 * time.Hour},
+		{"hour", time.Hour},
+		{"minute", time.Minute},
+		{"second", time.Second},
+	}
+	for _, unit := range units {
+		if duration >= unit.size && duration%unit.size == 0 {
+			count := int64(duration / unit.size)
+			if count == 1 {
+				return "1 " + unit.name
+			}
+			return fmt.Sprintf("%d %ss", count, unit.name)
+		}
+	}
+	return duration.String()
 }
 
 func userSafetyStatusPayload(state store.UserSafetyState, timedOut bool, now time.Time) map[string]any {
@@ -4184,6 +4476,12 @@ func confirmationArguments(action string, preview map[string]any) map[string]str
 		return stringArgumentsWithOptional(preview, []string{"channel_id", "rule"}, "channel_display")
 	case "channel_rule.remove":
 		return stringArgumentsWithOptional(preview, []string{"channel_id"}, "channel_display")
+	case "safety.timeout":
+		return stringArgumentsWithOptional(preview, []string{"user_id", "duration_seconds"}, "user_display", "duration_label")
+	case "safety.remove":
+		return stringArgumentsWithOptional(preview, []string{"user_id", "count"}, "user_display")
+	case "safety.clear":
+		return stringArgumentsWithOptional(preview, []string{"user_id"}, "user_display")
 	case "composed_tool.approve", "composed_tool.rollback":
 		return stringArguments(preview, "tool_name", "version")
 	case "composed_tool.delete":
@@ -4327,10 +4625,19 @@ func confirmationCopy(action string, arguments map[string]string) (string, strin
 	case "member_role.remove":
 		return fmt.Sprintf("Panda prepared removal of %s from %s.", roleConfirmationDisplay(arguments), userConfirmationDisplay(arguments)), "Remove role"
 	case "tool_access.add":
+		if toolAccessConfirmationIsPandaChat(arguments) {
+			return fmt.Sprintf("Panda prepared allowing replies to %s.", toolAccessConfirmationTarget(arguments)), "Allow replies"
+		}
 		return fmt.Sprintf("Panda prepared tool access for `%s` on %s.", arguments["tool_name"], toolAccessConfirmationTarget(arguments)), toolAccessConfirmationLabel("Allow", arguments["tool_name"])
 	case "tool_access.remove":
+		if toolAccessConfirmationIsPandaChat(arguments) {
+			return fmt.Sprintf("Panda prepared resuming replies to %s.", toolAccessConfirmationTarget(arguments)), "Resume replies"
+		}
 		return fmt.Sprintf("Panda prepared removal of tool access for `%s` from %s.", arguments["tool_name"], toolAccessConfirmationTarget(arguments)), toolAccessConfirmationLabel("Remove", arguments["tool_name"])
 	case "tool_access.deny":
+		if toolAccessConfirmationIsPandaChat(arguments) {
+			return fmt.Sprintf("Panda prepared not to reply to %s.", toolAccessConfirmationTarget(arguments)), "Stop replying"
+		}
 		return fmt.Sprintf("Panda prepared denial of tool access for `%s` on %s.", arguments["tool_name"], toolAccessConfirmationTarget(arguments)), toolAccessConfirmationLabel("Deny", arguments["tool_name"])
 	case "tool_access.open":
 		return fmt.Sprintf("Panda prepared opening %s to everyone.", toolAccessOpenToolList(arguments["tool_names"])), "Open tool access"
@@ -4338,6 +4645,12 @@ func confirmationCopy(action string, arguments map[string]string) (string, strin
 		return fmt.Sprintf("Panda prepared `%s` channel access rule for %s.", arguments["rule"], channelConfirmationDisplay(arguments)), "Set rule"
 	case "channel_rule.remove":
 		return fmt.Sprintf("Panda prepared removal of the channel access rule for %s.", channelConfirmationDisplay(arguments)), "Remove rule"
+	case "safety.timeout":
+		return fmt.Sprintf("Panda prepared a %s timeout from Panda for %s.", safetyConfirmationDurationLabel(arguments), userConfirmationDisplay(arguments)), "Timeout from Panda"
+	case "safety.remove":
+		return fmt.Sprintf("Panda prepared removal of `%s` safety strike(s) from %s.", arguments["count"], userConfirmationDisplay(arguments)), "Remove strike"
+	case "safety.clear":
+		return fmt.Sprintf("Panda prepared clearing all safety strikes and timeout state from %s.", userConfirmationDisplay(arguments)), "Clear safety state"
 	case "composed_tool.approve":
 		return fmt.Sprintf("Panda prepared approval of `%s` version `%s`.", arguments["tool_name"], arguments["version"]), "Approve tool"
 	case "composed_tool.rollback":
@@ -4363,6 +4676,21 @@ func toolAccessConfirmationLabel(verb, toolName string) string {
 		return verb + " tool access"
 	}
 	return truncateRunes(verb+" "+toolName, 80)
+}
+
+func toolAccessConfirmationIsPandaChat(arguments map[string]string) bool {
+	return strings.EqualFold(strings.TrimSpace(arguments["tool_name"]), ToolNamePandaChat)
+}
+
+func safetyConfirmationDurationLabel(arguments map[string]string) string {
+	if label := strings.TrimSpace(arguments["duration_label"]); label != "" {
+		return label
+	}
+	seconds, err := strconv.ParseInt(strings.TrimSpace(arguments["duration_seconds"]), 10, 64)
+	if err != nil || seconds <= 0 {
+		return "requested"
+	}
+	return durationDisplayLabel(time.Duration(seconds) * time.Second)
 }
 
 func toolAccessOpenToolList(value string) string {

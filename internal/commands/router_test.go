@@ -381,6 +381,17 @@ func attachRuntimeStatus(t *testing.T, router *Router) *runtimecontrol.Service {
 	return service
 }
 
+func newCommandSafetyRepository(t *testing.T) *repository.UserSafetyRepository {
+	t.Helper()
+	ctx := context.Background()
+	db, err := store.Open(ctx, filepath.Join(t.TempDir(), "safety.db"))
+	if err != nil {
+		t.Fatalf("open safety store: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	return repository.NewUserSafetyRepository(db.DB)
+}
+
 func containsString(values []string, want string) bool {
 	for _, value := range values {
 		if value == want {
@@ -2184,6 +2195,139 @@ func TestNaturalUserToolAccessRendersConfirmationThroughAgentTool(t *testing.T) 
 	}
 }
 
+func TestNaturalSafetyStrikeRemovalRendersConfirmationThroughAgentTool(t *testing.T) {
+	ctx := context.Background()
+	var safety *repository.UserSafetyRepository
+	client := &fakeLLM{responses: []llm.ChatResponse{
+		{ToolCalls: []llm.ToolCall{{
+			ID:   "call-safety-remove",
+			Type: "function",
+			Function: llm.ToolCallFunction{
+				Name:      "panda_manage_safety",
+				Arguments: `{"action":"remove","user":"<@100000000000000222>"}`,
+			},
+		}}},
+		{Content: "Prepared safety strike removal."},
+	}}
+	router := newTestRouter(t, client, 20, func(executor *tools.Executor) {
+		safety = newCommandSafetyRepository(t)
+		executor.WithUserSafetyRepository(safety)
+	})
+	if _, err := safety.AddStrike(ctx, "guild-1", "100000000000000222", 3, 10*time.Minute, time.Date(2026, time.June, 25, 19, 0, 0, 0, time.UTC)); err != nil {
+		t.Fatalf("seed strike: %v", err)
+	}
+
+	response := router.HandleNaturalMessage(ctx, Request{
+		GuildID:      "guild-1",
+		ChannelID:    "channel-1",
+		UserID:       "admin",
+		IsGuildAdmin: true,
+		Options:      map[string]string{"message": "panda remove the strike from @xer0", "bot_mentioned": "true"},
+	})
+	if response.Confirmation == nil || response.Confirmation.ConfirmLabel != "Remove strike" {
+		t.Fatalf("expected safety strike confirmation, got %+v", response)
+	}
+	confirmationRequest, ok := RequestFromToolConfirmationID(response.Confirmation.ID, Request{
+		GuildID:      "guild-1",
+		ChannelID:    "channel-1",
+		UserID:       "admin",
+		IsGuildAdmin: true,
+	})
+	if !ok || confirmationRequest.Action != toolActionSafetyStrikeRemove || confirmationRequest.Options["user_id"] != "100000000000000222" || confirmationRequest.Options["count"] != "1" {
+		t.Fatalf("unexpected safety confirmation id: request=%+v ok=%t", confirmationRequest, ok)
+	}
+	status, err := safety.Status(ctx, "guild-1", "100000000000000222", time.Now().UTC())
+	if err != nil {
+		t.Fatalf("status before confirmation: %v", err)
+	}
+	if status.State.ActiveStrikes != 1 || status.State.TotalStrikes != 1 {
+		t.Fatalf("natural confirmation preparation should not mutate safety state, got %+v", status)
+	}
+
+	confirmed := router.HandleToolConfirmation(ctx, confirmationRequest)
+	if !confirmed.Ephemeral || !strings.Contains(confirmed.Content, "Removed 1 safety strike") {
+		t.Fatalf("unexpected safety confirmation response: %+v", confirmed)
+	}
+	status, err = safety.Status(ctx, "guild-1", "100000000000000222", time.Now().UTC())
+	if err != nil {
+		t.Fatalf("status after confirmation: %v", err)
+	}
+	if status.State.ActiveStrikes != 0 || status.State.TotalStrikes != 0 {
+		t.Fatalf("expected confirmed removal to clear strike counts, got %+v", status)
+	}
+	if len(client.requests) != 2 {
+		t.Fatalf("expected streamed safety tool call and final response, got %d request(s)", len(client.requests))
+	}
+	if names := requestToolNames(client.requests[0]); !names["panda_manage_safety"] {
+		t.Fatalf("expected safety management tool to be available, got %+v", names)
+	}
+}
+
+func TestNaturalManualSafetyTimeoutRendersConfirmationThroughAgentTool(t *testing.T) {
+	ctx := context.Background()
+	var safety *repository.UserSafetyRepository
+	client := &fakeLLM{responses: []llm.ChatResponse{
+		{ToolCalls: []llm.ToolCall{{
+			ID:   "call-safety-timeout",
+			Type: "function",
+			Function: llm.ToolCallFunction{
+				Name:      "panda_manage_safety",
+				Arguments: `{"action":"timeout","user":"<@100000000000000222>","duration":"30 minutes"}`,
+			},
+		}}},
+		{Content: "Prepared Panda timeout."},
+	}}
+	router := newTestRouter(t, client, 20, func(executor *tools.Executor) {
+		safety = newCommandSafetyRepository(t)
+		executor.WithUserSafetyRepository(safety)
+	})
+
+	response := router.HandleNaturalMessage(ctx, Request{
+		GuildID:      "guild-1",
+		ChannelID:    "channel-1",
+		UserID:       "admin",
+		IsGuildAdmin: true,
+		Options:      map[string]string{"message": "panda timeout @xer0 for 30 minutes", "bot_mentioned": "true"},
+	})
+	if response.Confirmation == nil || response.Confirmation.ConfirmLabel != "Timeout from Panda" {
+		t.Fatalf("expected safety timeout confirmation, got %+v", response)
+	}
+	confirmationRequest, ok := RequestFromToolConfirmationID(response.Confirmation.ID, Request{
+		GuildID:      "guild-1",
+		ChannelID:    "channel-1",
+		UserID:       "admin",
+		IsGuildAdmin: true,
+	})
+	if !ok || confirmationRequest.Action != toolActionSafetyTimeout || confirmationRequest.Options["user_id"] != "100000000000000222" || confirmationRequest.Options["duration_seconds"] != "1800" {
+		t.Fatalf("unexpected safety timeout confirmation id: request=%+v ok=%t", confirmationRequest, ok)
+	}
+	status, err := safety.Status(ctx, "guild-1", "100000000000000222", time.Now().UTC())
+	if err != nil {
+		t.Fatalf("status before confirmation: %v", err)
+	}
+	if status.TimedOut || status.State.TimeoutUntil != nil {
+		t.Fatalf("natural confirmation preparation should not timeout the user, got %+v", status)
+	}
+
+	confirmed := router.HandleToolConfirmation(ctx, confirmationRequest)
+	if !confirmed.Ephemeral || !strings.Contains(confirmed.Content, "Timed out") || !strings.Contains(confirmed.Content, "30 minutes") {
+		t.Fatalf("unexpected safety timeout confirmation response: %+v", confirmed)
+	}
+	status, err = safety.Status(ctx, "guild-1", "100000000000000222", time.Now().UTC())
+	if err != nil {
+		t.Fatalf("status after confirmation: %v", err)
+	}
+	if !status.TimedOut || status.State.TimeoutUntil == nil {
+		t.Fatalf("expected confirmed timeout to be active, got %+v", status)
+	}
+	if len(client.requests) != 2 {
+		t.Fatalf("expected streamed safety tool call and final response, got %d request(s)", len(client.requests))
+	}
+	if names := requestToolNames(client.requests[0]); !names["panda_manage_safety"] || names["discord_timeout_member"] {
+		t.Fatalf("expected safety management tool path without Discord timeout, got %+v", names)
+	}
+}
+
 func TestNaturalDenyNamedUserToolAccessResolvesMember(t *testing.T) {
 	client := &fakeLLM{responses: []llm.ChatResponse{
 		{ToolCalls: []llm.ToolCall{{
@@ -2236,7 +2380,7 @@ func TestNaturalDenyNamedUserChatAccessResolvesMember(t *testing.T) {
 			Type: "function",
 			Function: llm.ToolCallFunction{
 				Name:      "panda_manage_tool_access",
-				Arguments: `{"action":"deny","tool_name":"responding","user":"@xer0"}`,
+				Arguments: `{"action":"deny","tool_name":"interacting","user":"@xer0"}`,
 			},
 		}}},
 		{Content: "Prepared user chat denial."},
@@ -2260,9 +2404,9 @@ func TestNaturalDenyNamedUserChatAccessResolvesMember(t *testing.T) {
 		ChannelID:    "channel-1",
 		UserID:       "admin",
 		IsGuildAdmin: true,
-		Options:      map[string]string{"message": "panda don't respond to @xer0 for now", "bot_mentioned": "true"},
+		Options:      map[string]string{"message": "panda don't interact with @xer0", "bot_mentioned": "true"},
 	})
-	if response.Confirmation == nil || response.Confirmation.ConfirmLabel != "Deny panda.chat" {
+	if response.Confirmation == nil || response.Confirmation.ConfirmLabel != "Stop replying" {
 		t.Fatalf("expected deny chat access confirmation, got %+v", response)
 	}
 	confirmationRequest, ok := RequestFromToolConfirmationID(response.Confirmation.ID, Request{UserID: "admin"})
@@ -2677,7 +2821,7 @@ func TestLLMToolAccessRemovalConfirmationsNameEachTool(t *testing.T) {
 		}
 		requestsByTool[request.Options["tool_name"]] = request
 	}
-	if !labels["Remove panda.chat"] || !labels["Remove panda.generate_image"] {
+	if !labels["Resume replies"] || !labels["Remove panda.generate_image"] {
 		t.Fatalf("expected tool-specific confirmation labels, got %+v", response.Confirmations)
 	}
 	for _, toolName := range []string{"panda.chat", "panda.generate_image"} {
@@ -2849,6 +2993,32 @@ func TestAssistantStandaloneCardWithPlaceholderContentDoesNotCreateFollowup(t *t
 	}
 	if len(response.Followups) != 0 {
 		t.Fatalf("placeholder standalone card prose should not create a followup, got %+v", response.Followups)
+	}
+}
+
+func TestAssistantStandaloneCardWithCardMarkupDoesNotCreateFollowup(t *testing.T) {
+	router := &Router{}
+	response := router.responseFromAssistantAnswer(context.Background(), Request{}, assistant.AskResponse{
+		Content: `<card>{
+"title":"Track queued",
+"content":"Queued **Edward Maya & Vika Jigulina - Stereo Love** at position 3."
+}`,
+		Card: &assistant.ToolCard{
+			Title:      "Track queued",
+			Content:    "Queued **Edward Maya & Vika Jigulina - Stereo Love** at position 3.",
+			Accent:     "music",
+			Standalone: true,
+		},
+	}, "", "")
+
+	if response.Content != "Queued **Edward Maya & Vika Jigulina - Stereo Love** at position 3." {
+		t.Fatalf("expected card content as primary embed description, got %+v", response)
+	}
+	if response.Presentation.Title != "Track queued" || response.Presentation.Accent != AccentMusic {
+		t.Fatalf("expected music card presentation, got %+v", response.Presentation)
+	}
+	if len(response.Followups) != 0 {
+		t.Fatalf("raw card markup should not create a followup, got %+v", response.Followups)
 	}
 }
 
@@ -3871,7 +4041,7 @@ func TestNaturalMessageRunsMultipleMusicToolsInOneTurn(t *testing.T) {
 		t.Fatalf("expected streamed tool batch and final response, got %d request(s)", len(client.requests))
 	}
 	finalMessages := joinRequestMessages(client.requests[1])
-	for _, want := range []string{`"action":"skip"`, `"action":"play"`, "bmxxing by mgk"} {
+	for _, want := range []string{"Track skipped", "Now playing", "bmxxing by mgk"} {
 		if !strings.Contains(finalMessages, want) {
 			t.Fatalf("expected final chat request to include %s from both music tools, got:\n%s", want, finalMessages)
 		}

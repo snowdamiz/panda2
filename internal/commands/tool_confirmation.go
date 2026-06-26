@@ -36,6 +36,9 @@ const (
 	toolConfirmationOpToolUserAccessDeny   = "tw"
 	toolConfirmationOpChannelRuleSet       = "cs"
 	toolConfirmationOpChannelRuleRemove    = "cr"
+	toolConfirmationOpSafetyTimeout        = "st"
+	toolConfirmationOpSafetyStrikeRemove   = "sr"
+	toolConfirmationOpSafetyClear          = "sc"
 	toolConfirmationOpComposedToolApprove  = "ca"
 	toolConfirmationOpComposedToolRollback = "cb"
 	toolConfirmationOpDiscordPollCreate    = "pc"
@@ -60,6 +63,9 @@ const (
 	toolActionToolAccessOpen               = "tool_access.open"
 	toolActionChannelRuleSet               = "channel_rule.set"
 	toolActionChannelRuleRemove            = "channel_rule.remove"
+	toolActionSafetyTimeout                = "safety.timeout"
+	toolActionSafetyStrikeRemove           = "safety.remove"
+	toolActionSafetyClear                  = "safety.clear"
 	toolActionComposedToolApprove          = "composed_tool.approve"
 	toolActionComposedToolRollback         = "composed_tool.rollback"
 	toolActionDiscordPollCreate            = "discord_poll.create"
@@ -341,6 +347,26 @@ func RequestFromToolConfirmationID(id string, base Request) (ToolConfirmationReq
 		}
 		request.Action = toolActionChannelRuleRemove
 		request.Options["channel_id"] = decodeToolConfirmationPart(parts[3])
+	case toolConfirmationOpSafetyTimeout:
+		if len(parts) != 5 {
+			return ToolConfirmationRequest{}, false
+		}
+		request.Action = toolActionSafetyTimeout
+		request.Options["user_id"] = decodeToolConfirmationPart(parts[3])
+		request.Options["duration_seconds"] = decodeToolConfirmationPart(parts[4])
+	case toolConfirmationOpSafetyStrikeRemove:
+		if len(parts) != 5 {
+			return ToolConfirmationRequest{}, false
+		}
+		request.Action = toolActionSafetyStrikeRemove
+		request.Options["user_id"] = decodeToolConfirmationPart(parts[3])
+		request.Options["count"] = decodeToolConfirmationPart(parts[4])
+	case toolConfirmationOpSafetyClear:
+		if len(parts) != 4 {
+			return ToolConfirmationRequest{}, false
+		}
+		request.Action = toolActionSafetyClear
+		request.Options["user_id"] = decodeToolConfirmationPart(parts[3])
 	case toolConfirmationOpComposedToolApprove:
 		if len(parts) != 5 {
 			return ToolConfirmationRequest{}, false
@@ -562,6 +588,24 @@ func toolConfirmationID(userID, action string, arguments map[string]string) stri
 		}
 		prefix[1] = toolConfirmationOpChannelRuleRemove
 		return strings.Join(append(prefix, encodeToolConfirmationPart(arguments["channel_id"])), ":")
+	case toolActionSafetyTimeout:
+		if strings.TrimSpace(arguments["user_id"]) == "" || strings.TrimSpace(arguments["duration_seconds"]) == "" {
+			return ""
+		}
+		prefix[1] = toolConfirmationOpSafetyTimeout
+		return strings.Join(append(prefix, encodeToolConfirmationPart(arguments["user_id"]), encodeToolConfirmationPart(arguments["duration_seconds"])), ":")
+	case toolActionSafetyStrikeRemove:
+		if strings.TrimSpace(arguments["user_id"]) == "" || strings.TrimSpace(arguments["count"]) == "" {
+			return ""
+		}
+		prefix[1] = toolConfirmationOpSafetyStrikeRemove
+		return strings.Join(append(prefix, encodeToolConfirmationPart(arguments["user_id"]), encodeToolConfirmationPart(arguments["count"])), ":")
+	case toolActionSafetyClear:
+		if strings.TrimSpace(arguments["user_id"]) == "" {
+			return ""
+		}
+		prefix[1] = toolConfirmationOpSafetyClear
+		return strings.Join(append(prefix, encodeToolConfirmationPart(arguments["user_id"])), ":")
 	case toolActionComposedToolApprove:
 		if strings.TrimSpace(arguments["tool_name"]) == "" || strings.TrimSpace(arguments["version"]) == "" {
 			return ""

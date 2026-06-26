@@ -138,6 +138,149 @@ func (r *UserSafetyRepository) AddStrike(ctx context.Context, guildID, userID st
 	return status, err
 }
 
+func (r *UserSafetyRepository) SetTimeout(ctx context.Context, guildID, userID string, duration time.Duration, now time.Time) (UserSafetyStatus, error) {
+	guildID, userID = normalizeSafetyKey(guildID, userID)
+	if userID == "" {
+		return UserSafetyStatus{}, fmt.Errorf("user id is required")
+	}
+	if duration <= 0 {
+		return UserSafetyStatus{}, fmt.Errorf("timeout duration must be positive")
+	}
+	now = normalizedSafetyTime(now)
+
+	var status UserSafetyStatus
+	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		state, ok, err := findUserSafetyState(tx, guildID, userID)
+		if err != nil {
+			return err
+		}
+		timeoutUntil := now.Add(duration)
+		if !ok {
+			state = store.UserSafetyState{
+				GuildID:      guildID,
+				UserID:       userID,
+				TimeoutUntil: &timeoutUntil,
+				CreatedAt:    now,
+				UpdatedAt:    now,
+			}
+			if err := tx.Create(&state).Error; err != nil {
+				return err
+			}
+		} else {
+			state.ActiveStrikes = 0
+			state.TimeoutUntil = &timeoutUntil
+			state.UpdatedAt = now
+			if err := tx.Model(&state).Updates(map[string]any{
+				"active_strikes": state.ActiveStrikes,
+				"timeout_until":  state.TimeoutUntil,
+				"updated_at":     state.UpdatedAt,
+			}).Error; err != nil {
+				return err
+			}
+		}
+		state, _, err = findUserSafetyState(tx, guildID, userID)
+		if err != nil {
+			return err
+		}
+		status = UserSafetyStatus{State: state, TimedOut: safetyTimeoutActive(state, now)}
+		return nil
+	})
+	return status, err
+}
+
+func (r *UserSafetyRepository) RemoveStrike(ctx context.Context, guildID, userID string, count int, now time.Time) (UserSafetyStatus, error) {
+	guildID, userID = normalizeSafetyKey(guildID, userID)
+	if userID == "" {
+		return UserSafetyStatus{}, fmt.Errorf("user id is required")
+	}
+	if count <= 0 {
+		return UserSafetyStatus{}, fmt.Errorf("strike count must be positive")
+	}
+	now = normalizedSafetyTime(now)
+
+	var status UserSafetyStatus
+	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		state, ok, err := findUserSafetyState(tx, guildID, userID)
+		if err != nil {
+			return err
+		}
+		if !ok || userSafetyStateEmpty(state) {
+			return ErrNotFound
+		}
+
+		if state.ActiveStrikes > 0 {
+			state.ActiveStrikes -= minInt(count, state.ActiveStrikes)
+		}
+		if state.TotalStrikes > 0 {
+			state.TotalStrikes -= minInt(count, state.TotalStrikes)
+		}
+		state.TimeoutUntil = nil
+		if state.ActiveStrikes == 0 && state.TotalStrikes == 0 {
+			state.LastStrikeAt = nil
+		}
+		state.UpdatedAt = now
+
+		if err := tx.Model(&state).Updates(map[string]any{
+			"active_strikes": state.ActiveStrikes,
+			"total_strikes":  state.TotalStrikes,
+			"last_strike_at": state.LastStrikeAt,
+			"timeout_until":  state.TimeoutUntil,
+			"updated_at":     state.UpdatedAt,
+		}).Error; err != nil {
+			return err
+		}
+		state, _, err = findUserSafetyState(tx, guildID, userID)
+		if err != nil {
+			return err
+		}
+		status = UserSafetyStatus{State: state, TimedOut: safetyTimeoutActive(state, now)}
+		return nil
+	})
+	return status, err
+}
+
+func (r *UserSafetyRepository) Clear(ctx context.Context, guildID, userID string, now time.Time) (UserSafetyStatus, error) {
+	guildID, userID = normalizeSafetyKey(guildID, userID)
+	if userID == "" {
+		return UserSafetyStatus{}, fmt.Errorf("user id is required")
+	}
+	now = normalizedSafetyTime(now)
+
+	var status UserSafetyStatus
+	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		state, ok, err := findUserSafetyState(tx, guildID, userID)
+		if err != nil {
+			return err
+		}
+		if !ok || userSafetyStateEmpty(state) {
+			return ErrNotFound
+		}
+
+		state.ActiveStrikes = 0
+		state.TotalStrikes = 0
+		state.LastStrikeAt = nil
+		state.TimeoutUntil = nil
+		state.UpdatedAt = now
+
+		if err := tx.Model(&state).Updates(map[string]any{
+			"active_strikes": state.ActiveStrikes,
+			"total_strikes":  state.TotalStrikes,
+			"last_strike_at": state.LastStrikeAt,
+			"timeout_until":  state.TimeoutUntil,
+			"updated_at":     state.UpdatedAt,
+		}).Error; err != nil {
+			return err
+		}
+		state, _, err = findUserSafetyState(tx, guildID, userID)
+		if err != nil {
+			return err
+		}
+		status = UserSafetyStatus{State: state, TimedOut: false}
+		return nil
+	})
+	return status, err
+}
+
 func clearExpiredUserSafetyTimeout(tx *gorm.DB, state store.UserSafetyState, now time.Time) (store.UserSafetyState, error) {
 	if err := tx.Model(&state).Updates(map[string]any{
 		"active_strikes": 0,
@@ -175,4 +318,18 @@ func normalizedSafetyTime(now time.Time) time.Time {
 
 func normalizeSafetyKey(guildID, userID string) (string, string) {
 	return strings.TrimSpace(guildID), strings.TrimSpace(userID)
+}
+
+func userSafetyStateEmpty(state store.UserSafetyState) bool {
+	return state.ActiveStrikes == 0 &&
+		state.TotalStrikes == 0 &&
+		state.LastStrikeAt == nil &&
+		state.TimeoutUntil == nil
+}
+
+func minInt(left, right int) int {
+	if left < right {
+		return left
+	}
+	return right
 }

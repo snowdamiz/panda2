@@ -2217,6 +2217,146 @@ func TestExecutorReadsUserSafetyStatus(t *testing.T) {
 	}
 }
 
+func TestExecutorPreparesAndConfirmsUserSafetyRemoval(t *testing.T) {
+	ctx := context.Background()
+	registry, err := NewDefaultRegistry()
+	if err != nil {
+		t.Fatalf("NewDefaultRegistry: %v", err)
+	}
+	_, safety := newToolSafetyRepository(t)
+	if _, err := safety.AddStrike(ctx, "guild-1", "100000000000000222", 3, 10*time.Minute, time.Date(2026, time.June, 25, 18, 0, 0, 0, time.UTC)); err != nil {
+		t.Fatalf("AddStrike: %v", err)
+	}
+	executor := NewExecutor(registry, nil, nil).WithUserSafetyRepository(safety)
+
+	readOnly, err := executor.Execute(ctx, ExecutionRequest{
+		GuildID: "guild-1",
+		ActorID: "admin-1",
+		Access:  testAccess(ToolPolicyWriteConfirmed, admin.PermissionAdminAuditRead),
+		Call: llm.ToolCall{
+			ID:   "call-read-only-safety-remove",
+			Type: "function",
+			Function: llm.ToolCallFunction{
+				Name:      "panda_manage_safety",
+				Arguments: `{"action":"remove","user_id":"100000000000000222"}`,
+			},
+		},
+	})
+	if err != nil || readOnly.Confirmation != nil || !strings.Contains(readOnly.Message.Content, admin.PermissionAdminConfigWrite) {
+		t.Fatalf("expected safety removal to require admin config write, result=%+v err=%v", readOnly, err)
+	}
+
+	prepared, err := executor.Execute(ctx, ExecutionRequest{
+		GuildID: "guild-1",
+		ActorID: "admin-1",
+		Access:  testAccess(ToolPolicyWriteConfirmed, admin.PermissionAdminConfigWrite),
+		Call: llm.ToolCall{
+			ID:   "call-safety-remove",
+			Type: "function",
+			Function: llm.ToolCallFunction{
+				Name:      "panda_manage_safety",
+				Arguments: `{"action":"remove","user":"<@100000000000000222>"}`,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Prepare safety remove: %v", err)
+	}
+	if prepared.Confirmation == nil || prepared.Confirmation.Action != "safety.remove" || prepared.Confirmation.Arguments["user_id"] != "100000000000000222" || prepared.Confirmation.Arguments["count"] != "1" {
+		t.Fatalf("expected safety removal confirmation, got %+v", prepared.Confirmation)
+	}
+	status, err := safety.Status(ctx, "guild-1", "100000000000000222", time.Now().UTC())
+	if err != nil {
+		t.Fatalf("Status before confirmed remove: %v", err)
+	}
+	if status.State.ActiveStrikes != 1 || status.State.TotalStrikes != 1 {
+		t.Fatalf("prepare should not mutate safety state, got %+v", status)
+	}
+
+	confirmed, err := executor.Execute(ctx, ExecutionRequest{
+		GuildID:              "guild-1",
+		ActorID:              "admin-1",
+		Access:               testAccess(ToolPolicyWriteConfirmed, admin.PermissionAdminConfigWrite),
+		AllowConfirmedWrites: true,
+		Call: llm.ToolCall{
+			ID:   "call-confirmed-safety-remove",
+			Type: "function",
+			Function: llm.ToolCallFunction{
+				Name:      "panda_manage_safety",
+				Arguments: `{"action":"remove","user_id":"100000000000000222"}`,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Confirmed safety remove: %v", err)
+	}
+	for _, want := range []string{`"removed_strikes":1`, `"active_strikes":0`, `"total_strikes":0`} {
+		if !strings.Contains(confirmed.Message.Content, want) {
+			t.Fatalf("expected confirmed safety payload %s, got %s", want, confirmed.Message.Content)
+		}
+	}
+}
+
+func TestExecutorPreparesAndConfirmsManualUserSafetyTimeout(t *testing.T) {
+	ctx := context.Background()
+	registry, err := NewDefaultRegistry()
+	if err != nil {
+		t.Fatalf("NewDefaultRegistry: %v", err)
+	}
+	_, safety := newToolSafetyRepository(t)
+	executor := NewExecutor(registry, nil, nil).WithUserSafetyRepository(safety)
+
+	prepared, err := executor.Execute(ctx, ExecutionRequest{
+		GuildID: "guild-1",
+		ActorID: "admin-1",
+		Access:  testAccess(ToolPolicyWriteConfirmed, admin.PermissionAdminConfigWrite),
+		Call: llm.ToolCall{
+			ID:   "call-safety-timeout",
+			Type: "function",
+			Function: llm.ToolCallFunction{
+				Name:      "panda_manage_safety",
+				Arguments: `{"action":"timeout","user_id":"100000000000000222","duration":"30 minutes"}`,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Prepare safety timeout: %v", err)
+	}
+	if prepared.Confirmation == nil || prepared.Confirmation.Action != "safety.timeout" || prepared.Confirmation.Arguments["user_id"] != "100000000000000222" || prepared.Confirmation.Arguments["duration_seconds"] != "1800" {
+		t.Fatalf("expected safety timeout confirmation, got %+v", prepared.Confirmation)
+	}
+
+	confirmed, err := executor.Execute(ctx, ExecutionRequest{
+		GuildID:              "guild-1",
+		ActorID:              "admin-1",
+		Access:               testAccess(ToolPolicyWriteConfirmed, admin.PermissionAdminConfigWrite),
+		AllowConfirmedWrites: true,
+		Call: llm.ToolCall{
+			ID:   "call-confirmed-safety-timeout",
+			Type: "function",
+			Function: llm.ToolCallFunction{
+				Name:      "panda_manage_safety",
+				Arguments: `{"action":"timeout","user_id":"100000000000000222","duration_seconds":1800}`,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Confirmed safety timeout: %v", err)
+	}
+	for _, want := range []string{`"action":"safety.timeout"`, `"duration_seconds":1800`, `"timed_out":true`} {
+		if !strings.Contains(confirmed.Message.Content, want) {
+			t.Fatalf("expected confirmed safety timeout payload %s, got %s", want, confirmed.Message.Content)
+		}
+	}
+	status, err := safety.Status(ctx, "guild-1", "100000000000000222", time.Now().UTC())
+	if err != nil {
+		t.Fatalf("Status after confirmed timeout: %v", err)
+	}
+	if !status.TimedOut || status.State.TimeoutUntil == nil {
+		t.Fatalf("expected safety timeout to be active, got %+v", status)
+	}
+}
+
 func TestExecutorRunsAdminServiceTools(t *testing.T) {
 	registry, err := NewDefaultRegistry()
 	if err != nil {
