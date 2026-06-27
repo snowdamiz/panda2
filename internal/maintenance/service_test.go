@@ -22,7 +22,8 @@ func TestCleanupExpiresConversationsAndAttachments(t *testing.T) {
 
 	conversations := repository.NewConversationRepository(db.DB)
 	attachments := repository.NewAttachmentRepository(db.DB)
-	service := NewService(conversations, attachments, db)
+	composedTools := repository.NewComposedToolRepository(db.DB)
+	service := NewService(conversations, attachments, db).WithComposedTools(composedTools)
 
 	now := time.Date(2026, 6, 19, 12, 0, 0, 0, time.UTC)
 	conversation, err := conversations.GetOrCreateActive(ctx, repository.ConversationKey{
@@ -54,12 +55,61 @@ func TestCleanupExpiresConversationsAndAttachments(t *testing.T) {
 	if err != nil {
 		t.Fatalf("record attachment: %v", err)
 	}
+	tool := store.ComposedTool{
+		GuildID:    "guild-1",
+		ToolID:     "guild-1:cleanup_tool",
+		Name:       "cleanup_tool",
+		Status:     "enabled",
+		Visibility: "guild",
+		CreatedAt:  now,
+		UpdatedAt:  now,
+	}
+	if err := db.DB.Create(&tool).Error; err != nil {
+		t.Fatalf("create composed tool: %v", err)
+	}
+	version := store.ComposedToolVersion{
+		ComposedToolID:     tool.ID,
+		VersionNumber:      1,
+		SpecJSON:           "{}",
+		ValidationJSON:     "{}",
+		ToolDefinitionJSON: "{}",
+		CreatedAt:          now,
+	}
+	if err := db.DB.Create(&version).Error; err != nil {
+		t.Fatalf("create composed version: %v", err)
+	}
+	oldRun := store.ComposedToolRun{
+		ComposedToolID: tool.ID,
+		VersionID:      version.ID,
+		GuildID:        "guild-1",
+		InvocationType: "scheduled",
+		Status:         "succeeded",
+		CreatedAt:      now.Add(-31 * 24 * time.Hour),
+		UpdatedAt:      now.Add(-31 * 24 * time.Hour),
+	}
+	freshRun := oldRun
+	freshRun.CreatedAt = now.Add(-time.Hour)
+	freshRun.UpdatedAt = freshRun.CreatedAt
+	if err := db.DB.Create(&oldRun).Error; err != nil {
+		t.Fatalf("create old composed run: %v", err)
+	}
+	if err := db.DB.Create(&freshRun).Error; err != nil {
+		t.Fatalf("create fresh composed run: %v", err)
+	}
+	if err := db.DB.Create(&store.ComposedToolDedupe{
+		ComposedToolID:        tool.ID,
+		InvocationFingerprint: "old",
+		ExpiresAt:             now.Add(-time.Minute),
+		CreatedAt:             now.Add(-time.Hour),
+	}).Error; err != nil {
+		t.Fatalf("create old dedupe: %v", err)
+	}
 
 	stats, err := service.Cleanup(ctx, now)
 	if err != nil {
 		t.Fatalf("Cleanup: %v", err)
 	}
-	if stats.ExpiredConversations != 1 || stats.CleanedAttachments != 1 {
+	if stats.ExpiredConversations != 1 || stats.CleanedAttachments != 1 || stats.DeletedComposedRuns != 1 || stats.DeletedComposedDedupe != 1 {
 		t.Fatalf("unexpected cleanup stats: %+v", stats)
 	}
 	if _, err := os.Stat(tempPath); !os.IsNotExist(err) {

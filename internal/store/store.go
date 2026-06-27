@@ -55,6 +55,10 @@ func Open(ctx context.Context, sqlitePath string) (*Store, error) {
 		_ = store.Close()
 		return nil, err
 	}
+	if err := hardenSQLiteFiles(sqlitePath); err != nil {
+		_ = store.Close()
+		return nil, err
+	}
 	return store, nil
 }
 
@@ -88,6 +92,9 @@ func (s *Store) Backup(ctx context.Context, destination string) error {
 		return err
 	}
 	_, err := s.sql.ExecContext(ctx, "VACUUM INTO ?", destination)
+	if err == nil {
+		err = hardenSQLiteFiles(destination)
+	}
 	return err
 }
 
@@ -118,7 +125,11 @@ func ensureParentDir(path string) error {
 	if isMemoryDSN(path) {
 		return nil
 	}
-	dir := filepath.Dir(path)
+	fsPath := sqliteFilesystemPath(path)
+	if fsPath == "" {
+		return nil
+	}
+	dir := filepath.Dir(fsPath)
 	if dir == "." || dir == "" {
 		return nil
 	}
@@ -127,4 +138,34 @@ func ensureParentDir(path string) error {
 
 func isMemoryDSN(path string) bool {
 	return path == ":memory:" || strings.HasPrefix(path, "file::memory:") || strings.Contains(path, "mode=memory")
+}
+
+func hardenSQLiteFiles(path string) error {
+	fsPath := sqliteFilesystemPath(path)
+	if fsPath == "" || isMemoryDSN(path) {
+		return nil
+	}
+	for _, candidate := range []string{fsPath, fsPath + "-wal", fsPath + "-shm"} {
+		if err := os.Chmod(candidate, 0o600); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+	}
+	return nil
+}
+
+func sqliteFilesystemPath(path string) string {
+	path = strings.TrimSpace(path)
+	if path == "" || isMemoryDSN(path) {
+		return ""
+	}
+	if strings.HasPrefix(path, "file:") {
+		path = strings.TrimPrefix(path, "file:")
+		if index := strings.Index(path, "?"); index >= 0 {
+			path = path[:index]
+		}
+	}
+	if strings.HasPrefix(path, ":") {
+		return ""
+	}
+	return path
 }

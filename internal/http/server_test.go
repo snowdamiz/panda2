@@ -111,6 +111,56 @@ func TestMetricsReportsLocalState(t *testing.T) {
 	if err := db.DB.Create(&store.DiscordEvent{GuildID: "guild-1", ChannelID: "channel-1", EventType: "message_create", CreatedAt: time.Now().UTC()}).Error; err != nil {
 		t.Fatalf("create discord event fixture: %v", err)
 	}
+	now := time.Now().UTC()
+	tool := store.ComposedTool{GuildID: "guild-1", ToolID: "ct-guild-1-fixture", Name: "fixture_tool", Status: "enabled", Visibility: "guild", CreatedBy: "admin", CreatedAt: now, UpdatedAt: now}
+	if err := db.DB.Create(&tool).Error; err != nil {
+		t.Fatalf("create composed tool fixture: %v", err)
+	}
+	version := store.ComposedToolVersion{ComposedToolID: tool.ID, VersionNumber: 1, SpecJSON: `{}`, ValidationJSON: `{}`, ToolDefinitionJSON: `{}`, CreatedBy: "admin", CreatedAt: now}
+	if err := db.DB.Create(&version).Error; err != nil {
+		t.Fatalf("create composed version fixture: %v", err)
+	}
+	started := now.Add(-2 * time.Second)
+	finished := now
+	if err := db.DB.Create(&store.ComposedToolRun{
+		ComposedToolID: tool.ID,
+		VersionID:      version.ID,
+		GuildID:        "guild-1",
+		InvocationType: "chat_tool",
+		Status:         "blocked",
+		Error:          "feature disabled",
+		StartedAt:      &started,
+		FinishedAt:     &finished,
+		CreatedAt:      now,
+		UpdatedAt:      now,
+	}).Error; err != nil {
+		t.Fatalf("create composed run fixture: %v", err)
+	}
+	if err := db.DB.Create(&store.ComposedToolDedupe{ComposedToolID: tool.ID, InvocationFingerprint: "fingerprint", ExpiresAt: now.Add(time.Minute), CreatedAt: now}).Error; err != nil {
+		t.Fatalf("create composed dedupe fixture: %v", err)
+	}
+	if err := db.DB.Create(&store.Schedule{
+		GuildID:         "guild-1",
+		ChannelID:       "channel-1",
+		OwnerUserID:     "admin",
+		Kind:            "composed",
+		Status:          repository.ScheduleStatusActive,
+		Title:           "Composed fixture",
+		ScheduleType:    "recurring",
+		IntervalSeconds: 900,
+		Payload:         `{}`,
+		NextRunAt:       now.Add(time.Hour),
+		LastStatus:      repository.ScheduleLastSkipped,
+		CreatedAt:       now,
+		UpdatedAt:       now,
+	}).Error; err != nil {
+		t.Fatalf("create composed schedule fixture: %v", err)
+	}
+	for _, action := range []string{"composed_tool.draft_created", "composed_tool.version_approved", "composed_tool.auto_paused"} {
+		if err := db.DB.Create(&store.AuditEvent{GuildID: "guild-1", ActorID: "admin", Action: action, TargetType: "composed_tool", TargetID: "fixture_tool", Metadata: `{}`, CreatedAt: now}).Error; err != nil {
+			t.Fatalf("create audit fixture %s: %v", action, err)
+		}
+	}
 
 	server := New(config.Config{
 		SQLitePath:          ":memory:",
@@ -141,6 +191,13 @@ func TestMetricsReportsLocalState(t *testing.T) {
 		"panda_queue_depth 1",
 		"panda_usage_events_total 1",
 		"panda_usage_events_failed_total 1",
+		"panda_composed_tools_total 1",
+		"panda_composed_drafts_total 1",
+		"panda_composed_approvals_total 1",
+		`panda_composed_runs_by_status_total{status="blocked"} 1`,
+		`panda_composed_blocked_runs_by_reason_total{reason="feature_disabled"} 1`,
+		"panda_composed_schedule_skips_total 1",
+		"panda_composed_event_dedupe_active 1",
 		"panda_discord_events_total 1",
 		"panda_discord_event_cache_size 1",
 		"panda_discord_intent_guild_members_enabled 0",

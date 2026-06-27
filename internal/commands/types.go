@@ -138,6 +138,7 @@ type BackgroundTask struct {
 	BypassSafety                 bool                       `json:"bypass_safety,omitempty"`
 	AllowedPermissions           []string                   `json:"allowed_permissions,omitempty"`
 	AllowedTools                 []string                   `json:"allowed_tools,omitempty"`
+	DeniedTools                  []string                   `json:"denied_tools,omitempty"`
 	RestrictedTools              []string                   `json:"restricted_tools,omitempty"`
 	EnabledFeatures              []string                   `json:"enabled_features,omitempty"`
 	ImageReferences              []generated.ImageReference `json:"image_references,omitempty"`

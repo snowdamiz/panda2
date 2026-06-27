@@ -30,6 +30,11 @@ const (
 	TargetUser    = "user"
 	TargetChannel = "channel"
 	TargetRole    = "role"
+
+	MinComposedFirstRunDelay = time.Minute
+	MinComposedRecurrence    = 15 * time.Minute
+	composedBackoffBase      = 5 * time.Minute
+	composedBackoffMax       = time.Hour
 )
 
 type AuditRecorder interface {
@@ -217,6 +222,9 @@ func (s *Service) CreateComposed(ctx context.Context, request CreateComposedRequ
 	if next.IsZero() {
 		return store.Schedule{}, fmt.Errorf("next run time is required")
 	}
+	if err := validateComposedScheduleTiming(next, request.Interval, s.now().UTC()); err != nil {
+		return store.Schedule{}, err
+	}
 	if err := s.ensureScheduleCapacity(ctx, request.GuildID); err != nil {
 		return store.Schedule{}, err
 	}
@@ -391,15 +399,17 @@ func (s *Service) HandleJob(ctx context.Context, job store.Job) error {
 	if err := s.schedules.MarkRunning(ctx, schedule.ID, now); err != nil {
 		return err
 	}
-	status, runErr := s.executeSchedule(ctx, schedule, now)
+	status, message, runErr := s.executeSchedule(ctx, schedule, now)
 	if runErr != nil {
 		releaseLock := job.Attempts >= job.MaxAttempts
 		_ = s.schedules.MarkFailed(ctx, schedule.ID, runErr.Error(), now, releaseLock)
 		return runErr
 	}
 	nextRunAt, disabled := nextScheduleRun(schedule, now)
-	message := ""
-	if status == repository.ScheduleLastSkipped {
+	if schedule.Kind == KindComposed && status == repository.ScheduleLastSkipped && nextRunAt != nil {
+		nextRunAt = composedBackoffNextRun(schedule, now, nextRunAt)
+	}
+	if status == repository.ScheduleLastSkipped && message == "" {
 		message = "skipped because follow-up activity resolved the reminder"
 	}
 	if err := s.schedules.MarkFinished(ctx, schedule.ID, status, message, nextRunAt, disabled, now); err != nil {
@@ -409,45 +419,46 @@ func (s *Service) HandleJob(ctx context.Context, job store.Job) error {
 	return nil
 }
 
-func (s *Service) executeSchedule(ctx context.Context, schedule store.Schedule, now time.Time) (string, error) {
+func (s *Service) executeSchedule(ctx context.Context, schedule store.Schedule, now time.Time) (string, string, error) {
 	switch schedule.Kind {
 	case KindReminder:
 		if enabled, err := s.featureEnabled(ctx, schedule.GuildID, features.Reminders); err != nil {
-			return repository.ScheduleLastFailed, err
+			return repository.ScheduleLastFailed, err.Error(), err
 		} else if !enabled {
-			return repository.ScheduleLastSkipped, nil
+			return repository.ScheduleLastSkipped, "reminders feature is disabled", nil
 		}
 		return s.withScheduledRunQuota(ctx, schedule, func() (string, error) {
 			return repository.ScheduleLastSucceeded, s.deliverReminder(ctx, schedule)
 		})
 	case KindFollowUp:
 		if enabled, err := s.featureEnabled(ctx, schedule.GuildID, features.Reminders); err != nil {
-			return repository.ScheduleLastFailed, err
+			return repository.ScheduleLastFailed, err.Error(), err
 		} else if !enabled {
-			return repository.ScheduleLastSkipped, nil
+			return repository.ScheduleLastSkipped, "reminders feature is disabled", nil
 		}
 		resolved, err := s.followUpResolved(ctx, schedule, now)
 		if err != nil {
-			return repository.ScheduleLastFailed, err
+			return repository.ScheduleLastFailed, err.Error(), err
 		}
 		if resolved {
-			return repository.ScheduleLastSkipped, nil
+			return repository.ScheduleLastSkipped, "skipped because follow-up activity resolved the reminder", nil
 		}
 		return s.withScheduledRunQuota(ctx, schedule, func() (string, error) {
 			return repository.ScheduleLastSucceeded, s.deliverReminder(ctx, schedule)
 		})
 	case KindComposed:
 		if enabled, err := s.featureEnabled(ctx, schedule.GuildID, features.ComposedTools); err != nil {
-			return repository.ScheduleLastFailed, err
+			return repository.ScheduleLastFailed, err.Error(), err
 		} else if !enabled {
-			return repository.ScheduleLastSkipped, nil
+			return repository.ScheduleLastSkipped, "composed tools feature is disabled", nil
 		}
 		if s.composed == nil {
-			return repository.ScheduleLastSkipped, nil
+			return repository.ScheduleLastSkipped, "composed scheduler is not configured", nil
 		}
-		return repository.ScheduleLastSucceeded, s.runComposed(ctx, schedule)
+		return s.runComposed(ctx, schedule)
 	default:
-		return repository.ScheduleLastFailed, fmt.Errorf("unsupported schedule kind %q", schedule.Kind)
+		err := fmt.Errorf("unsupported schedule kind %q", schedule.Kind)
+		return repository.ScheduleLastFailed, err.Error(), err
 	}
 }
 
@@ -465,13 +476,17 @@ func (s *Service) featureEnabled(ctx context.Context, guildID, featureID string)
 	return s.features.Enabled(ctx, guildID, featureID)
 }
 
-func (s *Service) withScheduledRunQuota(ctx context.Context, schedule store.Schedule, run func() (string, error)) (string, error) {
+func (s *Service) withScheduledRunQuota(ctx context.Context, schedule store.Schedule, run func() (string, error)) (string, string, error) {
 	if s.billing == nil {
-		return run()
+		status, err := run()
+		if err != nil {
+			return status, err.Error(), err
+		}
+		return status, "", nil
 	}
 	reservation, err := s.billing.BeginUsage(ctx, schedule.GuildID, billing.MetricScheduledRun, 1)
 	if err != nil {
-		return repository.ScheduleLastFailed, err
+		return repository.ScheduleLastFailed, err.Error(), err
 	}
 	committed := false
 	defer func() {
@@ -481,11 +496,11 @@ func (s *Service) withScheduledRunQuota(ctx context.Context, schedule store.Sche
 	}()
 	status, err := run()
 	if err != nil {
-		return status, err
+		return status, err.Error(), err
 	}
 	_ = s.billing.CommitUsage(ctx, reservation)
 	committed = true
-	return status, nil
+	return status, "", nil
 }
 
 func (s *Service) deliverReminder(ctx context.Context, schedule store.Schedule) error {
@@ -538,18 +553,18 @@ func (s *Service) followUpResolved(ctx context.Context, schedule store.Schedule,
 	return count > 0, nil
 }
 
-func (s *Service) runComposed(ctx context.Context, schedule store.Schedule) error {
+func (s *Service) runComposed(ctx context.Context, schedule store.Schedule) (string, string, error) {
 	if s.composed == nil {
-		return errors.New("composed scheduler is not configured")
+		return repository.ScheduleLastSkipped, "composed scheduler is not configured", nil
 	}
 	var payload ComposedPayload
 	if err := json.Unmarshal([]byte(schedule.Payload), &payload); err != nil {
-		return err
+		return repository.ScheduleLastFailed, err.Error(), err
 	}
 	if payload.Input == nil {
 		payload.Input = map[string]any{}
 	}
-	_, err := s.composed.Run(ctx, composed.RunRequest{
+	result, err := s.composed.Run(ctx, composed.RunRequest{
 		GuildID:           schedule.GuildID,
 		ToolName:          payload.ToolName,
 		InvocationType:    firstNonEmpty(payload.InvocationType, composed.InvocationScheduled),
@@ -557,7 +572,18 @@ func (s *Service) runComposed(ctx context.Context, schedule store.Schedule) erro
 		TriggeringEventID: fmt.Sprintf("schedule:%d", schedule.ID),
 		Input:             payload.Input,
 	})
-	return err
+	if err != nil {
+		switch result.Status {
+		case composed.RunBlocked, composed.RunRateLimited, composed.RunDeduped, composed.RunSkipped:
+			return repository.ScheduleLastSkipped, composedScheduleRunMessage(result), nil
+		default:
+			return repository.ScheduleLastFailed, err.Error(), err
+		}
+	}
+	if result.Status != "" && result.Status != composed.RunSucceeded {
+		return repository.ScheduleLastSkipped, composedScheduleRunMessage(result), nil
+	}
+	return repository.ScheduleLastSucceeded, "", nil
 }
 
 func validateReminderRequest(request CreateReminderRequest) error {
@@ -597,6 +623,60 @@ func nextScheduleRun(schedule store.Schedule, now time.Time) (*time.Time, bool) 
 		next = next.Add(interval)
 	}
 	return &next, false
+}
+
+func validateComposedScheduleTiming(next time.Time, interval time.Duration, now time.Time) error {
+	next = next.UTC()
+	now = now.UTC()
+	if !next.After(now) {
+		return fmt.Errorf("composed schedule first run must be in the future")
+	}
+	if next.Sub(now) < MinComposedFirstRunDelay {
+		return fmt.Errorf("composed schedule first run must be at least %s from now", MinComposedFirstRunDelay)
+	}
+	if interval > 0 && interval < MinComposedRecurrence {
+		return fmt.Errorf("composed schedule recurrence must be at least %s", MinComposedRecurrence)
+	}
+	return nil
+}
+
+func composedBackoffNextRun(schedule store.Schedule, now time.Time, nextRunAt *time.Time) *time.Time {
+	if nextRunAt == nil {
+		return nil
+	}
+	delay := composedBackoffBase
+	if schedule.LastStatus == repository.ScheduleLastSkipped && schedule.RunCount > 0 {
+		shift := schedule.RunCount
+		if shift > 4 {
+			shift = 4
+		}
+		delay = delay << shift
+		if delay > composedBackoffMax {
+			delay = composedBackoffMax
+		}
+	}
+	backoff := now.UTC().Add(delay)
+	if nextRunAt.Before(backoff) {
+		return &backoff
+	}
+	return nextRunAt
+}
+
+func composedScheduleRunMessage(result composed.RunResult) string {
+	parts := []string{}
+	if strings.TrimSpace(result.Status) != "" {
+		parts = append(parts, "composed run "+result.Status)
+	}
+	if result.RunID != 0 {
+		parts = append(parts, "run_id="+strconv.FormatUint(uint64(result.RunID), 10))
+	}
+	if strings.TrimSpace(result.Error) != "" {
+		parts = append(parts, result.Error)
+	}
+	if len(parts) == 0 {
+		return "composed run was skipped"
+	}
+	return strings.Join(parts, ": ")
 }
 
 func defaultReminderTitle(message string, followUp bool) string {

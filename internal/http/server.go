@@ -15,6 +15,7 @@ import (
 	stdhttp "net/http"
 	stdurl "net/url"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -490,6 +491,8 @@ func (s *Server) metrics(ctx context.Context) string {
 	_ = s.store.DB.Table("usage_events").Where("success = ?", false).Count(&usageFailures).Error
 	writeGauge(&builder, "panda_usage_events_failed_total", "Failed assistant usage events", usageFailures)
 
+	s.writeComposedMetrics(&builder)
+
 	var discordEventsTotal int64
 	_ = s.store.DB.Table("discord_events").Count(&discordEventsTotal).Error
 	writeGauge(&builder, "panda_discord_events_total", "Recorded Discord gateway events", discordEventsTotal)
@@ -524,6 +527,81 @@ func (s *Server) metrics(ctx context.Context) string {
 	writeGauge(&builder, "panda_discord_intent_presences_enabled", "Presence privileged intent enabled", 0)
 	writeGauge(&builder, "panda_discord_intent_message_content_enabled", "Message Content privileged intent requested when Discord is configured", boolInt(s.cfg.DiscordConfigured()))
 	return builder.String()
+}
+
+func (s *Server) writeComposedMetrics(builder *strings.Builder) {
+	var composedToolsTotal int64
+	_ = s.store.DB.Table("composed_tools").Count(&composedToolsTotal).Error
+	writeGauge(builder, "panda_composed_tools_total", "Composed tools recorded", composedToolsTotal)
+
+	for _, action := range []struct {
+		name   string
+		help   string
+		action string
+	}{
+		{"panda_composed_drafts_total", "Composed tool draft events recorded", "composed_tool.draft_created"},
+		{"panda_composed_approvals_total", "Composed tool approval events recorded", "composed_tool.version_approved"},
+		{"panda_composed_auto_pauses_total", "Composed tools auto-paused after repeated failures", "composed_tool.auto_paused"},
+	} {
+		var count int64
+		_ = s.store.DB.Table("audit_events").Where("action = ?", action.action).Count(&count).Error
+		writeGauge(builder, action.name, action.help, count)
+	}
+
+	var composedRunsTotal int64
+	_ = s.store.DB.Table("composed_tool_runs").Count(&composedRunsTotal).Error
+	writeGauge(builder, "panda_composed_runs_total", "Composed tool runs recorded", composedRunsTotal)
+
+	var statusRows []struct {
+		Status string
+		Count  int64
+	}
+	_ = s.store.DB.Table("composed_tool_runs").Select("status, COUNT(*) AS count").Group("status").Scan(&statusRows).Error
+	if len(statusRows) > 0 {
+		writeGaugeHeader(builder, "panda_composed_runs_by_status_total", "Composed tool runs by terminal status")
+		for _, row := range statusRows {
+			status := sanitizeMetricLabel(row.Status)
+			if status == "" {
+				status = "unknown"
+			}
+			writeGaugeSampleWithLabels(builder, "panda_composed_runs_by_status_total", map[string]string{"status": status}, row.Count)
+		}
+	}
+
+	var averageRunDuration float64
+	_ = s.store.DB.Table("composed_tool_runs").
+		Where("started_at IS NOT NULL AND finished_at IS NOT NULL").
+		Select("COALESCE(AVG((julianday(finished_at) - julianday(started_at)) * 86400.0), 0)").
+		Scan(&averageRunDuration).Error
+	writeGauge(builder, "panda_composed_run_duration_seconds_avg", "Average composed tool run duration in seconds", averageRunDuration)
+
+	var blockedRows []struct {
+		Error string
+		Count int64
+	}
+	_ = s.store.DB.Table("composed_tool_runs").
+		Select("error, COUNT(*) AS count").
+		Where("status IN ?", []string{"blocked", "rate_limited", "deduped", "skipped"}).
+		Group("error").
+		Scan(&blockedRows).Error
+	if len(blockedRows) > 0 {
+		writeGaugeHeader(builder, "panda_composed_blocked_runs_by_reason_total", "Composed tool blocked, skipped, deduped, or rate-limited runs by reason")
+		for _, row := range blockedRows {
+			reason := sanitizeMetricLabel(row.Error)
+			if reason == "" {
+				reason = "unspecified"
+			}
+			writeGaugeSampleWithLabels(builder, "panda_composed_blocked_runs_by_reason_total", map[string]string{"reason": reason}, row.Count)
+		}
+	}
+
+	var scheduleSkips int64
+	_ = s.store.DB.Table("schedules").Where("kind = ? AND last_status = ?", "composed", "skipped").Count(&scheduleSkips).Error
+	writeGauge(builder, "panda_composed_schedule_skips_total", "Composed schedules currently reporting a skipped last run", scheduleSkips)
+
+	var eventDedupes int64
+	_ = s.store.DB.Table("composed_tool_dedupes").Where("expires_at > ?", time.Now().UTC()).Count(&eventDedupes).Error
+	writeGauge(builder, "panda_composed_event_dedupe_active", "Active composed event dedupe fingerprints", eventDedupes)
 }
 
 type discordWebhookPayload struct {
@@ -1636,9 +1714,54 @@ func validateDiscordWebhookTimestamp(timestamp string, now func() time.Time) err
 }
 
 func writeGauge(builder *strings.Builder, name, help string, value any) {
+	writeGaugeHeader(builder, name, help)
+	fmt.Fprintf(builder, "%s %v\n", name, value)
+}
+
+func writeGaugeHeader(builder *strings.Builder, name, help string) {
 	fmt.Fprintf(builder, "# HELP %s %s\n", name, help)
 	fmt.Fprintf(builder, "# TYPE %s gauge\n", name)
-	fmt.Fprintf(builder, "%s %v\n", name, value)
+}
+
+func writeGaugeSampleWithLabels(builder *strings.Builder, name string, labels map[string]string, value any) {
+	fmt.Fprintf(builder, "%s{%s} %v\n", name, formatMetricLabels(labels), value)
+}
+
+func formatMetricLabels(labels map[string]string) string {
+	if len(labels) == 0 {
+		return ""
+	}
+	keys := make([]string, 0, len(labels))
+	for key := range labels {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	parts := make([]string, 0, len(keys))
+	for _, key := range keys {
+		parts = append(parts, fmt.Sprintf(`%s="%s"`, key, strings.ReplaceAll(labels[key], `"`, `\"`)))
+	}
+	return strings.Join(parts, ",")
+}
+
+func sanitizeMetricLabel(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if value == "" {
+		return ""
+	}
+	var builder strings.Builder
+	lastUnderscore := false
+	for _, r := range value {
+		if r >= 'a' && r <= 'z' || r >= '0' && r <= '9' {
+			builder.WriteRune(r)
+			lastUnderscore = false
+			continue
+		}
+		if !lastUnderscore {
+			builder.WriteByte('_')
+			lastUnderscore = true
+		}
+	}
+	return strings.Trim(builder.String(), "_")
 }
 
 func boolInt(value bool) int {

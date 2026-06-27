@@ -311,6 +311,20 @@ func (r *ComposedToolRepository) Versions(ctx context.Context, toolID uint) ([]s
 	return versions, err
 }
 
+func (r *ComposedToolRepository) VersionByNumber(ctx context.Context, toolID uint, versionNumber int) (store.ComposedToolVersion, bool, error) {
+	var version store.ComposedToolVersion
+	err := r.db.WithContext(ctx).
+		Where("composed_tool_id = ? AND version_number = ?", toolID, versionNumber).
+		First(&version).Error
+	if err == nil {
+		return version, true, nil
+	}
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return store.ComposedToolVersion{}, false, nil
+	}
+	return store.ComposedToolVersion{}, false, err
+}
+
 func (r *ComposedToolRepository) CreateRun(ctx context.Context, run store.ComposedToolRun) (store.ComposedToolRun, error) {
 	now := time.Now().UTC()
 	run.Status = firstNonEmpty(run.Status, "queued")
@@ -360,6 +374,24 @@ func (r *ComposedToolRepository) RecentRuns(ctx context.Context, guildID, name s
 	var runs []store.ComposedToolRun
 	err := query.Order("composed_tool_runs.created_at DESC, composed_tool_runs.id DESC").Limit(limit).Find(&runs).Error
 	return runs, err
+}
+
+func (r *ComposedToolRepository) RunByID(ctx context.Context, guildID, name string, runID uint) (store.ComposedToolRun, bool, error) {
+	query := r.db.WithContext(ctx).Model(&store.ComposedToolRun{}).
+		Joins("JOIN composed_tools ON composed_tools.id = composed_tool_runs.composed_tool_id").
+		Where("composed_tool_runs.guild_id = ? AND composed_tool_runs.id = ?", guildID, runID)
+	if strings.TrimSpace(name) != "" {
+		query = query.Where("composed_tools.name = ?", name)
+	}
+	var run store.ComposedToolRun
+	err := query.First(&run).Error
+	if err == nil {
+		return run, true, nil
+	}
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return store.ComposedToolRun{}, false, nil
+	}
+	return store.ComposedToolRun{}, false, err
 }
 
 func (r *ComposedToolRepository) CountRunsSince(ctx context.Context, toolID uint, since time.Time) (int64, error) {
@@ -430,6 +462,20 @@ func (r *ComposedToolRepository) TryDedupe(ctx context.Context, toolID uint, fin
 		return false, nil
 	}
 	return false, err
+}
+
+func (r *ComposedToolRepository) DeleteRunsBefore(ctx context.Context, cutoff time.Time) (int64, error) {
+	result := r.db.WithContext(ctx).
+		Where("created_at < ?", cutoff.UTC()).
+		Delete(&store.ComposedToolRun{})
+	return result.RowsAffected, result.Error
+}
+
+func (r *ComposedToolRepository) DeleteExpiredDedupe(ctx context.Context, now time.Time) (int64, error) {
+	result := r.db.WithContext(ctx).
+		Where("expires_at <= ?", now.UTC()).
+		Delete(&store.ComposedToolDedupe{})
+	return result.RowsAffected, result.Error
 }
 
 func isUniqueConstraintError(err error) bool {

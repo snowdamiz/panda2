@@ -160,8 +160,11 @@ func TestChannelAwareToolDescriptionsPreferDiscordChannelLookup(t *testing.T) {
 		t.Fatal("panda.manage_composed_tool not registered")
 	}
 	composedSchema := string(composed.InputSchema)
-	if !strings.Contains(composed.Description, "delete, remove") || !strings.Contains(composedSchema, "delete, remove") {
-		t.Fatalf("composed tool should tell the model to delete removals, description=%q schema=%s", composed.Description, composedSchema)
+	if !strings.Contains(composed.Description, "Use archive for reversible removal") ||
+		!strings.Contains(composed.Description, "Use delete only when the user explicitly asks for permanent deletion") ||
+		!strings.Contains(composedSchema, "Use archive for reversible removal") ||
+		!strings.Contains(composedSchema, "Use delete only when the user explicitly asks for permanent deletion") {
+		t.Fatalf("composed tool should steer removals to archive and permanent deletion to delete, description=%q schema=%s", composed.Description, composedSchema)
 	}
 	music, ok := registry.Get("panda.manage_music")
 	if !ok {
@@ -882,7 +885,7 @@ func TestExecutorRunsComposedToolManager(t *testing.T) {
 	}
 }
 
-func TestExecutorDeletesComposedToolForRemoveAlias(t *testing.T) {
+func TestExecutorArchivesComposedToolForRemoveAlias(t *testing.T) {
 	registry, err := NewDefaultRegistry()
 	if err != nil {
 		t.Fatalf("NewDefaultRegistry: %v", err)
@@ -905,8 +908,28 @@ func TestExecutorDeletesComposedToolForRemoveAlias(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
-	if len(manager.requests) != 1 || manager.requests[0].Action != "delete" || manager.requests[0].ToolName != "play_song_on_voice_join" {
-		t.Fatalf("expected remove alias to delete composed tool, got %+v", manager.requests)
+	if len(manager.requests) != 1 || manager.requests[0].Action != "archive" || manager.requests[0].ToolName != "play_song_on_voice_join" {
+		t.Fatalf("expected remove alias to archive composed tool, got %+v", manager.requests)
+	}
+
+	_, err = executor.Execute(context.Background(), ExecutionRequest{
+		GuildID: "guild-1",
+		ActorID: "admin",
+		Access:  testAccess(ToolPolicyWriteConfirmed, admin.PermissionToolComposeApprove),
+		Call: llm.ToolCall{
+			ID:   "call-composed-manager-delete",
+			Type: "function",
+			Function: llm.ToolCallFunction{
+				Name:      "panda_manage_composed_tool",
+				Arguments: `{"action":"permanent_delete","tool_name":"play_song_on_voice_join"}`,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Execute permanent delete: %v", err)
+	}
+	if len(manager.requests) != 2 || manager.requests[1].Action != "delete" || manager.requests[1].ToolName != "play_song_on_voice_join" {
+		t.Fatalf("expected explicit permanent delete alias to delete composed tool, got %+v", manager.requests)
 	}
 }
 

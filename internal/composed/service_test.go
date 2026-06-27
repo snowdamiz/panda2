@@ -489,6 +489,169 @@ func TestManageComposedToolDraftAndApprovalConfirmation(t *testing.T) {
 	}
 }
 
+func TestManageComposedToolLintReturnsIssuesWithoutSaving(t *testing.T) {
+	ctx := context.Background()
+	service, _ := newComposedTestService(t)
+	spec := memberJoinWelcomeSpec()
+	spec.Runner.Type = ""
+	spec.Steps[0].Arguments["channel_id"] = "channel-bot-test"
+	delete(spec.Steps[0].Arguments, "channel_name")
+
+	result, err := service.ManageComposedTool(ctx, tools.ComposedToolManagementRequest{
+		GuildID:  "guild-1",
+		ActorID:  "admin-1",
+		Action:   "lint",
+		SpecJSON: mustJSON(spec),
+	})
+	if err != nil {
+		t.Fatalf("lint: %v", err)
+	}
+	payload := toolsPayloadString(result)
+	if !strings.Contains(payload, `"valid":false`) || !strings.Contains(payload, "runner_type_required") {
+		t.Fatalf("expected structured lint issues, got %+v", result)
+	}
+	records, err := service.List(ctx, "guild-1")
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(records) != 0 {
+		t.Fatalf("lint should not persist drafts, got %+v", records)
+	}
+}
+
+func TestManageComposedToolRunDetailRedactsPersistedPayloads(t *testing.T) {
+	ctx := context.Background()
+	service, _ := newComposedTestService(t)
+	service.client = &fakeComposedLLM{response: llm.ChatResponse{Content: mustJSON(memberJoinWelcomeSpec())}}
+	service.WithDiscordResolver(fakeDiscordResolver{
+		channels: map[string]ResolvedDiscordObject{"bot-test": {ID: "channel-bot-test", Name: "bot-test"}},
+	})
+	if _, err := service.Draft(ctx, DraftRequest{GuildID: "guild-1", ActorID: "admin-1", Text: "welcome new members"}); err != nil {
+		t.Fatalf("Draft: %v", err)
+	}
+	if _, err := service.Approve(ctx, "guild-1", "member_welcome", 1, "admin-1"); err != nil {
+		t.Fatalf("Approve: %v", err)
+	}
+	run, err := service.Run(ctx, RunRequest{
+		GuildID:        "guild-1",
+		ToolName:       "member_welcome",
+		InvocationType: InvocationEvent,
+		Input: map[string]any{
+			"user_id": "user-1",
+			"token":   "abcdefghijklmnopqrstuvwxyz123456",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	detail, err := service.ManageComposedTool(ctx, tools.ComposedToolManagementRequest{
+		GuildID: "guild-1",
+		Action:  "run_detail",
+		RunID:   run.RunID,
+	})
+	if err != nil {
+		t.Fatalf("run_detail: %v", err)
+	}
+	payload := toolsPayloadString(detail)
+	if strings.Contains(payload, "abcdefghijklmnopqrstuvwxyz123456") || !strings.Contains(payload, "[redacted]") || !strings.Contains(payload, `"transcript"`) {
+		t.Fatalf("expected redacted run detail with transcript, got %+v", detail)
+	}
+}
+
+func TestManageComposedToolCompareVersionsReportsChangedFields(t *testing.T) {
+	ctx := context.Background()
+	service, _ := newComposedTestService(t)
+	spec := roleWelcomeSpec()
+	spec.Name = "compare_tool"
+	if _, err := service.Draft(ctx, DraftRequest{GuildID: "guild-1", ActorID: "admin-1", SpecJSON: mustJSON(spec)}); err != nil {
+		t.Fatalf("Draft v1: %v", err)
+	}
+	spec.Description = "Updated description for comparison."
+	if _, err := service.Draft(ctx, DraftRequest{GuildID: "guild-1", ActorID: "admin-1", SpecJSON: mustJSON(spec)}); err != nil {
+		t.Fatalf("Draft v2: %v", err)
+	}
+
+	result, err := service.ManageComposedTool(ctx, tools.ComposedToolManagementRequest{
+		GuildID:        "guild-1",
+		Action:         "compare",
+		ToolName:       "compare_tool",
+		CompareVersion: 1,
+		Version:        2,
+	})
+	if err != nil {
+		t.Fatalf("compare: %v", err)
+	}
+	if !strings.Contains(toolsPayloadString(result), `"changed_fields":["description"]`) {
+		t.Fatalf("expected description diff, got %+v", result)
+	}
+}
+
+func TestComposedListShowsHiddenByAccessHealth(t *testing.T) {
+	ctx := context.Background()
+	service, _ := newComposedTestService(t)
+	spec := roleWelcomeSpec()
+	spec.Name = "private_tool"
+	if _, err := service.Draft(ctx, DraftRequest{GuildID: "guild-1", ActorID: "admin-1", SpecJSON: mustJSON(spec)}); err != nil {
+		t.Fatalf("Draft: %v", err)
+	}
+	if _, err := service.Approve(ctx, "guild-1", "private_tool", 1, "admin-1"); err != nil {
+		t.Fatalf("Approve: %v", err)
+	}
+
+	result, err := service.ManageComposedTool(ctx, tools.ComposedToolManagementRequest{
+		GuildID: "guild-1",
+		Action:  "list",
+		Access: tools.ToolAccess{
+			Policy:                       tools.ToolPolicyAssistive,
+			Permissions:                  map[string]struct{}{admin.PermissionToolComposeInvoke: {}},
+			RequireExplicitComposedTools: true,
+		},
+	})
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	payload := toolsPayloadString(result)
+	if !strings.Contains(payload, HealthHiddenByAccess) || !strings.Contains(payload, "enabled_but_private") {
+		t.Fatalf("expected hidden health and private exposure, got %+v", result)
+	}
+}
+
+func TestRunBlockedBeforeExecutionCreatesRunRecord(t *testing.T) {
+	ctx := context.Background()
+	service, provider := newComposedTestService(t)
+	spec := roleWelcomeSpec()
+	spec.Name = "blocked_tool"
+	if _, err := service.Draft(ctx, DraftRequest{GuildID: "guild-1", ActorID: "admin-1", SpecJSON: mustJSON(spec)}); err != nil {
+		t.Fatalf("Draft: %v", err)
+	}
+	if _, err := service.Approve(ctx, "guild-1", "blocked_tool", 1, "admin-1"); err != nil {
+		t.Fatalf("Approve: %v", err)
+	}
+	if _, err := service.SetStatus(ctx, "guild-1", "blocked_tool", StatusPaused, "admin-1"); err != nil {
+		t.Fatalf("pause: %v", err)
+	}
+	result, err := service.Run(ctx, RunRequest{
+		GuildID:        "guild-1",
+		ToolName:       "blocked_tool",
+		InvocationType: InvocationEvent,
+		Input:          map[string]any{"user_id": "user-1", "role_id": "role-builder"},
+	})
+	if err == nil || result.Status != RunBlocked {
+		t.Fatalf("expected blocked run result and error, result=%+v err=%v", result, err)
+	}
+	if len(provider.calls) != 0 {
+		t.Fatalf("blocked run should not execute native tools, got %+v", provider.calls)
+	}
+	runs, err := service.repo.RecentRuns(ctx, "guild-1", "blocked_tool", 10)
+	if err != nil {
+		t.Fatalf("RecentRuns: %v", err)
+	}
+	if len(runs) != 1 || runs[0].Status != RunBlocked || !strings.Contains(runs[0].Error, "paused") {
+		t.Fatalf("expected persisted blocked run, got %+v", runs)
+	}
+}
+
 func TestManageComposedToolArchiveUsesArchivedStatus(t *testing.T) {
 	ctx := context.Background()
 	service, _ := newComposedTestService(t)
@@ -524,7 +687,7 @@ func TestManageComposedToolArchiveUsesArchivedStatus(t *testing.T) {
 	}
 }
 
-func TestManageComposedToolDeleteHardDeletesTool(t *testing.T) {
+func TestManageComposedToolDeleteRequiresConfirmation(t *testing.T) {
 	ctx := context.Background()
 	service, _ := newComposedTestService(t)
 	spec := roleWelcomeSpec()
@@ -547,15 +710,15 @@ func TestManageComposedToolDeleteHardDeletesTool(t *testing.T) {
 		t.Fatalf("delete: %v", err)
 	}
 	payload := toolsPayloadString(result)
-	if !strings.Contains(payload, `"deleted":true`) || !strings.Contains(payload, `"tool_name":"deletable_tool"`) {
-		t.Fatalf("expected delete result payload, got %+v", result)
+	if strings.Contains(payload, `"deleted":true`) || !strings.Contains(payload, `"confirmation_required":true`) || !strings.Contains(payload, "composed_tool.delete") {
+		t.Fatalf("expected delete confirmation payload, got %+v", result)
 	}
 	records, err := service.List(ctx, "guild-1")
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
-	if len(records) != 0 {
-		t.Fatalf("expected deleted tool to be absent, got %+v", records)
+	if len(records) != 1 || records[0].Name != "deletable_tool" {
+		t.Fatalf("delete confirmation preview must not mutate records, got %+v", records)
 	}
 }
 
@@ -870,9 +1033,48 @@ func TestValidateSpecRejectsBroadVoiceStateEvent(t *testing.T) {
 	}
 }
 
-func TestPolicyAwareModNoteDraftUsesNonDestructiveAllowlist(t *testing.T) {
+func TestPolicyAwareModNoteDraftUsesLLMPath(t *testing.T) {
 	ctx := context.Background()
 	service, _ := newComposedTestService(t)
+	spec := NormalizeSpec(Spec{
+		SchemaVersion: 1,
+		Name:          "policy_mod_note",
+		Description:   "Fetches message context, checks server knowledge, and drafts a policy-aware moderator note.",
+		InputSchema: rawObjectSchema([]string{"message_link"}, map[string]string{
+			"message_link": "string",
+			"tone":         "string",
+		}),
+		OutputSchema: rawObjectSchema([]string{"draft"}, map[string]string{
+			"draft":       "string",
+			"sources":     "array",
+			"needs_human": "boolean",
+		}),
+		Runner: RunnerSpec{
+			Type:         RunnerAgentic,
+			SystemPrompt: "Draft a policy-aware note for human review only. Do not take moderation action.",
+			Temperature:  0.2,
+			MaxTokens:    700,
+			ToolAllowlist: []string{
+				"discord.fetch_message",
+				"discord.fetch_messages",
+				"search_knowledge",
+				"draft_moderator_note",
+			},
+		},
+		Invocations: []InvocationSpec{
+			{Type: InvocationChatTool},
+			{Type: InvocationMessageContext},
+		},
+		Safety: SafetySpec{
+			RequiresApproval:            true,
+			RequiresConfirmationOnWrite: false,
+			MaxNestedDepth:              2,
+			CooldownSeconds:             5,
+			MaxRunsPerHour:              60,
+		},
+	})
+	client := &fakeComposedLLM{response: llm.ChatResponse{Content: mustJSON(spec)}}
+	service.client = client
 	draft, err := service.PreviewDraft(ctx, DraftRequest{
 		GuildID: "guild-1",
 		ActorID: "moderator-1",
@@ -883,6 +1085,12 @@ func TestPolicyAwareModNoteDraftUsesNonDestructiveAllowlist(t *testing.T) {
 	}
 	if draft.Spec.Name != "policy_mod_note" || draft.Spec.Runner.Type != RunnerAgentic {
 		t.Fatalf("unexpected mod note spec: %+v", draft.Spec)
+	}
+	if len(client.requests) != 1 {
+		t.Fatalf("expected policy/mod-note request to use LLM draft path, got %d requests", len(client.requests))
+	}
+	if client.requests[0].ResponseFormat == nil || client.requests[0].ResponseFormat.Type != "json_schema" {
+		t.Fatalf("expected structured draft response format, got %+v", client.requests[0].ResponseFormat)
 	}
 	if draft.Validation.RiskLevel != "medium" || len(draft.Validation.Writes) != 0 {
 		t.Fatalf("draft note should not be treated as an unattended write: %+v", draft.Validation)
