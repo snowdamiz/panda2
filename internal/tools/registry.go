@@ -534,6 +534,19 @@ func DefaultDefinitions() []Definition {
 			BypassToolPolicy:      true,
 		},
 		{
+			Name:                  "panda.summarize_youtube",
+			Description:           "Watch and summarize a YouTube video from a URL or title/search query. Use this when the user asks Panda to summarize, recap, watch, explain, outline, or get key points from a YouTube video. If the user provides a YouTube URL, pass that exact URL as query. If the user names a video by title, pass the title/search query so yt-dlp can resolve the top YouTube result. This tool extracts audio in chunks, transcribes it with Lemonfox Whisper, and returns a plain text transcript for Panda's final summary. Do not use this for music playback; use panda.manage_music for play/queue/control requests.",
+			RequiredPermission:    admin.PermissionAssistantUse,
+			FeatureID:             features.AssistantChat,
+			ToolClass:             ToolClassMedia,
+			InputSchema:           youtubeSummarySchema(),
+			OutputSchema:          objectSchema("result"),
+			Timeout:               30 * time.Minute,
+			Redaction:             RedactContent,
+			Audit:                 AuditSensitive,
+			IncludeInModelContext: true,
+		},
+		{
 			Name:                  "panda.list_tools",
 			Description:           "List callable tools in the current guild and channel context for explicit inventory/debug requests.",
 			RequiredPermission:    admin.PermissionAssistantUse,
@@ -1088,6 +1101,37 @@ func musicManagementSchema() json.RawMessage {
 		"position":             map[string]any{"type": "integer", "minimum": 1, "description": "Queue position for remove or move."},
 		"to":                   map[string]any{"type": "integer", "minimum": 1, "description": "Destination queue position for move."},
 		"volume":               map[string]any{"type": "integer", "minimum": 1, "maximum": 200, "description": "Default music volume for settings."},
+	})
+}
+
+func youtubeSummarySchema() json.RawMessage {
+	return schemaWithProperties([]string{"query"}, map[string]any{
+		"query": map[string]any{
+			"type":        "string",
+			"minLength":   1,
+			"description": "YouTube URL or title/search query to summarize. Use the exact URL when the user provided one; otherwise use the video title/name/search phrase.",
+		},
+		"url": map[string]any{
+			"type":        "string",
+			"description": "Alias for query when the user provides a YouTube URL. Prefer putting the same URL in query.",
+		},
+		"title": map[string]any{
+			"type":        "string",
+			"description": "Alias for query when the user names a YouTube video by title.",
+		},
+		"video": map[string]any{
+			"type":        "string",
+			"description": "Alias for query when the user says the video name separately.",
+		},
+		"detail": map[string]any{
+			"type":        "string",
+			"enum":        []string{"concise", "standard", "detailed"},
+			"description": "Requested summary depth. Use concise for brief/key-points, detailed for deep notes, otherwise standard.",
+		},
+		"language": map[string]any{
+			"type":        "string",
+			"description": "Optional spoken language hint, such as english, spanish, french, or japanese. Omit unless the user specifies the video's language.",
+		},
 	})
 }
 

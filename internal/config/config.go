@@ -23,6 +23,8 @@ const (
 	defaultOpenRouterModel        = "openai/gpt-oss-120b"
 	defaultOpenRouterImageModel   = "google/gemini-3.1-flash-image"
 	defaultOpenRouterProvider     = "cerebras"
+	defaultLemonfoxBaseURL        = "https://api.lemonfox.ai/v1"
+	defaultYouTubeChunkDuration   = 10 * time.Minute
 	defaultSolanaCluster          = "devnet"
 	defaultSolanaConfirmation     = "finalized"
 	defaultImageTimeout           = 90 * time.Second
@@ -57,6 +59,9 @@ type Config struct {
 	OpenRouterCircuitBreakerCooldown         time.Duration
 	BraveSearchAPIKey                        string
 	BraveSearchBaseURL                       string
+	LemonfoxAPIKey                           string
+	LemonfoxBaseURL                          string
+	YouTubeAudioChunkDuration                time.Duration
 	PublicAppURL                             string
 	BillingAllowedOrigins                    []string
 	SolanaRPCURL                             string
@@ -83,6 +88,7 @@ type fileConfig struct {
 	Discord     fileDiscordConfig     `json:"discord"`
 	OpenRouter  fileOpenRouterConfig  `json:"openrouter"`
 	BraveSearch fileBraveSearchConfig `json:"brave_search"`
+	Lemonfox    fileLemonfoxConfig    `json:"lemonfox"`
 	Billing     fileBillingConfig     `json:"billing"`
 	Music       fileMusicConfig       `json:"music"`
 	Runtime     fileRuntimeConfig     `json:"runtime"`
@@ -121,6 +127,12 @@ type fileCircuitBreakerConfig struct {
 
 type fileBraveSearchConfig struct {
 	BaseURL string `json:"base_url"`
+}
+
+type fileLemonfoxConfig struct {
+	APIKey                    string `json:"api_key"`
+	BaseURL                   string `json:"base_url"`
+	YouTubeAudioChunkDuration string `json:"youtube_audio_chunk_duration"`
 }
 
 type fileBillingConfig struct {
@@ -201,6 +213,12 @@ func (c Config) Validate() ([]string, error) {
 	if c.BraveSearchBaseURL == "" {
 		return nil, errors.New("brave_search.base_url (BRAVE_SEARCH_BASE_URL) must not be empty")
 	}
+	if c.LemonfoxBaseURL == "" {
+		return nil, errors.New("lemonfox.base_url (LEMONFOX_BASE_URL) must not be empty")
+	}
+	if c.YouTubeAudioChunkDuration <= 0 {
+		return nil, errors.New("lemonfox.youtube_audio_chunk_duration (YOUTUBE_AUDIO_CHUNK_DURATION) must be greater than zero")
+	}
 	if c.SolanaPlanLamports == nil {
 		c.SolanaPlanLamports = map[string]int64{}
 	}
@@ -260,6 +278,9 @@ func (c Config) Validate() ([]string, error) {
 	}
 	if !c.OpenRouterConfigured() {
 		warnings = append(warnings, "OPENROUTER_API_KEY is not configured; natural-language assistant responses are disabled")
+	}
+	if !c.LemonfoxConfigured() {
+		warnings = append(warnings, "LEMONFOX_API_KEY is not configured; YouTube video summarization is disabled")
 	}
 	if c.PublicAppURL == "" {
 		warnings = append(warnings, "PUBLIC_APP_URL is not configured; billing and support links will be limited")
@@ -345,6 +366,10 @@ func (c Config) BraveSearchConfigured() bool {
 	return c.BraveSearchAPIKey != ""
 }
 
+func (c Config) LemonfoxConfigured() bool {
+	return strings.TrimSpace(c.LemonfoxAPIKey) != ""
+}
+
 func (c Config) SolanaPaymentsConfigured() bool {
 	return strings.TrimSpace(c.SolanaRPCURL) != "" &&
 		strings.TrimSpace(c.SolanaTreasuryWallet) != "" &&
@@ -391,6 +416,8 @@ func defaultConfig() Config {
 		OpenRouterCircuitBreakerFailureThreshold: 5,
 		OpenRouterCircuitBreakerCooldown:         30 * time.Second,
 		BraveSearchBaseURL:                       "https://api.search.brave.com/res/v1",
+		LemonfoxBaseURL:                          defaultLemonfoxBaseURL,
+		YouTubeAudioChunkDuration:                defaultYouTubeChunkDuration,
 		SolanaCluster:                            defaultSolanaCluster,
 		SolanaConfirmation:                       defaultSolanaConfirmation,
 		SolanaOrderExpiration:                    defaultSolanaOrderExpiration,
@@ -698,6 +725,19 @@ func applyFileConfig(cfg *Config, file fileConfig) error {
 	if value := strings.TrimSpace(file.BraveSearch.BaseURL); value != "" {
 		cfg.BraveSearchBaseURL = value
 	}
+	if value := strings.TrimSpace(file.Lemonfox.APIKey); value != "" {
+		cfg.LemonfoxAPIKey = value
+	}
+	if value := strings.TrimSpace(file.Lemonfox.BaseURL); value != "" {
+		cfg.LemonfoxBaseURL = value
+	}
+	if value := strings.TrimSpace(file.Lemonfox.YouTubeAudioChunkDuration); value != "" {
+		parsed, err := parseDuration("lemonfox.youtube_audio_chunk_duration", value)
+		if err != nil {
+			return err
+		}
+		cfg.YouTubeAudioChunkDuration = parsed
+	}
 	if value := strings.TrimSpace(file.Billing.PublicURL); value != "" {
 		cfg.PublicAppURL = value
 	}
@@ -805,6 +845,9 @@ func applyEnvValues(cfg *Config, lookup func(string) (string, bool)) {
 	cfg.OpenRouterCircuitBreakerCooldown = durationFromLookup(lookup, "OPENROUTER_CIRCUIT_COOLDOWN", cfg.OpenRouterCircuitBreakerCooldown)
 	cfg.BraveSearchAPIKey = stringFromLookup(lookup, "BRAVE_SEARCH_API_KEY", cfg.BraveSearchAPIKey)
 	cfg.BraveSearchBaseURL = nonEmptyStringFromLookup(lookup, "BRAVE_SEARCH_BASE_URL", cfg.BraveSearchBaseURL)
+	cfg.LemonfoxAPIKey = stringFromLookup(lookup, "LEMONFOX_API_KEY", cfg.LemonfoxAPIKey)
+	cfg.LemonfoxBaseURL = nonEmptyStringFromLookup(lookup, "LEMONFOX_BASE_URL", cfg.LemonfoxBaseURL)
+	cfg.YouTubeAudioChunkDuration = durationFromLookup(lookup, "YOUTUBE_AUDIO_CHUNK_DURATION", cfg.YouTubeAudioChunkDuration)
 	cfg.PublicAppURL = nonEmptyStringFromLookup(lookup, "PUBLIC_APP_URL", cfg.PublicAppURL)
 	if value, ok := csvListFromLookup(lookup, "BILLING_ALLOWED_ORIGINS"); ok {
 		cfg.BillingAllowedOrigins = value

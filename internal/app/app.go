@@ -33,6 +33,7 @@ import (
 	"github.com/sn0w/panda2/internal/store"
 	"github.com/sn0w/panda2/internal/tools"
 	"github.com/sn0w/panda2/internal/websearch"
+	"github.com/sn0w/panda2/internal/youtube"
 )
 
 type App struct {
@@ -47,6 +48,18 @@ type App struct {
 
 type commandInstallIntentAdapter struct {
 	service *discordbot.InstallService
+}
+
+type youtubeToolProvider struct {
+	sidecars *music.SidecarManager
+}
+
+func (p youtubeToolProvider) Ensure(ctx context.Context) (youtube.ToolPaths, error) {
+	paths, err := p.sidecars.Ensure(ctx)
+	if err != nil {
+		return youtube.ToolPaths{}, err
+	}
+	return youtube.ToolPaths{YTDLPPath: paths.YTDLPPath, FFmpegPath: paths.FFmpegPath}, nil
 }
 
 func (a commandInstallIntentAdapter) CreateFeatureInstallIntent(ctx context.Context, request commands.FeatureInstallIntentRequest) (commands.FeatureInstallIntentResult, error) {
@@ -124,6 +137,14 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 		FFmpegPath: cfg.MusicFFmpegPath,
 		Logger:     logger,
 	})
+	youtubeSummarizer := youtube.NewService(youtube.Config{
+		APIKey:        cfg.LemonfoxAPIKey,
+		BaseURL:       cfg.LemonfoxBaseURL,
+		YTDLPPath:     cfg.MusicYTDLPPath,
+		FFmpegPath:    cfg.MusicFFmpegPath,
+		ToolProvider:  youtubeToolProvider{sidecars: musicSidecars},
+		ChunkDuration: cfg.YouTubeAudioChunkDuration,
+	})
 	memoryService := memory.NewServiceWithEmbeddings(knowledge, openRouter, cfg.OpenRouterEmbeddingModel)
 	billingService := billing.NewService(billingRepo, billing.Config{
 		PublicURL:              cfg.PublicAppURL,
@@ -165,6 +186,7 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 		WithImageAnalyzer(openRouterImages).
 		WithGIFFrameExtractor(tools.NewFFmpegGIFFrameExtractor(musicSidecars)).
 		WithUserSafetyRepository(userSafety).
+		WithYouTubeSummarizer(youtubeSummarizer).
 		WithBilling(billingService).
 		WithOpsManager(opsService)
 	composedService := composed.NewService(composedRepo, toolRegistry, toolExecutor, openRouter, cfg.OpenRouterModel).

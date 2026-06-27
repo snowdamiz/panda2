@@ -301,9 +301,10 @@ var catalog = []Feature{
 	{
 		ID:                 AssistantChat,
 		Label:              "Assistant chat",
-		Description:        "Natural messages plus explain, summarize, rewrite, and translate workflows.",
+		Description:        "Natural messages plus explain, summarize, rewrite, translate, and YouTube video summary workflows.",
 		DiscordPermissions: []string{"VIEW_CHANNEL", "SEND_MESSAGES", "READ_MESSAGE_HISTORY", "EMBED_LINKS"},
 		PandaPermissions:   []string{admin.PermissionAssistantUse},
+		ToolNames:          []string{"panda.summarize_youtube"},
 		ConsumesPlanQuota:  true,
 		Public:             true,
 	},
