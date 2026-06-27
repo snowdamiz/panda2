@@ -254,6 +254,8 @@ type ComposedToolManagementRequest struct {
 	Action           string
 	ToolName         string
 	Version          int
+	CompareVersion   int
+	RunID            uint
 	Text             string
 	SpecJSON         string
 	RoleID           string
@@ -3373,6 +3375,8 @@ func (e *Executor) manageComposedTool(ctx context.Context, request ExecutionRequ
 		Action:           action,
 		ToolName:         firstNonEmpty(stringArgument(args, "tool_name"), stringArgument(args, "tool")),
 		Version:          intArgument(args, "version", 0),
+		CompareVersion:   firstPositiveInt(intArgument(args, "compare_version", 0), intArgument(args, "from_version", 0)),
+		RunID:            uint(firstPositiveInt(intArgument(args, "run_id", 0), intArgument(args, "id", 0))),
 		Text:             firstNonEmpty(stringArgument(args, "request"), stringArgument(args, "description")),
 		SpecJSON:         stringArgument(args, "spec_json"),
 		RoleID:           stringArgument(args, "role_id"),
@@ -5033,9 +5037,11 @@ func normalizeComposedManagementAction(action string) string {
 		return "preview"
 	case "draft", "create":
 		return "draft"
-	case "list", "show", "approve", "pause", "resume", "disable", "archive", "delete", "run", "simulate", "export", "rollback":
+	case "list", "show", "approve", "pause", "resume", "disable", "archive", "delete", "run", "simulate", "export", "rollback", "lint", "run_detail", "compare":
 		return strings.ToLower(strings.TrimSpace(action))
 	case "remove", "destroy":
+		return "archive"
+	case "permanent_delete", "hard_delete":
 		return "delete"
 	case "enable":
 		return "resume"
@@ -5117,9 +5123,9 @@ func normalizeMusicManagementAction(action string) string {
 
 func composedManagementPermission(action string) string {
 	switch action {
-	case "preview", "draft":
+	case "preview", "draft", "lint":
 		return admin.PermissionToolComposeDraft
-	case "list", "show", "export":
+	case "list", "show", "export", "run_detail", "compare":
 		return admin.PermissionToolComposeAudit
 	case "approve", "pause", "resume", "disable", "archive", "delete", "rollback":
 		return admin.PermissionToolComposeApprove
@@ -5436,6 +5442,15 @@ func intArgumentValue(value any, fallback int) int {
 
 func intArgument(arguments map[string]any, name string, fallback int) int {
 	return intArgumentValue(arguments[name], fallback)
+}
+
+func firstPositiveInt(values ...int) int {
+	for _, value := range values {
+		if value > 0 {
+			return value
+		}
+	}
+	return 0
 }
 
 func parseArguments(raw string) (map[string]any, error) {

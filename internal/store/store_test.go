@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"log"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -130,6 +131,24 @@ func TestOpenRunsMigrationsAndPragmas(t *testing.T) {
 		}
 	}
 
+}
+
+func TestOpenHardensSQLiteFilePermissions(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "panda.db")
+	store, err := Open(ctx, dbPath)
+	if err != nil {
+		t.Fatalf("Open returned error: %v", err)
+	}
+	defer store.Close()
+
+	info, err := os.Stat(dbPath)
+	if err != nil {
+		t.Fatalf("stat sqlite file: %v", err)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Fatalf("expected sqlite file mode 0600, got %o", got)
+	}
 }
 
 func TestExecMigrationStatementSkipsIdempotentAlterWithoutWarnings(t *testing.T) {

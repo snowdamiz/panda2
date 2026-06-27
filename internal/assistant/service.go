@@ -101,6 +101,7 @@ type AskRequest struct {
 	BypassSafety                 bool
 	AllowedPermissions           map[string]struct{}
 	AllowedTools                 map[string]struct{}
+	DeniedTools                  map[string]struct{}
 	RestrictedTools              map[string]struct{}
 	EnabledFeatures              map[string]struct{}
 	ImageReferences              []generated.ImageReference
@@ -170,6 +171,7 @@ type TaskRequest struct {
 	BypassSafety                 bool
 	AllowedPermissions           map[string]struct{}
 	AllowedTools                 map[string]struct{}
+	DeniedTools                  map[string]struct{}
 	RestrictedTools              map[string]struct{}
 	EnabledFeatures              map[string]struct{}
 	ImageReferences              []generated.ImageReference
@@ -210,6 +212,7 @@ type toolExecutionContext struct {
 	IsOwner                      bool
 	AllowedPermissions           map[string]struct{}
 	AllowedTools                 map[string]struct{}
+	DeniedTools                  map[string]struct{}
 	RestrictedTools              map[string]struct{}
 	EnabledFeatures              map[string]struct{}
 	ImageReferences              []generated.ImageReference
@@ -243,6 +246,7 @@ func (s *Service) Ask(ctx context.Context, request AskRequest) (AskResponse, err
 		BypassSafety:                 request.BypassSafety,
 		AllowedPermissions:           request.AllowedPermissions,
 		AllowedTools:                 request.AllowedTools,
+		DeniedTools:                  request.DeniedTools,
 		RestrictedTools:              request.RestrictedTools,
 		EnabledFeatures:              request.EnabledFeatures,
 		ImageReferences:              generated.CloneImageReferences(request.ImageReferences),
@@ -362,6 +366,7 @@ func (s *Service) chat(ctx context.Context, request AskRequest, options chatOpti
 		IsOwner:                      request.IsOwner,
 		AllowedPermissions:           request.AllowedPermissions,
 		AllowedTools:                 request.AllowedTools,
+		DeniedTools:                  request.DeniedTools,
 		RestrictedTools:              request.RestrictedTools,
 		EnabledFeatures:              request.EnabledFeatures,
 		ImageReferences:              generated.CloneImageReferences(request.ImageReferences),
@@ -540,6 +545,7 @@ func (s *Service) complete(ctx context.Context, request TaskRequest) (AskRespons
 		IsOwner:                      request.IsOwner,
 		AllowedPermissions:           request.AllowedPermissions,
 		AllowedTools:                 request.AllowedTools,
+		DeniedTools:                  request.DeniedTools,
 		RestrictedTools:              request.RestrictedTools,
 		EnabledFeatures:              request.EnabledFeatures,
 		ImageReferences:              generated.CloneImageReferences(request.ImageReferences),
@@ -712,7 +718,7 @@ func (s *Service) completeWithTools(ctx context.Context, config store.GuildConfi
 }
 
 func (s *Service) completeWithToolsWithOptions(ctx context.Context, config store.GuildConfig, toolContext toolExecutionContext, request llm.ChatRequest, options completionOptions) (llm.ChatResponse, []InteractionConfirmation, *ToolCard, []tools.SourceLink, []generated.File, []billing.Reservation, bool, bool, bool, error) {
-	access := toolAccess(config, toolContext.AllowedPermissions, toolContext.AllowedTools, toolContext.RestrictedTools, toolContext.EnabledFeatures, toolContext.FeatureGateActive, toolContext.RequireExplicitComposedTools)
+	access := toolAccess(config, toolContext.AllowedPermissions, toolContext.AllowedTools, toolContext.DeniedTools, toolContext.RestrictedTools, toolContext.EnabledFeatures, toolContext.FeatureGateActive, toolContext.RequireExplicitComposedTools)
 	if s.toolExecutor != nil && len(access.Permissions) > 0 {
 		request.Tools = modelCallableTools(s.toolExecutor.OpenRouterToolsForRequest(ctx, tools.DynamicToolListRequest{
 			GuildID:        config.GuildID,
@@ -2452,7 +2458,7 @@ func defaultMaxTokensForCommand(command string) int {
 	}
 }
 
-func toolAccess(config store.GuildConfig, allowedPermissions, allowedTools, restrictedTools, enabledFeatures map[string]struct{}, featureGateActive bool, requireExplicitComposedTools bool) tools.ToolAccess {
+func toolAccess(config store.GuildConfig, allowedPermissions, allowedTools, deniedTools, restrictedTools, enabledFeatures map[string]struct{}, featureGateActive bool, requireExplicitComposedTools bool) tools.ToolAccess {
 	policy := strings.ToLower(strings.TrimSpace(config.ToolPolicy))
 	if policy == "" {
 		policy = tools.ToolPolicyAdminOnly
@@ -2468,6 +2474,7 @@ func toolAccess(config store.GuildConfig, allowedPermissions, allowedTools, rest
 		Policy:                       policy,
 		Permissions:                  permissions,
 		AllowedTools:                 clonePermissions(allowedTools),
+		DeniedTools:                  clonePermissions(deniedTools),
 		RestrictedTools:              clonePermissions(restrictedTools),
 		EnabledFeatures:              clonePermissions(enabledFeatures),
 		FeatureGateActive:            featureGateActive,

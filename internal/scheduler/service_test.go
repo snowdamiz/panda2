@@ -129,6 +129,60 @@ func TestParseTimeOptionsAcceptsNaturalInValue(t *testing.T) {
 	}
 }
 
+func TestCreateComposedRejectsTooNearAndTooFrequentSchedules(t *testing.T) {
+	now := time.Date(2026, 6, 21, 12, 0, 0, 0, time.UTC)
+	service, db, _, _ := newSchedulerTestService(t, now)
+	defer db.Close()
+	ctx := context.Background()
+
+	_, err := service.CreateComposed(ctx, CreateComposedRequest{
+		GuildID:     "guild-1",
+		ChannelID:   "channel-1",
+		OwnerUserID: "admin",
+		ToolName:    "member_welcome",
+		NextRunAt:   now.Add(30 * time.Second),
+	})
+	if err == nil || !strings.Contains(err.Error(), "at least 1m0s") {
+		t.Fatalf("expected first-run delay rejection, got %v", err)
+	}
+
+	_, err = service.CreateComposed(ctx, CreateComposedRequest{
+		GuildID:     "guild-1",
+		ChannelID:   "channel-1",
+		OwnerUserID: "admin",
+		ToolName:    "member_welcome",
+		NextRunAt:   now.Add(10 * time.Minute),
+		Interval:    time.Second,
+	})
+	if err == nil || !strings.Contains(err.Error(), "at least 15m0s") {
+		t.Fatalf("expected recurrence rejection, got %v", err)
+	}
+}
+
+func TestComposedSkippedScheduleBackoffIsBoundedAndVisible(t *testing.T) {
+	now := time.Date(2026, 6, 21, 12, 0, 0, 0, time.UTC)
+	next := now.Add(time.Minute)
+	schedule := store.Schedule{
+		Kind:            KindComposed,
+		ScheduleType:    ScheduleRecurring,
+		IntervalSeconds: 60,
+		NextRunAt:       next,
+		LastStatus:      repository.ScheduleLastSkipped,
+		LastError:       "composed run rate_limited",
+		RunCount:        2,
+	}
+
+	backoff := composedBackoffNextRun(schedule, now, &next)
+	if backoff == nil || backoff.Sub(now) != 20*time.Minute {
+		t.Fatalf("expected exponential backoff to 20m, got %v", backoff)
+	}
+	schedule.NextRunAt = *backoff
+	payload := schedulePayload(schedule)
+	if payload["backoff_until"] == "" || payload["last_error"] != "composed run rate_limited" {
+		t.Fatalf("expected visible backoff state, got %+v", payload)
+	}
+}
+
 func TestManageReminderCreatesPersonalReminder(t *testing.T) {
 	now := time.Date(2026, 6, 21, 12, 0, 0, 0, time.UTC)
 	service, db, _, _ := newSchedulerTestService(t, now)

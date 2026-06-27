@@ -176,6 +176,11 @@ func schedulePayload(schedule store.Schedule) map[string]any {
 		"schedule_type":    schedule.ScheduleType,
 		"interval_seconds": schedule.IntervalSeconds,
 		"last_status":      schedule.LastStatus,
+		"last_error":       schedule.LastError,
+		"run_count":        schedule.RunCount,
+	}
+	if schedule.Kind == KindComposed && (schedule.LastStatus == repository.ScheduleLastSkipped || schedule.LastStatus == repository.ScheduleLastFailed) && schedule.ScheduleType == ScheduleRecurring && !schedule.Disabled {
+		payload["backoff_until"] = schedule.NextRunAt.UTC().Format(time.RFC3339)
 	}
 	if toolName := scheduleToolName(schedule); toolName != "" {
 		payload["tool_name"] = toolName

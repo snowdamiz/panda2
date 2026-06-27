@@ -43,6 +43,7 @@ const (
 	toolConfirmationOpSafetyClear          = "sc"
 	toolConfirmationOpComposedToolApprove  = "ca"
 	toolConfirmationOpComposedToolRollback = "cb"
+	toolConfirmationOpComposedToolDelete   = "cd"
 	toolConfirmationOpDiscordPollCreate    = "pc"
 	toolConfirmationEmptyValue             = "_"
 	toolActionKnowledgeDelete              = "knowledge.delete"
@@ -72,6 +73,7 @@ const (
 	toolActionSafetyClear                  = "safety.clear"
 	toolActionComposedToolApprove          = "composed_tool.approve"
 	toolActionComposedToolRollback         = "composed_tool.rollback"
+	toolActionComposedToolDelete           = "composed_tool.delete"
 	toolActionDiscordPollCreate            = "discord_poll.create"
 	toolActionDiscordWriteExecute          = "discord_write.execute"
 	toolActionOwnerOpsDrain                = "owner_ops.drain"
@@ -397,6 +399,12 @@ func RequestFromToolConfirmationID(id string, base Request) (ToolConfirmationReq
 		request.Action = toolActionComposedToolRollback
 		request.Options["tool_name"] = decodeToolConfirmationPart(parts[3])
 		request.Options["version"] = decodeToolConfirmationPart(parts[4])
+	case toolConfirmationOpComposedToolDelete:
+		if len(parts) != 4 {
+			return ToolConfirmationRequest{}, false
+		}
+		request.Action = toolActionComposedToolDelete
+		request.Options["tool_name"] = decodeToolConfirmationPart(parts[3])
 	default:
 		return ToolConfirmationRequest{}, false
 	}
@@ -643,6 +651,12 @@ func toolConfirmationID(userID, action string, arguments map[string]string) stri
 		}
 		prefix[1] = toolConfirmationOpComposedToolRollback
 		return strings.Join(append(prefix, encodeToolConfirmationPart(arguments["tool_name"]), encodeToolConfirmationPart(arguments["version"])), ":")
+	case toolActionComposedToolDelete:
+		if strings.TrimSpace(arguments["tool_name"]) == "" {
+			return ""
+		}
+		prefix[1] = toolConfirmationOpComposedToolDelete
+		return strings.Join(append(prefix, encodeToolConfirmationPart(arguments["tool_name"])), ":")
 	default:
 		return ""
 	}

@@ -42,8 +42,23 @@ const (
 	RunRateLimited = "rate_limited"
 	RunDeduped     = "deduped"
 
+	IssueSeverityError   = "error"
+	IssueSeverityWarning = "warning"
+	IssueSeverityInfo    = "info"
+
+	HealthHealthy                 = "healthy"
+	HealthHiddenByAccess          = "hidden_by_access"
+	HealthFeatureDisabled         = "feature_disabled"
+	HealthInvalidSpec             = "invalid_spec"
+	HealthMissingNativeTool       = "missing_native_tool"
+	HealthUnresolvedDiscordTarget = "unresolved_discord_target"
+	HealthCyclicDependency        = "cyclic_dependency"
+	HealthRateLimited             = "rate_limited"
+	HealthPausedAfterFailures     = "paused_after_failures"
+	HealthPaused                  = "paused"
+	HealthBlocked                 = "blocked"
+
 	EventJobKind = "composed_tool.event"
-	RunJobKind   = "composed_tool.run"
 
 	EventGuildMemberJoined      = "guild.member.joined"
 	EventGuildMemberRoleAdded   = "guild.member.role_added"
@@ -188,12 +203,57 @@ type SafetySpec struct {
 }
 
 type ValidationReport struct {
-	Valid       bool     `json:"valid"`
-	RiskLevel   string   `json:"risk_level"`
-	Errors      []string `json:"errors,omitempty"`
-	Warnings    []string `json:"warnings,omitempty"`
-	NativeTools []string `json:"native_tools,omitempty"`
-	Writes      []string `json:"writes,omitempty"`
+	Valid       bool              `json:"valid"`
+	RiskLevel   string            `json:"risk_level"`
+	Issues      []ValidationIssue `json:"issues,omitempty"`
+	Errors      []string          `json:"errors,omitempty"`
+	Warnings    []string          `json:"warnings,omitempty"`
+	NativeTools []string          `json:"native_tools,omitempty"`
+	Writes      []string          `json:"writes,omitempty"`
+}
+
+type ValidationIssue struct {
+	Code         string `json:"code"`
+	Severity     string `json:"severity"`
+	Message      string `json:"message"`
+	SuggestedFix string `json:"suggested_fix,omitempty"`
+}
+
+type HealthReport struct {
+	State         string            `json:"state"`
+	Visible       bool              `json:"visible"`
+	Reasons       []string          `json:"reasons,omitempty"`
+	Issues        []ValidationIssue `json:"issues,omitempty"`
+	LastRunID     uint              `json:"last_run_id,omitempty"`
+	LastRunStatus string            `json:"last_run_status,omitempty"`
+}
+
+type ExposureSummary struct {
+	State                  string   `json:"state"`
+	CallableByRequester    bool     `json:"callable_by_requester"`
+	RequiresExplicitGrant  bool     `json:"requires_explicit_grant"`
+	RecommendedNextActions []string `json:"recommended_next_actions,omitempty"`
+	Explanation            string   `json:"explanation,omitempty"`
+}
+
+type ApprovalSummary struct {
+	Purpose             string         `json:"purpose"`
+	InvocationModes     []string       `json:"invocation_modes"`
+	TriggerSummary      []string       `json:"trigger_summary,omitempty"`
+	TargetSummary       []string       `json:"target_summary,omitempty"`
+	NativeTools         []string       `json:"native_tools,omitempty"`
+	ComposedTools       []string       `json:"composed_tools,omitempty"`
+	WriteActions        []string       `json:"write_actions,omitempty"`
+	DiscordPermissions  []string       `json:"discord_permissions,omitempty"`
+	SafetyLimits        map[string]any `json:"safety_limits"`
+	RiskLevel           string         `json:"risk_level"`
+	RiskReasons         []string       `json:"risk_reasons,omitempty"`
+	RequiresApproval    bool           `json:"requires_approval"`
+	WriteConfirmation   bool           `json:"write_confirmation"`
+	MaxNestedDepth      int            `json:"max_nested_depth"`
+	CooldownSeconds     int            `json:"cooldown_seconds"`
+	MaxRunsPerHour      int            `json:"max_runs_per_hour"`
+	DedupeWindowSeconds int            `json:"dedupe_window_seconds"`
 }
 
 type EventJobPayload struct {
@@ -205,16 +265,6 @@ type EventJobPayload struct {
 	MessageID string            `json:"message_id,omitempty"`
 	Metadata  map[string]string `json:"metadata,omitempty"`
 	CreatedAt time.Time         `json:"created_at,omitempty"`
-}
-
-type RunJobPayload struct {
-	GuildID           string         `json:"guild_id"`
-	ToolName          string         `json:"tool_name"`
-	InvocationType    string         `json:"invocation_type"`
-	InvokingUserID    string         `json:"invoking_user_id,omitempty"`
-	TriggeringEventID string         `json:"triggering_event_id,omitempty"`
-	Input             map[string]any `json:"input,omitempty"`
-	DryRun            bool           `json:"dry_run,omitempty"`
 }
 
 type RunRequest struct {

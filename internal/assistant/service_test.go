@@ -76,9 +76,10 @@ func (f *fakeAssistantGIFFrameExtractor) ExtractGIFFrame(_ context.Context, refe
 }
 
 type fakeAssistantDynamicTools struct {
-	tools  []llm.Tool
-	result tools.ExecutionResult
-	err    error
+	tools    []llm.Tool
+	requests *[]tools.DynamicToolListRequest
+	result   tools.ExecutionResult
+	err      error
 }
 
 type fakeAssistantMusicManager struct {
@@ -88,7 +89,10 @@ type fakeAssistantMusicManager struct {
 
 type fakeAssistantDiscordProvider struct{}
 
-func (f fakeAssistantDynamicTools) OpenRouterTools(context.Context, tools.DynamicToolListRequest) ([]llm.Tool, error) {
+func (f fakeAssistantDynamicTools) OpenRouterTools(_ context.Context, request tools.DynamicToolListRequest) ([]llm.Tool, error) {
+	if f.requests != nil {
+		*f.requests = append(*f.requests, request)
+	}
 	return f.tools, nil
 }
 
@@ -1871,6 +1875,70 @@ func TestAskFiltersFeatureDisabledToolsBeforeModelRequest(t *testing.T) {
 		if strings.Contains(joined, disabled) {
 			t.Fatalf("feature-disabled tool %s leaked into tool availability prompt: %s", disabled, joined)
 		}
+	}
+}
+
+func TestAskPropagatesDeniedToolsBeforeModelRequest(t *testing.T) {
+	ctx := context.Background()
+	client := &fakeClient{response: llm.ChatResponse{Model: "fixture/model", Content: "ok"}}
+	service, db := newTestService(t, client)
+	configs := repository.NewGuildConfigRepository(db.DB)
+	registry, err := tools.NewDefaultRegistry()
+	if err != nil {
+		t.Fatalf("NewDefaultRegistry: %v", err)
+	}
+	var dynamicRequests []tools.DynamicToolListRequest
+	executor := tools.NewExecutor(registry, nil, configs).WithDynamicToolProvider(fakeAssistantDynamicTools{
+		requests: &dynamicRequests,
+		tools: []llm.Tool{
+			{Type: "function", Function: llm.ToolFunction{Name: "web_search", Parameters: []byte(`{"type":"object"}`)}},
+			{Type: "function", Function: llm.ToolFunction{Name: "custom_safe_reader", Parameters: []byte(`{"type":"object"}`)}},
+		},
+	})
+	service.WithToolExecutor(executor)
+
+	if _, err := configs.EnsureDefault(ctx, "guild-1"); err != nil {
+		t.Fatalf("EnsureDefault: %v", err)
+	}
+	if _, err := configs.UpdateBehaviorSettings(ctx, "guild-1", map[string]any{"tool_policy": tools.ToolPolicyWriteConfirmed}); err != nil {
+		t.Fatalf("UpdateBehaviorSettings: %v", err)
+	}
+
+	_, err = service.Ask(ctx, AskRequest{
+		GuildID:   "guild-1",
+		UserID:    "admin",
+		ChannelID: "channel-1",
+		Question:  "Search for this if you can.",
+		AllowedPermissions: map[string]struct{}{
+			admin.PermissionAssistantUse:       {},
+			admin.PermissionAssistantWebSearch: {},
+		},
+		DeniedTools: map[string]struct{}{
+			"web.search": {},
+		},
+		EnabledFeatures: map[string]struct{}{
+			features.AssistantChat: {},
+			features.WebSearch:     {},
+		},
+		FeatureGateActive: true,
+	})
+	if err != nil {
+		t.Fatalf("Ask: %v", err)
+	}
+	if len(dynamicRequests) != 1 {
+		t.Fatalf("expected one dynamic tool request, got %d", len(dynamicRequests))
+	}
+	if _, ok := dynamicRequests[0].Access.DeniedTools["web.search"]; !ok {
+		t.Fatalf("expected denied tool to propagate into dynamic access, got %+v", dynamicRequests[0].Access.DeniedTools)
+	}
+	if len(client.requests) != 1 {
+		t.Fatalf("expected one LLM request, got %d", len(client.requests))
+	}
+	if toolNamePresent(client.requests[0].Tools, "web_search") {
+		t.Fatalf("denied web search tool was exposed to model: %+v", client.requests[0].Tools)
+	}
+	if !toolNamePresent(client.requests[0].Tools, "custom_safe_reader") {
+		t.Fatalf("expected unrelated dynamic tool to remain available: %+v", client.requests[0].Tools)
 	}
 }
 
@@ -3671,6 +3739,7 @@ func TestToolAccessOwnerOpsPermissionOverridesConfiguredPolicy(t *testing.T) {
 			admin.PermissionAssistantUse: {},
 			admin.PermissionOwnerOps:     {},
 		},
+		nil,
 		nil,
 		nil,
 		nil,

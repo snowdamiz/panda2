@@ -10,16 +10,21 @@ import (
 	"github.com/sn0w/panda2/internal/store"
 )
 
+const composedRunRetention = 30 * 24 * time.Hour
+
 type Service struct {
 	conversations *repository.ConversationRepository
 	attachments   *repository.AttachmentRepository
+	composed      *repository.ComposedToolRepository
 	store         *store.Store
 	removeFile    func(string) error
 }
 
 type CleanupStats struct {
-	ExpiredConversations int64
-	CleanedAttachments   int
+	ExpiredConversations  int64
+	CleanedAttachments    int
+	DeletedComposedRuns   int64
+	DeletedComposedDedupe int64
 }
 
 func NewService(conversations *repository.ConversationRepository, attachments *repository.AttachmentRepository, store *store.Store) *Service {
@@ -33,6 +38,11 @@ func NewService(conversations *repository.ConversationRepository, attachments *r
 
 func (s *Service) WithRemoveFile(remove func(string) error) *Service {
 	s.removeFile = remove
+	return s
+}
+
+func (s *Service) WithComposedTools(composed *repository.ComposedToolRepository) *Service {
+	s.composed = composed
 	return s
 }
 
@@ -58,6 +68,19 @@ func (s *Service) Cleanup(ctx context.Context, now time.Time) (CleanupStats, err
 			return stats, err
 		}
 		stats.CleanedAttachments++
+	}
+
+	if s.composed != nil {
+		deletedRuns, err := s.composed.DeleteRunsBefore(ctx, now.Add(-composedRunRetention))
+		if err != nil {
+			return stats, err
+		}
+		stats.DeletedComposedRuns = deletedRuns
+		deletedDedupe, err := s.composed.DeleteExpiredDedupe(ctx, now)
+		if err != nil {
+			return stats, err
+		}
+		stats.DeletedComposedDedupe = deletedDedupe
 	}
 
 	if err := s.store.Optimize(ctx); err != nil {

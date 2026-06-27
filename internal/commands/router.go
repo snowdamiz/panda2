@@ -1752,6 +1752,7 @@ func (r *Router) handleAsk(ctx context.Context, request Request, command string)
 		BypassSafety:                 r.safetyBypassAllowed(ctx, request),
 		AllowedPermissions:           r.allowedToolPermissions(ctx, request),
 		AllowedTools:                 toolFilter.allowed,
+		DeniedTools:                  toolFilter.denied,
 		RestrictedTools:              toolFilter.restricted,
 		EnabledFeatures:              enabledFeatures,
 		ImageReferences:              generated.CloneImageReferences(request.ImageReferences),
@@ -1871,6 +1872,7 @@ func (r *Router) handleChatModeWithOptionsResult(ctx context.Context, request Re
 		BypassSafety:                 r.safetyBypassAllowed(ctx, request),
 		AllowedPermissions:           allowedPermissions,
 		AllowedTools:                 toolFilter.allowed,
+		DeniedTools:                  toolFilter.denied,
 		RestrictedTools:              toolFilter.restricted,
 		EnabledFeatures:              enabledFeatures,
 		ImageReferences:              generated.CloneImageReferences(request.ImageReferences),
@@ -1894,6 +1896,7 @@ func (r *Router) handleChatModeWithOptionsResult(ctx context.Context, request Re
 			slog.Any("allowed_permissions", permissionNames(allowedPermissions)),
 			slog.Any("enabled_features", permissionNames(enabledFeatures)),
 			slog.Any("allowed_tools", permissionNames(toolFilter.allowed)),
+			slog.Any("denied_tools", permissionNames(toolFilter.denied)),
 			slog.Any("restricted_tools", permissionNames(toolFilter.restricted)),
 		)
 	}
@@ -1959,6 +1962,7 @@ func (r *Router) handleTask(ctx context.Context, request Request) Response {
 		BypassSafety:                 r.safetyBypassAllowed(ctx, request),
 		AllowedPermissions:           permissionNames(r.allowedToolPermissions(ctx, request)),
 		AllowedTools:                 permissionNames(toolFilter.allowed),
+		DeniedTools:                  permissionNames(toolFilter.denied),
 		RestrictedTools:              permissionNames(toolFilter.restricted),
 		EnabledFeatures:              permissionNames(enabledFeatures),
 		ImageReferences:              generated.CloneImageReferences(request.ImageReferences),
@@ -2062,6 +2066,7 @@ func assistantTaskRequestFromBackgroundTask(task BackgroundTask, enabledFeatures
 		BypassSafety:                 task.BypassSafety,
 		AllowedPermissions:           permissionsFromNames(task.AllowedPermissions),
 		AllowedTools:                 permissionsFromNames(task.AllowedTools),
+		DeniedTools:                  permissionsFromNames(task.DeniedTools),
 		RestrictedTools:              permissionsFromNames(task.RestrictedTools),
 		EnabledFeatures:              enabledFeatures,
 		ImageReferences:              generated.CloneImageReferences(task.ImageReferences),
@@ -2438,7 +2443,8 @@ func (r *Router) HandleToolConfirmation(ctx context.Context, request ToolConfirm
 		if err != nil {
 			return toolConfirmationError(err, "Composed tool could not be approved.", "That composed tool version was not found.")
 		}
-		return Response{Content: fmt.Sprintf("Approved `%s` version %d. Risk: `%s`.", result.Tool, result.Version, result.Validation.RiskLevel), Ephemeral: true}
+		exposure := r.composedExposureLine(ctx, request.Request, result.Tool)
+		return Response{Content: renderComposedApprovalContent(result.Tool, result.Version, composedApprovalSummary(result), exposure), Ephemeral: true}
 	case toolActionComposedToolRollback:
 		if denied := r.ensureToolConfirmationPermission(ctx, request.Request, r.admin.CanApproveComposedTool, "You do not have permission to roll back composed tools."); denied.Content != "" {
 			return denied
@@ -2456,6 +2462,22 @@ func (r *Router) HandleToolConfirmation(ctx context.Context, request ToolConfirm
 			return toolConfirmationError(err, "Composed tool could not be rolled back.", "That approved composed tool version was not found.")
 		}
 		return Response{Content: fmt.Sprintf("Rolled `%s` back to version %d.", result.Tool, result.Version), Ephemeral: true}
+	case toolActionComposedToolDelete:
+		if denied := r.ensureToolConfirmationPermission(ctx, request.Request, r.admin.CanApproveComposedTool, "You do not have permission to permanently delete composed tools."); denied.Content != "" {
+			return denied
+		}
+		if r.composed == nil {
+			return Response{Content: "Composed tools are not configured for this runtime.", Ephemeral: true}
+		}
+		toolName := strings.TrimSpace(request.Options["tool_name"])
+		if toolName == "" {
+			return Response{Content: "That composed-tool delete confirmation is invalid.", Ephemeral: true}
+		}
+		tool, err := r.composed.Delete(ctx, request.Request.GuildID, toolName, request.Request.UserID)
+		if err != nil {
+			return toolConfirmationError(err, "Composed tool could not be permanently deleted.", "That composed tool was not found.")
+		}
+		return Response{Content: fmt.Sprintf("Permanently deleted `%s` and its versions, runs, and dedupe records.", tool.Name), Ephemeral: true}
 	case toolActionOwnerOpsDrain,
 		toolActionOwnerOpsResume,
 		toolActionOwnerOpsIncidentEnable,
@@ -2527,7 +2549,8 @@ func toolConfirmationFeature(action string) string {
 	case toolActionDiscordPollCreate:
 		return features.Polls
 	case toolActionComposedToolApprove,
-		toolActionComposedToolRollback:
+		toolActionComposedToolRollback,
+		toolActionComposedToolDelete:
 		return features.ComposedTools
 	case toolActionOwnerOpsDrain,
 		toolActionOwnerOpsResume,
@@ -2537,6 +2560,123 @@ func toolConfirmationFeature(action string) string {
 	default:
 		return ""
 	}
+}
+
+func composedApprovalSummary(result composed.DraftResult) composed.ApprovalSummary {
+	summary := composed.ApprovalSummary{
+		Purpose:             result.Spec.Description,
+		NativeTools:         append([]string(nil), result.Validation.NativeTools...),
+		WriteActions:        append([]string(nil), result.Validation.Writes...),
+		RiskLevel:           result.Validation.RiskLevel,
+		RiskReasons:         append([]string(nil), result.Validation.Warnings...),
+		RequiresApproval:    result.Spec.Safety.RequiresApproval,
+		WriteConfirmation:   result.Spec.Safety.RequiresConfirmationOnWrite,
+		MaxNestedDepth:      result.Spec.Safety.MaxNestedDepth,
+		CooldownSeconds:     result.Spec.Safety.CooldownSeconds,
+		MaxRunsPerHour:      result.Spec.Safety.MaxRunsPerHour,
+		DedupeWindowSeconds: result.Spec.Safety.DedupeWindowSeconds,
+	}
+	for _, invocation := range result.Spec.Invocations {
+		if invocation.Enabled != nil && !*invocation.Enabled {
+			continue
+		}
+		summary.InvocationModes = append(summary.InvocationModes, invocation.Type)
+		switch invocation.Type {
+		case composed.InvocationEvent:
+			trigger := "event " + firstNonEmpty(invocation.EventType, "unspecified")
+			if len(invocation.Filters) > 0 {
+				trigger += " with filters"
+			}
+			summary.TriggerSummary = append(summary.TriggerSummary, trigger)
+		case composed.InvocationScheduled:
+			summary.TriggerSummary = append(summary.TriggerSummary, "scheduled")
+		default:
+			summary.TriggerSummary = append(summary.TriggerSummary, invocation.Type)
+		}
+	}
+	for _, step := range result.Spec.Steps {
+		if step.Type != composed.StepToolCall {
+			continue
+		}
+		for _, key := range []string{"channel_id", "voice_channel_id", "role_id", "user_id"} {
+			if value := strings.TrimSpace(fmt.Sprint(step.Arguments[key])); value != "" && value != "<nil>" {
+				summary.TargetSummary = append(summary.TargetSummary, step.Tool+" "+key+"="+value)
+			}
+		}
+	}
+	return summary
+}
+
+func renderComposedApprovalContent(toolName string, version int, summary composed.ApprovalSummary, exposure string) string {
+	lines := []string{
+		fmt.Sprintf("Approved `%s` version %d.", toolName, version),
+		fmt.Sprintf("Risk: `%s`.", firstNonEmpty(summary.RiskLevel, "unknown")),
+	}
+	if summary.Purpose != "" {
+		lines = append(lines, "Purpose: "+summary.Purpose)
+	}
+	lines = append(lines,
+		"Triggers: "+displayList(summary.TriggerSummary),
+		"Native tools: "+displayList(summary.NativeTools),
+		"Writes: "+displayList(summary.WriteActions),
+		"Targets: "+displayList(summary.TargetSummary),
+		fmt.Sprintf("Safety: approval=%t write_confirmation=%t max_depth=%d cooldown=%ds max_runs_per_hour=%d dedupe=%ds.",
+			summary.RequiresApproval,
+			summary.WriteConfirmation,
+			summary.MaxNestedDepth,
+			summary.CooldownSeconds,
+			summary.MaxRunsPerHour,
+			summary.DedupeWindowSeconds,
+		),
+		exposure,
+	)
+	return strings.Join(lines, "\n")
+}
+
+func (r *Router) composedExposureLine(ctx context.Context, request Request, toolName string) string {
+	if r == nil || r.admin == nil || strings.TrimSpace(request.GuildID) == "" {
+		return "Exposure: enabled; tool-access rules could not be inspected."
+	}
+	rules, err := r.admin.ListToolAccess(ctx, request.GuildID)
+	if err != nil {
+		return "Exposure: enabled; tool-access lookup failed."
+	}
+	matches := 0
+	for _, rule := range rules {
+		if strings.EqualFold(strings.TrimSpace(rule.ToolName), strings.TrimSpace(toolName)) {
+			matches++
+		}
+	}
+	if matches == 0 {
+		return "Exposure: enabled but private for regular callers. Next actions: keep private, allow a role, allow a user, or open to everyone if policy permits."
+	}
+	return fmt.Sprintf("Exposure: enabled with %d explicit tool-access rule(s).", matches)
+}
+
+func displayList(values []string) string {
+	values = distinctDisplayStrings(values)
+	if len(values) == 0 {
+		return "none"
+	}
+	return "`" + strings.Join(values, "`, `") + "`"
+}
+
+func distinctDisplayStrings(values []string) []string {
+	seen := map[string]struct{}{}
+	result := []string{}
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		result = append(result, value)
+	}
+	sort.Strings(result)
+	return result
 }
 
 func (r *Router) handleDiscordPollConfirmation(ctx context.Context, request ToolConfirmationRequest) Response {

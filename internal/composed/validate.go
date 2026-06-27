@@ -18,21 +18,9 @@ var validName = regexp.MustCompile(`^[a-z][a-z0-9_]{2,63}$`)
 func NormalizeSpec(spec Spec) Spec {
 	spec.Name = strings.ToLower(strings.TrimSpace(spec.Name))
 	spec.Description = strings.TrimSpace(spec.Description)
-	if spec.SchemaVersion == 0 {
-		spec.SchemaVersion = 1
-	}
 	spec.Runner.Type = strings.ToLower(strings.TrimSpace(spec.Runner.Type))
-	if spec.Runner.Type == "" {
-		spec.Runner.Type = RunnerDeterministic
-	}
-	if spec.Runner.MaxTokens <= 0 {
-		spec.Runner.MaxTokens = 500
-	}
 	if spec.Runner.Temperature < 0 {
 		spec.Runner.Temperature = 0
-	}
-	if spec.Safety.MaxNestedDepth <= 0 {
-		spec.Safety.MaxNestedDepth = 2
 	}
 	if spec.Safety.CooldownSeconds < 0 {
 		spec.Safety.CooldownSeconds = 0
@@ -84,45 +72,52 @@ func rejectLegacyModelFields(data []byte) error {
 func ValidateSpec(spec Spec, registry *tools.Registry) ValidationReport {
 	spec = NormalizeSpec(spec)
 	report := ValidationReport{Valid: true, RiskLevel: "low"}
-	addError := func(format string, args ...any) {
-		report.Valid = false
-		report.Errors = append(report.Errors, fmt.Sprintf(format, args...))
+	addErrorCode := func(code, fix, format string, args ...any) {
+		addValidationIssue(&report, code, IssueSeverityError, fix, format, args...)
 	}
 	addWarning := func(format string, args ...any) {
-		report.Warnings = append(report.Warnings, fmt.Sprintf(format, args...))
+		addValidationIssue(&report, "spec_warning", IssueSeverityWarning, "Review the warning before approval.", format, args...)
+	}
+	addWarningCode := func(code, fix, format string, args ...any) {
+		addValidationIssue(&report, code, IssueSeverityWarning, fix, format, args...)
 	}
 
 	if spec.SchemaVersion != 1 {
-		addError("schema_version must be 1")
+		addErrorCode("schema_version_invalid", "Set schema_version to 1.", "schema_version must be 1")
 	}
 	if !validName.MatchString(spec.Name) {
-		addError("name must match %s", validName.String())
+		addErrorCode("name_invalid", "Use lower_snake_case starting with a letter, 3-64 characters.", "name must match %s", validName.String())
 	}
 	if spec.Description == "" {
-		addError("description is required")
+		addErrorCode("description_required", "Describe what the composed tool does.", "description is required")
 	}
 	if registry != nil {
 		if _, exists := registry.Get(spec.Name); exists {
-			addError("name %q collides with a native tool wire name", spec.Name)
+			addErrorCode("name_collides_with_native_tool", "Choose a composed-tool name that does not match a native model tool.", "name %q collides with a native tool wire name", spec.Name)
 		}
 	}
 	if err := validateJSONSchema("input_schema", spec.InputSchema); err != nil {
-		addError("%s", err.Error())
+		addErrorCode("input_schema_invalid", "Provide a JSON object schema with object properties.", "%s", err.Error())
 	}
 	if err := validateJSONSchema("output_schema", spec.OutputSchema); err != nil {
-		addError("%s", err.Error())
+		addErrorCode("output_schema_invalid", "Provide a JSON object schema with object properties.", "%s", err.Error())
 	}
 
 	switch spec.Runner.Type {
+	case "":
+		addErrorCode("runner_type_required", "Set runner.type to deterministic, agentic, or hybrid.", "runner.type is required")
 	case RunnerDeterministic, RunnerAgentic, RunnerHybrid:
 	default:
-		addError("runner.type must be deterministic, agentic, or hybrid")
+		addErrorCode("runner_type_invalid", "Set runner.type to deterministic, agentic, or hybrid.", "runner.type must be deterministic, agentic, or hybrid")
 	}
 	if spec.Runner.Type != RunnerDeterministic && strings.TrimSpace(spec.Runner.SystemPrompt) == "" {
-		addError("agentic and hybrid runners require a system_prompt")
+		addErrorCode("runner_system_prompt_required", "Add a narrow system_prompt for agentic or hybrid runners.", "agentic and hybrid runners require a system_prompt")
+	}
+	if (spec.Runner.Type == RunnerAgentic || spec.Runner.Type == RunnerHybrid) && spec.Runner.MaxTokens <= 0 {
+		addErrorCode("runner_max_tokens_required", "Set runner.max_tokens to a positive limit.", "agentic and hybrid runners require runner.max_tokens greater than 0")
 	}
 	if len(spec.Runner.ToolAllowlist) == 0 && len(spec.Steps) > 0 {
-		addError("runner.tool_allowlist is required when steps call native tools")
+		addErrorCode("tool_allowlist_required", "List every native tool used by deterministic steps in runner.tool_allowlist.", "runner.tool_allowlist is required when steps call native tools")
 	}
 	allowedNative := stringSet(spec.Runner.ToolAllowlist)
 	allowedComposed := stringSet(spec.Runner.ComposedToolAllowlist)
@@ -133,13 +128,13 @@ func ValidateSpec(spec Spec, registry *tools.Registry) ValidationReport {
 			definition, ok = registry.Get(toolName)
 		}
 		if registry == nil || !ok {
-			addError("allowed native tool %q does not exist", toolName)
+			addErrorCode("missing_native_tool", "Remove the missing tool or use a registered native tool name.", "allowed native tool %q does not exist", toolName)
 			continue
 		}
 		report.NativeTools = append(report.NativeTools, definition.Name)
 		switch definition.ToolClass {
 		case tools.ToolClassOwnerOps:
-			addError("owner-only native tool %q cannot be used by composed tools", definition.Name)
+			addErrorCode("owner_tool_blocked", "Use a non-owner native tool; owner operations are never available to composed tools.", "owner-only native tool %q cannot be used by composed tools", definition.Name)
 		case tools.ToolClassDiscordWrite, tools.ToolClassAdminWrite, tools.ToolClassModerationWrite:
 			if definition.Name == "draft_moderator_note" {
 				continue
@@ -147,7 +142,7 @@ func ValidateSpec(spec Spec, registry *tools.Registry) ValidationReport {
 			report.Writes = append(report.Writes, definition.Name)
 			report.RiskLevel = "high"
 			if !supportedComposedWrite(definition.Name) {
-				addError("write tool %q is not available for approved composed-tool execution yet", definition.Name)
+				addErrorCode("unsupported_write_tool", "Remove this write step until the native tool has a composed-safe execution policy.", "write tool %q is not available for approved composed-tool execution yet", definition.Name)
 			}
 		}
 	}
@@ -155,14 +150,14 @@ func ValidateSpec(spec Spec, registry *tools.Registry) ValidationReport {
 	for _, step := range spec.Steps {
 		stepID := strings.TrimSpace(step.ID)
 		if stepID == "" {
-			addError("every step requires an id")
+			addErrorCode("step_id_required", "Give each step a stable id.", "every step requires an id")
 		}
 		switch strings.TrimSpace(step.Type) {
 		case StepToolCall:
 			if strings.TrimSpace(step.Tool) == "" {
-				addError("step %q requires a tool", stepID)
+				addErrorCode("step_tool_required", "Set the native tool name for this step.", "step %q requires a tool", stepID)
 			} else if !allowedNative[strings.TrimSpace(step.Tool)] {
-				addError("step %q calls native tool %q outside runner.tool_allowlist", stepID, step.Tool)
+				addErrorCode("step_tool_not_allowed", "Add the native tool to runner.tool_allowlist or remove the step.", "step %q calls native tool %q outside runner.tool_allowlist", stepID, step.Tool)
 			}
 			if step.Arguments == nil {
 				addWarning("step %q has no arguments", stepID)
@@ -170,17 +165,17 @@ func ValidateSpec(spec Spec, registry *tools.Registry) ValidationReport {
 			validateStepSafety(step, &report)
 		case StepComposedToolCall:
 			if strings.TrimSpace(step.Tool) == "" {
-				addError("step %q requires a composed tool", stepID)
+				addErrorCode("step_composed_tool_required", "Set the nested composed tool name for this step.", "step %q requires a composed tool", stepID)
 			} else if !allowedComposed[strings.TrimSpace(step.Tool)] {
-				addError("step %q calls composed tool %q outside runner.composed_tool_allowlist", stepID, step.Tool)
+				addErrorCode("step_composed_tool_not_allowed", "Add the nested tool to runner.composed_tool_allowlist or remove the step.", "step %q calls composed tool %q outside runner.composed_tool_allowlist", stepID, step.Tool)
 			}
 		default:
-			addError("step %q has unsupported type %q", stepID, step.Type)
+			addErrorCode("step_type_invalid", "Use tool_call or composed_tool_call.", "step %q has unsupported type %q", stepID, step.Type)
 		}
 	}
 
 	if len(spec.Invocations) == 0 {
-		addError("at least one invocation mode is required")
+		addErrorCode("invocation_required", "Add at least one invocation mode.", "at least one invocation mode is required")
 	}
 	seenInvocation := map[string]struct{}{}
 	for _, invocation := range spec.Invocations {
@@ -192,34 +187,36 @@ func ValidateSpec(spec Spec, registry *tools.Registry) ValidationReport {
 		switch mode {
 		case InvocationChatTool, InvocationSlashCommand, InvocationMessageContext, InvocationScheduled, InvocationEvent, InvocationNestedTool:
 		default:
-			addError("unsupported invocation type %q", invocation.Type)
+			addErrorCode("invocation_type_invalid", "Use a supported invocation type.", "unsupported invocation type %q", invocation.Type)
 		}
 		if mode == InvocationEvent {
 			if strings.TrimSpace(invocation.EventType) == "" {
-				addError("event invocation requires event_type")
+				addErrorCode("event_type_required", "Set invocations[].event_type for event invocations.", "event invocation requires event_type")
 			}
 			if !SupportsEventType(invocation.EventType) {
-				addError("event invocation type %q is not supported", invocation.EventType)
+				addErrorCode("unsupported_event_type", "Use one of Panda's supported composed event types.", "event invocation type %q is not supported", invocation.EventType)
 			}
 			if (invocation.EventType == EventGuildMemberRoleAdded || invocation.EventType == EventGuildMemberRoleRemoved) && strings.TrimSpace(invocation.Filters["role_id"]) == "" {
-				addError("%s invocation requires filters.role_id", invocation.EventType)
+				addErrorCode("event_role_filter_required", "Resolve or provide the role_id filter for role-change events.", "%s invocation requires filters.role_id", invocation.EventType)
 			}
 			if invocation.EventType == EventVoiceStateUpdated && strings.TrimSpace(invocation.Filters["channel_id"]) == "" {
-				addError("%s invocation requires filters.channel_id", invocation.EventType)
+				addErrorCode("event_voice_channel_filter_required", "Resolve or provide the channel_id filter for voice-state events.", "%s invocation requires filters.channel_id", invocation.EventType)
 			}
 		}
 		if (mode == InvocationEvent || mode == InvocationScheduled) && len(report.Writes) > 0 && spec.Safety.RequiresConfirmationOnWrite {
-			addError("%s invocations cannot use write tools while safety.requires_confirmation_on_write is true", mode)
+			addErrorCode("unattended_write_confirmation_invalid", "Disable unattended write invocations or set requires_confirmation_on_write false only after approval review.", "%s invocations cannot use write tools while safety.requires_confirmation_on_write is true", mode)
 		}
 	}
 	if _, ok := seenInvocation[InvocationNestedTool]; len(spec.Runner.ComposedToolAllowlist) > 0 && !ok {
-		addWarning("runner allows nested composed tools but no nested_tool invocation is exposed")
+		addWarningCode("nested_allowlist_without_invocation", "Add a nested_tool invocation if this tool should be callable from another composed tool.", "runner allows nested composed tools but no nested_tool invocation is exposed")
 	}
-	if spec.Safety.MaxNestedDepth > 8 {
-		addError("safety.max_nested_depth must be 8 or lower")
+	if spec.Safety.MaxNestedDepth <= 0 {
+		addErrorCode("max_nested_depth_required", "Set safety.max_nested_depth between 1 and 8.", "safety.max_nested_depth is required and must be greater than 0")
+	} else if spec.Safety.MaxNestedDepth > 8 {
+		addErrorCode("max_nested_depth_too_high", "Set safety.max_nested_depth to 8 or lower.", "safety.max_nested_depth must be 8 or lower")
 	}
 	if spec.Safety.MaxRunsPerHour > 1000 {
-		addError("safety.max_runs_per_hour must be 1000 or lower")
+		addErrorCode("max_runs_per_hour_too_high", "Set safety.max_runs_per_hour to 1000 or lower.", "safety.max_runs_per_hour must be 1000 or lower")
 	}
 	if len(report.Writes) == 0 && report.RiskLevel == "low" && spec.Runner.Type != RunnerDeterministic {
 		report.RiskLevel = "medium"
@@ -227,6 +224,27 @@ func ValidateSpec(spec Spec, registry *tools.Registry) ValidationReport {
 	sort.Strings(report.NativeTools)
 	sort.Strings(report.Writes)
 	return report
+}
+
+func addValidationIssue(report *ValidationReport, code, severity, suggestedFix, format string, args ...any) {
+	if report == nil {
+		return
+	}
+	message := fmt.Sprintf(format, args...)
+	issue := ValidationIssue{
+		Code:         strings.TrimSpace(code),
+		Severity:     strings.TrimSpace(severity),
+		Message:      message,
+		SuggestedFix: strings.TrimSpace(suggestedFix),
+	}
+	report.Issues = append(report.Issues, issue)
+	switch severity {
+	case IssueSeverityError:
+		report.Valid = false
+		report.Errors = append(report.Errors, message)
+	case IssueSeverityWarning:
+		report.Warnings = append(report.Warnings, message)
+	}
 }
 
 func validateStepSafety(step StepSpec, report *ValidationReport) {
@@ -238,15 +256,13 @@ func validateStepSafety(step StepSpec, report *ValidationReport) {
 	everyoneAllowed := boolMapValue(allowed, "everyone")
 	rolesAllowed := boolMapValue(allowed, "roles")
 	if everyoneAllowed {
-		report.Valid = false
-		report.Errors = append(report.Errors, fmt.Sprintf("step %q may not allow everyone mentions", step.ID))
+		addValidationIssue(report, "broad_mentions_blocked", IssueSeverityError, "Disable everyone mentions in allowed_mentions.", "step %q may not allow everyone mentions", step.ID)
 	}
 	if rolesAllowed {
-		report.Warnings = append(report.Warnings, fmt.Sprintf("step %q allows role mentions; prefer explicit users only", step.ID))
+		addValidationIssue(report, "role_mentions_warning", IssueSeverityWarning, "Prefer explicit user mentions for composed-tool messages.", "step %q allows role mentions; prefer explicit users only", step.ID)
 	}
 	if strings.Contains(content, "@everyone") || strings.Contains(content, "@here") {
-		report.Valid = false
-		report.Errors = append(report.Errors, fmt.Sprintf("step %q content may not include @everyone or @here", step.ID))
+		addValidationIssue(report, "broad_mentions_blocked", IssueSeverityError, "Remove @everyone and @here from composed-tool message content.", "step %q content may not include @everyone or @here", step.ID)
 	}
 }
 
