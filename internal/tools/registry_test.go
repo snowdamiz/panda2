@@ -162,9 +162,11 @@ func TestChannelAwareToolDescriptionsPreferDiscordChannelLookup(t *testing.T) {
 	composedSchema := string(composed.InputSchema)
 	if !strings.Contains(composed.Description, "Use archive for reversible removal") ||
 		!strings.Contains(composed.Description, "Use delete only when the user explicitly asks for permanent deletion") ||
+		!strings.Contains(composed.Description, "Use list for explicit questions about installed, existing, current, default, or pre-built composed tools") ||
 		!strings.Contains(composedSchema, "Use archive for reversible removal") ||
-		!strings.Contains(composedSchema, "Use delete only when the user explicitly asks for permanent deletion") {
-		t.Fatalf("composed tool should steer removals to archive and permanent deletion to delete, description=%q schema=%s", composed.Description, composedSchema)
+		!strings.Contains(composedSchema, "Use delete only when the user explicitly asks for permanent deletion") ||
+		!strings.Contains(composedSchema, "Use list for exact inventory questions about installed/current/existing/default/pre-built composed tools") {
+		t.Fatalf("composed tool should steer inventory listing, removals, and permanent deletion, description=%q schema=%s", composed.Description, composedSchema)
 	}
 	music, ok := registry.Get("panda.manage_music")
 	if !ok {

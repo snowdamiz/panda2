@@ -577,7 +577,7 @@ func DefaultDefinitions() []Definition {
 		channelRuleManagementTool(),
 		{
 			Name:                  "panda.manage_composed_tool",
-			Description:           "Preview, draft, list, show, approve, run, simulate, export, pause, resume, disable, archive, delete, or roll back composed tools. Use archive for reversible removal from active use when the user asks to remove or stop using a composed tool. Use delete only when the user explicitly asks for permanent deletion. When a draft request names a text channel, voice channel, stage channel, or thread by plain name, use discord.list_channels first if available to resolve the exact channel ID and type before drafting; ask for clarification only when lookup is unavailable, missing, or ambiguous.",
+			Description:           "Preview, draft, list, show, approve, run, simulate, export, pause, resume, disable, archive, delete, or roll back composed tools. Use list for explicit questions about installed, existing, current, default, or pre-built composed tools/automations in this server; do not answer those from broad capability examples alone. Use archive for reversible removal from active use when the user asks to remove or stop using a composed tool. Use delete only when the user explicitly asks for permanent deletion. When a draft request names a text channel, voice channel, stage channel, or thread by plain name, use discord.list_channels first if available to resolve the exact channel ID and type before drafting; ask for clarification only when lookup is unavailable, missing, or ambiguous.",
 			RequiredPermission:    admin.PermissionToolComposeDraft,
 			AlternatePermissions:  []string{admin.PermissionToolComposeApprove, admin.PermissionToolComposeInvoke, admin.PermissionToolComposeAudit},
 			FeatureID:             features.ComposedTools,
@@ -977,7 +977,7 @@ func composedToolManagementSchema() json.RawMessage {
 	return schemaWithProperties([]string{"action"}, map[string]any{
 		"action": map[string]any{
 			"type":        "string",
-			"description": "Action: preview, lint, draft, list, show, approve, pause, resume, disable, archive, delete, run, simulate, run_detail, compare, export, or rollback. Use archive for reversible removal from active use when the user asks to remove or stop using a composed tool. Use delete only when the user explicitly asks for permanent deletion. Use draft when an admin asks to set up a new composed automation; draft returns structured approval metadata for the Discord approval button.",
+			"description": "Action: preview, lint, draft, list, show, approve, pause, resume, disable, archive, delete, run, simulate, run_detail, compare, export, or rollback. Use list for exact inventory questions about installed/current/existing/default/pre-built composed tools or automations in this server. Use archive for reversible removal from active use when the user asks to remove or stop using a composed tool. Use delete only when the user explicitly asks for permanent deletion. Use draft when an admin asks to set up a new composed automation; draft returns structured approval metadata for the Discord approval button.",
 		},
 		"tool_name":          map[string]string{"type": "string", "description": "Composed tool name."},
 		"tool":               map[string]string{"type": "string", "description": "Alias for tool_name."},

@@ -2112,6 +2112,11 @@ func TestToolAvailabilityMessageUsesRichUserScopedCapabilitySections(t *testing.
 		"Current public web answers with source links",
 		"Composed tools",
 		"server automations",
+		"Composed-tool inventory:",
+		"call `panda_manage_composed_tool` with action `list`",
+		"Do not infer installed/default/pre-built composed tools",
+		"what kinds of automations Panda can create",
+		"examples Panda can draft, not defaults already installed",
 		"Admin setup (caller has admin access)",
 		"Access controls (caller has admin access)",
 		"do not emit markdown tables",
@@ -2125,6 +2130,34 @@ func TestToolAvailabilityMessageUsesRichUserScopedCapabilitySections(t *testing.
 	}
 	if strings.Contains(strings.ToLower(message), "webhook") {
 		t.Fatalf("capability context should not mention webhooks unless webhook tools are exposed:\n%s", message)
+	}
+}
+
+func TestToolAvailabilityMessageRoutesComposedInventoryToListAction(t *testing.T) {
+	message := toolAvailabilityMessage(testCapabilityTools(
+		"panda_manage_composed_tool",
+		"reply_spot_it_all_info",
+	), tools.ToolAccess{
+		Policy: tools.ToolPolicyWriteConfirmed,
+		Permissions: map[string]struct{}{
+			admin.PermissionAssistantUse:     {},
+			admin.PermissionToolComposeAudit: {},
+		},
+	})
+	for _, want := range []string{
+		"Composed-tool inventory:",
+		"installed tools",
+		"pre-built automations",
+		"default automations",
+		"saved workflows",
+		"call `panda_manage_composed_tool` with action `list`",
+		"Do not infer installed/default/pre-built composed tools from the capability overview or from exposed function names alone",
+		"what kinds of automations Panda can create",
+		"examples Panda can draft, not defaults already installed in this server",
+	} {
+		if !strings.Contains(message, want) {
+			t.Fatalf("composed inventory routing context missing %q:\n%s", want, message)
+		}
 	}
 }
 
@@ -2193,7 +2226,7 @@ func TestAskCapabilityQuestionAnswersFromCapabilitySummary(t *testing.T) {
 		t.Fatalf("list-tools meta tool should not be exposed to response model: %+v", client.requests[0].Tools)
 	}
 	joined := joinMessages(client.requests[0].Messages)
-	for _, want := range []string{"current user-scoped capability overview derived from the actual exposed function tools", "Composed tools", "server automations", "do not call a tool only to list capabilities", "treat that history as stale and do not copy it"} {
+	for _, want := range []string{"current user-scoped capability overview derived from the actual exposed function tools", "Composed tools", "server automations", "do not call a tool only to list broad capability categories", "exact inventory requests", "treat that history as stale and do not copy it"} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("expected capability context to contain %s, got %s", want, joined)
 		}
