@@ -38,6 +38,7 @@ type Response struct {
 	Followups         []Response
 	Confirmation      *Confirmation
 	Confirmations     []Confirmation
+	Selection         *Selection
 	Modal             *Modal
 	Background        *BackgroundTask
 	Poll              *polls.Poll
@@ -102,6 +103,23 @@ type Confirmation struct {
 	CancelID     string
 	CancelLabel  string
 	Danger       bool
+}
+
+type Selection struct {
+	ID          string
+	Placeholder string
+	Options     []SelectionOption
+}
+
+type SelectionOption struct {
+	Label          string
+	Description    string
+	Value          string
+	URL            string
+	ThumbnailURL   string
+	Command        string
+	Prompt         string
+	VoiceChannelID string
 }
 
 type Modal struct {

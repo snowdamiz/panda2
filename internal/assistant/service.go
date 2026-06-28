@@ -138,6 +138,7 @@ type ToolCard struct {
 	Accent     string
 	Fields     []ToolCardField
 	Actions    []ToolCardAction
+	Selection  *ToolCardSelection
 	Standalone bool
 	Terminal   bool
 }
@@ -151,6 +152,22 @@ type ToolCardField struct {
 type ToolCardAction struct {
 	Label string
 	URL   string
+}
+
+type ToolCardSelection struct {
+	Placeholder string
+	Options     []ToolCardSelectionOption
+}
+
+type ToolCardSelectionOption struct {
+	Label          string
+	Description    string
+	Value          string
+	URL            string
+	ThumbnailURL   string
+	Command        string
+	Prompt         string
+	VoiceChannelID string
 }
 
 type TaskRequest struct {
@@ -389,7 +406,7 @@ func (s *Service) chat(ctx context.Context, request AskRequest, options chatOpti
 		return AskResponse{Model: response.Model, Usage: response.Usage, Silent: true}, nil
 	}
 	if terminal {
-		return AskResponse{Model: response.Model, Usage: response.Usage, GeneratedFiles: generated.CloneFiles(generatedFiles), UsageReservations: append([]billing.Reservation(nil), usageReservations...), UsedWebSearch: usedWebSearch, Terminal: true}, nil
+		return terminalAskResponse(response, card, generatedFiles, usageReservations, usedWebSearch), nil
 	}
 
 	content := finalAssistantResponseContent(response.Content, sourceLinks, sourceLinkLimitForPrompt(request.Question), card)
@@ -568,7 +585,7 @@ func (s *Service) complete(ctx context.Context, request TaskRequest) (AskRespons
 		return AskResponse{}, err
 	}
 	if terminal {
-		return AskResponse{Model: response.Model, Usage: response.Usage, GeneratedFiles: generated.CloneFiles(generatedFiles), UsageReservations: append([]billing.Reservation(nil), usageReservations...), UsedWebSearch: usedWebSearch, Terminal: true}, nil
+		return terminalAskResponse(response, card, generatedFiles, usageReservations, usedWebSearch), nil
 	}
 
 	content := finalAssistantResponseContent(response.Content, sourceLinks, sourceLinkLimitForPrompt(request.Input), card)
@@ -583,6 +600,18 @@ func (s *Service) complete(ctx context.Context, request TaskRequest) (AskRespons
 		Response:  content,
 	})
 	return AskResponse{Content: content, Model: response.Model, Usage: response.Usage, Confirmation: firstConfirmation(confirmations), Confirmations: cloneConfirmations(confirmations), Card: card, GeneratedFiles: generated.CloneFiles(generatedFiles), UsageReservations: append([]billing.Reservation(nil), usageReservations...), UsedWebSearch: usedWebSearch}, nil
+}
+
+func terminalAskResponse(response llm.ChatResponse, card *ToolCard, generatedFiles []generated.File, usageReservations []billing.Reservation, usedWebSearch bool) AskResponse {
+	return AskResponse{
+		Model:             response.Model,
+		Usage:             response.Usage,
+		Card:              card,
+		GeneratedFiles:    generated.CloneFiles(generatedFiles),
+		UsageReservations: append([]billing.Reservation(nil), usageReservations...),
+		UsedWebSearch:     usedWebSearch,
+		Terminal:          card == nil,
+	}
 }
 
 func (s *Service) curateInteraction(ctx context.Context, interaction curation.Interaction) {
@@ -775,6 +804,7 @@ func (s *Service) completeWithToolsWithOptions(ctx context.Context, config store
 	staleCapabilityRetryUsed := false
 	imageToolRoutingRetryUsed := false
 	musicCapabilityRetryUsed := false
+	youtubeSelectionRetryUsed := false
 	totalToolCalls := 0
 
 	for round := 0; ; round++ {
@@ -911,6 +941,24 @@ func (s *Service) completeWithToolsWithOptions(ctx context.Context, config store
 				request.Messages = messages
 				continue
 			}
+			if !youtubeSelectionRetryUsed && shouldRetryYouTubeSelectionToolRouting(response.Content, request.Messages, availableToolNames) {
+				youtubeSelectionRetryUsed = true
+				slog.Warn("assistant youtube selection routing retrying",
+					slog.String("guild_id", config.GuildID),
+					slog.String("channel_id", toolContext.ChannelID),
+					slog.String("request_id", toolContext.RequestID),
+					slog.String("user_id", toolContext.ActorID),
+					slog.Int("round", round),
+					slog.Any("content_flags", assistantYouTubeSelectionResponseFlags(response.Content)),
+				)
+				messages := append([]llm.Message{}, request.Messages...)
+				messages = append(messages,
+					llm.Message{Role: "assistant", Content: sanitizePromptInput(response.Content)},
+					llm.Message{Role: "system", Content: youtubeSelectionToolRoutingRetryPrompt()},
+				)
+				request.Messages = messages
+				continue
+			}
 			return response, confirmations, card, sourceLinks, generatedFiles, usageReservations, usedWebSearch, false, false, nil
 		}
 		if round >= maxToolCallRounds {
@@ -968,12 +1016,12 @@ func (s *Service) completeWithToolsWithOptions(ctx context.Context, config store
 			} else if result.Terminal {
 				terminalToolRound = true
 			}
-			if toolCard := toolCardFromToolResult(call, message); toolCard != nil {
+			if toolCard := toolCardFromExecutionResult(call, message, result.Payload, result.Terminal); toolCard != nil {
 				if !cardContentEligible {
 					toolCard.Standalone = true
 				}
 				card = toolCard
-				terminalCardRound = terminalCardRound && s.toolExecutor.TerminalCardTool(call.Function.Name)
+				terminalCardRound = terminalCardRound && (toolCard.Terminal || s.toolExecutor.TerminalCardTool(call.Function.Name))
 			} else {
 				terminalCardRound = false
 				cardContentEligible = false
@@ -1347,6 +1395,74 @@ func imageToolRoutingRetryPrompt(references []generated.ImageReference) string {
 	return "Regenerate the previous response. The current request already has image reference IDs available: " + sanitizePromptInput(idList) + ". If the user's latest request asks Panda to make, generate, edit, restyle, remix, or make a meme out of the referenced image, you must call `panda_generate_image` with the relevant `reference_image_ids` in this turn. Do not ask for top/bottom captions, meme text, another upload, or optional creative details before calling the tool; infer suitable meme text/style from the reference and user request yourself or ask the image provider to create a humorous meme from the referenced image. The tool prompt must describe only the requested visual result and user-visible image text; do not make the image about Panda, Discord, the assistant, tool use, or the act of asking/generating unless the user explicitly requested that subject. Do not include reference IDs, filenames, MIME types, Discord media metadata, or tool-routing instructions in the prompt."
 }
 
+func shouldRetryYouTubeSelectionToolRouting(content string, messages []llm.Message, availableToolNames []string) bool {
+	if !stringSliceContains(availableToolNames, "panda_search_youtube") {
+		return false
+	}
+	return userAskedForYouTubeSelection(messages) && contentLooksLikePlainYouTubeOptions(content)
+}
+
+func userAskedForYouTubeSelection(messages []llm.Message) bool {
+	latest := strings.ToLower(latestUserMessageContent(messages))
+	if latest == "" {
+		return false
+	}
+	if strings.Contains(latest, "youtube.com/watch") || strings.Contains(latest, "youtu.be/") {
+		return false
+	}
+	mentionsVideo := strings.Contains(latest, "youtube") || strings.Contains(latest, "video")
+	mentionsSummary := strings.Contains(latest, "summarize") ||
+		strings.Contains(latest, "summary") ||
+		strings.Contains(latest, "recap") ||
+		strings.Contains(latest, "watch") ||
+		strings.Contains(latest, "explain") ||
+		strings.Contains(latest, "outline")
+	mentionsChoice := strings.Contains(latest, "option") ||
+		strings.Contains(latest, "choice") ||
+		strings.Contains(latest, "choose") ||
+		strings.Contains(latest, "pick") ||
+		strings.Contains(latest, "candidate") ||
+		strings.Contains(latest, "result")
+	return mentionsVideo && mentionsSummary && mentionsChoice
+}
+
+func contentLooksLikePlainYouTubeOptions(content string) bool {
+	flags := assistantYouTubeSelectionResponseFlags(content)
+	return flags["video_options"] ||
+		(flags["watch_on_youtube"] && (flags["choice_language"] || flags["list_marker"])) ||
+		(flags["youtube"] && flags["choice_language"] && flags["list_marker"])
+}
+
+func assistantYouTubeSelectionResponseFlags(content string) map[string]bool {
+	normalized := strings.ToLower(strings.TrimSpace(content))
+	return map[string]bool{
+		"youtube":          strings.Contains(normalized, "youtube"),
+		"video_options":    strings.Contains(normalized, "video option") || strings.Contains(normalized, "video result") || strings.Contains(normalized, "video choice"),
+		"watch_on_youtube": strings.Contains(normalized, "watch on youtube"),
+		"choice_language": strings.Contains(normalized, "pick") ||
+			strings.Contains(normalized, "choose") ||
+			strings.Contains(normalized, "option") ||
+			strings.Contains(normalized, "summarized"),
+		"list_marker": strings.Contains(normalized, "\n- ") ||
+			strings.Contains(normalized, "\n* ") ||
+			strings.Contains(normalized, "\n1.") ||
+			strings.Contains(normalized, "\n• "),
+	}
+}
+
+func latestUserMessageContent(messages []llm.Message) string {
+	for index := len(messages) - 1; index >= 0; index-- {
+		if messages[index].Role == "user" {
+			return messages[index].Content
+		}
+	}
+	return ""
+}
+
+func youtubeSelectionToolRoutingRetryPrompt() string {
+	return "Regenerate the previous response. The latest user asked for YouTube video options/choices for a title-only summary request, and the `panda_search_youtube` function is available. Do not answer with a prose list, markdown links, or guessed video options. Call `panda_search_youtube` with the video title/search phrase and `limit` 3. Leave final prose empty; Discord will render the selection card."
+}
+
 func llmToolNames(availableTools []llm.Tool) []string {
 	names := make([]string, 0, len(availableTools))
 	for _, tool := range availableTools {
@@ -1441,37 +1557,158 @@ func filterUnavailableToolCalls(toolCalls []llm.ToolCall, availableTools []llm.T
 	return filtered
 }
 
-func toolCardFromToolResult(call llm.ToolCall, message llm.Message) *ToolCard {
-	toolName := strings.TrimSpace(call.Function.Name)
-	if !toolResultRendersCard(toolName) {
+func toolCardFromExecutionResult(call llm.ToolCall, message llm.Message, payload any, terminal bool) *ToolCard {
+	if card := toolCardFromRawPayload(call.Function.Name, payload); card != nil {
+		return card
+	}
+	if card := toolCardFromToolResult(call, message); card != nil {
+		return card
+	}
+	if !terminal {
 		return nil
 	}
+	return terminalToolCardRenderFallback(call.Function.Name)
+}
+
+func toolCardFromToolResult(call llm.ToolCall, message llm.Message) *ToolCard {
+	toolName := strings.TrimSpace(call.Function.Name)
 	var payload map[string]any
 	if err := json.Unmarshal([]byte(message.Content), &payload); err != nil {
 		return nil
+	}
+	return toolCardFromPayloadMap(toolName, payload)
+}
+
+func toolCardFromRawPayload(toolName string, raw any) *ToolCard {
+	if raw == nil {
+		return nil
+	}
+	data, err := json.Marshal(raw)
+	if err != nil {
+		return nil
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(data, &payload); err != nil {
+		return nil
+	}
+	return toolCardFromPayloadMap(toolName, payload)
+}
+
+func toolCardFromPayloadMap(toolName string, payload map[string]any) *ToolCard {
+	toolName = strings.TrimSpace(toolName)
+	if !toolResultRendersCard(toolName) {
+		return nil
+	}
+	if card := toolErrorCardFromPayload(toolName, payload); card != nil {
+		return card
 	}
 	result, ok := payload["result"].(map[string]any)
 	if !ok {
 		return nil
 	}
 	card := &ToolCard{
-		Content:  stringValue(result["content"]),
-		Title:    stringValue(result["title"]),
-		URL:      stringValue(result["url"]),
-		Accent:   firstNonEmpty(stringValue(result["accent"]), toolCardDefaultAccent(toolName)),
-		Fields:   toolCardFields(result["fields"]),
-		Actions:  toolCardActions(result["actions"]),
-		Terminal: toolCardTerminal(toolName),
+		Content:   stringValue(result["content"]),
+		Title:     stringValue(result["title"]),
+		URL:       stringValue(result["url"]),
+		Accent:    firstNonEmpty(stringValue(result["accent"]), toolCardDefaultAccent(toolName)),
+		Fields:    toolCardFields(result["fields"]),
+		Actions:   toolCardActions(result["actions"]),
+		Selection: toolCardSelectionForTool(toolName, result["selection"]),
+		Terminal:  boolValue(result["terminal"]) || toolCardTerminal(toolName),
 	}
-	if strings.TrimSpace(card.Content) == "" && strings.TrimSpace(card.Title) == "" {
+	applyToolCardDefaults(toolName, card)
+	if !toolCardHasRenderablePayload(card) {
+		if card.Terminal {
+			return terminalToolCardRenderFallback(toolName)
+		}
 		return nil
 	}
 	return card
 }
 
+func terminalToolCardRenderFallback(toolName string) *ToolCard {
+	switch strings.TrimSpace(toolName) {
+	case "panda_search_youtube", "panda.search_youtube":
+		return &ToolCard{
+			Title:    "YouTube selection unavailable",
+			Content:  "I found video choices, but could not render the selection controls. Try again, or paste the exact YouTube link to summarize it.",
+			Accent:   "warning",
+			Terminal: true,
+		}
+	case "panda_about", "panda.about":
+		return &ToolCard{
+			Title:    "Panda card unavailable",
+			Content:  "I tried to render Panda's info card, but the card payload was incomplete.",
+			Accent:   "warning",
+			Terminal: true,
+		}
+	default:
+		return nil
+	}
+}
+
+func applyToolCardDefaults(toolName string, card *ToolCard) {
+	if card == nil || card.Selection == nil {
+		return
+	}
+	switch strings.TrimSpace(toolName) {
+	case "panda_search_youtube", "panda.search_youtube":
+		if strings.TrimSpace(card.Title) == "" {
+			card.Title = "Choose a YouTube video"
+		}
+		if strings.TrimSpace(card.Content) == "" {
+			card.Content = "I found a few possible matches. Pick the one you want me to summarize."
+		}
+		if strings.TrimSpace(card.Accent) == "" {
+			card.Accent = "info"
+		}
+		card.Terminal = true
+	}
+}
+
+func toolCardHasRenderablePayload(card *ToolCard) bool {
+	if card == nil {
+		return false
+	}
+	return strings.TrimSpace(card.Content) != "" ||
+		strings.TrimSpace(card.Title) != "" ||
+		strings.TrimSpace(card.URL) != "" ||
+		len(card.Fields) > 0 ||
+		len(card.Actions) > 0 ||
+		card.Selection != nil
+}
+
+func toolErrorCardFromPayload(toolName string, payload map[string]any) *ToolCard {
+	errMessage := stringValue(payload["error"])
+	if strings.TrimSpace(errMessage) == "" {
+		return nil
+	}
+	return &ToolCard{
+		Title:    toolCardErrorTitle(toolName),
+		Content:  errMessage,
+		Accent:   "warning",
+		Terminal: toolCardTerminal(toolName),
+	}
+}
+
+func toolCardErrorTitle(toolName string) string {
+	switch strings.TrimSpace(toolName) {
+	case "panda_search_youtube", "panda.search_youtube":
+		return "YouTube search failed"
+	case "panda_summarize_youtube", "panda.summarize_youtube":
+		return "YouTube summary failed"
+	case "panda_manage_music", "panda.manage_music":
+		return "Music request failed"
+	case "panda_about", "panda.about":
+		return "Panda card failed"
+	default:
+		return "Tool request failed"
+	}
+}
+
 func toolResultRendersCard(toolName string) bool {
 	switch strings.TrimSpace(toolName) {
-	case "panda_manage_music", "panda.manage_music", "panda_about", "panda.about":
+	case "panda_manage_music", "panda.manage_music", "panda_search_youtube", "panda.search_youtube", "panda_about", "panda.about":
 		return true
 	default:
 		return false
@@ -1482,6 +1719,8 @@ func toolCardDefaultAccent(toolName string) string {
 	switch strings.TrimSpace(toolName) {
 	case "panda_manage_music", "panda.manage_music":
 		return "music"
+	case "panda_search_youtube", "panda.search_youtube":
+		return "info"
 	case "panda_about", "panda.about":
 		return "info"
 	default:
@@ -1491,7 +1730,7 @@ func toolCardDefaultAccent(toolName string) string {
 
 func toolCardTerminal(toolName string) bool {
 	switch strings.TrimSpace(toolName) {
-	case "panda_about", "panda.about":
+	case "panda_search_youtube", "panda.search_youtube", "panda_about", "panda.about":
 		return true
 	default:
 		return false
@@ -1542,6 +1781,110 @@ func toolCardActions(value any) []ToolCardAction {
 		actions = append(actions, ToolCardAction{Label: label, URL: rawURL})
 	}
 	return actions
+}
+
+func toolCardSelectionForTool(toolName string, value any) *ToolCardSelection {
+	if selection := toolCardSelection(value); selection != nil {
+		return selection
+	}
+	switch strings.TrimSpace(toolName) {
+	case "panda_search_youtube", "panda.search_youtube":
+		return youtubeToolCardSelection(value)
+	default:
+		return nil
+	}
+}
+
+func toolCardSelection(value any) *ToolCardSelection {
+	selection, ok := value.(map[string]any)
+	if !ok {
+		return nil
+	}
+	optionsValue, ok := selection["options"].([]any)
+	if !ok {
+		return nil
+	}
+	result := &ToolCardSelection{
+		Placeholder: stringValue(selection["placeholder"]),
+		Options:     make([]ToolCardSelectionOption, 0, len(optionsValue)),
+	}
+	for _, item := range optionsValue {
+		option, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		label := stringValue(option["label"])
+		value := stringValue(option["value"])
+		prompt := stringValue(option["prompt"])
+		if strings.TrimSpace(label) == "" || strings.TrimSpace(value) == "" || strings.TrimSpace(prompt) == "" {
+			continue
+		}
+		result.Options = append(result.Options, ToolCardSelectionOption{
+			Label:          label,
+			Description:    stringValue(option["description"]),
+			Value:          value,
+			URL:            stringValue(option["url"]),
+			ThumbnailURL:   stringValue(option["thumbnail_url"]),
+			Command:        stringValue(option["command"]),
+			Prompt:         prompt,
+			VoiceChannelID: stringValue(option["voice_channel_id"]),
+		})
+	}
+	if len(result.Options) == 0 {
+		return nil
+	}
+	return result
+}
+
+func youtubeToolCardSelection(value any) *ToolCardSelection {
+	selection, ok := value.(map[string]any)
+	if !ok {
+		return nil
+	}
+	optionsValue, ok := selection["options"].([]any)
+	if !ok {
+		return nil
+	}
+	result := &ToolCardSelection{
+		Placeholder: stringValue(selection["placeholder"]),
+		Options:     make([]ToolCardSelectionOption, 0, len(optionsValue)),
+	}
+	for _, item := range optionsValue {
+		option, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		label := stringValue(option["label"])
+		url := stringValue(option["url"])
+		if strings.TrimSpace(label) == "" || strings.TrimSpace(url) == "" {
+			continue
+		}
+		value := stringValue(option["value"])
+		if strings.TrimSpace(value) == "" {
+			value = fmt.Sprintf("video_%d", len(result.Options)+1)
+		}
+		prompt := stringValue(option["prompt"])
+		if strings.TrimSpace(prompt) == "" {
+			prompt = "Summarize this exact YouTube video: " + url
+		}
+		command := stringValue(option["command"])
+		if strings.TrimSpace(command) == "" {
+			command = "chat"
+		}
+		result.Options = append(result.Options, ToolCardSelectionOption{
+			Label:        label,
+			Description:  stringValue(option["description"]),
+			Value:        value,
+			URL:          url,
+			ThumbnailURL: stringValue(option["thumbnail_url"]),
+			Command:      command,
+			Prompt:       prompt,
+		})
+	}
+	if len(result.Options) == 0 {
+		return nil
+	}
+	return result
 }
 
 func stringValue(value any) string {
@@ -1682,6 +2025,13 @@ func toolCardVisibleContent(card *ToolCard) string {
 			lines = append(lines, label)
 		}
 	}
+	if card.Selection != nil {
+		for _, option := range card.Selection.Options {
+			if label := strings.TrimSpace(option.Label); label != "" {
+				lines = append(lines, "Option: "+label)
+			}
+		}
+	}
 	return strings.TrimSpace(strings.Join(lines, "\n"))
 }
 
@@ -1699,7 +2049,7 @@ func containsCardMarkupArtifact(content string) bool {
 }
 
 func ResponseContentLooksInternalArtifact(content string) bool {
-	return containsTextToolCallMarkup(content) || containsCardMarkupArtifact(content)
+	return containsTextToolCallMarkup(content) || containsCardMarkupArtifact(content) || containsProviderWrapperMarker(content)
 }
 
 func textToolCallUnavailableMessage() string {
@@ -1819,6 +2169,14 @@ func cardContentTokens(card *ToolCard) map[string]struct{} {
 		cardText.WriteString(" ")
 		cardText.WriteString(action.Label)
 	}
+	if card.Selection != nil {
+		for _, option := range card.Selection.Options {
+			cardText.WriteString(" ")
+			cardText.WriteString(option.Label)
+			cardText.WriteString(" ")
+			cardText.WriteString(option.Description)
+		}
+	}
 	tokens := meaningfulContentTokens(cardText.String())
 	if strings.EqualFold(strings.TrimSpace(card.Accent), "music") {
 		for _, token := range []string{"music", "song", "songs", "track", "tracks", "play", "playing", "playback", "played", "queue", "queued", "voice", "stopped", "stop", "paused", "pause", "resumed", "resume", "skipped", "skip", "started", "start"} {
@@ -1883,9 +2241,28 @@ var commonContentTokenStopWords = map[string]struct{}{
 func cleanupAssistantModelArtifacts(content string) string {
 	content = strings.ReplaceAll(content, naturalRespondMarker, "")
 	content = strings.ReplaceAll(content, naturalIgnoreMarker, "")
+	for _, marker := range providerWrapperMarkers {
+		content = strings.ReplaceAll(content, marker, "")
+	}
 	content = modelToolCitationPattern.ReplaceAllString(content, "")
 	content = spaceBeforePunctuationMark.ReplaceAllString(content, "$1")
 	return strings.TrimSpace(content)
+}
+
+var providerWrapperMarkers = []string{
+	"<|assistant_output|>",
+	"<|assistant|>",
+	"<|final|>",
+	"<|end|>",
+}
+
+func containsProviderWrapperMarker(content string) bool {
+	for _, marker := range providerWrapperMarkers {
+		if strings.Contains(content, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func appendWebSearchSourceLinks(content string, sourceLinks []tools.SourceLink, sourceLimit int) string {

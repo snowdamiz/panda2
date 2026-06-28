@@ -33,6 +33,7 @@ import (
 	"github.com/sn0w/panda2/internal/store"
 	"github.com/sn0w/panda2/internal/tools"
 	"github.com/sn0w/panda2/internal/websearch"
+	"github.com/sn0w/panda2/internal/youtube"
 )
 
 type fakeLLM struct {
@@ -71,6 +72,12 @@ type fakeToolMusicManager struct {
 type fakeCommandWebSearch struct {
 	response websearch.Response
 	err      error
+}
+
+type fakeCommandYouTubeSummarizer struct {
+	candidates []youtube.VideoCandidate
+	err        error
+	searches   []youtube.SearchRequest
 }
 
 type fakeFeatureInstallCreator struct {
@@ -159,6 +166,26 @@ func (f *fakeToolMusicManager) ManageMusic(_ context.Context, request tools.Musi
 
 func (f fakeCommandWebSearch) Search(context.Context, websearch.Request) (websearch.Response, error) {
 	return f.response, f.err
+}
+
+func (f *fakeCommandYouTubeSummarizer) Configured() bool {
+	return true
+}
+
+func (f *fakeCommandYouTubeSummarizer) Search(_ context.Context, request youtube.SearchRequest) ([]youtube.VideoCandidate, error) {
+	f.searches = append(f.searches, request)
+	if f.err != nil {
+		return nil, f.err
+	}
+	return f.candidates, nil
+}
+
+func (f *fakeCommandYouTubeSummarizer) Summarize(context.Context, youtube.SummaryRequest) (youtube.SummaryResult, error) {
+	return youtube.SummaryResult{
+		Title:      "Fixture video",
+		URL:        "https://www.youtube.com/watch?v=fixture",
+		Transcript: "fixture transcript",
+	}, nil
 }
 
 func (f *fakeFeatureInstallCreator) CreateFeatureInstallIntent(_ context.Context, request FeatureInstallIntentRequest) (FeatureInstallIntentResult, error) {
@@ -3158,6 +3185,42 @@ func TestChatUsesThreadManagerWhenAvailable(t *testing.T) {
 	}
 }
 
+func TestSelectionChatDoesNotCreateThread(t *testing.T) {
+	client := &fakeLLM{response: llm.ChatResponse{Content: "selection handled"}}
+	threadManager := &fakeThreadManager{thread: Thread{ID: "thread-1", Name: "Panda: selected", Created: true}}
+	router := newTestRouter(t, client, 5).WithThreadManager(threadManager)
+	selection := PrepareSelectionForUser("user-1", &Selection{
+		Options: []SelectionOption{{
+			Label:   "Selected Video",
+			Value:   "video_1",
+			Command: "chat",
+			Prompt:  "Summarize this exact YouTube video: https://www.youtube.com/watch?v=selected",
+		}},
+	})
+	if selection == nil {
+		t.Fatal("expected prepared selection")
+	}
+	request, ok := RequestFromSelectionID(selection.ID, []string{"video_1"}, Request{
+		UserID:    "user-1",
+		GuildID:   "guild-1",
+		ChannelID: "channel-1",
+	})
+	if !ok {
+		t.Fatal("expected selection request")
+	}
+
+	response := router.Handle(context.Background(), request)
+	if response.Content != "selection handled" || response.ThreadID != "" {
+		t.Fatalf("unexpected selection response: %+v", response)
+	}
+	if len(threadManager.calls) != 0 {
+		t.Fatalf("selection chat should not create a thread, got %+v", threadManager.calls)
+	}
+	if len(client.requests) != 1 || !strings.Contains(joinRequestMessages(client.requests[0]), "Summarize this exact YouTube video") {
+		t.Fatalf("expected selected prompt to reach assistant, got %+v", client.requests)
+	}
+}
+
 func TestNaturalMessageUsesInlineChat(t *testing.T) {
 	client := &fakeLLM{responses: []llm.ChatResponse{
 		{Content: "<panda_respond>\nchat fixture"},
@@ -3731,6 +3794,150 @@ func TestNaturalMessageRendersPandaAboutCardWithLinkButtons(t *testing.T) {
 	}
 	if names := requestToolNames(client.requests[0]); !names["panda_about"] {
 		t.Fatalf("expected about tool to be exposed, got %+v", names)
+	}
+}
+
+func TestNaturalMessageRendersYouTubeSearchSelectionCard(t *testing.T) {
+	client := &fakeLLM{responses: []llm.ChatResponse{
+		{ToolCalls: []llm.ToolCall{{
+			ID:   "call-youtube-search",
+			Type: "function",
+			Function: llm.ToolCallFunction{
+				Name:      "panda_search_youtube",
+				Arguments: `{"query":"GPT-5.6 Sol Is Here","limit":3}`,
+			},
+		}}},
+		{Content: "<|assistant_output|>"},
+	}}
+	youtubeSearch := &fakeCommandYouTubeSummarizer{
+		candidates: []youtube.VideoCandidate{
+			{
+				Title:        "GPT-5.6 Sol Is Here, BUT You Can't Use It!",
+				URL:          "https://www.youtube.com/watch?v=one",
+				Uploader:     "Universe of AI",
+				ThumbnailURL: "https://i.ytimg.com/vi/one/hqdefault.jpg",
+				Duration:     10*time.Minute + 3*time.Second,
+			},
+			{
+				Title:        "GPT-5.6 Sol Rumors Explained",
+				URL:          "https://www.youtube.com/watch?v=two",
+				Uploader:     "Other Channel",
+				ThumbnailURL: "https://i.ytimg.com/vi/two/hqdefault.jpg",
+			},
+		},
+	}
+	router := newTestRouter(t, client, 5, func(executor *tools.Executor) {
+		executor.WithYouTubeSummarizer(youtubeSearch)
+	})
+
+	response := router.HandleNaturalMessage(context.Background(), Request{
+		UserID:    "user-1",
+		GuildID:   "guild-1",
+		ChannelID: "channel-1",
+		Options: map[string]string{
+			"message": "panda summarize GPT-5.6 Sol Is Here by universe of ai video show me video options to choose from",
+		},
+	})
+
+	if response.Presentation.Title != "Choose a YouTube video" || response.Presentation.Accent != AccentInfo {
+		t.Fatalf("expected YouTube selection card presentation, got %+v", response)
+	}
+	if response.Selection == nil || len(response.Selection.Options) != 2 {
+		t.Fatalf("expected selectable YouTube choices, got %+v", response.Selection)
+	}
+	first := response.Selection.Options[0]
+	if first.Label != "GPT-5.6 Sol Is Here, BUT You Can't Use It!" ||
+		first.URL != "https://www.youtube.com/watch?v=one" ||
+		first.ThumbnailURL == "" {
+		t.Fatalf("unexpected first selection option: %+v", first)
+	}
+	if len(client.requests) != 1 {
+		t.Fatalf("terminal YouTube selection should not request final model prose, got %d request(s)", len(client.requests))
+	}
+	if len(youtubeSearch.searches) != 1 || youtubeSearch.searches[0].Query != "GPT-5.6 Sol Is Here" {
+		t.Fatalf("unexpected YouTube search request: %+v", youtubeSearch.searches)
+	}
+}
+
+func TestNaturalMessageRetriesPlainYouTubeOptionsWithSearchTool(t *testing.T) {
+	client := &fakeLLM{responses: []llm.ChatResponse{
+		{Content: "<panda_respond>\nHere are the video options I found for **GPT-5.6 Sol Is Here**:\n\n- **Universe of AI - 9:07** - GPT-5.6 Sol Is Here, BUT You Can't Use It!\nWatch on YouTube\n\nPick the one you'd like summarized."},
+		{ToolCalls: []llm.ToolCall{{
+			ID:   "call-youtube-search",
+			Type: "function",
+			Function: llm.ToolCallFunction{
+				Name:      "panda_search_youtube",
+				Arguments: `{"query":"GPT-5.6 Sol Is Here","limit":1}`,
+			},
+		}}},
+	}}
+	youtubeSearch := &fakeCommandYouTubeSummarizer{
+		candidates: []youtube.VideoCandidate{
+			{Title: "First video", URL: "https://www.youtube.com/watch?v=one", ThumbnailURL: "https://i.ytimg.com/vi/one/hqdefault.jpg"},
+			{Title: "Second video", URL: "https://www.youtube.com/watch?v=two", ThumbnailURL: "https://i.ytimg.com/vi/two/hqdefault.jpg"},
+			{Title: "Third video", URL: "https://www.youtube.com/watch?v=three", ThumbnailURL: "https://i.ytimg.com/vi/three/hqdefault.jpg"},
+		},
+	}
+	router := newTestRouter(t, client, 5, func(executor *tools.Executor) {
+		executor.WithYouTubeSummarizer(youtubeSearch)
+	})
+
+	response := router.HandleNaturalMessage(context.Background(), Request{
+		UserID:    "user-1",
+		GuildID:   "guild-1",
+		ChannelID: "channel-1",
+		Options: map[string]string{
+			"message": "panda summarize GPT-5.6 Sol Is Here by universe of ai video show me video options to choose from",
+		},
+	})
+
+	if response.Presentation.Title != "Choose a YouTube video" || response.Selection == nil || len(response.Selection.Options) != 3 {
+		t.Fatalf("expected retried YouTube selection card with three choices, got %+v", response)
+	}
+	if strings.Contains(response.Content, "Watch on YouTube") || strings.Contains(response.Content, "Here are the video options") {
+		t.Fatalf("plain prose options should not survive retry, got %q", response.Content)
+	}
+	if len(client.requests) != 2 {
+		t.Fatalf("expected initial prose attempt plus retry tool request, got %d request(s)", len(client.requests))
+	}
+	if len(youtubeSearch.searches) != 1 || youtubeSearch.searches[0].Limit != 3 {
+		t.Fatalf("expected search retry to request three choices, got %+v", youtubeSearch.searches)
+	}
+}
+
+func TestNaturalMessageYouTubeSearchFailureRendersWarningCard(t *testing.T) {
+	client := &fakeLLM{responses: []llm.ChatResponse{
+		{ToolCalls: []llm.ToolCall{{
+			ID:   "call-youtube-search",
+			Type: "function",
+			Function: llm.ToolCallFunction{
+				Name:      "panda_search_youtube",
+				Arguments: `{"query":"rare video","limit":3}`,
+			},
+		}}},
+		{Content: "<|assistant_output|>"},
+	}}
+	router := newTestRouter(t, client, 5, func(executor *tools.Executor) {
+		executor.WithYouTubeSummarizer(&fakeCommandYouTubeSummarizer{err: errors.New("yt-dlp search failed")})
+	})
+
+	response := router.HandleNaturalMessage(context.Background(), Request{
+		UserID:    "user-1",
+		GuildID:   "guild-1",
+		ChannelID: "channel-1",
+		Options: map[string]string{
+			"message": "panda summarize rare video show me options",
+		},
+	})
+
+	if response.Presentation.Title != "YouTube search failed" || response.Presentation.Accent != AccentWarning {
+		t.Fatalf("expected YouTube warning card, got %+v", response)
+	}
+	if !strings.Contains(response.Content, "yt-dlp search failed") || strings.Contains(response.Content, "<|assistant_output|>") {
+		t.Fatalf("expected safe warning content without provider marker, got %q", response.Content)
+	}
+	if len(client.requests) != 1 {
+		t.Fatalf("failed terminal YouTube card should not request final model prose, got %d request(s)", len(client.requests))
 	}
 }
 

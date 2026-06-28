@@ -1776,7 +1776,7 @@ func (r *Router) handleAsk(ctx context.Context, request Request, command string)
 }
 
 func (r *Router) handleChat(ctx context.Context, request Request) Response {
-	return r.handleChatMode(ctx, request, true)
+	return r.handleChatMode(ctx, request, !truthyOption(request.Options[selectionRequestOption]))
 }
 
 func (r *Router) handleChatMode(ctx context.Context, request Request, threaded bool) Response {
@@ -3550,7 +3550,7 @@ func (r *Router) responseFromAssistantAnswer(ctx context.Context, request Reques
 		UsageReservations: append([]billing.Reservation(nil), answer.UsageReservations...),
 	}
 	if answer.Card != nil {
-		cardResponse := responseFromAssistantCard(answer.Card)
+		cardResponse := responseFromAssistantCard(request.UserID, answer.Card)
 		if answer.Card.Standalone && strings.TrimSpace(answer.Content) != "" {
 			response = cardResponse
 			response.ThreadID = threadID
@@ -3564,6 +3564,7 @@ func (r *Router) responseFromAssistantAnswer(ctx context.Context, request Reques
 			response.Content = firstNonEmpty(response.Content, answer.Card.Content)
 			response.Presentation = cardResponse.Presentation
 			response.Actions = cardResponse.Actions
+			response.Selection = cardResponse.Selection
 		}
 	}
 	pendingConfirmations := answerConfirmations(answer)
@@ -3610,7 +3611,7 @@ func placeholderOnlyAssistantContent(content string) bool {
 	return strings.Trim(trimmed, ".\u2026 \t\r\n") == ""
 }
 
-func responseFromAssistantCard(card *assistant.ToolCard) Response {
+func responseFromAssistantCard(userID string, card *assistant.ToolCard) Response {
 	if card == nil {
 		return Response{}
 	}
@@ -3618,6 +3619,7 @@ func responseFromAssistantCard(card *assistant.ToolCard) Response {
 		Content:      card.Content,
 		Presentation: presentationFromAssistantCard(card),
 		Actions:      actionsFromAssistantCard(card),
+		Selection:    selectionFromAssistantCard(userID, card.Selection),
 	}
 }
 
@@ -3667,7 +3669,8 @@ func assistantAnswerHasPayload(answer assistant.AskResponse) bool {
 		strings.TrimSpace(card.Title) != "" ||
 		strings.TrimSpace(card.URL) != "" ||
 		len(card.Fields) > 0 ||
-		len(card.Actions) > 0
+		len(card.Actions) > 0 ||
+		card.Selection != nil
 }
 
 func confirmationSummaries(confirmations []assistant.InteractionConfirmation) []string {
@@ -3763,6 +3766,29 @@ func actionsFromAssistantCard(card *assistant.ToolCard) []Action {
 		})
 	}
 	return actions
+}
+
+func selectionFromAssistantCard(userID string, selection *assistant.ToolCardSelection) *Selection {
+	if selection == nil {
+		return nil
+	}
+	options := make([]SelectionOption, 0, len(selection.Options))
+	for _, option := range selection.Options {
+		options = append(options, SelectionOption{
+			Label:          option.Label,
+			Description:    option.Description,
+			Value:          option.Value,
+			URL:            option.URL,
+			ThumbnailURL:   option.ThumbnailURL,
+			Command:        option.Command,
+			Prompt:         option.Prompt,
+			VoiceChannelID: option.VoiceChannelID,
+		})
+	}
+	return PrepareSelectionForUser(userID, &Selection{
+		Placeholder: selection.Placeholder,
+		Options:     options,
+	})
 }
 
 func appendConfirmationNotice(content, summary string) string {

@@ -95,6 +95,7 @@ type MusicManager interface {
 
 type YouTubeSummarizer interface {
 	Configured() bool
+	Search(ctx context.Context, request youtube.SearchRequest) ([]youtube.VideoCandidate, error)
 	Summarize(ctx context.Context, request youtube.SummaryRequest) (youtube.SummaryResult, error)
 }
 
@@ -220,6 +221,7 @@ type ExecutionRequest struct {
 
 type ExecutionResult struct {
 	Message           llm.Message
+	Payload           any
 	Confirmation      *InteractionConfirmation
 	SourceLinks       []SourceLink
 	GeneratedFiles    []generated.File
@@ -641,6 +643,8 @@ func (e *Executor) Execute(ctx context.Context, request ExecutionRequest) (Execu
 		payload, err = e.manageReminder(toolCtx, request, arguments)
 	case "panda.manage_music":
 		payload, err = e.manageMusic(toolCtx, request, arguments)
+	case "panda.search_youtube":
+		payload, err = e.searchYouTube(toolCtx, arguments)
 	case "panda.summarize_youtube":
 		payload, err = e.summarizeYouTube(toolCtx, arguments)
 	case "panda.manage_safety":
@@ -688,15 +692,42 @@ func (e *Executor) Execute(ctx context.Context, request ExecutionRequest) (Execu
 			ToolCallID: request.Call.ID,
 			Content:    security.RedactSecrets(string(data)),
 		},
+		Payload:           payload,
 		Confirmation:      confirmation,
 		SourceLinks:       sourceLinksFromPayload(definition.Name, payload),
 		GeneratedFiles:    generatedFiles,
 		UsageReservations: usageReservations,
+		Terminal:          terminalResultPayload(payload),
 	}, nil
+}
+
+func terminalResultPayload(payload any) bool {
+	root, ok := payload.(map[string]any)
+	if !ok {
+		return false
+	}
+	result, ok := root["result"].(map[string]any)
+	if !ok {
+		return false
+	}
+	switch value := result["terminal"].(type) {
+	case bool:
+		return value
+	case string:
+		switch strings.ToLower(strings.TrimSpace(value)) {
+		case "true", "yes", "y", "1", "on":
+			return true
+		default:
+			return false
+		}
+	default:
+		return false
+	}
 }
 
 func redactExecutionResult(result ExecutionResult) ExecutionResult {
 	result.Message.Content = security.RedactSecrets(strings.TrimSpace(result.Message.Content))
+	result.Payload = nil
 	result.Message.ToolCalls = append([]llm.ToolCall(nil), result.Message.ToolCalls...)
 	for index := range result.Message.ToolCalls {
 		result.Message.ToolCalls[index].Function.Arguments = security.RedactSecrets(result.Message.ToolCalls[index].Function.Arguments)
@@ -3540,6 +3571,98 @@ func (e *Executor) manageMusic(ctx context.Context, request ExecutionRequest, ar
 	})
 }
 
+func (e *Executor) searchYouTube(ctx context.Context, arguments string) (any, error) {
+	if e.youtube == nil || !e.youtube.Configured() {
+		return nil, fmt.Errorf("youtube summarizer is not configured")
+	}
+	args, err := parseArguments(arguments)
+	if err != nil {
+		return nil, err
+	}
+	query := firstNonEmpty(
+		stringArgument(args, "query"),
+		firstNonEmpty(
+			stringArgument(args, "title"),
+			stringArgument(args, "video"),
+		),
+	)
+	if strings.TrimSpace(query) == "" {
+		return nil, fmt.Errorf("query is required")
+	}
+	candidates, err := e.youtube.Search(ctx, youtube.SearchRequest{
+		Query: query,
+		Limit: youtubeSearchChoiceLimit(args["limit"]),
+	})
+	if err != nil {
+		return nil, err
+	}
+	options := youtubeSelectionOptions(candidates)
+	if len(options) == 0 {
+		return map[string]any{"result": map[string]any{
+			"ok":      false,
+			"title":   "No video choices found",
+			"content": "I could not find usable YouTube results for that video. Try a more specific title or paste the link.",
+			"accent":  "warning",
+			"fields":  []map[string]any{},
+			"actions": []map[string]string{},
+		}}, nil
+	}
+	return map[string]any{"result": map[string]any{
+		"ok":       true,
+		"title":    "Choose a YouTube video",
+		"content":  "I found a few possible matches. Pick the one you want me to summarize.",
+		"accent":   "info",
+		"terminal": true,
+		"fields":   []map[string]any{},
+		"actions":  []map[string]string{},
+		"selection": map[string]any{
+			"placeholder": "Choose a video",
+			"options":     options,
+		},
+	}}, nil
+}
+
+func youtubeSearchChoiceLimit(_ any) int {
+	const choiceLimit = 3
+	return choiceLimit
+}
+
+func youtubeSelectionOptions(candidates []youtube.VideoCandidate) []map[string]any {
+	options := make([]map[string]any, 0, len(candidates))
+	for _, candidate := range candidates {
+		url := strings.TrimSpace(candidate.URL)
+		if url == "" {
+			continue
+		}
+		index := len(options) + 1
+		options = append(options, map[string]any{
+			"label":         candidate.Title,
+			"description":   youtubeCandidateDescription(candidate),
+			"value":         fmt.Sprintf("video_%d", index),
+			"url":           url,
+			"thumbnail_url": candidate.ThumbnailURL,
+			"command":       "chat",
+			"prompt":        "Summarize this exact YouTube video: " + url,
+		})
+		if len(options) == 3 {
+			break
+		}
+	}
+	return options
+}
+
+func youtubeCandidateDescription(candidate youtube.VideoCandidate) string {
+	parts := []string{}
+	if uploader := strings.TrimSpace(candidate.Uploader); uploader != "" {
+		parts = append(parts, uploader)
+	}
+	if candidate.Duration > 0 {
+		totalSeconds := int(candidate.Duration.Round(time.Second).Seconds())
+		parts = append(parts, fmt.Sprintf("%d:%02d", totalSeconds/60, totalSeconds%60))
+	}
+	return strings.Join(parts, " - ")
+}
+
 func (e *Executor) summarizeYouTube(ctx context.Context, arguments string) (any, error) {
 	if e.youtube == nil || !e.youtube.Configured() {
 		return nil, fmt.Errorf("youtube summarizer is not configured")
@@ -4523,7 +4646,10 @@ func userNativeCapabilities(definitions map[string]Definition) []map[string]any 
 		add("manage_reminders", "Manage reminders", "Create, list, cancel, complete, or snooze personal reminders.", false)
 	}
 	if has("panda.manage_music") {
-		add("manage_music", "Manage music", "Play music, inspect the queue, and control playback from natural requests.", false)
+		add("manage_music", "Manage music", "Search candidate tracks, play music, inspect the queue, and control playback from natural requests.", false)
+	}
+	if has("panda.search_youtube", "panda.summarize_youtube") {
+		add("summarize_youtube", "Summarize YouTube videos", "Search candidate videos when needed, transcribe selected YouTube audio, and summarize the plain text transcript.", false)
 	}
 	if has("panda.manage_ops") {
 		add("owner_operations", "Owner operations", "Read operational status or prepare drain, resume, and incident-mode changes for confirmation.", true)
@@ -4603,7 +4729,7 @@ func (e *Executor) canExecute(name string) bool {
 		return e.reminder != nil
 	case "panda.manage_music":
 		return e.music != nil
-	case "panda.summarize_youtube":
+	case "panda.search_youtube", "panda.summarize_youtube":
 		return e.youtube != nil && e.youtube.Configured()
 	case "panda.manage_safety":
 		return e.safety != nil
@@ -5172,6 +5298,8 @@ func normalizeReminderManagementAction(action string) string {
 
 func normalizeMusicManagementAction(action string) string {
 	switch strings.ToLower(strings.TrimSpace(action)) {
+	case "search", "find", "choose", "choices", "suggest", "suggestions":
+		return "search"
 	case "play", "queue", "add":
 		return "play"
 	case "skip_play", "skip_and_play", "skipplay", "replace", "replace_current":

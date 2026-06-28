@@ -110,6 +110,7 @@ type Track struct {
 	StreamURL     string
 	StreamHeaders map[string]string
 	Uploader      string
+	ThumbnailURL  string
 	Duration      time.Duration
 	RequestedBy   string
 	TextChannelID string

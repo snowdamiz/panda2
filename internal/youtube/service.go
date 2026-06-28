@@ -74,6 +74,11 @@ type SummaryRequest struct {
 	Language string
 }
 
+type SearchRequest struct {
+	Query string
+	Limit int
+}
+
 type SummaryResult struct {
 	Title               string
 	URL                 string
@@ -85,6 +90,15 @@ type SummaryResult struct {
 	ChunkCount          int
 }
 
+type VideoCandidate struct {
+	ID           string
+	Title        string
+	URL          string
+	Uploader     string
+	ThumbnailURL string
+	Duration     time.Duration
+}
+
 type videoMetadata struct {
 	ID          string          `json:"id"`
 	Type        string          `json:"_type"`
@@ -93,8 +107,17 @@ type videoMetadata struct {
 	OriginalURL string          `json:"original_url"`
 	URL         string          `json:"url"`
 	Uploader    string          `json:"uploader"`
+	Thumbnail   string          `json:"thumbnail"`
+	Thumbnails  []thumbnailInfo `json:"thumbnails"`
 	Duration    float64         `json:"duration"`
 	Entries     []videoMetadata `json:"entries"`
+}
+
+type thumbnailInfo struct {
+	URL        string `json:"url"`
+	Preference int    `json:"preference"`
+	Width      int    `json:"width"`
+	Height     int    `json:"height"`
 }
 
 type transcriptionResponse struct {
@@ -205,6 +228,48 @@ func (s *Service) Summarize(ctx context.Context, request SummaryRequest) (Summar
 	}, nil
 }
 
+func (s *Service) Search(ctx context.Context, request SearchRequest) ([]VideoCandidate, error) {
+	query := strings.TrimSpace(request.Query)
+	if query == "" {
+		return nil, ErrMissingVideo
+	}
+	limit := request.Limit
+	if limit <= 0 {
+		limit = 3
+	}
+	if limit > 10 {
+		limit = 10
+	}
+	tools, err := s.ensureTools(ctx)
+	if err != nil {
+		return nil, err
+	}
+	lookupCtx, cancel := context.WithTimeout(ctx, s.lookupTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(lookupCtx, tools.YTDLPPath,
+		"--dump-json",
+		"--flat-playlist",
+		"--no-warnings",
+		"--no-cache-dir",
+		"--skip-download",
+		fmt.Sprintf("ytsearch%d:%s", limit, query),
+	)
+	var stderr limitedBuffer
+	cmd.Stderr = &stderr
+	output, err := cmd.Output()
+	if err != nil {
+		detail := strings.TrimSpace(stderr.String())
+		if lookupCtx.Err() != nil {
+			detail = lookupCtx.Err().Error()
+		} else if detail == "" {
+			detail = err.Error()
+		}
+		return nil, fmt.Errorf("youtube search failed: %s", detail)
+	}
+	candidates := parseSearchCandidates(output, limit)
+	return s.enrichSearchCandidates(lookupCtx, tools, candidates), nil
+}
+
 func (s *Service) resolve(ctx context.Context, tools ToolPaths, query string) (videoMetadata, error) {
 	lookupCtx, cancel := context.WithTimeout(ctx, s.lookupTimeout)
 	defer cancel()
@@ -266,6 +331,168 @@ func parseMetadata(output []byte) (videoMetadata, error) {
 		}
 	}
 	return videoMetadata{}, fmt.Errorf("youtube lookup failed: no video metadata")
+}
+
+func parseSearchCandidates(output []byte, limit int) []VideoCandidate {
+	output = bytes.TrimSpace(output)
+	if len(output) == 0 {
+		return nil
+	}
+	decoder := json.NewDecoder(bytes.NewReader(output))
+	candidates := make([]VideoCandidate, 0, limit)
+	for {
+		var metadata videoMetadata
+		if err := decoder.Decode(&metadata); err != nil {
+			break
+		}
+		if len(metadata.Entries) > 0 {
+			for _, entry := range metadata.Entries {
+				if candidate, ok := videoCandidateFromMetadata(entry); ok {
+					candidates = append(candidates, candidate)
+				}
+				if len(candidates) >= limit {
+					return candidates
+				}
+			}
+			continue
+		}
+		if candidate, ok := videoCandidateFromMetadata(metadata); ok {
+			candidates = append(candidates, candidate)
+		}
+		if len(candidates) >= limit {
+			return candidates
+		}
+	}
+	return candidates
+}
+
+func videoCandidateFromMetadata(metadata videoMetadata) (VideoCandidate, bool) {
+	title := strings.TrimSpace(metadata.Title)
+	if title == "" {
+		return VideoCandidate{}, false
+	}
+	id := strings.TrimSpace(metadata.ID)
+	url := strings.TrimSpace(firstNonEmpty(metadata.WebpageURL, metadata.OriginalURL, metadata.URL))
+	if !strings.HasPrefix(url, "http://") && !strings.HasPrefix(url, "https://") {
+		if id != "" {
+			url = "https://www.youtube.com/watch?v=" + id
+		} else {
+			url = ""
+		}
+	}
+	if url == "" {
+		return VideoCandidate{}, false
+	}
+	return VideoCandidate{
+		ID:           id,
+		Title:        title,
+		URL:          url,
+		Uploader:     strings.TrimSpace(metadata.Uploader),
+		ThumbnailURL: bestThumbnailURL(metadata.Thumbnail, metadata.Thumbnails),
+		Duration:     durationFromSeconds(metadata.Duration),
+	}, true
+}
+
+func (s *Service) enrichSearchCandidates(ctx context.Context, tools ToolPaths, candidates []VideoCandidate) []VideoCandidate {
+	if len(candidates) == 0 {
+		return candidates
+	}
+	enriched := append([]VideoCandidate(nil), candidates...)
+	for i, candidate := range enriched {
+		if !needsVideoCandidateEnrichment(candidate) {
+			continue
+		}
+		metadata, err := s.lookupSearchCandidateMetadata(ctx, tools, candidate.URL)
+		if err != nil {
+			continue
+		}
+		if resolved, ok := videoCandidateFromMetadata(metadata); ok {
+			enriched[i] = mergeVideoCandidate(candidate, resolved)
+		}
+	}
+	return enriched
+}
+
+func needsVideoCandidateEnrichment(candidate VideoCandidate) bool {
+	return strings.TrimSpace(candidate.ThumbnailURL) == "" ||
+		strings.TrimSpace(candidate.Uploader) == "" ||
+		candidate.Duration == 0
+}
+
+func (s *Service) lookupSearchCandidateMetadata(ctx context.Context, tools ToolPaths, source string) (videoMetadata, error) {
+	source = strings.TrimSpace(source)
+	if source == "" {
+		return videoMetadata{}, ErrMissingVideo
+	}
+	cmd := exec.CommandContext(ctx, tools.YTDLPPath,
+		"--dump-json",
+		"--no-playlist",
+		"--no-warnings",
+		"--no-cache-dir",
+		"--skip-download",
+		source,
+	)
+	var stderr limitedBuffer
+	cmd.Stderr = &stderr
+	output, err := cmd.Output()
+	if err != nil {
+		detail := strings.TrimSpace(stderr.String())
+		if ctx.Err() != nil {
+			detail = ctx.Err().Error()
+		} else if detail == "" {
+			detail = err.Error()
+		}
+		return videoMetadata{}, fmt.Errorf("youtube metadata lookup failed: %s", detail)
+	}
+	return parseMetadata(output)
+}
+
+func mergeVideoCandidate(base VideoCandidate, extra VideoCandidate) VideoCandidate {
+	if strings.TrimSpace(base.ID) == "" {
+		base.ID = extra.ID
+	}
+	if strings.TrimSpace(base.Title) == "" {
+		base.Title = extra.Title
+	}
+	if strings.TrimSpace(base.URL) == "" {
+		base.URL = extra.URL
+	}
+	if strings.TrimSpace(base.Uploader) == "" {
+		base.Uploader = extra.Uploader
+	}
+	if strings.TrimSpace(base.ThumbnailURL) == "" {
+		base.ThumbnailURL = extra.ThumbnailURL
+	}
+	if base.Duration == 0 {
+		base.Duration = extra.Duration
+	}
+	return base
+}
+
+func bestThumbnailURL(primary string, thumbnails []thumbnailInfo) string {
+	if value := strings.TrimSpace(primary); value != "" {
+		return value
+	}
+	best := ""
+	bestPreference := -1 << 30
+	bestArea := -1
+	bestIndex := -1
+	for i, thumbnail := range thumbnails {
+		url := strings.TrimSpace(thumbnail.URL)
+		if url == "" {
+			continue
+		}
+		area := thumbnail.Width * thumbnail.Height
+		if thumbnail.Preference > bestPreference ||
+			(thumbnail.Preference == bestPreference && area > bestArea) ||
+			(thumbnail.Preference == bestPreference && area == bestArea && i > bestIndex) {
+			best = url
+			bestPreference = thumbnail.Preference
+			bestArea = area
+			bestIndex = i
+		}
+	}
+	return best
 }
 
 func (s *Service) extractAudioChunks(ctx context.Context, tools ToolPaths, source string, dir string) ([]string, error) {

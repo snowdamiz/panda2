@@ -110,6 +110,74 @@ func TestParseMetadataAcceptsPlaylistEntry(t *testing.T) {
 	}
 }
 
+func TestParseSearchCandidatesBuildsWatchURLsAndThumbnails(t *testing.T) {
+	candidates := parseSearchCandidates([]byte(`
+{"id":"abc123","title":"First Result","uploader":"Creator","thumbnails":[{"url":"https://i.ytimg.com/vi/abc123/default.jpg","width":120,"height":90},{"url":"https://i.ytimg.com/vi/abc123/hqdefault.jpg","width":480,"height":360}],"duration":124}
+{"id":"def456","title":"Second Result","webpage_url":"https://www.youtube.com/watch?v=def456","uploader":"Other"}
+`), 3)
+	if len(candidates) != 2 {
+		t.Fatalf("expected two candidates, got %+v", candidates)
+	}
+	if candidates[0].Title != "First Result" ||
+		candidates[0].URL != "https://www.youtube.com/watch?v=abc123" ||
+		candidates[0].ThumbnailURL != "https://i.ytimg.com/vi/abc123/hqdefault.jpg" ||
+		candidates[0].Duration != 124*time.Second {
+		t.Fatalf("unexpected first candidate: %+v", candidates[0])
+	}
+	if candidates[1].URL != "https://www.youtube.com/watch?v=def456" {
+		t.Fatalf("unexpected second candidate: %+v", candidates[1])
+	}
+}
+
+func TestSearchEnrichesFlatCandidatesWithThumbnails(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell executable fixtures are unix-only")
+	}
+	ytdlpPath := writeShellExecutable(t, "yt-dlp", `case "$*" in
+*"ytsearch2:rare video"*)
+  cat <<'JSON'
+{"id":"abc123","title":"Flat First"}
+{"id":"def456","title":"Flat Second","webpage_url":"https://www.youtube.com/watch?v=def456","uploader":"Second Creator","thumbnail":"https://img.example.test/def.jpg","duration":42}
+JSON
+  ;;
+*"abc123"*)
+  cat <<'JSON'
+{"id":"abc123","title":"Full First","webpage_url":"https://www.youtube.com/watch?v=abc123","uploader":"Full Creator","duration":88,"thumbnails":[{"url":"https://img.example.test/abc-small.jpg","width":120,"height":90},{"url":"https://img.example.test/abc-large.jpg","width":480,"height":360}]}
+JSON
+  ;;
+*)
+  echo "unexpected yt-dlp args: $*" >&2
+  exit 1
+  ;;
+esac`)
+	ffmpegPath := writeShellExecutable(t, "ffmpeg", ":")
+	service := NewService(Config{
+		YTDLPPath:     ytdlpPath,
+		FFmpegPath:    ffmpegPath,
+		LookupTimeout: 5 * time.Second,
+	})
+
+	candidates, err := service.Search(context.Background(), SearchRequest{Query: "rare video", Limit: 2})
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if len(candidates) != 2 {
+		t.Fatalf("expected two candidates, got %+v", candidates)
+	}
+	first := candidates[0]
+	if first.Title != "Flat First" ||
+		first.URL != "https://www.youtube.com/watch?v=abc123" ||
+		first.Uploader != "Full Creator" ||
+		first.ThumbnailURL != "https://img.example.test/abc-large.jpg" ||
+		first.Duration != 88*time.Second {
+		t.Fatalf("unexpected enriched first candidate: %+v", first)
+	}
+	second := candidates[1]
+	if second.ThumbnailURL != "https://img.example.test/def.jpg" || second.Uploader != "Second Creator" || second.Duration != 42*time.Second {
+		t.Fatalf("unexpected second candidate: %+v", second)
+	}
+}
+
 func writeShellExecutable(t *testing.T, name string, body string) string {
 	t.Helper()
 	dir := t.TempDir()
