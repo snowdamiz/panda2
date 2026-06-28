@@ -4157,6 +4157,46 @@ func TestFinalAssistantResponseKeepsStandaloneCardRemainingAnswer(t *testing.T) 
 	}
 }
 
+func TestFinalAssistantResponseSuppressesMusicCardEnjoyRestatement(t *testing.T) {
+	card := &ToolCard{
+		Title:      "Connected to voice",
+		Content:    "Joined <#100000000000000222> and started **mgk - BMXXing (Official Music Video)**.",
+		Accent:     "music",
+		Standalone: true,
+	}
+
+	content := finalAssistantResponseContent(
+		"Here's the track playing in bot-test. Enjoy!",
+		nil,
+		defaultAppendedWebSourceLinks,
+		card,
+	)
+
+	if content != "" {
+		t.Fatalf("music card restatement should be suppressed, got %q", content)
+	}
+}
+
+func TestFinalAssistantResponseKeepsShortAnswerAfterMusicStatus(t *testing.T) {
+	card := &ToolCard{
+		Title:      "Connected to voice",
+		Content:    "Joined <#100000000000000222> and started **mgk - BMXXing (Official Music Video)**.",
+		Accent:     "music",
+		Standalone: true,
+	}
+
+	content := finalAssistantResponseContent(
+		"The track is playing. Stock unavailable.",
+		nil,
+		defaultAppendedWebSourceLinks,
+		card,
+	)
+
+	if !strings.Contains(content, "Stock unavailable") {
+		t.Fatalf("short non-card answer should be preserved, got %q", content)
+	}
+}
+
 func TestFinalAssistantResponseSuppressesTerminalAboutCardFollowup(t *testing.T) {
 	card := &ToolCard{
 		Title:    "I'm Panda, a Discord-native assistant.",
