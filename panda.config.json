@@ -14,6 +14,11 @@
     "image_timeout": "90s",
     "image_max_bytes": 8388608
   },
+  "lemonfox": {
+    "api_key": "",
+    "base_url": "https://api.lemonfox.ai/v1",
+    "youtube_audio_chunk_duration": "10m"
+  },
   "billing": {
     "public_url": "",
     "allowed_origins": [],

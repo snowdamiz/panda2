@@ -1406,6 +1406,57 @@ func TestMusicPresentationCreatesStrategicEmbed(t *testing.T) {
 	}
 }
 
+func TestSelectionResponseRendersSelectMenuAndCandidateEmbeds(t *testing.T) {
+	response := commands.Response{
+		Content: "Pick a result.",
+		Presentation: commands.Presentation{
+			Title:  "Choose a YouTube video",
+			Accent: commands.AccentInfo,
+		},
+		Selection: &commands.Selection{
+			ID:          "p2s:pick:user-1:abcdef",
+			Placeholder: "Choose a video",
+			Options: []commands.SelectionOption{
+				{
+					Label:        "First Result",
+					Description:  "Creator - 2:04",
+					Value:        "video_1",
+					URL:          "https://www.youtube.com/watch?v=one",
+					ThumbnailURL: "https://i.ytimg.com/vi/one/hqdefault.jpg",
+				},
+				{
+					Label:       "Second Result",
+					Description: "Other Creator",
+					Value:       "video_2",
+					URL:         "https://www.youtube.com/watch?v=two",
+				},
+			},
+		},
+	}
+
+	message := messageCreateFromResponse(response)
+	if message.Content != "" || len(message.Embeds) != 3 || message.Flags.Has(disgoDiscord.MessageFlagSuppressEmbeds) {
+		t.Fatalf("expected main embed plus two candidate embeds, got %+v", message)
+	}
+	if message.Embeds[1].Title != "1. First Result" || message.Embeds[1].URL != "https://www.youtube.com/watch?v=one" || message.Embeds[1].Thumbnail == nil || message.Embeds[1].Thumbnail.URL == "" {
+		t.Fatalf("unexpected first candidate embed: %+v", message.Embeds[1])
+	}
+	if len(message.Components) != 1 {
+		t.Fatalf("expected one selection row, got %+v", message.Components)
+	}
+	row, ok := message.Components[0].(disgoDiscord.ActionRowComponent)
+	if !ok || len(row.Components) != 1 {
+		t.Fatalf("expected action row with select menu, got %+v", message.Components)
+	}
+	menu, ok := row.Components[0].(disgoDiscord.StringSelectMenuComponent)
+	if !ok || menu.CustomID != response.Selection.ID || menu.Placeholder != "Choose a video" || len(menu.Options) != 2 {
+		t.Fatalf("unexpected select menu: %+v", row.Components[0])
+	}
+	if menu.Options[0].Label != "First Result" || menu.Options[0].Value != "video_1" || menu.Options[0].Description != "Creator - 2:04" {
+		t.Fatalf("unexpected first menu option: %+v", menu.Options[0])
+	}
+}
+
 func TestChannelMessageCreateWithReferenceRepliesWithoutPingingInvoker(t *testing.T) {
 	channelID := snowflake.MustParse("100000000000000002")
 	messageID := snowflake.MustParse("100000000000000003")

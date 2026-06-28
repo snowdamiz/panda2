@@ -827,6 +827,8 @@ func (b *Bot) onComponentInteraction(event *events.ComponentInteractionCreate) {
 	switch data.Type() {
 	case disgoDiscord.ComponentTypeButton:
 		b.onButtonInteraction(event)
+	case disgoDiscord.ComponentTypeStringSelectMenu:
+		b.onStringSelectInteraction(event)
 	default:
 		return
 	}
@@ -871,6 +873,39 @@ func (b *Bot) onButtonInteraction(event *events.ComponentInteractionCreate) {
 	}
 }
 
+func (b *Bot) onStringSelectInteraction(event *events.ComponentInteractionCreate) {
+	data := event.StringSelectMenuInteractionData()
+	baseRequest := b.requestFromComponentEvent(event)
+	selectedRequest, ok := commands.RequestFromSelectionID(data.CustomID(), data.Values, baseRequest)
+	if !ok {
+		if err := event.CreateMessage(messageCreateFromResponse(commands.Response{Content: "That selection is no longer valid for this user.", Ephemeral: true, Presentation: commands.Presentation{Title: "Selection expired", Accent: commands.AccentWarning}})); err != nil {
+			b.logger.Warn("failed to reject selection", slog.Any("err", err))
+		}
+		return
+	}
+	if err := event.DeferUpdateMessage(); err != nil {
+		b.logger.Warn("failed to defer selection", slog.Any("err", err), slog.String("request_id", selectedRequest.RequestID))
+		return
+	}
+	working := commands.Response{
+		Content: "Working on the selected result...",
+		Presentation: commands.Presentation{
+			Title:  "Selection received",
+			Accent: commands.AccentInfo,
+		},
+	}
+	if err := b.updateInteractionResponse(b.client.ApplicationID, event.Token(), working); err != nil {
+		b.logger.Warn("failed to update selection working response", slog.Any("err", err), slog.String("request_id", selectedRequest.RequestID))
+	}
+	response := b.router.Handle(context.Background(), selectedRequest)
+	if err := b.updateInteractionResponse(b.client.ApplicationID, event.Token(), response); err != nil {
+		b.logger.Warn("failed to update selection response", slog.Any("err", err), slog.String("request_id", selectedRequest.RequestID))
+		b.releaseResponseUsage(context.Background(), response, selectedRequest.RequestID, selectedRequest.Command)
+		return
+	}
+	b.commitResponseUsage(context.Background(), response, selectedRequest.RequestID, selectedRequest.Command)
+}
+
 func (b *Bot) requestFromComponentEvent(event *events.ComponentInteractionCreate) commands.Request {
 	request := commands.Request{
 		RequestID:    event.ID().String(),
@@ -886,6 +921,7 @@ func (b *Bot) requestFromComponentEvent(event *events.ComponentInteractionCreate
 	if guildID := event.GuildID(); guildID != nil {
 		request.GuildID = guildID.String()
 	}
+	request.VoiceChannelID = b.userVoiceChannelID(context.Background(), request.GuildID, event.User().ID)
 	return request
 }
 
@@ -971,8 +1007,8 @@ func messageCreateFromResponsePartWithFiles(response commands.Response, content 
 		}
 		return message.WithPoll(pollCreateFromPoll(*response.Poll))
 	}
-	if embed, ok := embedFromResponsePart(response, content); ok {
-		message = message.WithContent("").WithEmbeds(embed).WithSuppressEmbeds(false)
+	if embeds, contentValue, ok := embedsFromResponsePart(response, content); ok {
+		message = message.WithContent(contentValue).WithEmbeds(embeds...).WithSuppressEmbeds(false)
 	} else {
 		message = message.WithContent(content).WithSuppressEmbeds(true)
 	}
@@ -1018,8 +1054,8 @@ func channelMessageCreateFromResponsePartWithReferenceAndFiles(response commands
 		}
 		return message.WithPoll(pollCreateFromPoll(*response.Poll))
 	}
-	if embed, ok := embedFromResponsePart(response, content); ok {
-		message = message.WithContent("").WithEmbeds(embed).WithSuppressEmbeds(false)
+	if embeds, contentValue, ok := embedsFromResponsePart(response, content); ok {
+		message = message.WithContent(contentValue).WithEmbeds(embeds...).WithSuppressEmbeds(false)
 	} else {
 		message = message.WithContent(content).WithSuppressEmbeds(true)
 	}
@@ -1158,8 +1194,8 @@ func webhookMessageUpdateFromResponsePart(response commands.Response, content st
 
 func webhookMessageUpdateFromResponsePartWithFiles(response commands.Response, content string, includeComponents bool, includeFiles bool) disgoDiscord.MessageUpdate {
 	message := disgoDiscord.NewMessageUpdate()
-	if embed, ok := embedFromResponsePart(response, content); ok {
-		message = message.WithContent("").WithEmbeds(embed).WithSuppressEmbeds(false)
+	if embeds, contentValue, ok := embedsFromResponsePart(response, content); ok {
+		message = message.WithContent(contentValue).WithEmbeds(embeds...).WithSuppressEmbeds(false)
 	} else {
 		message = message.WithContent(content).WithEmbeds().WithSuppressEmbeds(true)
 	}
@@ -1297,6 +1333,24 @@ func discordSplitIndex(runes []rune, limit int) int {
 	return limit
 }
 
+func embedsFromResponsePart(response commands.Response, content string) ([]disgoDiscord.Embed, string, bool) {
+	selectionCount := 0
+	if response.Selection != nil {
+		selectionCount = len(response.Selection.Options)
+	}
+	embeds := make([]disgoDiscord.Embed, 0, 1+selectionCount)
+	contentValue := content
+	if embed, ok := embedFromResponsePart(response, content); ok {
+		embeds = append(embeds, embed)
+		contentValue = ""
+	}
+	embeds = append(embeds, selectionEmbedsFromResponse(response)...)
+	if len(embeds) == 0 {
+		return nil, "", false
+	}
+	return embeds, contentValue, true
+}
+
 func embedFromResponsePart(response commands.Response, content string) (disgoDiscord.Embed, bool) {
 	if !presentationHasExplicitDisplay(response.Presentation) {
 		return disgoDiscord.Embed{}, false
@@ -1331,6 +1385,37 @@ func embedFromResponsePart(response commands.Response, content string) (disgoDis
 		embed = embed.WithFields(fields...)
 	}
 	return embed, true
+}
+
+func selectionEmbedsFromResponse(response commands.Response) []disgoDiscord.Embed {
+	selection := response.Selection
+	if selection == nil || len(selection.Options) == 0 {
+		return nil
+	}
+	embeds := make([]disgoDiscord.Embed, 0, len(selection.Options))
+	for index, option := range selection.Options {
+		title := strings.TrimSpace(option.Label)
+		if title == "" {
+			continue
+		}
+		embed := disgoDiscord.NewEmbed().
+			WithColor(embedColor(response.Presentation.Accent)).
+			WithTitle(limitRunes(fmt.Sprintf("%d. %s", index+1, title), 256))
+		if description := strings.TrimSpace(option.Description); description != "" {
+			embed = embed.WithDescription(limitRunes(description, discordEmbedDescriptionLimit))
+		}
+		if validHTTPURL(option.URL) {
+			embed = embed.WithURL(strings.TrimSpace(option.URL))
+		}
+		if validHTTPURL(option.ThumbnailURL) {
+			embed = embed.WithThumbnail(strings.TrimSpace(option.ThumbnailURL))
+		}
+		embeds = append(embeds, embed)
+		if len(embeds) == 3 {
+			break
+		}
+	}
+	return embeds
 }
 
 func responsePresentation(presentation commands.Presentation, content string) commands.Presentation {
@@ -1424,6 +1509,9 @@ func utf8RuneCount(value string) int {
 func componentsFromResponse(response commands.Response) []disgoDiscord.LayoutComponent {
 	var components []disgoDiscord.LayoutComponent
 	components = append(components, confirmationComponentsFromResponse(response)...)
+	if selection := selectionComponentFromResponse(response.Selection); selection != nil {
+		components = append(components, disgoDiscord.NewActionRow(selection))
+	}
 	if response.Feedback != nil && response.Feedback.TargetID != 0 {
 		buttons := []disgoDiscord.InteractiveComponent{
 			disgoDiscord.NewSecondaryButton("Helpful", commands.FeedbackButtonID(response.Feedback.TargetID, "helpful")),
@@ -1438,6 +1526,41 @@ func componentsFromResponse(response commands.Response) []disgoDiscord.LayoutCom
 		components = append(components, disgoDiscord.NewActionRow(buttons...))
 	}
 	return components
+}
+
+func selectionComponentFromResponse(selection *commands.Selection) disgoDiscord.InteractiveComponent {
+	if selection == nil || strings.TrimSpace(selection.ID) == "" {
+		return nil
+	}
+	options := make([]disgoDiscord.StringSelectMenuOption, 0, len(selection.Options))
+	seen := map[string]struct{}{}
+	for _, option := range selection.Options {
+		label := strings.TrimSpace(option.Label)
+		value := strings.TrimSpace(option.Value)
+		if label == "" || value == "" {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		menuOption := disgoDiscord.NewStringSelectMenuOption(limitRunes(label, 100), limitRunes(value, 100))
+		if description := strings.TrimSpace(option.Description); description != "" {
+			menuOption = menuOption.WithDescription(limitRunes(description, 100))
+		}
+		options = append(options, menuOption)
+		if len(options) == 25 {
+			break
+		}
+	}
+	if len(options) == 0 {
+		return nil
+	}
+	placeholder := strings.TrimSpace(selection.Placeholder)
+	if placeholder == "" {
+		placeholder = "Choose one"
+	}
+	return disgoDiscord.NewStringSelectMenu(limitRunes(selection.ID, 100), limitRunes(placeholder, 150), options...).WithMinValues(1).WithMaxValues(1)
 }
 
 func confirmationComponentsFromResponse(response commands.Response) []disgoDiscord.LayoutComponent {
@@ -1873,6 +1996,7 @@ func hasDirectChannelResponsePayload(response commands.Response) bool {
 		len(response.Actions) > 0 ||
 		len(response.Confirmations) > 0 ||
 		response.Confirmation != nil ||
+		response.Selection != nil ||
 		response.Feedback != nil ||
 		len(response.GeneratedFiles) > 0
 }

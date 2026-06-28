@@ -21,6 +21,7 @@ import (
 	"github.com/sn0w/panda2/internal/repository"
 	"github.com/sn0w/panda2/internal/store"
 	"github.com/sn0w/panda2/internal/websearch"
+	"github.com/sn0w/panda2/internal/youtube"
 )
 
 func TestDefaultRegistryDefinitionsAreValid(t *testing.T) {
@@ -100,7 +101,9 @@ func TestAdminSetupToolSchemasExposeNaturalLanguageFields(t *testing.T) {
 	assertToolSchemaContains("panda.manage_prompt", "prompt", "instructions")
 	assertToolSchemaContains("panda.manage_quiet_mode", "duration_seconds", "duration", "until", "status", "set", "clear")
 	assertToolSchemaContains("panda.manage_soul", "soul", "enum", "status", "set", "update")
-	assertToolSchemaContains("panda.manage_music", "voice_channel_id", "voice_channel_name", "voice_channel", "vc")
+	assertToolSchemaContains("panda.manage_music", "search", "voice_channel_id", "voice_channel_name", "voice_channel", "vc")
+	assertToolSchemaContains("panda.summarize_youtube", "query", "url", "title", "detail", "language")
+	assertToolSchemaContains("panda.search_youtube", "query", "title", "video", "limit")
 	assertToolSchemaContains("panda.manage_composed_tool", "voice_channel_id", "voice_channel_name", "voice_channel")
 }
 
@@ -813,6 +816,30 @@ func (f *fakeMusicManager) ManageMusic(_ context.Context, request MusicManagemen
 	}, nil
 }
 
+type fakeYouTubeSummarizer struct {
+	configured bool
+	requests   []youtube.SummaryRequest
+	searches   []youtube.SearchRequest
+	candidates []youtube.VideoCandidate
+	result     youtube.SummaryResult
+	err        error
+	searchErr  error
+}
+
+func (f *fakeYouTubeSummarizer) Configured() bool {
+	return f.configured
+}
+
+func (f *fakeYouTubeSummarizer) Summarize(_ context.Context, request youtube.SummaryRequest) (youtube.SummaryResult, error) {
+	f.requests = append(f.requests, request)
+	return f.result, f.err
+}
+
+func (f *fakeYouTubeSummarizer) Search(_ context.Context, request youtube.SearchRequest) ([]youtube.VideoCandidate, error) {
+	f.searches = append(f.searches, request)
+	return f.candidates, f.searchErr
+}
+
 func newToolAdminService(t *testing.T) *admin.Service {
 	t.Helper()
 	ctx := context.Background()
@@ -1223,6 +1250,155 @@ func TestExecutorExposesMusicManagerToAssistantUse(t *testing.T) {
 	withManager := NewExecutor(registry, nil, nil).WithMusicManager(&fakeMusicManager{})
 	if !toolNames(withManager.OpenRouterTools(access))["panda_manage_music"] {
 		t.Fatalf("music manager tool should be available to assistant use")
+	}
+}
+
+func TestExecutorRunsYouTubeSummarizer(t *testing.T) {
+	registry, err := NewDefaultRegistry()
+	if err != nil {
+		t.Fatalf("NewDefaultRegistry: %v", err)
+	}
+	summarizer := &fakeYouTubeSummarizer{
+		configured: true,
+		result: youtube.SummaryResult{
+			Title:         "Deep Dive",
+			URL:           "https://www.youtube.com/watch?v=deep",
+			Uploader:      "Teacher",
+			Duration:      12 * time.Minute,
+			ResolvedQuery: "deep dive",
+			Transcript:    "First point.\n\nSecond point.",
+			ChunkCount:    2,
+		},
+	}
+	executor := NewExecutor(registry, nil, nil).WithYouTubeSummarizer(summarizer)
+	result, err := executor.Execute(context.Background(), ExecutionRequest{
+		GuildID:   "guild-1",
+		ChannelID: "text-1",
+		ActorID:   "user-1",
+		Access:    testAccess(ToolPolicyAssistive, admin.PermissionAssistantUse),
+		Call: llm.ToolCall{
+			ID:   "call-youtube",
+			Type: "function",
+			Function: llm.ToolCallFunction{
+				Name:      "panda_summarize_youtube",
+				Arguments: `{"query":"deep dive","detail":"detailed","language":"en"}`,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if len(summarizer.requests) != 1 {
+		t.Fatalf("expected one YouTube summary request, got %d", len(summarizer.requests))
+	}
+	request := summarizer.requests[0]
+	if request.Query != "deep dive" || request.Detail != "detailed" || request.Language != "en" {
+		t.Fatalf("unexpected YouTube request: %+v", request)
+	}
+	content := result.Message.Content
+	for _, want := range []string{`"title":"Deep Dive"`, `"plain_text_transcript":"First point.\n\nSecond point."`, `"chunk_count":2`, `"transcript_truncated":false`} {
+		if !strings.Contains(content, want) {
+			t.Fatalf("expected result content to contain %s, got %s", want, content)
+		}
+	}
+	if len(result.SourceLinks) != 1 || result.SourceLinks[0].URL != "https://www.youtube.com/watch?v=deep" {
+		t.Fatalf("expected YouTube source link, got %+v", result.SourceLinks)
+	}
+}
+
+func TestExecutorSearchesYouTubeForSelection(t *testing.T) {
+	registry, err := NewDefaultRegistry()
+	if err != nil {
+		t.Fatalf("NewDefaultRegistry: %v", err)
+	}
+	summarizer := &fakeYouTubeSummarizer{
+		configured: true,
+		candidates: []youtube.VideoCandidate{
+			{
+				Title:        "First Result",
+				URL:          "https://www.youtube.com/watch?v=one",
+				Uploader:     "Creator",
+				ThumbnailURL: "https://i.ytimg.com/vi/one/hqdefault.jpg",
+				Duration:     2*time.Minute + 4*time.Second,
+			},
+			{
+				Title:    "Second Result",
+				URL:      "https://www.youtube.com/watch?v=two",
+				Uploader: "Other Creator",
+			},
+		},
+	}
+	executor := NewExecutor(registry, nil, nil).WithYouTubeSummarizer(summarizer)
+	result, err := executor.Execute(context.Background(), ExecutionRequest{
+		GuildID:   "guild-1",
+		ChannelID: "text-1",
+		ActorID:   "user-1",
+		Access:    testAccess(ToolPolicyAssistive, admin.PermissionAssistantUse),
+		Call: llm.ToolCall{
+			ID:   "call-youtube-search",
+			Type: "function",
+			Function: llm.ToolCallFunction{
+				Name:      "panda_search_youtube",
+				Arguments: `{"query":"deep dive","limit":1}`,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if !result.Terminal {
+		t.Fatalf("expected YouTube search selection result to be terminal")
+	}
+	if result.Payload == nil {
+		t.Fatalf("expected YouTube search selection to preserve structured payload")
+	}
+	if len(summarizer.searches) != 1 || summarizer.searches[0].Query != "deep dive" || summarizer.searches[0].Limit != 3 {
+		t.Fatalf("unexpected YouTube search request: %+v", summarizer.searches)
+	}
+	var payload struct {
+		Result struct {
+			Title     string `json:"title"`
+			Terminal  bool   `json:"terminal"`
+			Selection struct {
+				Options []struct {
+					Label        string `json:"label"`
+					URL          string `json:"url"`
+					ThumbnailURL string `json:"thumbnail_url"`
+					Prompt       string `json:"prompt"`
+				} `json:"options"`
+			} `json:"selection"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal([]byte(result.Message.Content), &payload); err != nil {
+		t.Fatalf("unmarshal payload: %v\n%s", err, result.Message.Content)
+	}
+	if payload.Result.Title != "Choose a YouTube video" || !payload.Result.Terminal || len(payload.Result.Selection.Options) != 2 {
+		t.Fatalf("unexpected selection payload: %+v", payload.Result)
+	}
+	first := payload.Result.Selection.Options[0]
+	if first.Label != "First Result" || first.URL != "https://www.youtube.com/watch?v=one" || first.ThumbnailURL == "" || !strings.Contains(first.Prompt, "https://www.youtube.com/watch?v=one") {
+		t.Fatalf("unexpected first option: %+v", first)
+	}
+}
+
+func TestExecutorExposesYouTubeSummarizerOnlyWhenConfigured(t *testing.T) {
+	registry, err := NewDefaultRegistry()
+	if err != nil {
+		t.Fatalf("NewDefaultRegistry: %v", err)
+	}
+	access := testAccess(ToolPolicyAssistive, admin.PermissionAssistantUse)
+	withoutSummarizer := NewExecutor(registry, nil, nil)
+	if names := toolNames(withoutSummarizer.OpenRouterTools(access)); names["panda_summarize_youtube"] || names["panda_search_youtube"] {
+		t.Fatalf("youtube summary tool should be hidden when no summarizer is configured")
+	}
+	withUnconfiguredSummarizer := NewExecutor(registry, nil, nil).WithYouTubeSummarizer(&fakeYouTubeSummarizer{})
+	if names := toolNames(withUnconfiguredSummarizer.OpenRouterTools(access)); names["panda_summarize_youtube"] || names["panda_search_youtube"] {
+		t.Fatalf("youtube summary tool should be hidden when Lemonfox is not configured")
+	}
+	withSummarizer := NewExecutor(registry, nil, nil).WithYouTubeSummarizer(&fakeYouTubeSummarizer{configured: true})
+	names := toolNames(withSummarizer.OpenRouterTools(access))
+	if !names["panda_summarize_youtube"] || !names["panda_search_youtube"] {
+		t.Fatalf("youtube summary/search tools should be available to assistant users, got %+v", names)
 	}
 }
 

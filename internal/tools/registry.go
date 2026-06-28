@@ -521,7 +521,7 @@ func DefaultDefinitions() []Definition {
 		},
 		{
 			Name:                  "panda.manage_music",
-			Description:           "Play music, inspect the queue, and control playback from natural-language music requests. Use this for requests like play, pause, resume, skip, stop, queue, now playing, loop, shuffle, playlist, and volume. When the user names or mentions a target voice/stage channel, use discord.list_channels first if available to resolve the exact voice/stage channel ID, then include voice_channel_id; otherwise include voice_channel_name so the executor can resolve it. Playback uses the requester's current voice channel only when no target channel is named. For requests like 'skip this and play X', use one skip_play action with query X instead of separate skip and play calls.",
+			Description:           "Play music, inspect the queue, search candidate tracks, and control playback from natural-language music requests. Use this for requests like play, pause, resume, skip, stop, queue, now playing, loop, shuffle, playlist, and volume. When a play/skip_play request names a title that may be ambiguous, obscure, not algorithmically popular, or otherwise uncertain, call action=search with the query first so Discord can show the top choices; do not play a guessed top result until the user chooses. When the user provides an exact URL or a clearly disambiguated title/artist, play directly. When the user names or mentions a target voice/stage channel, use discord.list_channels first if available to resolve the exact voice/stage channel ID, then include voice_channel_id; otherwise include voice_channel_name so the executor can resolve it. Playback uses the requester's current voice channel only when no target channel is named. For requests like 'skip this and play X', use one skip_play action with query X instead of separate skip and play calls; if you need choices for that flow, call action=search with mode=skip_play.",
 			RequiredPermission:    admin.PermissionAssistantUse,
 			FeatureID:             features.Music,
 			ToolClass:             ToolClassWorkflow,
@@ -532,6 +532,33 @@ func DefaultDefinitions() []Definition {
 			Audit:                 AuditOnUse,
 			IncludeInModelContext: true,
 			BypassToolPolicy:      true,
+		},
+		{
+			Name:                  "panda.summarize_youtube",
+			Description:           "Watch and summarize a YouTube video from an exact URL. Use this when the user asks Panda to summarize, recap, watch, explain, outline, or get key points from a YouTube video and the user provided an exact YouTube URL, or after the user selected an exact URL from panda.search_youtube. For title/name-only requests, including a title plus channel/creator, call panda.search_youtube first so Discord can show the top choices; only call this tool with the selected/exact URL afterward unless the user explicitly asks to use the top result without choosing. This tool extracts audio in chunks, transcribes it with Lemonfox Whisper, and returns a plain text transcript for Panda's final summary. Do not use this for music playback; use panda.manage_music for play/queue/control requests.",
+			RequiredPermission:    admin.PermissionAssistantUse,
+			FeatureID:             features.AssistantChat,
+			ToolClass:             ToolClassMedia,
+			InputSchema:           youtubeSummarySchema(),
+			OutputSchema:          objectSchema("result"),
+			Timeout:               30 * time.Minute,
+			Redaction:             RedactContent,
+			Audit:                 AuditSensitive,
+			IncludeInModelContext: true,
+		},
+		{
+			Name:                  "panda.search_youtube",
+			Description:           "Search YouTube for the top candidate videos and render a Discord selection prompt with thumbnails. Use this before panda.summarize_youtube for title/name-only YouTube summary requests, including requests that also name a channel/creator, unless the user provided an exact YouTube URL or explicitly asked to use the top result without choosing. Do not use for music playback; use panda.manage_music action=search for track choices.",
+			RequiredPermission:    admin.PermissionAssistantUse,
+			FeatureID:             features.AssistantChat,
+			ToolClass:             ToolClassMedia,
+			InputSchema:           youtubeSearchSchema(),
+			OutputSchema:          objectSchema("result"),
+			Timeout:               30 * time.Second,
+			Redaction:             RedactContent,
+			Audit:                 AuditOnUse,
+			IncludeInModelContext: true,
+			TerminalCard:          true,
 		},
 		{
 			Name:                  "panda.list_tools",
@@ -1073,7 +1100,8 @@ func musicManagementSchema() json.RawMessage {
 	return schemaWithProperties([]string{"action"}, map[string]any{
 		"action": map[string]any{
 			"type":        "string",
-			"description": "Action: play, skip_play, pause, resume, skip, stop, queue, clear, now, controls, loop, shuffle, remove, move, vote_skip, settings, or playlist. Use skip_play with query for 'skip this and play ...' so playback stays in the same voice session. If the result has ok=false and suggestions, use those suggestions to ask a concise follow-up or offer alternate tracks instead of claiming playback succeeded.",
+			"enum":        []string{"search", "play", "skip_play", "pause", "resume", "skip", "stop", "queue", "clear", "now", "controls", "loop", "shuffle", "remove", "move", "vote_skip", "settings", "playlist"},
+			"description": "Action: search, play, skip_play, pause, resume, skip, stop, queue, clear, now, controls, loop, shuffle, remove, move, vote_skip, settings, or playlist. Use search with query when the intended track is uncertain; it returns a Discord selection prompt instead of playing. Use skip_play with query for 'skip this and play ...' so playback stays in the same voice session. If the result has ok=false and suggestions, use those suggestions to ask a concise follow-up or offer alternate tracks instead of claiming playback succeeded.",
 		},
 		"query":                map[string]string{"type": "string", "description": "Song/search query for play or skip_play."},
 		"song":                 map[string]string{"type": "string", "description": "Alias for query."},
@@ -1088,6 +1116,61 @@ func musicManagementSchema() json.RawMessage {
 		"position":             map[string]any{"type": "integer", "minimum": 1, "description": "Queue position for remove or move."},
 		"to":                   map[string]any{"type": "integer", "minimum": 1, "description": "Destination queue position for move."},
 		"volume":               map[string]any{"type": "integer", "minimum": 1, "maximum": 200, "description": "Default music volume for settings."},
+	})
+}
+
+func youtubeSummarySchema() json.RawMessage {
+	return schemaWithProperties([]string{"query"}, map[string]any{
+		"query": map[string]any{
+			"type":        "string",
+			"minLength":   1,
+			"description": "YouTube URL or title/search query to summarize. Use the exact URL when the user provided one; otherwise use the video title/name/search phrase.",
+		},
+		"url": map[string]any{
+			"type":        "string",
+			"description": "Alias for query when the user provides a YouTube URL. Prefer putting the same URL in query.",
+		},
+		"title": map[string]any{
+			"type":        "string",
+			"description": "Alias for query when the user names a YouTube video by title.",
+		},
+		"video": map[string]any{
+			"type":        "string",
+			"description": "Alias for query when the user says the video name separately.",
+		},
+		"detail": map[string]any{
+			"type":        "string",
+			"enum":        []string{"concise", "standard", "detailed"},
+			"description": "Requested summary depth. Use concise for brief/key-points, detailed for deep notes, otherwise standard.",
+		},
+		"language": map[string]any{
+			"type":        "string",
+			"description": "Optional spoken language hint, such as english, spanish, french, or japanese. Omit unless the user specifies the video's language.",
+		},
+	})
+}
+
+func youtubeSearchSchema() json.RawMessage {
+	return schemaWithProperties([]string{"query"}, map[string]any{
+		"query": map[string]any{
+			"type":        "string",
+			"minLength":   1,
+			"description": "YouTube video title/name/search phrase to search before asking the user to choose a result.",
+		},
+		"title": map[string]any{
+			"type":        "string",
+			"description": "Alias for query when the user names a YouTube video by title.",
+		},
+		"video": map[string]any{
+			"type":        "string",
+			"description": "Alias for query when the user says the video name separately.",
+		},
+		"limit": map[string]any{
+			"type":        "integer",
+			"minimum":     3,
+			"maximum":     3,
+			"description": "Number of choices to return. Use 3 for Discord selection prompts.",
+		},
 	})
 }
 

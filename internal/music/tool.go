@@ -26,6 +26,12 @@ func (m *Manager) ManageMusic(ctx context.Context, request toolsvc.MusicManageme
 		To:       request.To,
 		Volume:   request.Volume,
 	}
+	if action == "search" {
+		if intent.Query == "" {
+			return m.musicToolErrorResult(ctx, ActionPlay, intent.Query, ErrMissingSong), nil
+		}
+		return m.musicSearchSelectionResult(ctx, request, intent), nil
+	}
 	if (action == ActionPlay || action == ActionSkipPlay) && intent.Query == "" {
 		return nil, ErrMissingSong
 	}
@@ -114,13 +120,87 @@ func (m *Manager) musicSuggestions(ctx context.Context, query string, limit int)
 	return suggestions
 }
 
+func (m *Manager) musicSearchSelectionResult(ctx context.Context, request toolsvc.MusicManagementRequest, intent Intent) map[string]any {
+	suggestions := m.musicSuggestions(ctx, intent.Query, 3)
+	options := musicSelectionOptions(suggestions, request.VoiceChannelID, intent.Mode)
+	if len(options) == 0 {
+		return map[string]any{"result": map[string]any{
+			"ok":      false,
+			"action":  "search",
+			"title":   "No track choices found",
+			"content": "I could not find usable YouTube results for that track. Try a more specific title, artist, or link.",
+			"accent":  "warning",
+			"fields":  []map[string]any{},
+			"actions": []map[string]string{},
+		}}
+	}
+	return map[string]any{"result": map[string]any{
+		"ok":       true,
+		"action":   "search",
+		"title":    "Choose a track",
+		"content":  "I found a few possible matches. Pick the one you want me to play.",
+		"accent":   "music",
+		"terminal": true,
+		"fields":   []map[string]any{},
+		"actions":  []map[string]string{},
+		"selection": map[string]any{
+			"placeholder": "Choose a track",
+			"options":     options,
+		},
+	}}
+}
+
+func musicSelectionOptions(tracks []Track, voiceChannelID, mode string) []map[string]any {
+	options := make([]map[string]any, 0, len(tracks))
+	for _, track := range tracks {
+		url := strings.TrimSpace(track.URL)
+		if url == "" {
+			continue
+		}
+		index := len(options) + 1
+		options = append(options, map[string]any{
+			"label":            trackTitle(track),
+			"description":      musicSelectionDescription(track),
+			"value":            fmt.Sprintf("track_%d", index),
+			"url":              url,
+			"thumbnail_url":    track.ThumbnailURL,
+			"command":          "chat",
+			"prompt":           musicSelectionPrompt(mode, url),
+			"voice_channel_id": voiceChannelID,
+		})
+		if len(options) == 3 {
+			break
+		}
+	}
+	return options
+}
+
+func musicSelectionDescription(track Track) string {
+	parts := []string{}
+	if uploader := strings.TrimSpace(track.Uploader); uploader != "" {
+		parts = append(parts, uploader)
+	}
+	if suffix := strings.TrimSpace(durationSuffix(track.Duration)); suffix != "" {
+		parts = append(parts, strings.Trim(suffix, "` "))
+	}
+	return strings.Join(parts, " - ")
+}
+
+func musicSelectionPrompt(mode, url string) string {
+	if strings.EqualFold(strings.TrimSpace(mode), string(ActionSkipPlay)) {
+		return "Skip the current track and play this exact YouTube result: " + url
+	}
+	return "Play this exact YouTube result: " + url
+}
+
 func musicSuggestionPayloads(tracks []Track) []map[string]any {
 	payloads := make([]map[string]any, 0, len(tracks))
 	for _, track := range tracks {
 		payload := map[string]any{
-			"title":    trackTitle(track),
-			"url":      track.URL,
-			"uploader": track.Uploader,
+			"title":         trackTitle(track),
+			"url":           track.URL,
+			"uploader":      track.Uploader,
+			"thumbnail_url": track.ThumbnailURL,
 		}
 		if track.Duration > 0 {
 			payload["duration_seconds"] = int(track.Duration.Seconds())

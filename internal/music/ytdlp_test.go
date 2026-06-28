@@ -18,6 +18,10 @@ func TestYTDLPResolveKeepsPublicURLAndDirectStreamURL(t *testing.T) {
 		"webpage_url": "https://www.youtube.com/watch?v=track-1",
 		"url": "https://rr.example.test/videoplayback?expire=1",
 		"uploader": "Uploader",
+		"thumbnails": [
+			{"url": "https://img.example.test/track-small.jpg", "width": 120, "height": 90},
+			{"url": "https://img.example.test/track-large.jpg", "width": 480, "height": 360}
+		],
 		"duration": 123,
 		"http_headers": {
 			"User-Agent": "yt-dlp-test",
@@ -44,10 +48,13 @@ func TestYTDLPResolveKeepsPublicURLAndDirectStreamURL(t *testing.T) {
 	if track.StreamHeaders["User-Agent"] != "yt-dlp-test" || track.StreamHeaders["Referer"] != "https://www.youtube.com/" {
 		t.Fatalf("expected stream headers from yt-dlp metadata, got %+v", track.StreamHeaders)
 	}
+	if track.ThumbnailURL != "https://img.example.test/track-large.jpg" {
+		t.Fatalf("expected thumbnail from yt-dlp thumbnails array, got %q", track.ThumbnailURL)
+	}
 }
 
 func TestYTDLPSuggestionsParseSearchResults(t *testing.T) {
-	ytdlpPath := writeTestExecutable(t, "yt-dlp", `{"id":"one","title":"First Result","webpage_url":"https://example.test/one","uploader":"Artist","duration":164}
+	ytdlpPath := writeTestExecutable(t, "yt-dlp", `{"id":"one","title":"First Result","webpage_url":"https://example.test/one","uploader":"Artist","duration":164,"thumbnails":[{"url":"https://img.example.test/one-small.jpg","width":120,"height":90},{"url":"https://img.example.test/one-large.jpg","width":480,"height":360}]}
 {"id":"two","title":"Second Result","webpage_url":"https://example.test/two","uploader":"Artist","duration":120}`)
 	ffmpegPath := writeTestExecutable(t, "ffmpeg", "")
 	client := NewYTDLP(YTDLPConfig{
@@ -62,6 +69,58 @@ func TestYTDLPSuggestionsParseSearchResults(t *testing.T) {
 	}
 	if len(tracks) != 2 || tracks[0].Title != "First Result" || tracks[0].URL != "https://example.test/one" || tracks[0].Duration != 164*time.Second {
 		t.Fatalf("unexpected suggestions: %+v", tracks)
+	}
+	if tracks[0].ThumbnailURL != "https://img.example.test/one-large.jpg" {
+		t.Fatalf("expected thumbnail from yt-dlp thumbnails array, got %+v", tracks[0])
+	}
+}
+
+func TestYTDLPSuggestionsEnrichFlatResultsWithThumbnails(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell executable fixtures are unix-only")
+	}
+	ytdlpPath := writeShellExecutable(t, "yt-dlp", `case "$*" in
+*"ytsearch2:rare song"*)
+  cat <<'JSON'
+{"id":"one","title":"Flat First"}
+{"id":"two","title":"Flat Second","webpage_url":"https://www.youtube.com/watch?v=two","uploader":"Artist","thumbnail":"https://img.example.test/two.jpg","duration":120}
+JSON
+  ;;
+*"one"*)
+  cat <<'JSON'
+{"id":"one","title":"Full First","webpage_url":"https://www.youtube.com/watch?v=one","uploader":"Full Artist","duration":164,"thumbnails":[{"url":"https://img.example.test/one-small.jpg","width":120,"height":90},{"url":"https://img.example.test/one-large.jpg","width":480,"height":360}]}
+JSON
+  ;;
+*)
+  echo "unexpected yt-dlp args: $*" >&2
+  exit 1
+  ;;
+esac`)
+	ffmpegPath := writeShellExecutable(t, "ffmpeg", ":")
+	client := NewYTDLP(YTDLPConfig{
+		YTDLPPath:     ytdlpPath,
+		FFmpegPath:    ffmpegPath,
+		LookupTimeout: 5 * time.Second,
+	})
+
+	tracks, err := client.Suggestions(context.Background(), "rare song", 2)
+	if err != nil {
+		t.Fatalf("Suggestions: %v", err)
+	}
+	if len(tracks) != 2 {
+		t.Fatalf("expected two tracks, got %+v", tracks)
+	}
+	first := tracks[0]
+	if first.Title != "Flat First" ||
+		first.URL != "https://www.youtube.com/watch?v=one" ||
+		first.Uploader != "Full Artist" ||
+		first.ThumbnailURL != "https://img.example.test/one-large.jpg" ||
+		first.Duration != 164*time.Second {
+		t.Fatalf("unexpected enriched first track: %+v", first)
+	}
+	second := tracks[1]
+	if second.ThumbnailURL != "https://img.example.test/two.jpg" || second.Uploader != "Artist" || second.Duration != 120*time.Second {
+		t.Fatalf("unexpected second track: %+v", second)
 	}
 }
 

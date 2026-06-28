@@ -19,6 +19,7 @@ import (
 	"github.com/sn0w/panda2/internal/store"
 	"github.com/sn0w/panda2/internal/tools"
 	"github.com/sn0w/panda2/internal/websearch"
+	"github.com/sn0w/panda2/internal/youtube"
 )
 
 var fixedPromptTime = time.Date(2026, time.June, 25, 18, 42, 7, 0, time.UTC)
@@ -87,6 +88,8 @@ type fakeAssistantMusicManager struct {
 	activeVoiceChannelID string
 }
 
+type fakeAssistantYouTubeSummarizer struct{}
+
 type fakeAssistantDiscordProvider struct{}
 
 func (f fakeAssistantDynamicTools) OpenRouterTools(_ context.Context, request tools.DynamicToolListRequest) ([]llm.Tool, error) {
@@ -119,6 +122,18 @@ func (f *fakeAssistantMusicManager) ManageMusic(_ context.Context, request tools
 
 func (f *fakeAssistantMusicManager) ActiveVoiceChannelID(string) string {
 	return f.activeVoiceChannelID
+}
+
+func (fakeAssistantYouTubeSummarizer) Configured() bool {
+	return true
+}
+
+func (fakeAssistantYouTubeSummarizer) Summarize(context.Context, youtube.SummaryRequest) (youtube.SummaryResult, error) {
+	return youtube.SummaryResult{Title: "fixture", Transcript: "fixture transcript"}, nil
+}
+
+func (fakeAssistantYouTubeSummarizer) Search(context.Context, youtube.SearchRequest) ([]youtube.VideoCandidate, error) {
+	return []youtube.VideoCandidate{{Title: "fixture video", URL: "https://www.youtube.com/watch?v=fixture"}}, nil
 }
 
 func (f *fakeClient) Chat(_ context.Context, request llm.ChatRequest) (llm.ChatResponse, error) {
@@ -1712,6 +1727,47 @@ func TestAskKeepsDirectMusicCommandAfterToolAvailabilityContext(t *testing.T) {
 	}
 	if availabilityIndex >= len(request.Messages)-1 {
 		t.Fatalf("tool availability context should appear before the final user command, got messages: %s", joinMessages(request.Messages))
+	}
+}
+
+func TestAskExposesYouTubeSummarizerToolWhenConfigured(t *testing.T) {
+	ctx := context.Background()
+	client := &fakeClient{response: llm.ChatResponse{Model: "fixture/model", Content: "ok"}}
+	service, db := newTestService(t, client)
+	configs := repository.NewGuildConfigRepository(db.DB)
+	registry, err := tools.NewDefaultRegistry()
+	if err != nil {
+		t.Fatalf("NewDefaultRegistry: %v", err)
+	}
+	service.WithToolExecutor(tools.NewExecutor(registry, nil, configs).WithYouTubeSummarizer(fakeAssistantYouTubeSummarizer{}))
+
+	if _, err := configs.EnsureDefault(ctx, "guild-1"); err != nil {
+		t.Fatalf("EnsureDefault: %v", err)
+	}
+	if _, err := configs.UpdateBehaviorSettings(ctx, "guild-1", map[string]any{"tool_policy": tools.ToolPolicyAssistive}); err != nil {
+		t.Fatalf("UpdateBehaviorSettings: %v", err)
+	}
+
+	_, err = service.Ask(ctx, AskRequest{
+		GuildID:   "guild-1",
+		UserID:    "user-1",
+		ChannelID: "channel-1",
+		Question:  "summarize this youtube video https://www.youtube.com/watch?v=abc",
+		AllowedPermissions: map[string]struct{}{
+			admin.PermissionAssistantUse: {},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Ask: %v", err)
+	}
+	if len(client.requests) != 1 {
+		t.Fatalf("expected one LLM request, got %d", len(client.requests))
+	}
+	if !toolNamePresent(client.requests[0].Tools, "panda_summarize_youtube") {
+		t.Fatalf("expected YouTube summarizer tool in model request, got %+v", client.requests[0].Tools)
+	}
+	if !toolNamePresent(client.requests[0].Tools, "panda_search_youtube") {
+		t.Fatalf("expected YouTube search tool in model request, got %+v", client.requests[0].Tools)
 	}
 }
 
@@ -4121,6 +4177,152 @@ func TestFinalAssistantResponseSuppressesTerminalAboutCardFollowup(t *testing.T)
 	}
 	if card.Standalone {
 		t.Fatalf("terminal card should remain the primary response without a followup: %+v", card)
+	}
+}
+
+func TestFinalAssistantResponseStripsProviderWrapperMarkers(t *testing.T) {
+	content := finalAssistantResponseContent(
+		"<|assistant_output|>\nDone.<|end|>",
+		nil,
+		defaultAppendedWebSourceLinks,
+		nil,
+	)
+
+	if content != "Done." {
+		t.Fatalf("expected provider wrapper markers to be stripped, got %q", content)
+	}
+	if !ResponseContentLooksInternalArtifact("<|assistant_output|>") {
+		t.Fatal("expected provider wrapper marker to be treated as an internal artifact")
+	}
+}
+
+func TestToolCardFromYouTubeSelectionPayloadDoesNotRequireProseFields(t *testing.T) {
+	card := toolCardFromToolResult(llm.ToolCall{
+		ID:   "call-youtube-search",
+		Type: "function",
+		Function: llm.ToolCallFunction{
+			Name:      "panda_search_youtube",
+			Arguments: `{"query":"rare video","limit":3}`,
+		},
+	}, llm.Message{
+		Role:       "tool",
+		ToolCallID: "call-youtube-search",
+		Content: `{"result":{"ok":true,"terminal":true,"selection":{"placeholder":"Choose a video","options":[` +
+			`{"label":"First Result","url":"https://www.youtube.com/watch?v=one","thumbnail_url":"https://i.ytimg.com/vi/one/hqdefault.jpg"}` +
+			`]}}}`,
+	})
+
+	if card == nil {
+		t.Fatal("expected selection-only YouTube payload to render as a card")
+	}
+	if card.Title != "Choose a YouTube video" || card.Content == "" || card.Accent != "info" || !card.Terminal {
+		t.Fatalf("expected defaulted terminal YouTube card, got %+v", card)
+	}
+	if card.Selection == nil || len(card.Selection.Options) != 1 {
+		t.Fatalf("expected one selectable option, got %+v", card.Selection)
+	}
+	option := card.Selection.Options[0]
+	if option.Value != "video_1" || !strings.Contains(option.Prompt, "https://www.youtube.com/watch?v=one") {
+		t.Fatalf("expected selectable option metadata to be derived from URL, got %+v", option)
+	}
+	if option.ThumbnailURL == "" {
+		t.Fatalf("expected thumbnail URL to be preserved, got %+v", option)
+	}
+}
+
+func TestToolCardFromTerminalYouTubePayloadFallsBackInsteadOfDisappearing(t *testing.T) {
+	card := toolCardFromToolResult(llm.ToolCall{
+		ID:   "call-youtube-search",
+		Type: "function",
+		Function: llm.ToolCallFunction{
+			Name:      "panda_search_youtube",
+			Arguments: `{"query":"rare video","limit":3}`,
+		},
+	}, llm.Message{
+		Role:       "tool",
+		ToolCallID: "call-youtube-search",
+		Content:    `{"result":{"ok":true,"terminal":true,"selection":{"options":[]}}}`,
+	})
+
+	if card == nil {
+		t.Fatal("expected terminal YouTube renderer failure to produce a warning card")
+	}
+	if card.Title != "YouTube selection unavailable" || card.Accent != "warning" || !card.Terminal {
+		t.Fatalf("unexpected fallback card: %+v", card)
+	}
+	if !strings.Contains(card.Content, "could not render the selection controls") {
+		t.Fatalf("expected actionable fallback content, got %q", card.Content)
+	}
+}
+
+func TestToolCardFromTerminalExecutionResultFallsBackWhenPayloadCannotParse(t *testing.T) {
+	card := toolCardFromExecutionResult(llm.ToolCall{
+		ID:   "call-youtube-search",
+		Type: "function",
+		Function: llm.ToolCallFunction{
+			Name:      "panda_search_youtube",
+			Arguments: `{"query":"rare video","limit":3}`,
+		},
+	}, llm.Message{
+		Role:       "tool",
+		ToolCallID: "call-youtube-search",
+		Content:    `not-json`,
+	}, nil, true)
+
+	if card == nil {
+		t.Fatal("expected terminal YouTube execution fallback to produce a warning card")
+	}
+	if card.Title != "YouTube selection unavailable" || card.Accent != "warning" || !card.Terminal {
+		t.Fatalf("unexpected fallback card: %+v", card)
+	}
+}
+
+func TestToolCardFromExecutionResultPrefersStructuredYouTubePayload(t *testing.T) {
+	card := toolCardFromExecutionResult(llm.ToolCall{
+		ID:   "call-youtube-search",
+		Type: "function",
+		Function: llm.ToolCallFunction{
+			Name:      "panda_search_youtube",
+			Arguments: `{"query":"rare video","limit":3}`,
+		},
+	}, llm.Message{
+		Role:       "tool",
+		ToolCallID: "call-youtube-search",
+		Content:    `not-json`,
+	}, map[string]any{"result": map[string]any{
+		"ok":       true,
+		"title":    "Choose a YouTube video",
+		"content":  "I found a few possible matches. Pick the one you want me to summarize.",
+		"accent":   "info",
+		"terminal": true,
+		"selection": map[string]any{
+			"placeholder": "Choose a video",
+			"options": []map[string]any{
+				{
+					"label":         "First Result",
+					"description":   "Creator - 2:04",
+					"value":         "video_1",
+					"url":           "https://www.youtube.com/watch?v=one",
+					"thumbnail_url": "https://i.ytimg.com/vi/one/hqdefault.jpg",
+					"command":       "chat",
+					"prompt":        "Summarize this exact YouTube video: https://www.youtube.com/watch?v=one",
+				},
+			},
+		},
+	}}, true)
+
+	if card == nil {
+		t.Fatal("expected structured YouTube payload to render as a card")
+	}
+	if card.Title != "Choose a YouTube video" || card.Accent != "info" || !card.Terminal {
+		t.Fatalf("unexpected structured card: %+v", card)
+	}
+	if card.Selection == nil || len(card.Selection.Options) != 1 {
+		t.Fatalf("expected selectable option from structured payload, got %+v", card.Selection)
+	}
+	option := card.Selection.Options[0]
+	if option.URL != "https://www.youtube.com/watch?v=one" || option.ThumbnailURL == "" || option.Prompt == "" {
+		t.Fatalf("unexpected structured selection option: %+v", option)
 	}
 }
 

@@ -107,6 +107,7 @@ func (y *YTDLP) Resolve(ctx context.Context, query string) (Track, error) {
 		StreamURL:     streamURL,
 		StreamHeaders: cleanHTTPHeaders(metadata.HTTPHeaders),
 		Uploader:      strings.TrimSpace(metadata.Uploader),
+		ThumbnailURL:  bestYTDLPThumbnailURL(metadata.Thumbnail, metadata.Thumbnails),
 		Duration:      durationFromSeconds(metadata.Duration),
 	}, nil
 }
@@ -148,7 +149,11 @@ func (y *YTDLP) Suggestions(ctx context.Context, query string, limit int) ([]Tra
 		}
 		return nil, fmt.Errorf("%w: %s", ErrTrackLookupFailed, detail)
 	}
-	return parseYTDLPSuggestions(output, query, limit)
+	tracks, err := parseYTDLPSuggestions(output, query, limit)
+	if err != nil {
+		return nil, err
+	}
+	return y.enrichSuggestions(lookupCtx, tools, tracks), nil
 }
 
 func (y *YTDLP) Stream(ctx context.Context, track Track) (OpusFrameProvider, error) {
@@ -344,8 +349,17 @@ type ytdlpMetadata struct {
 	URL         string            `json:"url"`
 	HTTPHeaders map[string]string `json:"http_headers"`
 	Uploader    string            `json:"uploader"`
+	Thumbnail   string            `json:"thumbnail"`
+	Thumbnails  []ytdlpThumbnail  `json:"thumbnails"`
 	Duration    float64           `json:"duration"`
 	Entries     []ytdlpMetadata   `json:"entries"`
+}
+
+type ytdlpThumbnail struct {
+	URL        string `json:"url"`
+	Preference int    `json:"preference"`
+	Width      int    `json:"width"`
+	Height     int    `json:"height"`
 }
 
 func parseYTDLPSuggestions(output []byte, query string, limit int) ([]Track, error) {
@@ -391,16 +405,130 @@ func suggestionTrack(metadata ytdlpMetadata, query string) (Track, bool) {
 	}
 	url := strings.TrimSpace(firstNonEmpty(metadata.WebpageURL, metadata.OriginalURL, metadata.URL))
 	if !strings.HasPrefix(url, "http://") && !strings.HasPrefix(url, "https://") {
-		url = ""
+		if id := strings.TrimSpace(metadata.ID); id != "" {
+			url = "https://www.youtube.com/watch?v=" + id
+		} else {
+			url = ""
+		}
+	}
+	if url == "" {
+		return Track{}, false
 	}
 	return Track{
-		ID:       strings.TrimSpace(metadata.ID),
-		Query:    query,
-		Title:    title,
-		URL:      url,
-		Uploader: strings.TrimSpace(metadata.Uploader),
-		Duration: durationFromSeconds(metadata.Duration),
+		ID:           strings.TrimSpace(metadata.ID),
+		Query:        query,
+		Title:        title,
+		URL:          url,
+		Uploader:     strings.TrimSpace(metadata.Uploader),
+		ThumbnailURL: bestYTDLPThumbnailURL(metadata.Thumbnail, metadata.Thumbnails),
+		Duration:     durationFromSeconds(metadata.Duration),
 	}, true
+}
+
+func (y *YTDLP) enrichSuggestions(ctx context.Context, tools ToolPaths, tracks []Track) []Track {
+	if len(tracks) == 0 {
+		return tracks
+	}
+	enriched := append([]Track(nil), tracks...)
+	for i, track := range enriched {
+		if !needsTrackSuggestionEnrichment(track) {
+			continue
+		}
+		metadata, err := y.lookupSuggestionMetadata(ctx, tools, track.URL)
+		if err != nil {
+			continue
+		}
+		if resolved, ok := suggestionTrack(metadata, track.Query); ok {
+			enriched[i] = mergeSuggestionTrack(track, resolved)
+		}
+	}
+	return enriched
+}
+
+func needsTrackSuggestionEnrichment(track Track) bool {
+	return strings.TrimSpace(track.ThumbnailURL) == "" ||
+		strings.TrimSpace(track.Uploader) == "" ||
+		track.Duration == 0
+}
+
+func (y *YTDLP) lookupSuggestionMetadata(ctx context.Context, tools ToolPaths, source string) (ytdlpMetadata, error) {
+	source = strings.TrimSpace(source)
+	if source == "" {
+		return ytdlpMetadata{}, ErrMissingSong
+	}
+	cmd := exec.CommandContext(ctx, tools.YTDLPPath,
+		"--dump-json",
+		"--no-playlist",
+		"--no-warnings",
+		"--no-cache-dir",
+		"--skip-download",
+		source,
+	)
+	var stderr limitedBuffer
+	cmd.Stderr = &stderr
+	output, err := cmd.Output()
+	if err != nil {
+		detail := strings.TrimSpace(stderr.String())
+		if ctx.Err() != nil {
+			detail = ctx.Err().Error()
+		} else if detail == "" {
+			detail = err.Error()
+		}
+		return ytdlpMetadata{}, fmt.Errorf("%w: suggestion metadata: %s", ErrTrackLookupFailed, detail)
+	}
+	var metadata ytdlpMetadata
+	if err := json.Unmarshal(output, &metadata); err != nil {
+		return ytdlpMetadata{}, fmt.Errorf("%w: parse suggestion metadata: %v", ErrTrackLookupFailed, err)
+	}
+	return metadata, nil
+}
+
+func mergeSuggestionTrack(base Track, extra Track) Track {
+	if strings.TrimSpace(base.ID) == "" {
+		base.ID = extra.ID
+	}
+	if strings.TrimSpace(base.Title) == "" {
+		base.Title = extra.Title
+	}
+	if strings.TrimSpace(base.URL) == "" {
+		base.URL = extra.URL
+	}
+	if strings.TrimSpace(base.Uploader) == "" {
+		base.Uploader = extra.Uploader
+	}
+	if strings.TrimSpace(base.ThumbnailURL) == "" {
+		base.ThumbnailURL = extra.ThumbnailURL
+	}
+	if base.Duration == 0 {
+		base.Duration = extra.Duration
+	}
+	return base
+}
+
+func bestYTDLPThumbnailURL(primary string, thumbnails []ytdlpThumbnail) string {
+	if value := strings.TrimSpace(primary); value != "" {
+		return value
+	}
+	best := ""
+	bestPreference := -1 << 30
+	bestArea := -1
+	bestIndex := -1
+	for i, thumbnail := range thumbnails {
+		url := strings.TrimSpace(thumbnail.URL)
+		if url == "" {
+			continue
+		}
+		area := thumbnail.Width * thumbnail.Height
+		if thumbnail.Preference > bestPreference ||
+			(thumbnail.Preference == bestPreference && area > bestArea) ||
+			(thumbnail.Preference == bestPreference && area == bestArea && i > bestIndex) {
+			best = url
+			bestPreference = thumbnail.Preference
+			bestArea = area
+			bestIndex = i
+		}
+	}
+	return best
 }
 
 type processOpusProvider struct {

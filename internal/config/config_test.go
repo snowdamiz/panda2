@@ -99,6 +99,11 @@ func TestLoadConfigFile(t *testing.T) {
 		"brave_search": {
 			"base_url": "https://brave.example/res/v1"
 		},
+		"lemonfox": {
+			"api_key": "lemon-from-file",
+			"base_url": "https://lemon.example/v1",
+			"youtube_audio_chunk_duration": "7m"
+		},
 		"music": {
 			"ytdlp_path": "/usr/local/bin/yt-dlp",
 			"ffmpeg_path": "/usr/local/bin/ffmpeg",
@@ -158,6 +163,9 @@ func TestLoadConfigFile(t *testing.T) {
 	if cfg.BraveSearchBaseURL != "https://brave.example/res/v1" {
 		t.Fatalf("unexpected Brave Search base URL: %q", cfg.BraveSearchBaseURL)
 	}
+	if !cfg.LemonfoxConfigured() || cfg.LemonfoxAPIKey != "lemon-from-file" || cfg.LemonfoxBaseURL != "https://lemon.example/v1" || cfg.YouTubeAudioChunkDuration.String() != "7m0s" {
+		t.Fatalf("unexpected Lemonfox config: configured=%t key=%q base=%q chunk=%s", cfg.LemonfoxConfigured(), cfg.LemonfoxAPIKey, cfg.LemonfoxBaseURL, cfg.YouTubeAudioChunkDuration)
+	}
 	if cfg.MusicYTDLPPath != "/usr/local/bin/yt-dlp" || cfg.MusicFFmpegPath != "/usr/local/bin/ffmpeg" {
 		t.Fatalf("unexpected music paths: ytdlp=%q ffmpeg=%q", cfg.MusicYTDLPPath, cfg.MusicFFmpegPath)
 	}
@@ -204,6 +212,9 @@ func TestEnvOverridesConfigFile(t *testing.T) {
 	t.Setenv("OPENROUTER_ALLOW_PROVIDER_FALLBACKS", "false")
 	t.Setenv("BRAVE_SEARCH_API_KEY", "brave-key")
 	t.Setenv("BRAVE_SEARCH_BASE_URL", "https://brave-env.example/res/v1")
+	t.Setenv("LEMONFOX_API_KEY", "lemon-from-env")
+	t.Setenv("LEMONFOX_BASE_URL", "https://lemon-env.example/v1")
+	t.Setenv("YOUTUBE_AUDIO_CHUNK_DURATION", "4m")
 	t.Setenv("YTDLP_PATH", "/opt/bin/yt-dlp")
 	t.Setenv("FFMPEG_PATH", "/opt/bin/ffmpeg")
 	t.Setenv("MUSIC_SIDECAR_DIR", "/opt/panda/music-bin")
@@ -242,6 +253,9 @@ func TestEnvOverridesConfigFile(t *testing.T) {
 	}
 	if !cfg.BraveSearchConfigured() || cfg.BraveSearchBaseURL != "https://brave-env.example/res/v1" {
 		t.Fatalf("expected env Brave Search settings, configured=%t base=%q", cfg.BraveSearchConfigured(), cfg.BraveSearchBaseURL)
+	}
+	if !cfg.LemonfoxConfigured() || cfg.LemonfoxAPIKey != "lemon-from-env" || cfg.LemonfoxBaseURL != "https://lemon-env.example/v1" || cfg.YouTubeAudioChunkDuration.String() != "4m0s" {
+		t.Fatalf("expected env Lemonfox settings, configured=%t key=%q base=%q chunk=%s", cfg.LemonfoxConfigured(), cfg.LemonfoxAPIKey, cfg.LemonfoxBaseURL, cfg.YouTubeAudioChunkDuration)
 	}
 	if cfg.MusicYTDLPPath != "/opt/bin/yt-dlp" || cfg.MusicFFmpegPath != "/opt/bin/ffmpeg" {
 		t.Fatalf("expected env music paths, ytdlp=%q ffmpeg=%q", cfg.MusicYTDLPPath, cfg.MusicFFmpegPath)
@@ -487,6 +501,9 @@ func clearConfigEnv(t *testing.T) {
 		"OPENROUTER_CIRCUIT_COOLDOWN",
 		"BRAVE_SEARCH_API_KEY",
 		"BRAVE_SEARCH_BASE_URL",
+		"LEMONFOX_API_KEY",
+		"LEMONFOX_BASE_URL",
+		"YOUTUBE_AUDIO_CHUNK_DURATION",
 		"PUBLIC_APP_URL",
 		"BILLING_ALLOWED_ORIGINS",
 		"SOLANA_RPC_URL",
