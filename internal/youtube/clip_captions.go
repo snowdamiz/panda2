@@ -588,22 +588,70 @@ func buildClipASSSubtitle(plan ClipCaptionPlan, renderPlan ClipFrameRenderPlan, 
 		if err != nil {
 			return "", fmt.Errorf("youtube clip captions failed: %w", err)
 		}
-		eventText := captionASSEventText(text, words, cue.EmphasisWordIDs, region, target, style)
-		if strings.TrimSpace(eventText) == "" {
-			continue
+		events := captionASSDialogueEvents(text, words, cue.EmphasisWordIDs, region, target, style, sourceStart, sourceEnd)
+		for _, event := range events {
+			if strings.TrimSpace(event.Text) == "" {
+				continue
+			}
+			start := math.Max(0, event.StartSeconds-renderPlan.SourceStartSeconds)
+			end := math.Max(start+0.05, event.EndSeconds-renderPlan.SourceStartSeconds)
+			builder.WriteString(fmt.Sprintf(
+				"Dialogue: 0,%s,%s,PandaCaption,,0,0,0,,%s%s\n",
+				formatASSTime(start),
+				formatASSTime(end),
+				captionASSRegionOverride(region, target),
+				event.Text,
+			))
 		}
-		start := math.Max(0, sourceStart-renderPlan.SourceStartSeconds)
-		end := math.Max(start+0.05, sourceEnd-renderPlan.SourceStartSeconds)
-		builder.WriteString(fmt.Sprintf(
-			"Dialogue: 0,%s,%s,PandaCaption,,0,0,0,,%s%s%s\n",
-			formatASSTime(start),
-			formatASSTime(end),
-			captionASSRegionOverride(region, target),
-			captionASSFitOverride(eventText, region, target, style),
-			eventText,
-		))
 	}
 	return builder.String(), nil
+}
+
+type captionASSDialogueEvent struct {
+	StartSeconds float64
+	EndSeconds   float64
+	Text         string
+}
+
+func captionASSDialogueEvents(text string, words []TranscriptWord, emphasisWordIDs []string, region ClipCaptionRegion, target ClipResolution, style clipCaptionASSStyle, sourceStart float64, sourceEnd float64) []captionASSDialogueEvent {
+	if len(words) > 0 {
+		chunks := captionWordChunks(words, region, target)
+		events := make([]captionASSDialogueEvent, 0, len(chunks))
+		for _, chunk := range chunks {
+			eventText := captionASSEventText("", chunk, emphasisWordIDs, region, target, style)
+			if strings.TrimSpace(eventText) == "" {
+				continue
+			}
+			events = append(events, captionASSDialogueEvent{
+				StartSeconds: chunk[0].StartSeconds,
+				EndSeconds:   chunk[len(chunk)-1].EndSeconds,
+				Text:         eventText,
+			})
+		}
+		return events
+	}
+	chunks := captionTextChunks(text, region, target)
+	if len(chunks) == 0 {
+		return nil
+	}
+	duration := sourceEnd - sourceStart
+	if duration <= 0 {
+		duration = float64(len(chunks)) * 0.5
+	}
+	events := make([]captionASSDialogueEvent, 0, len(chunks))
+	for index, chunk := range chunks {
+		start := sourceStart + duration*float64(index)/float64(len(chunks))
+		end := sourceStart + duration*float64(index+1)/float64(len(chunks))
+		if end <= start {
+			end = start + 0.05
+		}
+		events = append(events, captionASSDialogueEvent{
+			StartSeconds: start,
+			EndSeconds:   end,
+			Text:         captionASSEventText(strings.Join(chunk, " "), nil, emphasisWordIDs, region, target, style),
+		})
+	}
+	return events
 }
 
 func captionASSEventText(text string, words []TranscriptWord, emphasisWordIDs []string, region ClipCaptionRegion, target ClipResolution, style clipCaptionASSStyle) string {
@@ -639,6 +687,96 @@ func captionASSEventText(text string, words []TranscriptWord, emphasisWordIDs []
 		tokens = append(tokens, token)
 	}
 	return assLineBreakTokens(tokens, maxLines, maxVisibleChars)
+}
+
+func captionWordChunks(words []TranscriptWord, region ClipCaptionRegion, target ClipResolution) [][]TranscriptWord {
+	chunks := make([][]TranscriptWord, 0)
+	current := make([]TranscriptWord, 0, maxCaptionWordsPerLine*captionMaxLines(region))
+	lineCount := 1
+	lineWords := 0
+	lineVisible := 0
+	maxLines := captionMaxLines(region)
+	maxVisibleChars := captionMaxLineVisibleChars(region, target)
+	for _, word := range words {
+		if cleanTranscriptText(word.Text) == "" {
+			continue
+		}
+		visible := captionVisibleRuneCount(word.Text)
+		if len(current) > 0 && captionTokenWouldOverflowLine(lineWords, lineVisible, visible, maxVisibleChars) {
+			if lineCount < maxLines {
+				lineCount++
+				lineWords = 0
+				lineVisible = 0
+			} else {
+				chunks = append(chunks, current)
+				current = make([]TranscriptWord, 0, maxCaptionWordsPerLine*maxLines)
+				lineCount = 1
+				lineWords = 0
+				lineVisible = 0
+			}
+		}
+		if lineWords > 0 {
+			lineVisible++
+		}
+		current = append(current, word)
+		lineWords++
+		lineVisible += visible
+	}
+	if len(current) > 0 {
+		chunks = append(chunks, current)
+	}
+	return chunks
+}
+
+func captionTextChunks(text string, region ClipCaptionRegion, target ClipResolution) [][]string {
+	fields := strings.Fields(cleanTranscriptText(text))
+	if len(fields) == 0 {
+		return nil
+	}
+	chunks := make([][]string, 0)
+	current := make([]string, 0, maxCaptionWordsPerLine*captionMaxLines(region))
+	lineCount := 1
+	lineWords := 0
+	lineVisible := 0
+	maxLines := captionMaxLines(region)
+	maxVisibleChars := captionMaxLineVisibleChars(region, target)
+	for _, field := range fields {
+		visible := captionVisibleRuneCount(field)
+		if len(current) > 0 && captionTokenWouldOverflowLine(lineWords, lineVisible, visible, maxVisibleChars) {
+			if lineCount < maxLines {
+				lineCount++
+				lineWords = 0
+				lineVisible = 0
+			} else {
+				chunks = append(chunks, current)
+				current = make([]string, 0, maxCaptionWordsPerLine*maxLines)
+				lineCount = 1
+				lineWords = 0
+				lineVisible = 0
+			}
+		}
+		if lineWords > 0 {
+			lineVisible++
+		}
+		current = append(current, field)
+		lineWords++
+		lineVisible += visible
+	}
+	if len(current) > 0 {
+		chunks = append(chunks, current)
+	}
+	return chunks
+}
+
+func captionTokenWouldOverflowLine(lineWords int, lineVisible int, tokenVisible int, maxVisibleChars int) bool {
+	if lineWords == 0 {
+		return false
+	}
+	return lineWords >= maxCaptionWordsPerLine || lineVisible+1+tokenVisible > maxVisibleChars
+}
+
+func captionVisibleRuneCount(text string) int {
+	return len([]rune(cleanTranscriptText(text)))
 }
 
 func assLineBreaks(text string, wordCount int, maxLines int, maxVisibleChars int) string {
@@ -718,35 +856,6 @@ func captionMaxLineVisibleChars(region ClipCaptionRegion, target ClipResolution)
 	return maxChars
 }
 
-func captionASSFitOverride(eventText string, region ClipCaptionRegion, target ClipResolution, style clipCaptionASSStyle) string {
-	baseFontSize := captionFontSize(target)
-	maxWidth := captionAvailableTextWidth(region, target, style)
-	if baseFontSize <= 0 || maxWidth <= 0 {
-		return ""
-	}
-	estimatedWidth := captionEstimatedMaxLineWidth(eventText, baseFontSize, captionStyleScaleX)
-	if estimatedWidth <= maxWidth {
-		return ""
-	}
-	fittedFontSize := int(math.Floor(float64(baseFontSize) * float64(maxWidth) / float64(estimatedWidth)))
-	minFontSize := captionMinFittedFontSize(target)
-	if fittedFontSize < minFontSize {
-		fittedFontSize = minFontSize
-	}
-	fittedWidth := captionEstimatedMaxLineWidth(eventText, fittedFontSize, captionStyleScaleX)
-	if fittedWidth <= maxWidth {
-		return fmt.Sprintf("{\\fs%d}", fittedFontSize)
-	}
-	scaleX := int(math.Floor(float64(captionStyleScaleX) * float64(maxWidth) / float64(fittedWidth)))
-	if scaleX < 58 {
-		scaleX = 58
-	}
-	if scaleX > captionStyleScaleX {
-		scaleX = captionStyleScaleX
-	}
-	return fmt.Sprintf("{\\fs%d\\fscx%d}", fittedFontSize, scaleX)
-}
-
 func captionAvailableTextWidth(region ClipCaptionRegion, target ClipResolution, style clipCaptionASSStyle) int {
 	rect := outputPixelRect(region.OutputRect, target)
 	padding := captionRegionHorizontalPadding(target)
@@ -801,66 +910,6 @@ func captionMinInt(left int, right int) int {
 		return left
 	}
 	return right
-}
-
-func captionMinFittedFontSize(target ClipResolution) int {
-	size := int(math.Round(float64(target.Height) * 0.032))
-	if size < 40 {
-		return 40
-	}
-	if size > 62 {
-		return 62
-	}
-	return size
-}
-
-func captionEstimatedMaxLineWidth(eventText string, fontSize int, scaleX int) int {
-	maxWeight := 0.0
-	for _, line := range strings.Split(eventText, `\N`) {
-		weight := assVisibleLineWeight(line)
-		if weight > maxWeight {
-			maxWeight = weight
-		}
-	}
-	return int(math.Ceil(maxWeight * float64(fontSize) * float64(scaleX) / 100))
-}
-
-func assVisibleLineWeight(text string) float64 {
-	weight := 0.0
-	inOverride := false
-	for _, r := range text {
-		switch r {
-		case '{':
-			inOverride = true
-		case '}':
-			inOverride = false
-		default:
-			if inOverride {
-				continue
-			}
-			weight += assVisibleRuneWeight(r)
-		}
-	}
-	return weight
-}
-
-func assVisibleRuneWeight(r rune) float64 {
-	switch {
-	case unicode.IsSpace(r):
-		return 0.32
-	case strings.ContainsRune(".,:;!|'`", r):
-		return 0.22
-	case strings.ContainsRune("MWmw", r):
-		return 0.95
-	case strings.ContainsRune("Iil1", r):
-		return 0.34
-	case unicode.IsUpper(r):
-		return 0.68
-	case unicode.IsDigit(r):
-		return 0.56
-	default:
-		return 0.58
-	}
 }
 
 func assTokenVisibleRuneCount(token string) int {

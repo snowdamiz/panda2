@@ -263,7 +263,8 @@ func (s *Service) Clip(ctx context.Context, request ClipRequest) (ClipResult, er
 func clipCompositionTranscriptTimeline(decision ClipDecision, transcript []TranscriptSegment) []ClipCompositionTranscriptSegment {
 	timeline := make([]ClipCompositionTranscriptSegment, 0)
 	for segmentIndex, clipSegment := range decision.Segments {
-		for _, sourceSegment := range transcript {
+		sourceSegments := transcriptSegmentsForClipDecisionSegment(clipSegment, transcript)
+		for _, sourceSegment := range sourceSegments {
 			if sourceSegment.EndSeconds < clipSegment.StartSeconds-0.05 || sourceSegment.StartSeconds > clipSegment.EndSeconds+0.05 {
 				continue
 			}
@@ -282,6 +283,17 @@ func clipCompositionTranscriptTimeline(decision ClipDecision, transcript []Trans
 		}
 	}
 	return timeline
+}
+
+func transcriptSegmentsForClipDecisionSegment(clipSegment ClipDecisionSegment, transcript []TranscriptSegment) []TranscriptSegment {
+	if clipSegment.StartSegmentIndex != nil && clipSegment.EndSegmentIndex != nil {
+		start := *clipSegment.StartSegmentIndex
+		end := *clipSegment.EndSegmentIndex
+		if start >= 0 && end >= start && end < len(transcript) {
+			return transcript[start : end+1]
+		}
+	}
+	return transcript
 }
 
 func reportClipProgress(request ClipRequest, status string) {

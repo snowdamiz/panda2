@@ -34,6 +34,13 @@ func (f *fakeClipLLM) Chat(_ context.Context, request llm.ChatRequest) (llm.Chat
 	return f.response, f.err
 }
 
+func closeFloat(left float64, right float64) bool {
+	if left > right {
+		return left-right < 0.001
+	}
+	return right-left < 0.001
+}
+
 type blockingClipLLM struct {
 	requests []llm.ChatRequest
 	release  chan struct{}
@@ -74,7 +81,7 @@ func TestOpenRouterClipDetectorUsesConfiguredModelAndJSONSchemaPrompt(t *testing
 	if err != nil {
 		t.Fatalf("Detect: %v", err)
 	}
-	if len(decision.Clips) != 2 || decision.Clips[0].Title != "Best Moment" || decision.Clips[0].Type != "spliced" || len(decision.Clips[0].Segments) != 2 || decision.Clips[0].Segments[0].StartSeconds != 10 || decision.Clips[0].Segments[0].EndSeconds != 18 || decision.Clips[0].Segments[1].EndSeconds != 27 {
+	if len(decision.Clips) != 2 || decision.Clips[0].Title != "Best Moment" || decision.Clips[0].Type != "spliced" || len(decision.Clips[0].Segments) != 2 || !closeFloat(decision.Clips[0].Segments[0].StartSeconds, 9.82) || !closeFloat(decision.Clips[0].Segments[0].EndSeconds, 18.28) || !closeFloat(decision.Clips[0].Segments[1].StartSeconds, 20.82) || !closeFloat(decision.Clips[0].Segments[1].EndSeconds, 27.28) {
 		t.Fatalf("unexpected decision: %+v", decision)
 	}
 	if decision.Clips[0].Segments[0].Transcript != "The important part starts here. The setup gets sharper." {
@@ -118,6 +125,33 @@ func TestOpenRouterClipDetectorUsesConfiguredModelAndJSONSchemaPrompt(t *testing
 	}
 	if !strings.Contains(systemPrompt, "at least 2") || !strings.Contains(systemPrompt, "max_clips") || !strings.Contains(request.Messages[1].Content, "clip the key explanation") || !strings.Contains(request.Messages[1].Content, "transcript_segments") || !strings.Contains(request.Messages[1].Content, `"index":0`) || !strings.Contains(request.Messages[1].Content, `"min_clips":2`) || !strings.Contains(request.Messages[1].Content, `"max_clips":12`) {
 		t.Fatalf("expected structured detector input, got %s", request.Messages[1].Content)
+	}
+}
+
+func TestOpenRouterClipDetectorTrimsBoundaryPaddingToMaxDuration(t *testing.T) {
+	client := &fakeClipLLM{
+		response: llm.ChatResponse{
+			Content: `{"clips":[{"rank":1,"title":"Full Length","type":"continuous","segments":[{"start_segment_index":0,"end_segment_index":0,"start_seconds":10,"end_seconds":40,"transcript":"The full length moment lands cleanly."}],"reason":"Strong standalone moment.","confidence":0.8,"virality_score":82,"hook_score":85,"retention_score":80,"shareability_score":81,"duration_policy":"requested_duration","exception_reason":""},{"rank":2,"title":"Second Moment","type":"continuous","segments":[{"start_segment_index":1,"end_segment_index":1,"start_seconds":45,"end_seconds":55,"transcript":"The second moment lands."}],"reason":"Second viable clip from the same video.","confidence":0.75,"virality_score":76,"hook_score":78,"retention_score":74,"shareability_score":75,"duration_policy":"short_exception","exception_reason":"Standalone soundbite works shorter."}]}`,
+		},
+	}
+	detector := NewOpenRouterClipDetector(ClipDetectorConfig{Client: client, Model: "provider/clip-model"})
+
+	result, err := detector.Detect(context.Background(), ClipDetectionRequest{
+		Duration:           time.Minute,
+		Instructions:       "clip something",
+		MinDurationSeconds: 5,
+		MaxDurationSeconds: 30,
+		Segments: []TranscriptSegment{
+			{StartSeconds: 10, EndSeconds: 40, Text: "The full length moment lands cleanly."},
+			{StartSeconds: 45, EndSeconds: 55, Text: "The second moment lands."},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Detect: %v", err)
+	}
+	first := result.Clips[0].Segments[0]
+	if !closeFloat(first.StartSeconds, 10) || !closeFloat(first.EndSeconds, 40) {
+		t.Fatalf("expected padding to be trimmed when base clip is already at max duration, got %+v", first)
 	}
 }
 

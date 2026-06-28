@@ -18,6 +18,9 @@ const (
 	defaultClipDetectionTimeout   = 2 * time.Minute
 	clipDetectionMaxSegments      = 6
 	clipDetectionInputMaxBytes    = 180000
+	clipBoundaryLeadPadSeconds    = 0.18
+	clipBoundaryTailPadSeconds    = 0.28
+	clipBoundaryMinGapSeconds     = 0.02
 )
 
 type OpenRouterClipDetector struct {
@@ -145,7 +148,7 @@ func parseAndValidateClipDetection(content string, request ClipDetectionRequest,
 	if err := decoder.Decode(&result); err != nil {
 		return ClipDetectionResult{}, fmt.Errorf("parse clip detection response: %w", err)
 	}
-	result, err := alignClipDetectionResultToTranscript(result, request.Segments)
+	result, err := alignClipDetectionResultToTranscript(result, request)
 	if err != nil {
 		return ClipDetectionResult{}, err
 	}
@@ -255,6 +258,7 @@ func clipDetectionSystemPrompt() string {
 		"Return clips in rank order with rank values 1..N and no gaps.",
 		"Transcript segments are atomic cut units. Every returned segment must choose a contiguous inclusive transcript segment range using start_segment_index and end_segment_index.",
 		"Set start_seconds exactly to transcript_segments[start_segment_index].start_seconds and end_seconds exactly to transcript_segments[end_segment_index].end_seconds. Do not invent interior timestamps.",
+		"Panda adds a small render-safe lead-in and tail after validation, so choose transcript indexes for complete meaning instead of trying to compensate with invented timestamps.",
 		"Set transcript to the exact source text covered by that inclusive range, lightly joined with spaces only when the range spans multiple transcript segments.",
 		"Each clip may be type=continuous with one segment or type=spliced with 2-6 ordered segments. Use spliced clips when cutting dead air, repeated filler, meandering setup, or distant setup/payoff moments creates a more cohesive short-form story.",
 		"Clip type must match segment count exactly: continuous means exactly one returned segment; spliced means two to six returned segments. Never label a multi-segment clip as continuous.",
@@ -264,6 +268,7 @@ func clipDetectionSystemPrompt() string {
 		"Choose hook-first boundaries: the first 0.5-2 seconds should contain the strongest hook, emotional spike, bold claim, question, contradiction, consequence, funny reaction, or open loop.",
 		"Do not start on filler, weak connective words, dangling prepositions, or contextless pronouns. Move the start_segment_index to a clean sentence, clause, quote, question, or reaction start.",
 		"End after the thought, punchline, reveal, or exchange lands. Do not end mid-sentence, mid-word, or on weak connective words, prepositions, setup-only clauses, or unresolved references.",
+		"If the best moment starts or ends inside an ongoing idea, extend to the neighboring transcript segment that completes the idea; skip the candidate if it only works with a mid-thought cut.",
 		"Every clip must make sense when watched alone. Include the minimum setup needed for pronouns, stakes, contrast, punchline, or payoff; skip candidates that only work with missing context.",
 		"If a transcript segment boundary forces an awkward opening or ending, choose the neighboring segment boundary that makes the phrase complete, or skip that candidate.",
 		"Duration policy: target 30-45 seconds by default; use shorter clips only for extreme standalone reactions, memes, quotable soundbites, or user-requested brevity; use longer clips only when setup and payoff truly require it. Always obey the min/max constraints.",
@@ -405,7 +410,8 @@ func indexedClipDetectionTranscriptSegments(segments []TranscriptSegment) []clip
 	return indexed
 }
 
-func alignClipDetectionResultToTranscript(result ClipDetectionResult, transcript []TranscriptSegment) (ClipDetectionResult, error) {
+func alignClipDetectionResultToTranscript(result ClipDetectionResult, request ClipDetectionRequest) (ClipDetectionResult, error) {
+	transcript := request.Segments
 	if len(transcript) == 0 {
 		return result, fmt.Errorf("timestamped transcript segments are required")
 	}
@@ -420,9 +426,103 @@ func alignClipDetectionResultToTranscript(result ClipDetectionResult, transcript
 			}
 			alignedClip.Segments = append(alignedClip.Segments, alignedSegment)
 		}
+		alignedClip.Segments = padClipDecisionSegmentBoundaries(alignedClip.Segments, request.Duration, durationSeconds(request.MaxDurationSeconds))
 		aligned.Clips = append(aligned.Clips, alignedClip)
 	}
 	return aligned, nil
+}
+
+func padClipDecisionSegmentBoundaries(segments []ClipDecisionSegment, videoDuration time.Duration, maxDuration time.Duration) []ClipDecisionSegment {
+	if len(segments) == 0 {
+		return nil
+	}
+	padded := make([]ClipDecisionSegment, len(segments))
+	baseStarts := make([]float64, len(segments))
+	baseEnds := make([]float64, len(segments))
+	videoEnd := videoDuration.Seconds()
+	for index, segment := range segments {
+		padded[index] = segment
+		baseStarts[index] = segment.StartSeconds
+		baseEnds[index] = segment.EndSeconds
+		padded[index].StartSeconds = segment.StartSeconds - clipBoundaryLeadPadSeconds
+		if padded[index].StartSeconds < 0 {
+			padded[index].StartSeconds = 0
+		}
+		padded[index].EndSeconds = segment.EndSeconds + clipBoundaryTailPadSeconds
+		if videoEnd > 0 && padded[index].EndSeconds > videoEnd {
+			padded[index].EndSeconds = videoEnd
+		}
+	}
+	for index := 1; index < len(padded); index++ {
+		if padded[index-1].EndSeconds <= padded[index].StartSeconds-clipBoundaryMinGapSeconds {
+			continue
+		}
+		gapStart := baseEnds[index-1]
+		gapEnd := baseStarts[index]
+		if gapEnd-gapStart > clipBoundaryMinGapSeconds {
+			boundary := (gapStart + gapEnd) / 2
+			previousEnd := boundary - clipBoundaryMinGapSeconds/2
+			nextStart := boundary + clipBoundaryMinGapSeconds/2
+			if padded[index-1].EndSeconds > previousEnd {
+				padded[index-1].EndSeconds = previousEnd
+			}
+			if padded[index].StartSeconds < nextStart {
+				padded[index].StartSeconds = nextStart
+			}
+			continue
+		}
+		padded[index-1].EndSeconds = baseEnds[index-1]
+		padded[index].StartSeconds = baseStarts[index]
+	}
+	if maxDuration > 0 {
+		trimClipBoundaryPaddingToMax(padded, baseStarts, baseEnds, maxDuration.Seconds())
+	}
+	return padded
+}
+
+func trimClipBoundaryPaddingToMax(segments []ClipDecisionSegment, baseStarts []float64, baseEnds []float64, maxSeconds float64) {
+	if maxSeconds <= 0 {
+		return
+	}
+	total := clipDecisionSegmentsTotalSeconds(segments)
+	excess := total - maxSeconds
+	if excess <= 0 {
+		return
+	}
+	for index := range segments {
+		endPadding := segments[index].EndSeconds - baseEnds[index]
+		if endPadding > 0 {
+			trim := endPadding
+			if trim > excess {
+				trim = excess
+			}
+			segments[index].EndSeconds -= trim
+			excess -= trim
+			if excess <= 0 {
+				return
+			}
+		}
+		startPadding := baseStarts[index] - segments[index].StartSeconds
+		if startPadding > 0 {
+			trim := startPadding
+			if trim > excess {
+				trim = excess
+			}
+			segments[index].StartSeconds += trim
+			excess -= trim
+			if excess <= 0 {
+				return
+			}
+		}
+	}
+}
+
+func clipDecisionSegmentsTotalSeconds(segments []ClipDecisionSegment) float64 {
+	total := 0.0
+	for _, segment := range segments {
+		total += segment.EndSeconds - segment.StartSeconds
+	}
+	return total
 }
 
 func alignClipDecisionSegmentToTranscript(segment ClipDecisionSegment, transcript []TranscriptSegment) (ClipDecisionSegment, error) {

@@ -467,28 +467,48 @@ func TestBuildClipASSSubtitleOpusDefaultUppercasesAndWraps(t *testing.T) {
 	}
 }
 
-func TestCaptionASSFitOverrideShrinksLongLinesWithinRegion(t *testing.T) {
+func TestBuildClipASSSubtitleSplitsDenseCueWithoutFontOverrides(t *testing.T) {
 	target := ClipResolution{Width: 1080, Height: 1920}
-	region := ClipCaptionRegion{
-		ID:              "global_captions",
-		OutputRect:      ClipRect{X: 250, Y: 720, W: 500, H: 160},
-		HorizontalAlign: clipCaptionAlignCenter,
-		VerticalAlign:   clipCaptionAlignMiddle,
-		MaxLines:        2,
-		ZIndex:          20,
+	request := captionTestCompositionRequest()
+	request.TranscriptTimeline[0].Text = "By unlawfully retaining national defense information after leaving office"
+	request.TranscriptTimeline[0].Words = []TranscriptWord{
+		{ID: "w_0001", StartSeconds: 10.00, EndSeconds: 10.18, Text: "By"},
+		{ID: "w_0002", StartSeconds: 10.19, EndSeconds: 10.62, Text: "unlawfully"},
+		{ID: "w_0003", StartSeconds: 10.63, EndSeconds: 11.03, Text: "retaining"},
+		{ID: "w_0004", StartSeconds: 11.04, EndSeconds: 11.34, Text: "national"},
+		{ID: "w_0005", StartSeconds: 11.35, EndSeconds: 11.75, Text: "defense"},
+		{ID: "w_0006", StartSeconds: 11.76, EndSeconds: 12.18, Text: "information"},
+		{ID: "w_0007", StartSeconds: 12.19, EndSeconds: 12.48, Text: "after"},
+		{ID: "w_0008", StartSeconds: 12.49, EndSeconds: 12.82, Text: "leaving"},
+		{ID: "w_0009", StartSeconds: 12.83, EndSeconds: 13.12, Text: "office"},
 	}
+	result := captionTestCompositionResult()
+	result.CaptionPlan.Regions[0].OutputRect = ClipRect{X: 250, Y: 720, W: 500, H: 160}
+	result.CaptionPlan.Cues[0].WordIDs = []string{"w_0001", "w_0009"}
+	refs := newClipCaptionReferences(request.TranscriptTimeline)
 	style := clipCaptionASSStyle{
+		Font:            clipCaptionResolvedFont{Key: clipCaptionFontDefault, Family: "Arial", Path: "/fonts/Arial.ttf"},
+		PrimaryColor:    "&H00FFFFFF",
+		HighlightColor:  "&H0000E6FF",
+		BorderColor:     "&H00000000",
+		BackColor:       "&H80000000",
+		BorderStyle:     1,
 		BorderThickness: captionBorderSize(target, clipCaptionBorderThick),
 		ShadowSize:      captionShadowSize(target),
+		Uppercase:       true,
 	}
-	eventText := `{\\k20}BY\N{\\k52}UNLAWFULLY {\\k48}RETAINING`
 
-	override := captionASSFitOverride(eventText, region, target, style)
-	if !strings.Contains(override, `\fs`) {
-		t.Fatalf("expected long caption line to receive a fit override, got %q", override)
+	ass, err := buildClipASSSubtitle(*result.CaptionPlan, result.Plans[0], target, refs, style)
+	if err != nil {
+		t.Fatalf("buildClipASSSubtitle: %v", err)
 	}
-	if captionEstimatedMaxLineWidth(eventText, captionFontSize(target), captionStyleScaleX) <= captionAvailableTextWidth(region, target, style) {
-		t.Fatalf("test fixture should exceed available width without fitting")
+	if count := strings.Count(ass, "Dialogue: "); count < 2 {
+		t.Fatalf("expected dense caption cue to split into multiple events, got %d in %s", count, ass)
+	}
+	for _, forbidden := range []string{`\fs`, `\fscx`} {
+		if strings.Contains(ass, forbidden) {
+			t.Fatalf("caption events must keep one clip-wide font size, found %s in %s", forbidden, ass)
+		}
 	}
 }
 

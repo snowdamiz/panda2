@@ -446,6 +446,28 @@ func TestResolveCaptionFontUsesConfiguredDefaultFont(t *testing.T) {
 	}
 }
 
+func TestClipCompositionTranscriptTimelineUsesSegmentIndexesWithPaddedBoundaries(t *testing.T) {
+	startIndex := 1
+	endIndex := 1
+	timeline := clipCompositionTranscriptTimeline(ClipDecision{
+		Segments: []ClipDecisionSegment{{
+			StartSegmentIndex: &startIndex,
+			EndSegmentIndex:   &endIndex,
+			StartSeconds:      9.82,
+			EndSeconds:        18.28,
+			Transcript:        "selected idea",
+		}},
+	}, []TranscriptSegment{
+		{ID: "before", StartSeconds: 8, EndSeconds: 10, Text: "previous idea"},
+		{ID: "selected", StartSeconds: 10, EndSeconds: 18, Text: "selected idea"},
+		{ID: "after", StartSeconds: 18, EndSeconds: 20, Text: "next idea"},
+	})
+
+	if len(timeline) != 1 || timeline[0].ID != "selected" || timeline[0].Text != "selected idea" {
+		t.Fatalf("expected padded clip boundary to keep indexed transcript segment only, got %+v", timeline)
+	}
+}
+
 func TestClipRejectsInvalidDetectorTimestamps(t *testing.T) {
 	err := validateClipDecision(ClipDecision{
 		Rank:  1,
