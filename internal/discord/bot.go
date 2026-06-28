@@ -52,6 +52,8 @@ type Bot struct {
 	music       *music.Manager
 	installs    *InstallService
 	closeOnce   sync.Once
+
+	selectionRequestHandler func(applicationID snowflake.ID, token string, request commands.Request)
 }
 
 type AttachmentRecorder interface {
@@ -887,6 +889,18 @@ func (b *Bot) onStringSelectInteraction(event *events.ComponentInteractionCreate
 		b.logger.Warn("failed to defer selection", slog.Any("err", err), slog.String("request_id", selectedRequest.RequestID))
 		return
 	}
+	b.handleSelectionRequestAsync(event.ApplicationID(), event.Token(), selectedRequest)
+}
+
+func (b *Bot) handleSelectionRequestAsync(applicationID snowflake.ID, token string, request commands.Request) {
+	handler := b.handleSelectionRequest
+	if b.selectionRequestHandler != nil {
+		handler = b.selectionRequestHandler
+	}
+	go handler(applicationID, token, request)
+}
+
+func (b *Bot) handleSelectionRequest(applicationID snowflake.ID, token string, selectedRequest commands.Request) {
 	working := commands.Response{
 		Content: "Working on the selected result...",
 		Presentation: commands.Presentation{
@@ -894,11 +908,11 @@ func (b *Bot) onStringSelectInteraction(event *events.ComponentInteractionCreate
 			Accent: commands.AccentInfo,
 		},
 	}
-	if err := b.updateInteractionResponse(b.client.ApplicationID, event.Token(), working); err != nil {
+	if err := b.updateInteractionResponse(applicationID, token, working); err != nil {
 		b.logger.Warn("failed to update selection working response", slog.Any("err", err), slog.String("request_id", selectedRequest.RequestID))
 	}
 	response := b.router.Handle(context.Background(), selectedRequest)
-	if err := b.updateInteractionResponse(b.client.ApplicationID, event.Token(), response); err != nil {
+	if err := b.updateInteractionResponse(applicationID, token, response); err != nil {
 		b.logger.Warn("failed to update selection response", slog.Any("err", err), slog.String("request_id", selectedRequest.RequestID))
 		b.releaseResponseUsage(context.Background(), response, selectedRequest.RequestID, selectedRequest.Command)
 		return
@@ -2013,11 +2027,13 @@ func (b *Bot) userVoiceChannelID(ctx context.Context, guildIDValue string, userI
 	if err != nil {
 		return ""
 	}
-	state, ok := b.client.Caches.VoiceState(guildID, userID)
-	if !ok || state.ChannelID == nil {
-		return b.userVoiceChannelIDFromREST(ctx, guildID, userID)
+	if b.client.Caches != nil {
+		state, ok := b.client.Caches.VoiceState(guildID, userID)
+		if ok && state.ChannelID != nil {
+			return state.ChannelID.String()
+		}
 	}
-	return state.ChannelID.String()
+	return b.userVoiceChannelIDFromREST(ctx, guildID, userID)
 }
 
 func (b *Bot) userVoiceChannelIDFromREST(ctx context.Context, guildID snowflake.ID, userID snowflake.ID) string {

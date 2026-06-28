@@ -13,6 +13,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	disgoBot "github.com/disgoorg/disgo/bot"
 	disgoDiscord "github.com/disgoorg/disgo/discord"
 	"github.com/disgoorg/disgo/events"
 	"github.com/disgoorg/disgo/rest"
@@ -229,6 +230,113 @@ func TestGuildCommandRegistrationClearsGlobalCommandsAfterGuildSync(t *testing.T
 	}
 	if len(guildSync.commands) != len(commands) {
 		t.Fatalf("expected %d guild commands, got %d", len(commands), len(guildSync.commands))
+	}
+}
+
+func TestStringSelectInteractionDispatchesSelectionAsync(t *testing.T) {
+	userID := "100000000000000101"
+	selection := commands.PrepareSelectionForUser(userID, &commands.Selection{
+		Options: []commands.SelectionOption{{
+			Label:          "Selected track",
+			Value:          "track_1",
+			Command:        "chat",
+			Prompt:         "Play this exact YouTube result: https://www.youtube.com/watch?v=track",
+			VoiceChannelID: "100000000000000404",
+		}},
+	})
+	if selection == nil {
+		t.Fatal("expected prepared selection")
+	}
+
+	applicationID := snowflake.MustParse("100000000000000200")
+	event := selectionComponentInteractionEvent(t, selection.ID, "track_1", applicationID, snowflake.MustParse("100000000000000300"), snowflake.MustParse("100000000000000301"), snowflake.MustParse(userID))
+	var responseTypes []disgoDiscord.InteractionResponseType
+	event.Respond = func(responseType disgoDiscord.InteractionResponseType, _ disgoDiscord.InteractionResponseData, _ ...rest.RequestOpt) error {
+		responseTypes = append(responseTypes, responseType)
+		return nil
+	}
+
+	started := make(chan commands.Request, 1)
+	release := make(chan struct{})
+	t.Cleanup(func() {
+		close(release)
+	})
+	bot := &Bot{
+		cfg: config.Config{OwnerUserIDs: map[string]struct{}{userID: {}}},
+		client: &disgoBot.Client{
+			ApplicationID: applicationID,
+		},
+		selectionRequestHandler: func(_ snowflake.ID, _ string, request commands.Request) {
+			started <- request
+			<-release
+		},
+	}
+
+	done := make(chan struct{})
+	go func() {
+		bot.onStringSelectInteraction(event)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("select interaction handler blocked on selected request work")
+	}
+	select {
+	case request := <-started:
+		if request.Command != "chat" || request.Options["question"] != "Play this exact YouTube result: https://www.youtube.com/watch?v=track" || request.VoiceChannelID != "100000000000000404" {
+			t.Fatalf("unexpected selected request: %+v", request)
+		}
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("expected selected request worker to start")
+	}
+	if len(responseTypes) != 1 || responseTypes[0] != disgoDiscord.InteractionResponseTypeDeferredUpdateMessage {
+		t.Fatalf("expected one deferred update response, got %+v", responseTypes)
+	}
+}
+
+func selectionComponentInteractionEvent(t *testing.T, customID string, value string, applicationID snowflake.ID, guildID snowflake.ID, channelID snowflake.ID, userID snowflake.ID) *events.ComponentInteractionCreate {
+	t.Helper()
+	raw := fmt.Sprintf(`{
+		"id":"100000000000000500",
+		"application_id":%q,
+		"type":3,
+		"token":"interaction-token",
+		"version":1,
+		"guild_id":%q,
+		"channel":{"id":%q,"type":0,"name":"bot-test","permissions":"0"},
+		"member":{"user":{"id":%q,"username":"tester","discriminator":"0001","avatar":null},"roles":[],"permissions":"0"},
+		"data":{"component_type":3,"custom_id":%q,"values":[%q]},
+		"message":{
+			"id":"100000000000000501",
+			"channel_id":%q,
+			"author":{"id":%q,"username":"Panda","discriminator":"0001","avatar":null,"bot":true},
+			"content":"",
+			"timestamp":"2026-06-27T00:00:00Z",
+			"edited_timestamp":null,
+			"tts":false,
+			"mention_everyone":false,
+			"mentions":[],
+			"mention_roles":[],
+			"attachments":[],
+			"embeds":[],
+			"components":[],
+			"pinned":false,
+			"type":0
+		}
+	}`, applicationID.String(), guildID.String(), channelID.String(), userID.String(), customID, value, channelID.String(), applicationID.String())
+	interaction, err := disgoDiscord.UnmarshalInteraction([]byte(raw))
+	if err != nil {
+		t.Fatalf("UnmarshalInteraction: %v", err)
+	}
+	component, ok := interaction.(disgoDiscord.ComponentInteraction)
+	if !ok {
+		t.Fatalf("expected component interaction, got %T", interaction)
+	}
+	return &events.ComponentInteractionCreate{
+		GenericEvent:         events.NewGenericEvent(&disgoBot.Client{}, 0, 0),
+		ComponentInteraction: component,
 	}
 }
 
