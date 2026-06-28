@@ -2141,17 +2141,55 @@ func cardCoversAssistantContent(content string, card *ToolCard) bool {
 		return true
 	}
 	cardTokens := cardContentTokens(card)
+	allowedMissing := 1
+	if musicCardLooseRestatementContent(contentTokens, card) {
+		allowedMissing = 2
+	}
 	missing := 0
 	for token := range contentTokens {
 		if _, ok := cardTokens[token]; ok {
 			continue
 		}
+		if musicCardRestatementTokenCovered(token, contentTokens, card) {
+			continue
+		}
 		missing++
-		if missing > 1 {
+		if missing > allowedMissing {
 			return false
 		}
 	}
 	return true
+}
+
+func musicCardRestatementContent(contentTokens map[string]struct{}, card *ToolCard) bool {
+	if !strings.EqualFold(strings.TrimSpace(card.Accent), "music") {
+		return false
+	}
+	for statusToken := range musicStatusTokens {
+		if _, ok := contentTokens[statusToken]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+func musicCardLooseRestatementContent(contentTokens map[string]struct{}, card *ToolCard) bool {
+	if !musicCardRestatementContent(contentTokens, card) {
+		return false
+	}
+	for token := range musicCardRestatementTokens {
+		if _, ok := contentTokens[token]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+func musicCardRestatementTokenCovered(token string, contentTokens map[string]struct{}, card *ToolCard) bool {
+	if _, ok := musicCardRestatementTokens[token]; !ok {
+		return false
+	}
+	return musicCardRestatementContent(contentTokens, card)
 }
 
 func cardContentTokens(card *ToolCard) map[string]struct{} {
@@ -2179,11 +2217,42 @@ func cardContentTokens(card *ToolCard) map[string]struct{} {
 	}
 	tokens := meaningfulContentTokens(cardText.String())
 	if strings.EqualFold(strings.TrimSpace(card.Accent), "music") {
-		for _, token := range []string{"music", "song", "songs", "track", "tracks", "play", "playing", "playback", "played", "queue", "queued", "voice", "stopped", "stop", "paused", "pause", "resumed", "resume", "skipped", "skip", "started", "start"} {
+		for token := range musicStatusTokens {
 			tokens[token] = struct{}{}
 		}
 	}
 	return tokens
+}
+
+var musicStatusTokens = map[string]struct{}{
+	"music":    {},
+	"song":     {},
+	"songs":    {},
+	"track":    {},
+	"tracks":   {},
+	"play":     {},
+	"playing":  {},
+	"playback": {},
+	"played":   {},
+	"queue":    {},
+	"queued":   {},
+	"voice":    {},
+	"stopped":  {},
+	"stop":     {},
+	"paused":   {},
+	"pause":    {},
+	"resumed":  {},
+	"resume":   {},
+	"skipped":  {},
+	"skip":     {},
+	"started":  {},
+	"start":    {},
+}
+
+var musicCardRestatementTokens = map[string]struct{}{
+	"enjoy": {},
+	"here":  {},
+	"heres": {},
 }
 
 func meaningfulContentTokens(content string) map[string]struct{} {
