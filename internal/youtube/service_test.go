@@ -12,6 +12,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/sn0w/panda2/internal/objectstore"
 )
 
 func TestSummarizeResolvesChunksAndTranscribesYouTubeAudio(t *testing.T) {
@@ -23,14 +25,26 @@ func TestSummarizeResolvesChunksAndTranscribesYouTubeAudio(t *testing.T) {
   printf '%s\n' '{"id":"video-1","title":"Deep Dive","webpage_url":"https://www.youtube.com/watch?v=video-1","uploader":"Teacher","duration":612}'
   ;;
 *)
-  printf 'fake media stream'
+  out=""
+  previous=""
+  for arg in "$@"; do
+    if [ "$previous" = "--output" ]; then
+      out="$arg"
+    fi
+    previous="$arg"
+  done
+  if [ -z "$out" ]; then
+    echo "missing output template" >&2
+    exit 1
+  fi
+  out="$(printf '%s' "$out" | sed 's/%(ext)s/m4a/g')"
+  printf 'fake audio bytes' > "$out"
   ;;
 esac`)
 	ffmpegPath := writeShellExecutable(t, "ffmpeg", `last=""
 for arg in "$@"; do
   last="$arg"
 done
-cat >/dev/null
 printf 'audio one' > "$(printf "$last" 0)"
 printf 'audio two' > "$(printf "$last" 1)"`)
 	var uploaded []string
@@ -98,6 +112,302 @@ func TestSummarizeRequiresLemonfoxKey(t *testing.T) {
 	_, err := service.Summarize(context.Background(), SummaryRequest{Query: "video"})
 	if err == nil || !strings.Contains(err.Error(), ErrNotConfigured.Error()) {
 		t.Fatalf("expected not configured error, got %v", err)
+	}
+}
+
+func TestExtractAudioChunksReportsYTDLPFailureWithoutPipeNoise(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell executable fixtures are unix-only")
+	}
+	ytdlpPath := writeShellExecutable(t, "yt-dlp", `case " $* " in
+*" --format bestaudio[ext=m4a]/bestaudio/best "*)
+  echo "ERROR: unable to download video data: HTTP Error 403: Forbidden" >&2
+  exit 1
+  ;;
+*)
+  echo "unexpected yt-dlp args: $*" >&2
+  exit 1
+  ;;
+esac`)
+	ffmpegPath := writeShellExecutable(t, "ffmpeg", `echo "ffmpeg should not run after yt-dlp download failure" >&2
+exit 1`)
+	service := NewService(Config{
+		APIKey:         "lemon-key",
+		YTDLPPath:      ytdlpPath,
+		FFmpegPath:     ffmpegPath,
+		ProcessTimeout: time.Second,
+	})
+
+	_, err := service.extractAudioChunks(context.Background(), ToolPaths{YTDLPPath: ytdlpPath, FFmpegPath: ffmpegPath}, "https://www.youtube.com/watch?v=blocked", t.TempDir())
+	if err == nil {
+		t.Fatal("expected audio extraction error")
+	}
+	message := err.Error()
+	if !strings.Contains(message, "HTTP Error 403") {
+		t.Fatalf("expected yt-dlp 403 in error, got %v", err)
+	}
+	if strings.Contains(message, "ffmpeg") || strings.Contains(message, "pipe:0") {
+		t.Fatalf("yt-dlp download failure should not include ffmpeg pipe noise, got %v", err)
+	}
+}
+
+func TestClipTranscribesDetectsRendersAndUploads(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell executable fixtures are unix-only")
+	}
+	ytdlpPath := writeShellExecutable(t, "yt-dlp", `case " $* " in
+*" --dump-json "*)
+  printf '%s\n' '{"id":"video-1","title":"Deep Dive","webpage_url":"https://www.youtube.com/watch?v=video-1","uploader":"Teacher","duration":420}'
+  ;;
+*" --format best[ext=mp4]/best "*)
+  out=""
+  previous=""
+  for arg in "$@"; do
+    if [ "$previous" = "--output" ]; then
+      out="$arg"
+    fi
+    previous="$arg"
+  done
+  if [ -z "$out" ]; then
+    echo "missing output template" >&2
+    exit 1
+  fi
+  out="$(printf '%s' "$out" | sed 's/%(ext)s/mp4/g')"
+  printf 'source video bytes' > "$out"
+  ;;
+*" --format bestaudio[ext=m4a]/bestaudio/best "*)
+  out=""
+  previous=""
+  for arg in "$@"; do
+    if [ "$previous" = "--output" ]; then
+      out="$arg"
+    fi
+    previous="$arg"
+  done
+  if [ -z "$out" ]; then
+    echo "missing output template" >&2
+    exit 1
+  fi
+  out="$(printf '%s' "$out" | sed 's/%(ext)s/m4a/g')"
+  printf 'fake audio bytes' > "$out"
+  ;;
+*)
+  printf 'fake media stream'
+  ;;
+esac`)
+	ffmpegPath := writeShellExecutable(t, "ffmpeg", `last=""
+for arg in "$@"; do
+  last="$arg"
+done
+case " $* " in
+*" -f segment "*)
+  printf 'audio one' > "$(printf "$last" 0)"
+  printf 'audio two' > "$(printf "$last" 1)"
+  ;;
+*" -f concat "*)
+  printf 'spliced clip bytes' > "$last"
+  ;;
+*" -frames:v 1 "*)
+  if base64 --decode > "$last" 2>/dev/null <<'B64'
+iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=
+B64
+  then
+    :
+  else
+    base64 -D > "$last" <<'B64'
+iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=
+B64
+  fi
+  ;;
+*" +faststart "*)
+  cat >/dev/null
+  printf 'clip bytes' > "$last"
+  ;;
+*)
+  echo "unexpected ffmpeg args: $*" >&2
+  exit 1
+  ;;
+esac`)
+	transcriptionCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		transcriptionCount++
+		if r.URL.Path != "/v1/audio/transcriptions" {
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+		reader, err := r.MultipartReader()
+		if err != nil {
+			t.Fatalf("MultipartReader: %v", err)
+		}
+		form, err := reader.ReadForm(1 << 20)
+		if err != nil {
+			t.Fatalf("ReadForm: %v", err)
+		}
+		if got := form.Value["language"]; len(got) != 1 || got[0] != "en" {
+			t.Fatalf("expected language field, got %#v", got)
+		}
+		switch transcriptionCount {
+		case 1:
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"text": "Intro",
+				"segments": []map[string]any{
+					{"start": 1.0, "end": 3.0, "text": "Intro"},
+					{"start": 10.0, "end": 14.0, "text": "Setup"},
+				},
+			})
+		case 2:
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"text": "Best part",
+				"segments": []map[string]any{
+					{"start": 3.0, "end": 9.0, "text": "Best part"},
+				},
+			})
+		default:
+			t.Fatalf("unexpected transcription count %d", transcriptionCount)
+		}
+	}))
+	defer server.Close()
+	detector := &fakeClipDetector{
+		configured: true,
+		result: ClipDetectionResult{
+			Clips: []ClipDecision{
+				{
+					Rank:  1,
+					Title: "Best Moment",
+					Type:  "spliced",
+					Segments: []ClipDecisionSegment{
+						{StartSeconds: 63, EndSeconds: 66, Transcript: "Best part begins"},
+						{StartSeconds: 69, EndSeconds: 72, Transcript: "Best part lands"},
+					},
+					Reason:            "This segment contains the requested moment with dead air removed.",
+					Confidence:        0.9,
+					ViralityScore:     86,
+					HookScore:         88,
+					RetentionScore:    80,
+					ShareabilityScore: 84,
+					DurationPolicy:    "requested_duration",
+					ExceptionReason:   "",
+				},
+				{
+					Rank:  2,
+					Title: "Setup Payoff",
+					Type:  "continuous",
+					Segments: []ClipDecisionSegment{
+						{StartSeconds: 60, EndSeconds: 78, Transcript: "A fuller version with setup and payoff."},
+					},
+					Reason:            "A fuller version with setup and payoff.",
+					Confidence:        0.82,
+					ViralityScore:     78,
+					HookScore:         76,
+					RetentionScore:    79,
+					ShareabilityScore: 77,
+					DurationPolicy:    "requested_duration",
+					ExceptionReason:   "",
+				},
+			},
+		},
+	}
+	planner := &fakeClipPlanner{configured: true}
+	uploader := &fakeClipUploader{configured: true, baseURL: "https://cdn.example.test/clips"}
+	service := NewService(Config{
+		APIKey:          "lemon-key",
+		BaseURL:         server.URL + "/v1",
+		YTDLPPath:       ytdlpPath,
+		FFmpegPath:      ffmpegPath,
+		ChunkDuration:   time.Minute,
+		ClipDetector:    detector,
+		ClipPlanner:     planner,
+		ClipUploader:    uploader,
+		ClipMinDuration: 5 * time.Second,
+		ClipMaxDuration: 30 * time.Second,
+		ClipMaxBytes:    1 << 20,
+	})
+
+	var progress []string
+	result, err := service.Clip(context.Background(), ClipRequest{
+		Query:              "deep dive video",
+		Language:           "en",
+		AspectRatio:        "9:16",
+		LayoutInstructions: "keep the full frame readable",
+		GuildID:            "guild 1",
+		RequestID:          "request 1",
+		Progress: func(update ClipProgress) {
+			progress = append(progress, update.Status)
+		},
+	})
+	if err != nil {
+		t.Fatalf("Clip: %v", err)
+	}
+	expectedProgress := []string{
+		"Searching",
+		"Transcribing",
+		"Building clips",
+		"Rendering",
+		"Planning layout 1/2",
+		"Rendering 1/2",
+		"Uploading 1/2",
+		"Planning layout 2/2",
+		"Rendering 2/2",
+		"Uploading 2/2",
+	}
+	if strings.Join(progress, "|") != strings.Join(expectedProgress, "|") {
+		t.Fatalf("unexpected clip progress: got %+v want %+v", progress, expectedProgress)
+	}
+	if len(detector.requests) != 1 {
+		t.Fatalf("expected one detector request, got %d", len(detector.requests))
+	}
+	if len(planner.requests) != 2 {
+		t.Fatalf("expected two composition planner requests, got %d", len(planner.requests))
+	}
+	if planner.requests[0].RequestedAspect != "9:16" || planner.requests[0].LayoutInstructions != "keep the full frame readable" || len(planner.requests[0].Thumbnails) == 0 {
+		t.Fatalf("unexpected composition request: %+v", planner.requests[0])
+	}
+	detection := detector.requests[0]
+	if detection.Title != "Deep Dive" || detection.URL != "https://www.youtube.com/watch?v=video-1" || !strings.Contains(detection.Instructions, "viral short-form clips") {
+		t.Fatalf("unexpected detector request: %+v", detection)
+	}
+	if len(detection.Segments) != 3 || detection.Segments[2].StartSeconds != 63 || detection.Segments[2].EndSeconds != 69 {
+		t.Fatalf("expected second chunk segments to be offset, got %+v", detection.Segments)
+	}
+	if len(uploader.requests) != 2 {
+		t.Fatalf("expected two uploads, got %d", len(uploader.requests))
+	}
+	upload := uploader.requests[0]
+	if upload.Key != "guild-1/request-1/01-best-moment.mp4" || upload.ContentType != "video/mp4" || string(upload.Body) != "spliced clip bytes" {
+		t.Fatalf("unexpected upload request: %+v body=%q", upload, string(upload.Body))
+	}
+	secondUpload := uploader.requests[1]
+	if secondUpload.Key != "guild-1/request-1/02-setup-payoff.mp4" || string(secondUpload.Body) != "clip bytes" {
+		t.Fatalf("unexpected second upload request: %+v body=%q", secondUpload, string(secondUpload.Body))
+	}
+	if len(result.Clips) != 2 || result.Clips[0].WatchURL != "https://cdn.example.test/clips/guild-1/request-1/01-best-moment.mp4" || result.Clips[0].Type != "spliced" || len(result.Clips[0].Segments) != 2 || result.Clips[0].SourceStartSeconds != 63 || result.Clips[0].SourceEndSeconds != 72 || result.Clips[0].Duration != 6*time.Second || result.TranscriptSegmentCount != 3 {
+		t.Fatalf("unexpected clip result: %+v", result)
+	}
+	if result.Clips[0].AspectRatio != "9:16" || result.Clips[0].LayoutMode != "full_frame" || result.Clips[0].CompositionConfidence != 0.8 {
+		t.Fatalf("expected composition metadata on rendered clip, got %+v", result.Clips[0])
+	}
+}
+
+func TestClipRejectsInvalidDetectorTimestamps(t *testing.T) {
+	err := validateClipDecision(ClipDecision{
+		Rank:  1,
+		Title: "Bad Clip",
+		Type:  "continuous",
+		Segments: []ClipDecisionSegment{{
+			StartSeconds: 20,
+			EndSeconds:   10,
+			Transcript:   "bad",
+		}},
+		Reason:            "bad",
+		Confidence:        0.5,
+		ViralityScore:     10,
+		HookScore:         10,
+		RetentionScore:    10,
+		ShareabilityScore: 10,
+		DurationPolicy:    "other",
+		ExceptionReason:   "",
+	}, time.Minute, 5*time.Second, 30*time.Second)
+	if err == nil || !strings.Contains(err.Error(), "after clip segment start") {
+		t.Fatalf("expected invalid timestamp error, got %v", err)
 	}
 }
 
@@ -387,4 +697,94 @@ func failingHTTPClient() *http.Client {
 	return &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
 		return stringResponse(request, http.StatusServiceUnavailable, "unavailable"), nil
 	})}
+}
+
+type fakeClipDetector struct {
+	configured bool
+	requests   []ClipDetectionRequest
+	result     ClipDetectionResult
+	err        error
+}
+
+func (f *fakeClipDetector) Configured() bool {
+	return f.configured
+}
+
+func (f *fakeClipDetector) Detect(_ context.Context, request ClipDetectionRequest) (ClipDetectionResult, error) {
+	f.requests = append(f.requests, request)
+	return f.result, f.err
+}
+
+type fakeClipPlanner struct {
+	configured bool
+	requests   []ClipCompositionRequest
+	results    []ClipCompositionResult
+	err        error
+}
+
+func (f *fakeClipPlanner) Configured() bool {
+	return f.configured
+}
+
+func (f *fakeClipPlanner) Plan(_ context.Context, request ClipCompositionRequest) (ClipCompositionResult, error) {
+	f.requests = append(f.requests, request)
+	if f.err != nil {
+		return ClipCompositionResult{}, f.err
+	}
+	if len(f.results) > 0 {
+		result := f.results[0]
+		f.results = f.results[1:]
+		return result, nil
+	}
+	aspect := strings.TrimSpace(request.RequestedAspect)
+	if aspect == "" || aspect == "auto" {
+		aspect = "9:16"
+	}
+	plans := make([]ClipFrameRenderPlan, 0, len(request.Clip.Segments))
+	for index, segment := range request.Clip.Segments {
+		plans = append(plans, ClipFrameRenderPlan{
+			AppliesToSegmentIndex: index,
+			SourceStartSeconds:    segment.StartSeconds,
+			SourceEndSeconds:      segment.EndSeconds,
+			Regions: []ClipRenderRegion{{
+				Role:       "full_frame",
+				SourceRect: ClipRect{X: 0, Y: 0, W: 1000, H: 1000},
+				OutputRect: ClipRect{X: 0, Y: 0, W: 1000, H: 1000},
+				Fit:        "contain",
+				ZIndex:     0,
+			}},
+		})
+	}
+	return ClipCompositionResult{
+		AspectRatio: aspect,
+		LayoutMode:  "full_frame",
+		Plans:       plans,
+		Confidence:  0.8,
+		Reason:      "Preserve the full source frame for this test fixture.",
+	}, nil
+}
+
+type fakeClipUploader struct {
+	configured bool
+	requests   []objectstore.UploadRequest
+	url        string
+	baseURL    string
+	err        error
+}
+
+func (f *fakeClipUploader) Configured() bool {
+	return f.configured
+}
+
+func (f *fakeClipUploader) Upload(_ context.Context, request objectstore.UploadRequest) (objectstore.UploadResult, error) {
+	f.requests = append(f.requests, request)
+	url := f.url
+	if url == "" {
+		url = strings.TrimRight(f.baseURL, "/") + "/" + strings.TrimLeft(request.Key, "/")
+	}
+	return objectstore.UploadResult{
+		Key:       request.Key,
+		URL:       url,
+		SizeBytes: int64(len(request.Body)),
+	}, f.err
 }

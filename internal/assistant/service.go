@@ -240,11 +240,15 @@ type toolExecutionContext struct {
 type chatOptions struct {
 	NaturalMessage bool
 	OnRespond      func()
+	OnToolStart    func(string)
+	OnToolProgress func(string, string)
 }
 
 type completionOptions struct {
-	NaturalGate bool
-	OnRespond   func()
+	NaturalGate    bool
+	OnRespond      func()
+	OnToolStart    func(string)
+	OnToolProgress func(string, string)
 }
 
 func (s *Service) Ask(ctx context.Context, request AskRequest) (AskResponse, error) {
@@ -317,6 +321,10 @@ func (s *Service) Chat(ctx context.Context, request AskRequest) (AskResponse, er
 
 func (s *Service) ChatNaturalMessage(ctx context.Context, request AskRequest, onRespond func()) (AskResponse, error) {
 	return s.chat(ctx, request, chatOptions{NaturalMessage: true, OnRespond: onRespond})
+}
+
+func (s *Service) ChatNaturalMessageWithToolStart(ctx context.Context, request AskRequest, onRespond func(), onToolStart func(string), onToolProgress func(string, string)) (AskResponse, error) {
+	return s.chat(ctx, request, chatOptions{NaturalMessage: true, OnRespond: onRespond, OnToolStart: onToolStart, OnToolProgress: onToolProgress})
 }
 
 func (s *Service) chat(ctx context.Context, request AskRequest, options chatOptions) (AskResponse, error) {
@@ -394,8 +402,10 @@ func (s *Service) chat(ctx context.Context, request AskRequest, options chatOpti
 		Temperature: temperatureFromConfig(config, "chat"),
 		MaxTokens:   maxTokensFromConfig(config, "chat"),
 	}, completionOptions{
-		NaturalGate: options.NaturalMessage,
-		OnRespond:   options.OnRespond,
+		NaturalGate:    options.NaturalMessage,
+		OnRespond:      options.OnRespond,
+		OnToolStart:    options.OnToolStart,
+		OnToolProgress: options.OnToolProgress,
 	})
 	latency := time.Since(start).Milliseconds()
 	s.recordUsage(ctx, request, "chat", response, err, latency)
@@ -977,6 +987,18 @@ func (s *Service) completeWithToolsWithOptions(ctx context.Context, config store
 		terminalToolRound := false
 		for _, call := range response.ToolCalls {
 			usedWebSearch = usedWebSearch || isWebSearchToolName(call.Function.Name)
+			toolStart := time.Now()
+			slog.Info("assistant executing tool call",
+				slog.String("guild_id", config.GuildID),
+				slog.String("channel_id", toolContext.ChannelID),
+				slog.String("request_id", toolContext.RequestID),
+				slog.String("user_id", toolContext.ActorID),
+				slog.Int("round", round),
+				slog.String("tool_name", call.Function.Name),
+			)
+			if options.OnToolStart != nil {
+				options.OnToolStart(call.Function.Name)
+			}
 			result, err := s.toolExecutor.Execute(ctx, tools.ExecutionRequest{
 				GuildID:         config.GuildID,
 				ChannelID:       toolContext.ChannelID,
@@ -990,6 +1012,7 @@ func (s *Service) completeWithToolsWithOptions(ctx context.Context, config store
 				ImageReferences: generated.CloneImageReferences(toolContext.ImageReferences),
 				Access:          access,
 				Call:            call,
+				Progress:        toolProgressReporter(call.Function.Name, options.OnToolProgress),
 			})
 			message := result.Message
 			generatedFiles = append(generatedFiles, result.GeneratedFiles...)
@@ -1003,6 +1026,7 @@ func (s *Service) completeWithToolsWithOptions(ctx context.Context, config store
 					slog.String("user_id", toolContext.ActorID),
 					slog.Int("round", round),
 					slog.String("tool_name", call.Function.Name),
+					slog.Int64("duration_ms", time.Since(toolStart).Milliseconds()),
 				)
 				message = llm.Message{
 					Role:       "tool",
@@ -1015,6 +1039,20 @@ func (s *Service) completeWithToolsWithOptions(ctx context.Context, config store
 				terminalCardRound = false
 			} else if result.Terminal {
 				terminalToolRound = true
+			}
+			if err == nil {
+				slog.Info("assistant tool call completed",
+					slog.String("guild_id", config.GuildID),
+					slog.String("channel_id", toolContext.ChannelID),
+					slog.String("request_id", toolContext.RequestID),
+					slog.String("user_id", toolContext.ActorID),
+					slog.Int("round", round),
+					slog.String("tool_name", call.Function.Name),
+					slog.Int64("duration_ms", time.Since(toolStart).Milliseconds()),
+					slog.Int("generated_file_count", len(result.GeneratedFiles)),
+					slog.Bool("terminal", result.Terminal),
+					slog.Bool("confirmation_required", result.Confirmation != nil),
+				)
 			}
 			if toolCard := toolCardFromExecutionResult(call, message, result.Payload, result.Terminal); toolCard != nil {
 				if !cardContentEligible {
@@ -1071,6 +1109,20 @@ func (s *Service) chatCompletionForRound(ctx context.Context, config store.Guild
 		return llm.ChatResponse{ID: response.ID, Model: response.Model, Usage: response.Usage}, true, nil
 	}
 	return response, silent, nil
+}
+
+func toolProgressReporter(toolName string, onToolProgress func(string, string)) func(tools.ProgressUpdate) {
+	if onToolProgress == nil {
+		return nil
+	}
+	toolName = strings.TrimSpace(toolName)
+	return func(update tools.ProgressUpdate) {
+		status := strings.TrimSpace(update.Status)
+		if toolName == "" || status == "" {
+			return
+		}
+		onToolProgress(toolName, status)
+	}
 }
 
 type naturalStreamGate struct {
@@ -1697,6 +1749,8 @@ func toolCardErrorTitle(toolName string) string {
 		return "YouTube search failed"
 	case "panda_summarize_youtube", "panda.summarize_youtube":
 		return "YouTube summary failed"
+	case "panda_clip_youtube", "panda.clip_youtube":
+		return "YouTube clip failed"
 	case "panda_manage_music", "panda.manage_music":
 		return "Music request failed"
 	case "panda_about", "panda.about":
@@ -1708,7 +1762,7 @@ func toolCardErrorTitle(toolName string) string {
 
 func toolResultRendersCard(toolName string) bool {
 	switch strings.TrimSpace(toolName) {
-	case "panda_manage_music", "panda.manage_music", "panda_search_youtube", "panda.search_youtube", "panda_about", "panda.about":
+	case "panda_manage_music", "panda.manage_music", "panda_search_youtube", "panda.search_youtube", "panda_clip_youtube", "panda.clip_youtube", "panda_about", "panda.about":
 		return true
 	default:
 		return false
@@ -1721,6 +1775,8 @@ func toolCardDefaultAccent(toolName string) string {
 		return "music"
 	case "panda_search_youtube", "panda.search_youtube":
 		return "info"
+	case "panda_clip_youtube", "panda.clip_youtube":
+		return "info"
 	case "panda_about", "panda.about":
 		return "info"
 	default:
@@ -1730,7 +1786,7 @@ func toolCardDefaultAccent(toolName string) string {
 
 func toolCardTerminal(toolName string) bool {
 	switch strings.TrimSpace(toolName) {
-	case "panda_search_youtube", "panda.search_youtube", "panda_about", "panda.about":
+	case "panda_search_youtube", "panda.search_youtube", "panda_clip_youtube", "panda.clip_youtube", "panda_about", "panda.about":
 		return true
 	default:
 		return false

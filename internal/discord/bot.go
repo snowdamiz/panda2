@@ -92,6 +92,7 @@ type commandSyncer interface {
 const maxAttachmentExtractBytes = 1 << 20
 const InteractionJobKind = "discord.interaction"
 const NaturalMessageJobKind = "discord.natural_message"
+const naturalMessageJobMaxAge = 10 * time.Minute
 const deferredProgressInterval = 8 * time.Second
 const typingRefreshInterval = 5 * time.Second
 const discordContentLimit = 2000
@@ -130,6 +131,31 @@ type naturalMessageReferencePayload struct {
 	ChannelID       string `json:"channel_id,omitempty"`
 	GuildID         string `json:"guild_id,omitempty"`
 	FailIfNotExists bool   `json:"fail_if_not_exists,omitempty"`
+}
+
+type naturalMessageProgress struct {
+	bot       *Bot
+	channelID snowflake.ID
+	reference *disgoDiscord.MessageReference
+
+	mu        sync.Mutex
+	messageID snowflake.ID
+	created   bool
+	failed    bool
+	toolName  string
+	status    string
+}
+
+type naturalMessageTyping struct {
+	ctx       context.Context
+	sender    typingSender
+	channelID snowflake.ID
+	interval  time.Duration
+
+	mu   sync.Mutex
+	once sync.Once
+	stop func()
+	done bool
 }
 
 func New(cfg config.Config, router *commands.Router, logger *slog.Logger) (*Bot, error) {
@@ -742,6 +768,18 @@ func (b *Bot) HandleInteractionJob(ctx context.Context, job store.Job) error {
 }
 
 func (b *Bot) HandleNaturalMessageJob(ctx context.Context, job store.Job) error {
+	if staleNaturalMessageJob(job, time.Now().UTC()) {
+		if b.logger != nil {
+			b.logger.Warn("dropping stale natural message job",
+				slog.Uint64("job_id", uint64(job.ID)),
+				slog.String("guild_id", job.GuildID),
+				slog.Time("created_at", job.CreatedAt),
+				slog.Int("attempts", job.Attempts),
+				slog.Int("max_attempts", job.MaxAttempts),
+			)
+		}
+		return nil
+	}
 	if b.client == nil {
 		return errors.New("discord client is not configured")
 	}
@@ -768,7 +806,14 @@ func (b *Bot) HandleNaturalMessageJob(ctx context.Context, job store.Job) error 
 	if err != nil {
 		return err
 	}
-	return b.respondToNaturalMessage(ctx, channelID, reference, payload.Request, job.Attempts < job.MaxAttempts)
+	return b.respondToNaturalMessage(ctx, channelID, reference, payload.Request)
+}
+
+func staleNaturalMessageJob(job store.Job, now time.Time) bool {
+	if job.CreatedAt.IsZero() {
+		return false
+	}
+	return now.UTC().Sub(job.CreatedAt.UTC()) > naturalMessageJobMaxAge
 }
 
 func naturalMessageReferencePayloadFrom(reference *disgoDiscord.MessageReference) *naturalMessageReferencePayload {
@@ -1307,6 +1352,184 @@ func (b *Bot) sendChannelResponse(channelID snowflake.ID, response commands.Resp
 	return nil
 }
 
+func (p *naturalMessageProgress) Start(ctx context.Context, toolName string) bool {
+	if p == nil || p.bot == nil || p.bot.client == nil || p.bot.client.Rest == nil {
+		return false
+	}
+	response, ok := naturalToolProgressResponse(toolName)
+	if !ok {
+		return false
+	}
+	p.mu.Lock()
+	if p.created || p.failed {
+		p.mu.Unlock()
+		return false
+	}
+	p.mu.Unlock()
+
+	message, err := p.bot.client.Rest.CreateMessage(
+		p.channelID,
+		channelMessageCreateFromResponsePartWithReference(response, firstDiscordContentChunk(response.Content), true, p.reference),
+		rest.WithCtx(ctx),
+	)
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if err != nil || message == nil {
+		p.failed = true
+		if p.bot.logger != nil && err != nil {
+			p.bot.logger.Warn("failed to create natural message progress card",
+				slog.Any("err", err),
+				slog.String("channel_id", p.channelID.String()),
+				slog.String("tool_name", toolName),
+			)
+		}
+		return false
+	}
+	p.messageID = message.ID
+	p.created = true
+	p.toolName = strings.TrimSpace(toolName)
+	p.status = naturalToolProgressStatus(toolName, "")
+	return true
+}
+
+func (p *naturalMessageProgress) Created() bool {
+	if p == nil {
+		return false
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.created
+}
+
+func (p *naturalMessageProgress) Update(ctx context.Context, response commands.Response) bool {
+	if p == nil || p.bot == nil || p.bot.client == nil || p.bot.client.Rest == nil {
+		return false
+	}
+	p.mu.Lock()
+	channelID := p.channelID
+	messageID := p.messageID
+	created := p.created
+	p.mu.Unlock()
+	if !created {
+		return false
+	}
+	if err := p.bot.updateChannelResponse(ctx, channelID, messageID, response); err != nil {
+		if p.bot.logger != nil {
+			p.bot.logger.Warn("failed to update natural message progress card",
+				slog.Any("err", err),
+				slog.String("channel_id", channelID.String()),
+				slog.String("message_id", messageID.String()),
+			)
+		}
+		return false
+	}
+	return true
+}
+
+func (p *naturalMessageProgress) UpdateToolStatus(ctx context.Context, toolName string, status string) bool {
+	status = strings.TrimSpace(status)
+	response, ok := naturalToolProgressResponse(toolName, status)
+	if status == "" || !ok {
+		return false
+	}
+	p.mu.Lock()
+	sameStatus := p.created && strings.EqualFold(strings.TrimSpace(p.toolName), strings.TrimSpace(toolName)) && p.status == status
+	p.mu.Unlock()
+	if sameStatus {
+		return true
+	}
+	if !p.Update(ctx, response) {
+		return false
+	}
+	p.mu.Lock()
+	p.toolName = strings.TrimSpace(toolName)
+	p.status = status
+	p.mu.Unlock()
+	return true
+}
+
+func (b *Bot) updateChannelResponse(ctx context.Context, channelID snowflake.ID, messageID snowflake.ID, response commands.Response) error {
+	if !hasDirectChannelResponsePayload(response) {
+		for _, followup := range response.Followups {
+			if err := b.sendChannelResponse(channelID, followup); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	chunks := splitDiscordContent(response.Content)
+	_, err := b.client.Rest.UpdateMessage(
+		channelID,
+		messageID,
+		webhookMessageUpdateFromResponsePartWithFiles(response, chunks[0], len(chunks) == 1, true),
+		rest.WithCtx(ctx),
+	)
+	if err != nil {
+		return err
+	}
+	for index := 1; index < len(chunks); index++ {
+		if _, err := b.client.Rest.CreateMessage(
+			channelID,
+			channelMessageCreateFromResponsePartWithFiles(response, chunks[index], index == len(chunks)-1, false),
+			rest.WithCtx(ctx),
+		); err != nil {
+			return err
+		}
+	}
+	for _, followup := range response.Followups {
+		if err := b.sendChannelResponse(channelID, followup); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func naturalToolProgressResponse(toolName string, statusOverride ...string) (commands.Response, bool) {
+	switch strings.TrimSpace(toolName) {
+	case "panda_summarize_youtube", "panda.summarize_youtube":
+		return commands.Response{
+			Content: "I'm watching and transcribing this YouTube video now. This card will update with the summary when it is ready.",
+			Presentation: commands.Presentation{
+				Title:  "Summarizing YouTube video",
+				Accent: commands.AccentInfo,
+				Fields: []commands.Field{{
+					Name:   "Status",
+					Value:  "Extracting audio and building the transcript",
+					Inline: false,
+				}},
+			},
+		}, true
+	case "panda_clip_youtube", "panda.clip_youtube":
+		return commands.Response{
+			Presentation: commands.Presentation{
+				Title:  "Clipping YouTube video",
+				Accent: commands.AccentInfo,
+				Fields: []commands.Field{{
+					Name:   "Status",
+					Value:  naturalToolProgressStatus(toolName, firstNonEmptyText(statusOverride...)),
+					Inline: false,
+				}},
+			},
+		}, true
+	default:
+		return commands.Response{}, false
+	}
+}
+
+func naturalToolProgressStatus(toolName string, status string) string {
+	status = strings.TrimSpace(status)
+	switch strings.TrimSpace(toolName) {
+	case "panda_clip_youtube", "panda.clip_youtube":
+		if status != "" {
+			return status
+		}
+		return "Searching"
+	default:
+		return status
+	}
+}
+
 func splitDiscordContent(content string) []string {
 	if content == "" {
 		return []string{""}
@@ -1536,9 +1759,7 @@ func componentsFromResponse(response commands.Response) []disgoDiscord.LayoutCom
 		}
 		components = append(components, disgoDiscord.NewActionRow(buttons...))
 	}
-	if buttons := actionButtonsFromResponse(response.Actions); len(buttons) > 0 {
-		components = append(components, disgoDiscord.NewActionRow(buttons...))
-	}
+	components = append(components, actionButtonRowsFromResponse(response.Actions, 5-len(components))...)
 	return components
 }
 
@@ -1661,8 +1882,12 @@ func cancelButtonFromConfirmation(confirmation commands.Confirmation) disgoDisco
 	return disgoDiscord.NewSecondaryButton(firstNonEmptyText(confirmation.CancelLabel, "Cancel"), id)
 }
 
-func actionButtonsFromResponse(actions []commands.Action) []disgoDiscord.InteractiveComponent {
-	buttons := make([]disgoDiscord.InteractiveComponent, 0, len(actions))
+func actionButtonRowsFromResponse(actions []commands.Action, maxRows int) []disgoDiscord.LayoutComponent {
+	if maxRows <= 0 {
+		return nil
+	}
+	rows := make([]disgoDiscord.LayoutComponent, 0, maxRows)
+	buttons := make([]disgoDiscord.InteractiveComponent, 0, 5)
 	for _, action := range actions {
 		label := strings.TrimSpace(action.Label)
 		rawURL := strings.TrimSpace(action.URL)
@@ -1671,10 +1896,17 @@ func actionButtonsFromResponse(actions []commands.Action) []disgoDiscord.Interac
 		}
 		buttons = append(buttons, disgoDiscord.NewLinkButton(limitRunes(label, 80), rawURL))
 		if len(buttons) == 5 {
-			break
+			rows = append(rows, disgoDiscord.NewActionRow(buttons...))
+			if len(rows) == maxRows {
+				return rows
+			}
+			buttons = make([]disgoDiscord.InteractiveComponent, 0, 5)
 		}
 	}
-	return buttons
+	if len(buttons) > 0 {
+		rows = append(rows, disgoDiscord.NewActionRow(buttons...))
+	}
+	return rows
 }
 
 func validHTTPURL(rawURL string) bool {
@@ -1861,7 +2093,7 @@ func (b *Bot) queueNaturalMessage(ctx context.Context, channelID snowflake.ID, r
 		Kind:        NaturalMessageJobKind,
 		GuildID:     request.GuildID,
 		Payload:     string(payload),
-		MaxAttempts: 3,
+		MaxAttempts: 1,
 	})
 	if err != nil {
 		return err
@@ -1881,7 +2113,7 @@ func (b *Bot) queueNaturalMessage(ctx context.Context, channelID snowflake.ID, r
 
 func (b *Bot) respondToNaturalMessageAsync(ctx context.Context, channelID snowflake.ID, reference *disgoDiscord.MessageReference, request commands.Request) {
 	go func() {
-		if err := b.respondToNaturalMessage(ctx, channelID, reference, request, false); err != nil && b.logger != nil {
+		if err := b.respondToNaturalMessage(ctx, channelID, reference, request); err != nil && b.logger != nil {
 			b.logger.Warn("natural message response failed",
 				slog.Any("err", err),
 				slog.String("guild_id", request.GuildID),
@@ -1892,7 +2124,7 @@ func (b *Bot) respondToNaturalMessageAsync(ctx context.Context, channelID snowfl
 	}()
 }
 
-func (b *Bot) respondToNaturalMessage(ctx context.Context, channelID snowflake.ID, reference *disgoDiscord.MessageReference, request commands.Request, retryableAssistantErrorsAsError bool) error {
+func (b *Bot) respondToNaturalMessage(ctx context.Context, channelID snowflake.ID, reference *disgoDiscord.MessageReference, request commands.Request) error {
 	if b == nil || b.client == nil || b.router == nil {
 		return nil
 	}
@@ -1905,33 +2137,25 @@ func (b *Bot) respondToNaturalMessage(ctx context.Context, channelID snowflake.I
 		)
 		return nil
 	}
-	var stopTyping func()
-	var typingMu sync.Mutex
-	var typingOnce sync.Once
-	startTyping := func() {
-		typingOnce.Do(func() {
-			typingMu.Lock()
-			defer typingMu.Unlock()
-			stopTyping = startTypingIndicator(ctx, b.client.Rest, channelID, typingRefreshInterval)
-		})
+	typing := newNaturalMessageTyping(ctx, b.client.Rest, channelID, typingRefreshInterval)
+	startTyping := typing.Start
+	defer typing.Stop()
+	progress := &naturalMessageProgress{
+		bot:       b,
+		channelID: channelID,
+		reference: reference,
 	}
-	defer func() {
-		typingMu.Lock()
-		defer typingMu.Unlock()
-		if stopTyping != nil {
-			stopTyping()
+	startToolProgress := func(toolName string) {
+		if progress.Start(ctx, toolName) {
+			typing.Stop()
 		}
-	}()
-	var response commands.Response
-	var err error
-	if retryableAssistantErrorsAsError {
-		response, err = b.router.HandleNaturalMessageStreamRetryable(ctx, request, startTyping)
-		if err != nil {
-			return err
-		}
-	} else {
-		response = b.router.HandleNaturalMessageStream(ctx, request, startTyping)
 	}
+	updateToolProgress := func(toolName string, status string) {
+		if progress.UpdateToolStatus(ctx, toolName, status) {
+			typing.Stop()
+		}
+	}
+	response := b.router.HandleNaturalMessageStreamWithToolProgress(ctx, request, startTyping, startToolProgress, updateToolProgress)
 	if b.logger != nil {
 		b.logger.Info("natural message router completed",
 			slog.String("guild_id", request.GuildID),
@@ -1944,6 +2168,19 @@ func (b *Bot) respondToNaturalMessage(ctx context.Context, channelID snowflake.I
 		)
 	}
 	if !hasChannelResponsePayload(response) {
+		if progress.Created() {
+			_ = progress.Update(ctx, commands.Response{
+				Content: "No visible response was needed.",
+				Presentation: commands.Presentation{
+					Title:  "Done",
+					Accent: commands.AccentInfo,
+				},
+			})
+		}
+		return nil
+	}
+	if progress.Update(ctx, response) {
+		b.commitResponseUsage(ctx, response, request.RequestID, request.Command)
 		return nil
 	}
 	if err := b.sendChannelResponse(channelID, response, reference); err != nil {
@@ -2134,6 +2371,42 @@ func alertMessageContent(delivery alertsvc.Delivery) string {
 		lines = append(lines, strings.TrimSpace(pending))
 	}
 	return strings.Join(lines, "\n")
+}
+
+func newNaturalMessageTyping(ctx context.Context, sender typingSender, channelID snowflake.ID, interval time.Duration) *naturalMessageTyping {
+	return &naturalMessageTyping{
+		ctx:       ctx,
+		sender:    sender,
+		channelID: channelID,
+		interval:  interval,
+	}
+}
+
+func (t *naturalMessageTyping) Start() {
+	if t == nil {
+		return
+	}
+	t.once.Do(func() {
+		t.mu.Lock()
+		defer t.mu.Unlock()
+		if t.done {
+			return
+		}
+		t.stop = startTypingIndicator(t.ctx, t.sender, t.channelID, t.interval)
+	})
+}
+
+func (t *naturalMessageTyping) Stop() {
+	if t == nil {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.done = true
+	if t.stop != nil {
+		t.stop()
+		t.stop = nil
+	}
 }
 
 func startTypingIndicator(ctx context.Context, sender typingSender, channelID snowflake.ID, interval time.Duration) func() {

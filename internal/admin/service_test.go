@@ -161,6 +161,15 @@ func TestImageGenerationPermissionIsAllowed(t *testing.T) {
 	}
 }
 
+func TestYouTubeClippingPermissionIsAllowed(t *testing.T) {
+	if !IsPermissionNameAllowed(PermissionAssistantYouTubeClipping) {
+		t.Fatal("assistant youtube clipping permission should be assignable")
+	}
+	if !containsString(AllPermissionNames(), PermissionAssistantYouTubeClipping) {
+		t.Fatal("assistant youtube clipping permission should be listed")
+	}
+}
+
 func containsString(values []string, want string) bool {
 	for _, value := range values {
 		if value == want {

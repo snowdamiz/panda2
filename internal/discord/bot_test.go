@@ -478,6 +478,36 @@ func TestTypingIndicatorNoopsWithoutSender(t *testing.T) {
 	stop()
 }
 
+func TestNaturalMessageTypingStopCancelsRefreshes(t *testing.T) {
+	sender := &fakeTypingSender{}
+	channelID := snowflake.MustParse("100000000000000002")
+	typing := newNaturalMessageTyping(context.Background(), sender, channelID, 5*time.Millisecond)
+
+	typing.Start()
+	if got := sender.count(); got != 1 {
+		t.Fatalf("expected initial typing call, got %d", got)
+	}
+
+	typing.Stop()
+	time.Sleep(25 * time.Millisecond)
+	if got := sender.count(); got != 1 {
+		t.Fatalf("expected typing refreshes to stop after progress handoff, got %d calls", got)
+	}
+	typing.Stop()
+}
+
+func TestNaturalMessageTypingStopBeforeStartPreventsTyping(t *testing.T) {
+	sender := &fakeTypingSender{}
+	typing := newNaturalMessageTyping(context.Background(), sender, snowflake.MustParse("100000000000000002"), time.Millisecond)
+
+	typing.Stop()
+	typing.Start()
+
+	if got := sender.count(); got != 0 {
+		t.Fatalf("expected stopped typing session not to start, got %d calls", got)
+	}
+}
+
 func TestCaptureAttachmentsRecordsSafeExtractedText(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
@@ -779,7 +809,7 @@ func TestQueueNaturalMessageStoresPayload(t *testing.T) {
 	if err := bot.queueNaturalMessage(context.Background(), channelID, reference, request); err != nil {
 		t.Fatalf("queueNaturalMessage: %v", err)
 	}
-	if len(queue.jobs) != 1 || queue.jobs[0].Kind != NaturalMessageJobKind || queue.jobs[0].GuildID != guildID.String() {
+	if len(queue.jobs) != 1 || queue.jobs[0].Kind != NaturalMessageJobKind || queue.jobs[0].GuildID != guildID.String() || queue.jobs[0].MaxAttempts != 1 {
 		t.Fatalf("unexpected queued jobs: %+v", queue.jobs)
 	}
 	var payload naturalMessageJobPayload
@@ -794,6 +824,37 @@ func TestQueueNaturalMessageStoresPayload(t *testing.T) {
 	}
 	if len(payload.Request.ImageReferences) != 1 || payload.Request.ImageReferences[0].ID != "reply:100000000000000004" {
 		t.Fatalf("expected queued natural message to preserve image references, got %+v", payload.Request.ImageReferences)
+	}
+}
+
+func TestHandleNaturalMessageJobDropsStaleJobBeforeClientWork(t *testing.T) {
+	bot := &Bot{}
+	err := bot.HandleNaturalMessageJob(context.Background(), store.Job{
+		ID:          42,
+		Kind:        NaturalMessageJobKind,
+		GuildID:     "guild-1",
+		Payload:     "not-json",
+		Attempts:    2,
+		MaxAttempts: 3,
+		CreatedAt:   time.Now().UTC().Add(-naturalMessageJobMaxAge - time.Minute),
+	})
+	if err != nil {
+		t.Fatalf("stale natural message job should be dropped without client or payload work: %v", err)
+	}
+}
+
+func TestStaleNaturalMessageJobUsesMaxAge(t *testing.T) {
+	now := time.Date(2026, 6, 28, 12, 0, 0, 0, time.UTC)
+	if staleNaturalMessageJob(store.Job{}, now) {
+		t.Fatal("zero CreatedAt should not be treated as stale")
+	}
+	fresh := store.Job{CreatedAt: now.Add(-naturalMessageJobMaxAge + time.Second)}
+	if staleNaturalMessageJob(fresh, now) {
+		t.Fatal("job inside max age should not be stale")
+	}
+	stale := store.Job{CreatedAt: now.Add(-naturalMessageJobMaxAge - time.Second)}
+	if !staleNaturalMessageJob(stale, now) {
+		t.Fatal("job older than max age should be stale")
 	}
 }
 
@@ -1457,6 +1518,37 @@ func TestPandaAboutResponseRendersGithubAndXButtons(t *testing.T) {
 	}
 }
 
+func TestResponseMessageSplitsManyLinkActionsAcrossRows(t *testing.T) {
+	actions := make([]commands.Action, 0, 13)
+	for i := 1; i <= 13; i++ {
+		actions = append(actions, commands.Action{
+			Label: fmt.Sprintf("Clip %d", i),
+			URL:   fmt.Sprintf("https://example.com/clips/%d", i),
+		})
+	}
+	response := commands.Response{
+		Content: "Clips ready.",
+		Actions: actions,
+	}
+
+	message := messageCreateFromResponsePart(response, response.Content, true)
+	if len(message.Components) != 3 {
+		t.Fatalf("expected three action rows, got %+v", message.Components)
+	}
+	expectedCounts := []int{5, 5, 3}
+	for index, component := range message.Components {
+		row, ok := component.(disgoDiscord.ActionRowComponent)
+		if !ok || len(row.Components) != expectedCounts[index] {
+			t.Fatalf("expected row %d to contain %d buttons, got %+v", index+1, expectedCounts[index], component)
+		}
+	}
+	lastRow := message.Components[2].(disgoDiscord.ActionRowComponent)
+	lastButton, ok := lastRow.Components[2].(disgoDiscord.ButtonComponent)
+	if !ok || lastButton.Style != disgoDiscord.ButtonStyleLink || lastButton.Label != "Clip 13" || lastButton.URL != "https://example.com/clips/13" {
+		t.Fatalf("unexpected last link button: %+v", lastRow.Components[2])
+	}
+}
+
 func TestResponseMessageUpdatesPandaEmbed(t *testing.T) {
 	response := commands.Response{Content: "Source: https://example.com/article", Presentation: commands.Presentation{Title: "Reference"}}
 
@@ -1520,6 +1612,133 @@ func TestPlainWebhookUpdateClearsPreviousEmbeds(t *testing.T) {
 	}
 	if update.Flags == nil || !update.Flags.Has(disgoDiscord.MessageFlagSuppressEmbeds) {
 		t.Fatalf("expected plain update to suppress external embeds, got flags %v", update.Flags)
+	}
+}
+
+func TestNaturalToolProgressResponseRendersClipProgressCard(t *testing.T) {
+	response, ok := naturalToolProgressResponse("panda_clip_youtube")
+	if !ok {
+		t.Fatal("expected clip tool to produce a natural progress response")
+	}
+	message := messageCreateFromResponse(response)
+	if message.Content != "" || len(message.Embeds) != 1 || message.Flags.Has(disgoDiscord.MessageFlagSuppressEmbeds) {
+		t.Fatalf("expected clip progress embed, got %+v", message)
+	}
+	embed := message.Embeds[0]
+	if embed.Title != "Clipping YouTube video" || embed.Color != infoEmbedColor || embed.Description != "" {
+		t.Fatalf("unexpected clip progress embed: %+v", embed)
+	}
+	if len(embed.Fields) != 1 || embed.Fields[0].Name != "Status" || embed.Fields[0].Value != "Searching" {
+		t.Fatalf("expected clip progress status field, got %+v", embed.Fields)
+	}
+	response, ok = naturalToolProgressResponse("panda_clip_youtube", "Transcribing")
+	if !ok {
+		t.Fatal("expected clip tool progress update response")
+	}
+	message = messageCreateFromResponse(response)
+	if got := message.Embeds[0].Fields[0].Value; got != "Transcribing" {
+		t.Fatalf("expected updated clip progress status, got %q", got)
+	}
+	if _, ok := naturalToolProgressResponse("web_search"); ok {
+		t.Fatal("short/non-YouTube tools should not produce natural progress cards")
+	}
+}
+
+func TestNaturalMessageProgressStartReportsCreated(t *testing.T) {
+	channelID := snowflake.MustParse("100000000000000002")
+	messageID := snowflake.MustParse("100000000000000003")
+	var requests int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		if r.Method != http.MethodPost || r.URL.Path != "/channels/"+channelID.String()+"/messages" {
+			t.Fatalf("unexpected progress request %s %s", r.Method, r.URL.Path)
+		}
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read progress request body: %v", err)
+		}
+		if !strings.Contains(string(body), "Clipping YouTube video") {
+			t.Fatalf("expected progress card title in request body, got %s", string(body))
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprintf(w, `{"id":"%s","channel_id":"%s","author":{"id":"100000000000000004","username":"Panda","discriminator":"0000"},"timestamp":"2026-06-28T15:00:00Z","type":0,"content":""}`, messageID, channelID)
+	}))
+	defer server.Close()
+
+	restClient := rest.NewClient("test-token",
+		rest.WithHTTPClient(server.Client()),
+		rest.WithRateLimiter(rest.NewNoopRateLimiter()),
+		rest.WithURL(server.URL),
+	)
+	progress := &naturalMessageProgress{
+		bot:       &Bot{client: &disgoBot.Client{Rest: rest.New(restClient)}},
+		channelID: channelID,
+	}
+
+	if !progress.Start(context.Background(), "panda_clip_youtube") {
+		t.Fatal("expected progress start to report a created card")
+	}
+	if !progress.Created() {
+		t.Fatal("expected progress to be marked created")
+	}
+	if progress.Start(context.Background(), "panda_clip_youtube") {
+		t.Fatal("expected duplicate progress start to report false")
+	}
+	if requests != 1 {
+		t.Fatalf("expected one progress request, got %d", requests)
+	}
+}
+
+func TestNaturalMessageProgressUpdatesClipStatus(t *testing.T) {
+	channelID := snowflake.MustParse("100000000000000002")
+	messageID := snowflake.MustParse("100000000000000003")
+	var creates int
+	var updates int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read progress request body: %v", err)
+		}
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/channels/"+channelID.String()+"/messages":
+			creates++
+			if !strings.Contains(string(body), "Searching") {
+				t.Fatalf("expected initial progress status in request body, got %s", string(body))
+			}
+		case r.Method == http.MethodPatch && r.URL.Path == "/channels/"+channelID.String()+"/messages/"+messageID.String():
+			updates++
+			if !strings.Contains(string(body), "Rendering") {
+				t.Fatalf("expected updated progress status in request body, got %s", string(body))
+			}
+		default:
+			t.Fatalf("unexpected progress request %s %s", r.Method, r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprintf(w, `{"id":"%s","channel_id":"%s","author":{"id":"100000000000000004","username":"Panda","discriminator":"0000"},"timestamp":"2026-06-28T15:00:00Z","type":0,"content":""}`, messageID, channelID)
+	}))
+	defer server.Close()
+
+	restClient := rest.NewClient("test-token",
+		rest.WithHTTPClient(server.Client()),
+		rest.WithRateLimiter(rest.NewNoopRateLimiter()),
+		rest.WithURL(server.URL),
+	)
+	progress := &naturalMessageProgress{
+		bot:       &Bot{client: &disgoBot.Client{Rest: rest.New(restClient)}},
+		channelID: channelID,
+	}
+
+	if !progress.Start(context.Background(), "panda_clip_youtube") {
+		t.Fatal("expected progress start to report a created card")
+	}
+	if !progress.UpdateToolStatus(context.Background(), "panda_clip_youtube", "Searching") {
+		t.Fatal("expected duplicate status update to be accepted")
+	}
+	if !progress.UpdateToolStatus(context.Background(), "panda_clip_youtube", "Rendering") {
+		t.Fatal("expected progress status update to report success")
+	}
+	if creates != 1 || updates != 1 {
+		t.Fatalf("expected one create and one update request, got creates=%d updates=%d", creates, updates)
 	}
 }
 

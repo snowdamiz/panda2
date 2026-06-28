@@ -11,13 +11,26 @@
     "allow_provider_fallbacks": true,
     "image_base_url": "https://openrouter.ai/api/v1",
     "image_model": "google/gemini-3.1-flash-image",
+    "clip_detection_model": "",
+    "clip_detection_timeout": "2m",
+    "clip_detection_max_tokens": 8192,
+    "clip_composition_model": "google/gemini-3.5-flash",
+    "clip_composition_timeout": "2m",
+    "clip_composition_max_tokens": 8192,
     "image_timeout": "90s",
     "image_max_bytes": 8388608
   },
   "lemonfox": {
     "api_key": "",
     "base_url": "https://api.lemonfox.ai/v1",
-    "youtube_audio_chunk_duration": "10m"
+    "youtube_audio_chunk_duration": "10m",
+    "youtube_clip_min_duration": "5s",
+    "youtube_clip_max_duration": "90s",
+    "youtube_clip_max_bytes": 104857600,
+    "youtube_clip_thumbnail_max_count": 12,
+    "youtube_clip_thumbnail_max_edge": 720,
+    "youtube_clip_vertical_resolution": "1080x1920",
+    "youtube_clip_landscape_resolution": "1920x1080"
   },
   "billing": {
     "public_url": "",
@@ -44,6 +57,13 @@
   },
   "storage": {
     "data_dir": "",
-    "sqlite_path": ""
+    "sqlite_path": "",
+    "r2_account_id": "",
+    "r2_endpoint": "",
+    "r2_access_key_id": "",
+    "r2_secret_access_key": "",
+    "r2_bucket": "",
+    "r2_public_base_url": "",
+    "r2_clip_prefix": "clips"
   }
 }

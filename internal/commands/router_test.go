@@ -4812,6 +4812,54 @@ func TestRegularUserGetsWebSearchPermissionWhenFeatureGateOmitsWebSearch(t *test
 	}
 }
 
+func TestRegularUserGetsYouTubeClippingPermissionByDefaultUntilAdminDisables(t *testing.T) {
+	ctx := context.Background()
+	router := newTestRouter(t, &fakeLLM{}, 5)
+	repo := attachFeatureService(t, router)
+	if err := repo.SetGuildFeatures(ctx, "guild-1", []string{features.AssistantChat}, "test", "admin", time.Now().UTC()); err != nil {
+		t.Fatalf("SetGuildFeatures: %v", err)
+	}
+
+	permissions := router.allowedToolPermissions(ctx, Request{
+		UserID:    "user-1",
+		GuildID:   "guild-1",
+		ChannelID: "channel-1",
+		RoleIDs:   []string{"member"},
+	})
+	if _, ok := permissions[admin.PermissionAssistantYouTubeClipping]; !ok {
+		t.Fatalf("youtube clipping should be available by default even when guild features omit it: %+v", permissions)
+	}
+	enabled, active := router.featureSetForAccess(ctx, "guild-1")
+	if !active || !features.Has(enabled, features.YouTubeClipping) {
+		t.Fatalf("youtube clipping should be injected into access feature set, active=%t enabled=%+v", active, enabled)
+	}
+
+	response := router.Handle(ctx, Request{
+		Command:      "admin",
+		Subcommand:   "feature",
+		GuildID:      "guild-1",
+		UserID:       "admin",
+		IsGuildAdmin: true,
+		Options:      map[string]string{"action": "disable", "feature_id": features.YouTubeClipping},
+	})
+	if !strings.Contains(response.Content, "Disabled") {
+		t.Fatalf("expected admin disable to succeed, got %+v", response)
+	}
+	permissions = router.allowedToolPermissions(ctx, Request{
+		UserID:    "user-1",
+		GuildID:   "guild-1",
+		ChannelID: "channel-1",
+		RoleIDs:   []string{"member"},
+	})
+	if _, ok := permissions[admin.PermissionAssistantYouTubeClipping]; ok {
+		t.Fatalf("youtube clipping should not be available after explicit disable: %+v", permissions)
+	}
+	enabled, active = router.featureSetForAccess(ctx, "guild-1")
+	if !active || features.Has(enabled, features.YouTubeClipping) {
+		t.Fatalf("youtube clipping should be absent after explicit disable, active=%t enabled=%+v", active, enabled)
+	}
+}
+
 func TestRegularUserGetsImageGenerationPermissionWhenFeatureEnabled(t *testing.T) {
 	ctx := context.Background()
 	router := newTestRouter(t, &fakeLLM{}, 5)
@@ -5132,7 +5180,7 @@ func TestNaturalMessageAboutPandaDeclineDoesNotStartResponse(t *testing.T) {
 	}
 }
 
-func TestNaturalMessageRetryableHandlerReturnsAssistantError(t *testing.T) {
+func TestNaturalMessageRendersRetryableAssistantErrorOnce(t *testing.T) {
 	retryErr := llm.Error{StatusCode: http.StatusTooManyRequests, Code: "rate_limit", Message: "slow down"}
 	request := Request{
 		UserID:    "user-1",
@@ -5145,21 +5193,9 @@ func TestNaturalMessageRetryableHandlerReturnsAssistantError(t *testing.T) {
 	}
 	router := newTestRouter(t, &fakeLLM{err: retryErr}, 5)
 
-	response, err := router.HandleNaturalMessageStreamRetryable(context.Background(), request, nil)
-	if err == nil {
-		t.Fatal("expected retryable assistant error")
-	}
-	if !assistant.RetryableFailure(err) {
-		t.Fatalf("expected retryable assistant failure, got %v", err)
-	}
-	if response.Content != "" {
-		t.Fatalf("retryable handler should not render a response before queue retry, got %+v", response)
-	}
-
-	visibleRouter := newTestRouter(t, &fakeLLM{err: retryErr}, 5)
-	visible := visibleRouter.HandleNaturalMessage(context.Background(), request)
-	if visible.Presentation.Title != "AI response failed" || !strings.Contains(visible.Content, "try again later") {
-		t.Fatalf("regular natural handler should still render visible error card, got %+v", visible)
+	response := router.HandleNaturalMessage(context.Background(), request)
+	if response.Presentation.Title != "AI response failed" || !strings.Contains(response.Content, "try again later") {
+		t.Fatalf("natural handler should render one visible error card, got %+v", response)
 	}
 }
 

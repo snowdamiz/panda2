@@ -88,7 +88,10 @@ type fakeAssistantMusicManager struct {
 	activeVoiceChannelID string
 }
 
-type fakeAssistantYouTubeSummarizer struct{}
+type fakeAssistantYouTubeSummarizer struct {
+	clipConfigured bool
+	clipResult     youtube.ClipResult
+}
 
 type fakeAssistantDiscordProvider struct{}
 
@@ -126,6 +129,33 @@ func (f *fakeAssistantMusicManager) ActiveVoiceChannelID(string) string {
 
 func (fakeAssistantYouTubeSummarizer) Configured() bool {
 	return true
+}
+
+func (f fakeAssistantYouTubeSummarizer) ClipConfigured() bool {
+	return f.clipConfigured
+}
+
+func (f fakeAssistantYouTubeSummarizer) Clip(_ context.Context, request youtube.ClipRequest) (youtube.ClipResult, error) {
+	if request.Progress != nil {
+		request.Progress(youtube.ClipProgress{Status: "Transcribing"})
+	}
+	if len(f.clipResult.Clips) > 0 {
+		return f.clipResult, nil
+	}
+	return youtube.ClipResult{
+		Title:    "fixture clip video",
+		URL:      "https://www.youtube.com/watch?v=fixture",
+		Uploader: "Fixture Creator",
+		Duration: time.Minute,
+		Clips: []youtube.RenderedClip{{
+			Rank:     1,
+			Title:    "Fixture Clip",
+			Type:     "continuous",
+			WatchURL: "https://cdn.example.test/clips/fixture.mp4",
+			Duration: 30 * time.Second,
+			Reason:   "Strong hook.",
+		}},
+	}, nil
 }
 
 func (fakeAssistantYouTubeSummarizer) Summarize(context.Context, youtube.SummaryRequest) (youtube.SummaryResult, error) {
@@ -1134,6 +1164,67 @@ func TestChatNaturalMessageInspectsAttachedImageForDirectQuestion(t *testing.T) 
 	finalMessages := joinMessages(client.requests[1].Messages)
 	if !strings.Contains(finalMessages, "AI responses at 214 / 2,000") {
 		t.Fatalf("final model request should include image inspection result, got:\n%s", finalMessages)
+	}
+}
+
+func TestChatNaturalMessageNotifiesToolStartForYouTubeClip(t *testing.T) {
+	ctx := context.Background()
+	client := &fakeClient{response: llm.ChatResponse{
+		Model: "fixture/model",
+		ToolCalls: []llm.ToolCall{{
+			ID:   "call-clip",
+			Type: "function",
+			Function: llm.ToolCallFunction{
+				Name:      "panda_clip_youtube",
+				Arguments: `{"query":"https://www.youtube.com/watch?v=fixture"}`,
+			},
+		}},
+	}}
+	service, db := newTestService(t, client)
+	configs := repository.NewGuildConfigRepository(db.DB)
+	registry, err := tools.NewDefaultRegistry()
+	if err != nil {
+		t.Fatalf("NewDefaultRegistry: %v", err)
+	}
+	service.WithToolExecutor(tools.NewExecutor(registry, nil, configs).WithYouTubeSummarizer(fakeAssistantYouTubeSummarizer{clipConfigured: true}))
+
+	var startedTools []string
+	var progressUpdates []string
+	response, err := service.ChatNaturalMessageWithToolStart(ctx, AskRequest{
+		RequestID:    "message-clip",
+		GuildID:      "guild-1",
+		UserID:       "user-1",
+		ChannelID:    "channel-1",
+		Question:     "panda clip https://www.youtube.com/watch?v=fixture",
+		BotMentioned: true,
+		AllowedPermissions: map[string]struct{}{
+			admin.PermissionAssistantUse:             {},
+			admin.PermissionAssistantYouTubeClipping: {},
+		},
+		EnabledFeatures: map[string]struct{}{
+			features.AssistantChat:   {},
+			features.YouTubeClipping: {},
+		},
+		FeatureGateActive: true,
+	}, nil, func(toolName string) {
+		startedTools = append(startedTools, toolName)
+	}, func(toolName string, status string) {
+		progressUpdates = append(progressUpdates, toolName+":"+status)
+	})
+	if err != nil {
+		t.Fatalf("ChatNaturalMessageWithToolStart: %v", err)
+	}
+	if len(startedTools) != 1 || startedTools[0] != "panda_clip_youtube" {
+		t.Fatalf("expected clip tool start notification, got %+v", startedTools)
+	}
+	if len(progressUpdates) != 1 || progressUpdates[0] != "panda_clip_youtube:Transcribing" {
+		t.Fatalf("expected clip tool progress notification, got %+v", progressUpdates)
+	}
+	if response.Card == nil || response.Card.Title != "YouTube clip ready" || !response.Card.Terminal {
+		t.Fatalf("expected terminal clip card, got %+v", response)
+	}
+	if len(client.requests) != 1 {
+		t.Fatalf("terminal clip tool should not require a final model round, got %d requests", len(client.requests))
 	}
 }
 
@@ -4292,6 +4383,31 @@ func TestToolCardFromTerminalYouTubePayloadFallsBackInsteadOfDisappearing(t *tes
 	}
 	if !strings.Contains(card.Content, "could not render the selection controls") {
 		t.Fatalf("expected actionable fallback content, got %q", card.Content)
+	}
+}
+
+func TestToolCardFromYouTubeClipPayloadIsTerminal(t *testing.T) {
+	card := toolCardFromToolResult(llm.ToolCall{
+		ID:   "call-youtube-clip",
+		Type: "function",
+		Function: llm.ToolCallFunction{
+			Name:      "panda_clip_youtube",
+			Arguments: `{"query":"https://www.youtube.com/watch?v=deep"}`,
+		},
+	}, llm.Message{
+		Role:       "tool",
+		ToolCallID: "call-youtube-clip",
+		Content:    `{"result":{"title":"YouTube clip ready","content":"1. [Best Moment](https://cdn.example.test/clip.mp4) - 20s","accent":"info","terminal":true,"actions":[{"label":"1. Best Moment","url":"https://cdn.example.test/clip.mp4"}],"clips":[{"rank":1,"watch_url":"https://cdn.example.test/clip.mp4"}]}}`,
+	})
+
+	if card == nil {
+		t.Fatal("expected YouTube clip payload to render as a card")
+	}
+	if card.Title != "YouTube clip ready" || card.Accent != "info" || !card.Terminal {
+		t.Fatalf("unexpected clip card: %+v", card)
+	}
+	if !strings.Contains(card.Content, "Best Moment") || len(card.Actions) != 1 || card.Actions[0].URL != "https://cdn.example.test/clip.mp4" {
+		t.Fatalf("expected clip card content and action, got %+v", card)
 	}
 }
 

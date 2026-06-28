@@ -21,6 +21,7 @@ const (
 	Attachments           = "attachments"
 	WebSearch             = "web_search"
 	ImageGeneration       = "image_generation"
+	YouTubeClipping       = "youtube_clipping"
 	AdminSetup            = "admin_setup"
 	AdminAccessControl    = "admin_access_control"
 	AdminAudit            = "admin_audit"
@@ -39,7 +40,7 @@ var (
 	ErrUnknownFeature       = errors.New("unknown feature")
 	ErrInternalFeature      = errors.New("feature is not selectable in public install")
 	ErrUnknownPermission    = errors.New("unknown Discord permission")
-	defaultInstallPresetIDs = []string{AssistantChat, Threads, Polls, Reminders, WebSearch, ImageGeneration, Knowledge, Attachments, Music, AdminSetup, AdminAccessControl, AdminAudit, ComposedTools, DiscordMessages}
+	defaultInstallPresetIDs = []string{AssistantChat, Threads, Polls, Reminders, WebSearch, ImageGeneration, YouTubeClipping, Knowledge, Attachments, Music, AdminSetup, AdminAccessControl, AdminAudit, ComposedTools, DiscordMessages}
 	defaultInstallScopes    = []string{"bot", "applications.commands", "identify", "guilds"}
 )
 
@@ -390,6 +391,16 @@ var catalog = []Feature{
 		ConsumesPlanQuota:  true,
 		Public:             true,
 		Dependencies:       []string{AssistantChat},
+	},
+	{
+		ID:                YouTubeClipping,
+		Label:             "YouTube clipping",
+		Description:       "Create short YouTube video clips from transcript-guided model decisions and publish durable watch links.",
+		PandaPermissions:  []string{admin.PermissionAssistantYouTubeClipping},
+		ToolNames:         []string{"panda.clip_youtube"},
+		ConsumesPlanQuota: true,
+		Public:            true,
+		Dependencies:      []string{AssistantChat},
 	},
 	{
 		ID:               AdminSetup,

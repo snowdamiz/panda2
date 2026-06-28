@@ -440,18 +440,30 @@ func (r *Router) HandleNaturalMessage(ctx context.Context, request Request) Resp
 }
 
 func (r *Router) HandleNaturalMessageStream(ctx context.Context, request Request, onRespond func()) Response {
-	response, err := r.handleNaturalMessageStream(ctx, request, onRespond, false)
+	response, err := r.handleNaturalMessageStream(ctx, request, onRespond, nil, nil)
 	if err != nil {
 		return assistantError(err)
 	}
 	return response
 }
 
-func (r *Router) HandleNaturalMessageStreamRetryable(ctx context.Context, request Request, onRespond func()) (Response, error) {
-	return r.handleNaturalMessageStream(ctx, request, onRespond, true)
+func (r *Router) HandleNaturalMessageStreamWithToolStart(ctx context.Context, request Request, onRespond func(), onToolStart func(string)) Response {
+	response, err := r.handleNaturalMessageStream(ctx, request, onRespond, onToolStart, nil)
+	if err != nil {
+		return assistantError(err)
+	}
+	return response
 }
 
-func (r *Router) handleNaturalMessageStream(ctx context.Context, request Request, onRespond func(), retryableAssistantErrorsAsError bool) (Response, error) {
+func (r *Router) HandleNaturalMessageStreamWithToolProgress(ctx context.Context, request Request, onRespond func(), onToolStart func(string), onToolProgress func(string, string)) Response {
+	response, err := r.handleNaturalMessageStream(ctx, request, onRespond, onToolStart, onToolProgress)
+	if err != nil {
+		return assistantError(err)
+	}
+	return response
+}
+
+func (r *Router) handleNaturalMessageStream(ctx context.Context, request Request, onRespond func(), onToolStart func(string), onToolProgress func(string, string)) (Response, error) {
 	message := strings.TrimSpace(firstNonEmpty(request.Options["message"], request.Options["question"]))
 	if message == "" {
 		return Response{}, nil
@@ -484,11 +496,12 @@ func (r *Router) handleNaturalMessageStream(ctx context.Context, request Request
 	}
 	request.Options["question"] = message
 	return r.handleChatModeWithOptionsResult(ctx, request, chatModeOptions{
-		threaded:                        false,
-		allowSoulWriter:                 true,
-		naturalMessage:                  true,
-		onRespond:                       onRespond,
-		retryableAssistantErrorsAsError: retryableAssistantErrorsAsError,
+		threaded:        false,
+		allowSoulWriter: true,
+		naturalMessage:  true,
+		onRespond:       onRespond,
+		onToolStart:     onToolStart,
+		onToolProgress:  onToolProgress,
 	})
 }
 
@@ -1784,11 +1797,12 @@ func (r *Router) handleChatMode(ctx context.Context, request Request, threaded b
 }
 
 type chatModeOptions struct {
-	threaded                        bool
-	allowSoulWriter                 bool
-	naturalMessage                  bool
-	onRespond                       func()
-	retryableAssistantErrorsAsError bool
+	threaded        bool
+	allowSoulWriter bool
+	naturalMessage  bool
+	onRespond       func()
+	onToolStart     func(string)
+	onToolProgress  func(string, string)
 }
 
 func (r *Router) handleChatModeWithAccess(ctx context.Context, request Request, threaded bool, allowSoulWriter bool) Response {
@@ -1903,15 +1917,12 @@ func (r *Router) handleChatModeWithOptionsResult(ctx context.Context, request Re
 	var answer assistant.AskResponse
 	var err error
 	if options.naturalMessage {
-		answer, err = r.assistant.ChatNaturalMessage(ctx, askRequest, options.onRespond)
+		answer, err = r.assistant.ChatNaturalMessageWithToolStart(ctx, askRequest, options.onRespond, options.onToolStart, options.onToolProgress)
 	} else {
 		answer, err = r.assistant.Chat(ctx, askRequest)
 	}
 	if err != nil {
 		r.releaseAIUsage(ctx, reservation)
-		if options.retryableAssistantErrorsAsError && assistant.RetryableFailure(err) {
-			return Response{}, err
-		}
 		return assistantError(err), nil
 	}
 	if answer.Silent {
@@ -3351,6 +3362,9 @@ func (r *Router) allowedToolPermissions(ctx context.Context, request Request) ma
 	}
 	if featureEnabled(features.ImageGeneration) {
 		r.addPermissionIfAllowed(ctx, request, permissions, admin.PermissionAssistantImageGeneration, r.admin.CanUseImageGeneration)
+	}
+	if featureEnabled(features.YouTubeClipping) {
+		r.addPermissionIfAllowed(ctx, request, permissions, admin.PermissionAssistantYouTubeClipping, r.admin.CanUseYouTubeClipping)
 	}
 	if featureEnabled(features.Knowledge) {
 		r.addPermissionIfAllowed(ctx, request, permissions, admin.PermissionAssistantMemoryRead, r.admin.CanReadMemory)

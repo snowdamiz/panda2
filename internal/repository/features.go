@@ -119,6 +119,10 @@ func (r *FeatureRepository) ConsumeInstallIntentAndSetGuildFeatures(ctx context.
 }
 
 func (r *FeatureRepository) SetGuildFeatures(ctx context.Context, guildID string, featureIDs []string, sourceInstallIntentID, actorID string, now time.Time) error {
+	return r.SetGuildFeatureStates(ctx, guildID, featureIDs, nil, sourceInstallIntentID, actorID, now)
+}
+
+func (r *FeatureRepository) SetGuildFeatureStates(ctx context.Context, guildID string, enabledFeatureIDs []string, disabledFeatureIDs []string, sourceInstallIntentID, actorID string, now time.Time) error {
 	guildID = strings.TrimSpace(guildID)
 	if guildID == "" {
 		return errors.New("guild_id is required")
@@ -129,7 +133,7 @@ func (r *FeatureRepository) SetGuildFeatures(ctx context.Context, guildID string
 		now = now.UTC()
 	}
 	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		return setGuildFeaturesTx(tx, guildID, featureIDs, sourceInstallIntentID, actorID, now)
+		return setGuildFeatureStatesTx(tx, guildID, enabledFeatureIDs, disabledFeatureIDs, sourceInstallIntentID, actorID, now)
 	})
 }
 
@@ -187,12 +191,27 @@ func markInstallIntentExpired(ctx context.Context, db *gorm.DB, stateHash string
 }
 
 func setGuildFeaturesTx(tx *gorm.DB, guildID string, featureIDs []string, sourceInstallIntentID, actorID string, now time.Time) error {
+	return setGuildFeatureStatesTx(tx, guildID, featureIDs, nil, sourceInstallIntentID, actorID, now)
+}
+
+func setGuildFeatureStatesTx(tx *gorm.DB, guildID string, enabledFeatureIDs []string, disabledFeatureIDs []string, sourceInstallIntentID, actorID string, now time.Time) error {
 	enabled := map[string]struct{}{}
-	for _, featureID := range featureIDs {
+	for _, featureID := range enabledFeatureIDs {
 		featureID = strings.TrimSpace(featureID)
 		if featureID != "" {
 			enabled[featureID] = struct{}{}
 		}
+	}
+	disabled := map[string]struct{}{}
+	for _, featureID := range disabledFeatureIDs {
+		featureID = strings.TrimSpace(featureID)
+		if featureID == "" {
+			continue
+		}
+		if _, alsoEnabled := enabled[featureID]; alsoEnabled {
+			continue
+		}
+		disabled[featureID] = struct{}{}
 	}
 	if err := tx.Model(&store.GuildFeature{}).
 		Where("guild_id = ?", guildID).
@@ -218,6 +237,28 @@ func setGuildFeaturesTx(tx *gorm.DB, guildID string, featureIDs []string, source
 				"updated_at":               now,
 			}),
 		}).Create(&row).Error; err != nil {
+			return err
+		}
+	}
+	for featureID := range disabled {
+		row := map[string]any{
+			"guild_id":                 guildID,
+			"feature_id":               featureID,
+			"enabled":                  false,
+			"source_install_intent_id": strings.TrimSpace(sourceInstallIntentID),
+			"enabled_by_user_id":       strings.TrimSpace(actorID),
+			"created_at":               now,
+			"updated_at":               now,
+		}
+		if err := tx.Model(&store.GuildFeature{}).Clauses(clause.OnConflict{
+			Columns: []clause.Column{{Name: "guild_id"}, {Name: "feature_id"}},
+			DoUpdates: clause.Assignments(map[string]any{
+				"enabled":                  false,
+				"source_install_intent_id": row["source_install_intent_id"],
+				"enabled_by_user_id":       row["enabled_by_user_id"],
+				"updated_at":               now,
+			}),
+		}).Create(row).Error; err != nil {
 			return err
 		}
 	}

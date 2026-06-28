@@ -38,6 +38,7 @@ const (
 	PermissionAssistantUseThreads      = "assistant.use_threads"
 	PermissionAssistantAttachments     = "assistant.attachments"
 	PermissionAssistantImageGeneration = "assistant.image_generation"
+	PermissionAssistantYouTubeClipping = "assistant.youtube_clipping"
 	PermissionAssistantMemoryRead      = "assistant.memory.read"
 	PermissionAssistantMemoryWrite     = "assistant.memory.write"
 	PermissionAssistantWebSearch       = "assistant.web_search"
@@ -68,6 +69,7 @@ var allPermissionNames = []string{
 	PermissionAssistantUseThreads,
 	PermissionAssistantAttachments,
 	PermissionAssistantImageGeneration,
+	PermissionAssistantYouTubeClipping,
 	PermissionAssistantMemoryRead,
 	PermissionAssistantMemoryWrite,
 	PermissionAssistantWebSearch,
@@ -1253,6 +1255,10 @@ func (s *Service) CanUseAttachments(ctx context.Context, request AssistantAccess
 
 func (s *Service) CanUseImageGeneration(ctx context.Context, request AssistantAccessRequest) (bool, error) {
 	return s.canUseOptionalAssistantPermission(ctx, request, PermissionAssistantImageGeneration)
+}
+
+func (s *Service) CanUseYouTubeClipping(ctx context.Context, request AssistantAccessRequest) (bool, error) {
+	return s.canUseOptionalAssistantPermission(ctx, request, PermissionAssistantYouTubeClipping)
 }
 
 func (s *Service) CanReadMemory(ctx context.Context, request AssistantAccessRequest) (bool, error) {

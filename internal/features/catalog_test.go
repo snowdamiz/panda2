@@ -52,7 +52,7 @@ func TestPublicCatalogExcludesOwnerOps(t *testing.T) {
 
 func TestDefaultInstallPresetIncludesAdminAutomationAndChannelMessages(t *testing.T) {
 	defaults := FeatureSet(DefaultInstallPreset())
-	for _, want := range []string{Threads, WebSearch, ImageGeneration, AdminSetup, AdminAccessControl, AdminAudit, ComposedTools, DiscordMessages} {
+	for _, want := range []string{Threads, WebSearch, ImageGeneration, YouTubeClipping, AdminSetup, AdminAccessControl, AdminAudit, ComposedTools, DiscordMessages} {
 		if !Has(defaults, want) {
 			t.Fatalf("expected default install preset to include %s, got %+v", want, DefaultInstallPreset())
 		}
@@ -68,6 +68,25 @@ func TestDefaultInstallPresetIncludesAdminAutomationAndChannelMessages(t *testin
 	for _, heavy := range []string{"MANAGE_MESSAGES", "PIN_MESSAGES", "ADD_REACTIONS"} {
 		if Has(permissions, heavy) {
 			t.Fatalf("default channel messages should not request %s, got %+v", heavy, selection.DiscordPermissionNames)
+		}
+	}
+}
+
+func TestYouTubeClippingFeatureDependsOnAssistantChat(t *testing.T) {
+	selection, err := Calculate([]string{YouTubeClipping}, true)
+	if err != nil {
+		t.Fatalf("Calculate: %v", err)
+	}
+	features := FeatureSet(selection.ExpandedFeatureIDs)
+	for _, want := range []string{AssistantChat, YouTubeClipping} {
+		if !Has(features, want) {
+			t.Fatalf("expected expanded feature %s in %+v", want, selection.ExpandedFeatureIDs)
+		}
+	}
+	permissions := FeatureSet(selection.DiscordPermissionNames)
+	for _, want := range []string{"VIEW_CHANNEL", "SEND_MESSAGES", "EMBED_LINKS"} {
+		if !Has(permissions, want) {
+			t.Fatalf("expected youtube clipping to request %s through assistant chat, got %+v", want, selection.DiscordPermissionNames)
 		}
 	}
 }

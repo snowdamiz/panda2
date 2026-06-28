@@ -547,8 +547,22 @@ func DefaultDefinitions() []Definition {
 			IncludeInModelContext: true,
 		},
 		{
+			Name:                  "panda.clip_youtube",
+			Description:           "Create and publish ranked short clips from a YouTube video, including cohesive spliced clips made from multiple transcript-backed cuts. Use this when the user asks Panda to clip, cut, capture, trim, extract, make highlights from, or make shareable/watchable moments from a YouTube video and the user provided an exact YouTube URL, or after the user selected an exact URL from panda.search_youtube with purpose=clip. If the user gives only a URL or says to clip the video without a specific moment, call this tool with no instructions so the clip detector uses Panda's default viral clip preset. For title/name-only clip requests, call panda.search_youtube first with purpose=clip and include instructions only when the user provided clip guidance, unless the user explicitly asks to use the top result without choosing. Set aspect_ratio to 9:16 when the user asks for vertical, Shorts, TikTok, Reels, phone, or 9:16; set 16:9 when the user asks for widescreen, landscape, YouTube, or 16:9; otherwise set auto so the visual planner chooses. This tool extracts audio, transcribes it with timestamps, asks dedicated models to choose ranked transcript segments and visual composition, renders continuous or spliced clips with ffmpeg, uploads them to R2, and returns durable watch links. Do not use this for summaries or music playback.",
+			RequiredPermission:    admin.PermissionAssistantYouTubeClipping,
+			FeatureID:             features.YouTubeClipping,
+			ToolClass:             ToolClassMedia,
+			InputSchema:           youtubeClipSchema(),
+			OutputSchema:          objectSchema("result"),
+			Timeout:               30 * time.Minute,
+			Redaction:             RedactContent,
+			Audit:                 AuditSensitive,
+			IncludeInModelContext: true,
+			DiscordPermissions:    []string{"VIEW_CHANNEL", "SEND_MESSAGES", "EMBED_LINKS"},
+		},
+		{
 			Name:                  "panda.search_youtube",
-			Description:           "Search YouTube for the top candidate videos and render a Discord selection prompt with thumbnails. Use this before panda.summarize_youtube for title/name-only YouTube summary requests, including requests that also name a channel/creator, unless the user provided an exact YouTube URL or explicitly asked to use the top result without choosing. For latest/newest/most recent video requests on a channel or creator, set source=channel_uploads and put only the channel/creator name in query; include channel_url or handle when the user provided one. For user-specified upload-date constraints, pass date, date_after, or date_before. Do not use for music playback; use panda.manage_music action=search for track choices.",
+			Description:           "Search YouTube for the top candidate videos and render a Discord selection prompt with thumbnails. Use this before panda.summarize_youtube for title/name-only YouTube summary requests or before panda.clip_youtube for title/name-only YouTube clipping requests, including requests that also name a channel/creator, unless the user provided an exact YouTube URL or explicitly asked to use the top result without choosing. Set purpose=summarize for summaries and purpose=clip for clipping; include clip instructions only when the user provided clip guidance. For latest/newest/most recent video requests on a channel or creator, set source=channel_uploads and put only the channel/creator name in query; include channel_url or handle when the user provided one. For user-specified upload-date constraints, pass date, date_after, or date_before. Do not use for music playback; use panda.manage_music action=search for track choices.",
 			RequiredPermission:    admin.PermissionAssistantUse,
 			FeatureID:             features.AssistantChat,
 			ToolClass:             ToolClassMedia,
@@ -1150,6 +1164,45 @@ func youtubeSummarySchema() json.RawMessage {
 	})
 }
 
+func youtubeClipSchema() json.RawMessage {
+	return schemaWithProperties([]string{"query"}, map[string]any{
+		"query": map[string]any{
+			"type":        "string",
+			"minLength":   1,
+			"description": "Exact YouTube URL or selected YouTube video URL to clip. Use the exact URL when the user provided one or after they selected a result.",
+		},
+		"url": map[string]any{
+			"type":        "string",
+			"description": "Alias for query when the user provides a YouTube URL. Prefer putting the same URL in query.",
+		},
+		"title": map[string]any{
+			"type":        "string",
+			"description": "Alias for query only when the user explicitly asks to use a top result without choosing. Otherwise call panda.search_youtube first.",
+		},
+		"video": map[string]any{
+			"type":        "string",
+			"description": "Alias for query when the user says the video name separately and explicitly asks to use a top result without choosing.",
+		},
+		"instructions": map[string]any{
+			"type":        "string",
+			"description": "Optional model-written clip intent from the user's request, such as the topic, moment, joke, quote, highlight, desired clip count, or requested duration. Omit when the user did not provide clip guidance; Panda will use its default viral clip preset. Do not include provider/tool/routing instructions.",
+		},
+		"aspect_ratio": map[string]any{
+			"type":        "string",
+			"enum":        []string{"auto", "16:9", "9:16"},
+			"description": "Requested output aspect. Use 9:16 for vertical, Shorts, TikTok, Reels, phone, or 9:16 requests. Use 16:9 for widescreen, landscape, YouTube, or 16:9 requests. Use auto when the user did not specify an aspect so the visual planner chooses.",
+		},
+		"layout_instructions": map[string]any{
+			"type":        "string",
+			"description": "Optional visual layout guidance from the user, such as keep the webcam visible, focus on gameplay, preserve captions, or prioritize the speaker. Omit unless the user provided visual layout guidance.",
+		},
+		"language": map[string]any{
+			"type":        "string",
+			"description": "Optional spoken language hint, such as english, spanish, french, or japanese. Omit unless the user specifies the video's language.",
+		},
+	})
+}
+
 func youtubeSearchSchema() json.RawMessage {
 	return schemaWithProperties([]string{"query"}, map[string]any{
 		"query": map[string]any{
@@ -1170,6 +1223,15 @@ func youtubeSearchSchema() json.RawMessage {
 			"minimum":     3,
 			"maximum":     3,
 			"description": "Number of choices to return. Use 3 for Discord selection prompts.",
+		},
+		"purpose": map[string]any{
+			"type":        "string",
+			"enum":        []string{"summarize", "clip"},
+			"description": "Use summarize when the selected video should be summarized. Use clip when the selected video should be clipped.",
+		},
+		"instructions": map[string]any{
+			"type":        "string",
+			"description": "For purpose=clip, preserve the user's requested clip topic, moment, quote, highlight, or desired short-clip intent so it can be passed to panda.clip_youtube after selection. Omit when the user did not provide clip guidance.",
 		},
 		"source": map[string]any{
 			"type":        "string",
