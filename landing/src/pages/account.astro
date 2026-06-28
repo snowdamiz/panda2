@@ -1,6 +1,5 @@
 ---
-import Footer from '../components/Footer.astro';
-import Header from '../components/Header.astro';
+import LogoMark from '../components/LogoMark.astro';
 import Kicker from '../components/ui/Kicker.astro';
 import { siteMeta } from '../data/landing';
 import BaseLayout from '../layouts/BaseLayout.astro';
@@ -9,96 +8,266 @@ const billingApiBase = import.meta.env.PUBLIC_PANDA_API_BASE_URL || (import.meta
 ---
 
 <BaseLayout
-  title="Panda account - Billing and wallet"
-  description="Manage your Panda wallet account, payment status, and billing actions."
+  title="Panda account - Dashboard"
+  description="Manage your Panda wallet account, payment status, trial usage, and billing from one dashboard."
 >
-  <Header />
-  <main id="main" class="app-page account-page">
-    <section class="shell account-shell" data-wallet-account data-api-base={billingApiBase}>
-      <div class="app-page-heading account-heading reveal">
-        <div>
-          <Kicker tone="paper">Wallet login</Kicker>
-          <h1 data-account-heading-title>Sign in to checkout.</h1>
+  <main id="main" class="account-page">
+    <section class="account-shell" data-wallet-account data-api-base={billingApiBase}>
+      <!-- Signed-out gate -->
+      <div class="account-gate reveal" data-account-login-view>
+        <a class="account-gate-brand" href="/" aria-label="Panda home">
+          <LogoMark class="brand-mark" loading="eager" />
+          <span>PANDA</span>
+        </a>
+
+        <div class="account-gate-intro">
+          <Kicker tone="paper">Account</Kicker>
+          <h1>Your account.</h1>
+          <p>
+            Sign in with the Solana wallet you use for payment. Panda attaches
+            your plan to Discord later through the activation key.
+          </p>
         </div>
-        <p data-account-heading-copy>
-          Connect the Solana wallet you will use for payment. Panda attaches
-          the purchased plan to Discord later through the activation key.
-        </p>
+
+        <div class="account-login-card">
+          <div class="account-panel-head">
+            <span>Wallet access</span>
+            <strong>Sign in</strong>
+          </div>
+          <div class="account-login-body">
+            <button class="app-primary account-login-button" type="button" data-account-connect>Sign in with wallet</button>
+          </div>
+        </div>
       </div>
 
-      <div class="account-login-card reveal" data-account-login-view>
-        <div class="account-panel-head">
-          <span>Checkout access</span>
-          <strong data-account-title>Wallet sign in</strong>
-        </div>
+      <!-- Signed-in console -->
+      <div class="account-console reveal" data-account-dashboard hidden>
+        <aside class="account-sidebar">
+          <a class="account-brand" href="/" aria-label="Panda home">
+            <LogoMark class="brand-mark" loading="eager" />
+            <span>PANDA</span>
+          </a>
 
-        <div class="account-login-body">
-          <button class="app-primary account-login-button" type="button" data-account-connect>Sign in with wallet</button>
-        </div>
-      </div>
+          <nav class="account-nav" role="tablist" aria-label="Account sections">
+            <button type="button" class="account-nav-item active" role="tab" aria-selected="true" data-account-tab-button="overview">
+              <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                <rect x="3" y="3" width="7.5" height="7.5" rx="1.6" stroke="currentColor" stroke-width="1.6" />
+                <rect x="13.5" y="3" width="7.5" height="7.5" rx="1.6" stroke="currentColor" stroke-width="1.6" />
+                <rect x="3" y="13.5" width="7.5" height="7.5" rx="1.6" stroke="currentColor" stroke-width="1.6" />
+                <rect x="13.5" y="13.5" width="7.5" height="7.5" rx="1.6" stroke="currentColor" stroke-width="1.6" />
+              </svg>
+              <span>Overview</span>
+            </button>
+            <button type="button" class="account-nav-item" role="tab" aria-selected="false" data-account-tab-button="billing">
+              <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                <rect x="3" y="5" width="18" height="14" rx="2" stroke="currentColor" stroke-width="1.6" />
+                <path d="M3 9.5h18" stroke="currentColor" stroke-width="1.6" />
+                <path d="M6.5 14.5h4" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" />
+              </svg>
+              <span>Billing</span>
+            </button>
+            <button type="button" class="account-nav-item" role="tab" aria-selected="false" data-account-tab-button="usage">
+              <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                <path d="M4 20V10M10 20V4M16 20v-7M22 20H2" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" />
+              </svg>
+              <span>Usage</span>
+            </button>
+            <button type="button" class="account-nav-item" role="tab" aria-selected="false" data-account-tab-button="settings">
+              <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                <circle cx="12" cy="12" r="3.2" stroke="currentColor" stroke-width="1.6" />
+                <path d="M12 3v2.4M12 18.6V21M3 12h2.4M18.6 12H21M5.6 5.6l1.7 1.7M16.7 16.7l1.7 1.7M18.4 5.6l-1.7 1.7M7.3 16.7l-1.7 1.7" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" />
+              </svg>
+              <span>Settings</span>
+            </button>
+          </nav>
 
-      <div class="account-dashboard reveal" data-account-dashboard hidden>
-        <div class="account-summary-grid" aria-label="Account summary">
-          <article class="account-metric-panel">
-            <div class="account-panel-head account-payment-head">
-              <span>Payment status</span>
-              <strong data-account-payment-status>No payment yet</strong>
+          <div class="account-sidebar-foot">
+            <div class="account-session-card">
+              <span>Signed in wallet</span>
+              <small data-account-wallet-summary>--</small>
+            </div>
+            <div class="account-sidebar-actions">
+              <button type="button" data-account-refresh>Refresh</button>
+              <button type="button" data-account-logout>Log out</button>
+            </div>
+          </div>
+        </aside>
+
+        <div class="account-main">
+          <!-- Overview -->
+          <section class="account-panel" role="tabpanel" data-account-tab="overview">
+            <header class="account-panel-head2">
+              <div class="account-panel-title">
+                <h2>Overview</h2>
+                <span class="account-pill" data-account-overview-pill data-tone="idle">No server connected</span>
+              </div>
+            </header>
+
+            <div class="account-overview">
+              <article class="account-stat-card">
+                <span class="account-stat-label">Payment status</span>
+                <div class="account-stat-value">
+                  <span class="account-stat-dot" aria-hidden="true"></span>
+                  <strong data-account-payment-status data-payment-tone="idle">No payment yet</strong>
+                </div>
+                <p class="account-stat-meta">Plan&nbsp;&middot;&nbsp;<span data-account-payment-plan>--</span></p>
+              </article>
+
+              <article class="account-stat-card">
+                <span class="account-stat-label">Subscription</span>
+                <div class="account-stat-value">
+                  <span class="account-stat-dot" aria-hidden="true"></span>
+                  <strong data-account-trial-status data-trial-tone="idle">No server connected</strong>
+                </div>
+                <p class="account-stat-meta">Time left&nbsp;&middot;&nbsp;<span data-account-trial-time>--</span></p>
+              </article>
             </div>
 
-            <dl class="account-detail-list">
-              <div>
-                <dt>Plan</dt>
-                <dd data-account-payment-plan>--</dd>
+            <div class="account-tiles">
+              <div class="account-tile">
+                <span>Amount</span>
+                <strong data-account-payment-amount>--</strong>
               </div>
-              <div>
-                <dt>Amount</dt>
-                <dd data-account-payment-amount>--</dd>
+              <div class="account-tile">
+                <span>Renews</span>
+                <strong data-account-payment-expires>--</strong>
               </div>
-              <div>
-                <dt>Expires</dt>
-                <dd data-account-payment-expires>--</dd>
+              <div class="account-tile">
+                <span>Wallet</span>
+                <strong data-account-wallet-summary>--</strong>
               </div>
-            </dl>
-          </article>
-
-          <article class="account-metric-panel">
-            <div class="account-panel-head account-trial-head">
-              <span>Free trial</span>
-              <strong data-account-trial-status>No server connected</strong>
             </div>
+          </section>
 
-            <dl class="account-detail-list">
-              <div>
-                <dt>Time left</dt>
-                <dd data-account-trial-time>--</dd>
+          <!-- Billing -->
+          <section class="account-panel" role="tabpanel" data-account-tab="billing" hidden>
+            <header class="account-panel-head2">
+              <div class="account-panel-title">
+                <h2>Billing</h2>
               </div>
-              <div>
-                <dt>AI credits</dt>
-                <dd data-account-trial-ai>--</dd>
-              </div>
-              <div>
-                <dt>Search</dt>
-                <dd data-account-trial-search>--</dd>
-              </div>
-              <div>
-                <dt>Images</dt>
-                <dd data-account-trial-images>--</dd>
-              </div>
-              <div>
-                <dt>Storage</dt>
-                <dd data-account-trial-storage>--</dd>
-              </div>
-            </dl>
-          </article>
-        </div>
+            </header>
 
-        <div class="account-action-bar">
-          <a class="app-primary account-dashboard-primary" href={siteMeta.billingUrl} data-account-billing-link>Open billing</a>
-          <button class="account-secondary-button" type="button" data-account-logout>Log out</button>
-        </div>
+            <article class="account-card">
+              <div class="account-card-head">
+                <span>Latest order</span>
+                <strong data-account-payment-status data-payment-tone="idle">No payment yet</strong>
+              </div>
+              <div class="account-card-body">
+                <dl class="account-kv">
+                  <div class="account-kv-row">
+                    <dt>Plan</dt>
+                    <dd data-account-payment-plan>--</dd>
+                  </div>
+                  <div class="account-kv-row">
+                    <dt>Amount</dt>
+                    <dd data-account-payment-amount>--</dd>
+                  </div>
+                  <div class="account-kv-row">
+                    <dt>Expires</dt>
+                    <dd data-account-payment-expires>--</dd>
+                  </div>
+                </dl>
+              </div>
+            </article>
 
-        <div class="account-danger-zone">
-          <button class="account-danger-button" type="button" data-account-delete>Delete account</button>
+            <div class="account-card-actions">
+              <p class="account-card-note">Checkout and renewals are processed with your connected wallet.</p>
+              <a class="app-primary account-billing-cta" href={siteMeta.billingUrl} data-account-billing-link>Open billing</a>
+            </div>
+          </section>
+
+          <!-- Usage -->
+          <section class="account-panel" role="tabpanel" data-account-tab="usage" hidden>
+            <header class="account-panel-head2">
+              <div class="account-panel-title">
+                <h2>Usage</h2>
+                <span class="account-pill" data-account-overview-pill data-tone="idle">No server connected</span>
+              </div>
+              <p class="account-usage-time">Time left&nbsp;&middot;&nbsp;<span data-account-trial-time>--</span></p>
+            </header>
+
+            <div class="account-meters">
+              <div class="account-meter">
+                <div class="account-meter-head">
+                  <span>AI responses</span>
+                  <strong data-account-trial-ai>--</strong>
+                </div>
+                <div class="account-meter-track">
+                  <div class="account-meter-fill" data-account-meter-fill="ai" data-level="idle"></div>
+                </div>
+                <small class="account-meter-detail" data-account-meter-detail="ai">--</small>
+              </div>
+
+              <div class="account-meter">
+                <div class="account-meter-head">
+                  <span>Web searches</span>
+                  <strong data-account-trial-search>--</strong>
+                </div>
+                <div class="account-meter-track">
+                  <div class="account-meter-fill" data-account-meter-fill="search" data-level="idle"></div>
+                </div>
+                <small class="account-meter-detail" data-account-meter-detail="search">--</small>
+              </div>
+
+              <div class="account-meter">
+                <div class="account-meter-head">
+                  <span>Image generations</span>
+                  <strong data-account-trial-images>--</strong>
+                </div>
+                <div class="account-meter-track">
+                  <div class="account-meter-fill" data-account-meter-fill="images" data-level="idle"></div>
+                </div>
+                <small class="account-meter-detail" data-account-meter-detail="images">--</small>
+              </div>
+
+              <div class="account-meter">
+                <div class="account-meter-head">
+                  <span>Knowledge storage</span>
+                  <strong data-account-trial-storage>--</strong>
+                </div>
+                <div class="account-meter-track">
+                  <div class="account-meter-fill" data-account-meter-fill="storage" data-level="idle"></div>
+                </div>
+                <small class="account-meter-detail" data-account-meter-detail="storage">--</small>
+              </div>
+            </div>
+          </section>
+
+          <!-- Settings -->
+          <section class="account-panel" role="tabpanel" data-account-tab="settings" hidden>
+            <header class="account-panel-head2">
+              <div class="account-panel-title">
+                <h2>Settings</h2>
+              </div>
+            </header>
+
+            <article class="account-card">
+              <div class="account-card-head">
+                <span>Wallet identity</span>
+                <strong data-account-wallet-name>--</strong>
+              </div>
+              <div class="account-card-body">
+                <dl class="account-kv">
+                  <div class="account-kv-row">
+                    <dt>Address</dt>
+                    <dd class="account-kv-mono" data-account-wallet-address>--</dd>
+                  </div>
+                  <div class="account-kv-row">
+                    <dt>Connected</dt>
+                    <dd data-account-created>--</dd>
+                  </div>
+                </dl>
+              </div>
+            </article>
+
+            <div class="account-danger">
+              <div class="account-danger-copy">
+                <strong>Delete account</strong>
+                <small>Removes the saved wallet session and billing references from this browser.</small>
+              </div>
+              <button class="account-danger-button" type="button" data-account-delete>Delete account</button>
+            </div>
+          </section>
         </div>
       </div>
 
@@ -120,5 +289,4 @@ const billingApiBase = import.meta.env.PUBLIC_PANDA_API_BASE_URL || (import.meta
       <p class="account-status-live" role="status" aria-live="polite" data-account-status></p>
     </section>
   </main>
-  <Footer />
 </BaseLayout>

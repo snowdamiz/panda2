@@ -74,21 +74,10 @@ type AccountNodes = {
   connectButtons: HTMLButtonElement[];
   loginView: HTMLElement;
   dashboard: HTMLElement;
-  headingKicker: HTMLElement | null;
-  headingTitle: HTMLElement;
-  headingCopy: HTMLElement;
-  accountTitle: HTMLElement;
-  paymentStatus: HTMLElement;
-  paymentPlan: HTMLElement;
-  paymentAmount: HTMLElement;
-  paymentExpires: HTMLElement;
-  trialStatus: HTMLElement;
-  trialTime: HTMLElement;
-  trialAI: HTMLElement;
-  trialSearch: HTMLElement;
-  trialImages: HTMLElement;
-  trialStorage: HTMLElement;
+  tabButtons: HTMLButtonElement[];
+  tabPanels: HTMLElement[];
   billingLink: HTMLAnchorElement;
+  refreshButton: HTMLButtonElement | null;
   logoutButton: HTMLButtonElement;
   deleteButton: HTMLButtonElement;
   walletDialog: HTMLDialogElement;
@@ -97,6 +86,15 @@ type AccountNodes = {
   walletList: HTMLElement;
   walletDialogNote: HTMLElement | null;
 };
+
+type UsageUnit = 'count' | 'bytes';
+
+const usageMeters: ReadonlyArray<{ key: string; metric: keyof AccountEntitlement['usage']; unit: UsageUnit }> = [
+  { key: 'ai', metric: 'ai_responses', unit: 'count' },
+  { key: 'search', metric: 'web_searches', unit: 'count' },
+  { key: 'images', metric: 'image_generations', unit: 'count' },
+  { key: 'storage', metric: 'knowledge_storage', unit: 'bytes' },
+];
 
 type ConnectFeature = {
   connect(input?: { readonly silent?: boolean }): Promise<{ readonly accounts: readonly WalletAccount[] }>;
@@ -239,11 +237,45 @@ class WalletAccountController {
     this.nodes.connectButtons.forEach((button) => {
       button.addEventListener('click', () => this.openWalletDialog());
     });
+    this.nodes.tabButtons.forEach((button) => {
+      button.addEventListener('click', () => this.selectTab(button.dataset.accountTabButton || 'overview'));
+    });
+    this.nodes.refreshButton?.addEventListener('click', () => this.refresh());
     this.nodes.logoutButton.addEventListener('click', () => this.logout());
     this.nodes.deleteButton.addEventListener('click', () => this.deleteAccount());
     this.nodes.walletCloseButton.addEventListener('click', () => this.closeWalletDialog());
     this.nodes.walletDialog.addEventListener('click', (event) => {
       if (event.target === this.nodes.walletDialog) this.closeWalletDialog();
+    });
+  }
+
+  private selectTab(key: string) {
+    this.nodes.tabButtons.forEach((button) => {
+      const active = (button.dataset.accountTabButton || '') === key;
+      button.classList.toggle('active', active);
+      button.setAttribute('aria-selected', active ? 'true' : 'false');
+    });
+    this.nodes.tabPanels.forEach((panel) => {
+      panel.hidden = (panel.dataset.accountTab || '') !== key;
+    });
+  }
+
+  private refresh() {
+    if (!readStoredWalletAccount()) return;
+    this.setStatus('Refreshing account.');
+    void this.refreshPaymentStatus();
+    void this.refreshTrialStatus();
+  }
+
+  private setText(selector: string, value: string) {
+    this.nodes.root.querySelectorAll<HTMLElement>(selector).forEach((node) => {
+      node.textContent = value;
+    });
+  }
+
+  private setTone(selector: string, key: string, value: string) {
+    this.nodes.root.querySelectorAll<HTMLElement>(selector).forEach((node) => {
+      node.dataset[key] = value;
     });
   }
 
@@ -322,13 +354,8 @@ class WalletAccountController {
       this.nodes.root.dataset.accountState = 'missing';
       this.nodes.loginView.hidden = false;
       this.nodes.dashboard.hidden = true;
-      this.renderHeading(
-        'Wallet login',
-        'Sign in to checkout.',
-        'Connect the Solana wallet you will use for payment. Panda attaches the purchased plan to Discord later through the activation key.',
-      );
-      this.nodes.accountTitle.textContent = 'Wallet sign in';
       this.renderConnectButtonLabel();
+      this.renderWalletIdentity(null);
       this.renderPaymentOrder(null);
       this.renderTrialUnavailable('No server connected');
       return;
@@ -340,16 +367,26 @@ class WalletAccountController {
     this.nodes.root.dataset.accountState = 'ready';
     this.nodes.loginView.hidden = true;
     this.nodes.dashboard.hidden = false;
-    this.renderHeading(
-      'Account',
-      'Account dashboard.',
-      'Review payment status and account controls.',
-    );
-    this.nodes.accountTitle.textContent = 'Wallet signed in';
+    this.selectTab('overview');
     this.renderConnectButtonLabel();
+    this.renderWalletIdentity(account);
     this.setStatus('Signed in.');
     void this.refreshPaymentStatus();
     void this.refreshTrialStatus();
+  }
+
+  private renderWalletIdentity(account: StoredWalletAccount | null) {
+    if (!account) {
+      this.setText('[data-account-wallet-summary]', '--');
+      this.setText('[data-account-wallet-name]', '--');
+      this.setText('[data-account-wallet-address]', '--');
+      this.setText('[data-account-created]', '--');
+      return;
+    }
+    this.setText('[data-account-wallet-summary]', `${account.walletName} · ${shortWalletAddress(account.walletAddress)}`);
+    this.setText('[data-account-wallet-name]', account.walletName);
+    this.setText('[data-account-wallet-address]', account.walletAddress);
+    this.setText('[data-account-created]', formatDate(account.createdAt));
   }
 
   private setBusy(busy: boolean) {
@@ -393,12 +430,6 @@ class WalletAccountController {
     });
   }
 
-  private renderHeading(kicker: string, title: string, copy: string) {
-    if (this.nodes.headingKicker) this.nodes.headingKicker.textContent = kicker;
-    this.nodes.headingTitle.textContent = title;
-    this.nodes.headingCopy.textContent = copy;
-  }
-
   private async refreshPaymentStatus() {
     const storedOrder = readStoredBillingOrder();
     this.renderPaymentOrder(storedOrder);
@@ -438,51 +469,83 @@ class WalletAccountController {
   private renderTrialEntitlement(entitlement: AccountEntitlement) {
     const isTrial = entitlement.plan === 'trial';
     const isUsable = entitlement.can_use_paid_features && !entitlement.read_only;
+    let status: string;
+    let tone: string;
+    let timeLeft: string;
     if (isTrial && isUsable) {
-      this.nodes.trialStatus.textContent = 'Trial active';
-      this.nodes.trialStatus.dataset.trialTone = 'good';
-      this.nodes.trialTime.textContent = formatTimeLeft(entitlement.trial_ends_at || entitlement.period_end);
+      status = 'Trial active';
+      tone = 'good';
+      timeLeft = formatTimeLeft(entitlement.trial_ends_at || entitlement.period_end);
     } else if (isTrial) {
-      this.nodes.trialStatus.textContent = 'Trial ended';
-      this.nodes.trialStatus.dataset.trialTone = 'bad';
-      this.nodes.trialTime.textContent = 'Expired';
+      status = 'Trial ended';
+      tone = 'bad';
+      timeLeft = 'Expired';
     } else {
-      this.nodes.trialStatus.textContent = `${entitlement.display_name || formatStatus(entitlement.plan)} active`;
-      this.nodes.trialStatus.dataset.trialTone = isUsable ? 'good' : 'bad';
-      this.nodes.trialTime.textContent = 'Paid plan';
+      status = `${entitlement.display_name || formatStatus(entitlement.plan)} active`;
+      tone = isUsable ? 'good' : 'bad';
+      timeLeft = 'Paid plan';
     }
-    this.nodes.trialAI.textContent = formatRemaining(entitlement.usage.ai_responses);
-    this.nodes.trialSearch.textContent = formatRemaining(entitlement.usage.web_searches);
-    this.nodes.trialImages.textContent = formatRemaining(entitlement.usage.image_generations);
-    this.nodes.trialStorage.textContent = formatRemaining(entitlement.usage.knowledge_storage, 'bytes');
+    this.setText('[data-account-trial-status]', status);
+    this.setTone('[data-account-trial-status]', 'trialTone', tone);
+    this.setText('[data-account-trial-time]', timeLeft);
+    this.setText('[data-account-overview-pill]', status);
+    this.setTone('[data-account-overview-pill]', 'tone', tone);
+
+    for (const meter of usageMeters) {
+      this.renderMeter(meter.key, entitlement.usage[meter.metric], meter.unit);
+    }
   }
 
   private renderTrialUnavailable(status: string) {
-    this.nodes.trialStatus.textContent = status;
-    this.nodes.trialStatus.dataset.trialTone = status === 'Trial unavailable' ? 'bad' : 'idle';
-    this.nodes.trialTime.textContent = '--';
-    this.nodes.trialAI.textContent = '--';
-    this.nodes.trialSearch.textContent = '--';
-    this.nodes.trialImages.textContent = '--';
-    this.nodes.trialStorage.textContent = '--';
+    const tone = status === 'Trial unavailable' ? 'bad' : 'idle';
+    this.setText('[data-account-trial-status]', status);
+    this.setTone('[data-account-trial-status]', 'trialTone', tone);
+    this.setText('[data-account-trial-time]', '--');
+    this.setText('[data-account-overview-pill]', status);
+    this.setTone('[data-account-overview-pill]', 'tone', tone);
+
+    for (const meter of usageMeters) {
+      this.renderMeter(meter.key, undefined, meter.unit);
+    }
+  }
+
+  private renderMeter(key: string, metric: AccountUsageMetric | undefined, unit: UsageUnit) {
+    this.setText(`[data-account-trial-${key}]`, formatRemaining(metric, unit));
+    const fill = this.nodes.root.querySelector<HTMLElement>(`[data-account-meter-fill="${key}"]`);
+    const hasLimit = Boolean(metric) && Number.isFinite(metric?.limit) && (metric?.limit ?? 0) > 0;
+    if (!metric || !hasLimit) {
+      this.setText(`[data-account-meter-detail="${key}"]`, '--');
+      if (fill) {
+        fill.style.width = '0%';
+        fill.dataset.level = 'idle';
+      }
+      return;
+    }
+    const consumed = Math.max(0, (metric.used || 0) + (metric.reserved || 0));
+    const ratio = Math.min(1, consumed / metric.limit);
+    this.setText(`[data-account-meter-detail="${key}"]`, `${formatMetricValue(consumed, unit)} / ${formatMetricValue(metric.limit, unit)}`);
+    if (fill) {
+      fill.style.width = `${(ratio * 100).toFixed(1)}%`;
+      fill.dataset.level = ratio >= 0.85 ? 'high' : 'normal';
+    }
   }
 
   private renderPaymentOrder(order: StoredBillingOrder | null) {
     if (!order) {
-      this.nodes.paymentStatus.textContent = 'No payment yet';
-      this.nodes.paymentStatus.dataset.paymentTone = 'idle';
-      this.nodes.paymentPlan.textContent = '--';
-      this.nodes.paymentAmount.textContent = '--';
-      this.nodes.paymentExpires.textContent = '--';
+      this.setText('[data-account-payment-status]', 'No payment yet');
+      this.setTone('[data-account-payment-status]', 'paymentTone', 'idle');
+      this.setText('[data-account-payment-plan]', '--');
+      this.setText('[data-account-payment-amount]', '--');
+      this.setText('[data-account-payment-expires]', '--');
       this.nodes.billingLink.href = billingURLForPlan(null);
       return;
     }
 
-    this.nodes.paymentStatus.textContent = formatStatus(order.status);
-    this.nodes.paymentStatus.dataset.paymentTone = paymentTone(order.status);
-    this.nodes.paymentPlan.textContent = order.display_name || formatStatus(order.plan);
-    this.nodes.paymentAmount.textContent = order.amount_sol ? `${order.amount_sol} SOL` : '--';
-    this.nodes.paymentExpires.textContent = formatDate(order.expires_at);
+    this.setText('[data-account-payment-status]', formatStatus(order.status));
+    this.setTone('[data-account-payment-status]', 'paymentTone', paymentTone(order.status));
+    this.setText('[data-account-payment-plan]', order.display_name || formatStatus(order.plan));
+    this.setText('[data-account-payment-amount]', order.amount_sol ? `${order.amount_sol} SOL` : '--');
+    this.setText('[data-account-payment-expires]', formatDate(order.expires_at));
     this.nodes.billingLink.href = billingURLForPlan(order.plan || null);
   }
 
@@ -517,23 +580,12 @@ class WalletAccountController {
 
 const collectAccountNodes = (root: HTMLElement): AccountNodes | null => {
   const connectButtons = Array.from(root.querySelectorAll<HTMLButtonElement>('[data-account-connect]'));
+  const tabButtons = Array.from(root.querySelectorAll<HTMLButtonElement>('[data-account-tab-button]'));
+  const tabPanels = Array.from(root.querySelectorAll<HTMLElement>('[data-account-tab]'));
   const loginView = root.querySelector<HTMLElement>('[data-account-login-view]');
   const dashboard = root.querySelector<HTMLElement>('[data-account-dashboard]');
-  const headingKicker = root.querySelector<HTMLElement>('.account-heading .kicker');
-  const headingTitle = root.querySelector<HTMLElement>('[data-account-heading-title]');
-  const headingCopy = root.querySelector<HTMLElement>('[data-account-heading-copy]');
-  const accountTitle = root.querySelector<HTMLElement>('[data-account-title]');
-  const paymentStatus = root.querySelector<HTMLElement>('[data-account-payment-status]');
-  const paymentPlan = root.querySelector<HTMLElement>('[data-account-payment-plan]');
-  const paymentAmount = root.querySelector<HTMLElement>('[data-account-payment-amount]');
-  const paymentExpires = root.querySelector<HTMLElement>('[data-account-payment-expires]');
-  const trialStatus = root.querySelector<HTMLElement>('[data-account-trial-status]');
-  const trialTime = root.querySelector<HTMLElement>('[data-account-trial-time]');
-  const trialAI = root.querySelector<HTMLElement>('[data-account-trial-ai]');
-  const trialSearch = root.querySelector<HTMLElement>('[data-account-trial-search]');
-  const trialImages = root.querySelector<HTMLElement>('[data-account-trial-images]');
-  const trialStorage = root.querySelector<HTMLElement>('[data-account-trial-storage]');
   const billingLink = root.querySelector<HTMLAnchorElement>('[data-account-billing-link]');
+  const refreshButton = root.querySelector<HTMLButtonElement>('[data-account-refresh]');
   const logoutButton = root.querySelector<HTMLButtonElement>('[data-account-logout]');
   const deleteButton = root.querySelector<HTMLButtonElement>('[data-account-delete]');
   const status = root.querySelector<HTMLElement>('[data-account-status]');
@@ -545,19 +597,6 @@ const collectAccountNodes = (root: HTMLElement): AccountNodes | null => {
     connectButtons.length === 0 ||
     !loginView ||
     !dashboard ||
-    !headingTitle ||
-    !headingCopy ||
-    !accountTitle ||
-    !paymentStatus ||
-    !paymentPlan ||
-    !paymentAmount ||
-    !paymentExpires ||
-    !trialStatus ||
-    !trialTime ||
-    !trialAI ||
-    !trialSearch ||
-    !trialImages ||
-    !trialStorage ||
     !billingLink ||
     !logoutButton ||
     !deleteButton ||
@@ -573,21 +612,10 @@ const collectAccountNodes = (root: HTMLElement): AccountNodes | null => {
     connectButtons,
     loginView,
     dashboard,
-    headingKicker,
-    headingTitle,
-    headingCopy,
-    accountTitle,
-    paymentStatus,
-    paymentPlan,
-    paymentAmount,
-    paymentExpires,
-    trialStatus,
-    trialTime,
-    trialAI,
-    trialSearch,
-    trialImages,
-    trialStorage,
+    tabButtons,
+    tabPanels,
     billingLink,
+    refreshButton,
     logoutButton,
     deleteButton,
     walletDialog,
@@ -692,6 +720,12 @@ const formatRemaining = (metric: AccountUsageMetric | undefined, unit: 'count' |
   const remaining = Math.max(0, metric.remaining);
   if (unit === 'bytes') return `${formatBytes(remaining)} left`;
   return `${new Intl.NumberFormat().format(remaining)} left`;
+};
+
+const formatMetricValue = (value: number, unit: 'count' | 'bytes' = 'count'): string => {
+  if (!Number.isFinite(value)) return '--';
+  if (unit === 'bytes') return formatBytes(Math.max(0, value));
+  return new Intl.NumberFormat().format(Math.max(0, value));
 };
 
 const formatBytes = (value: number): string => {
