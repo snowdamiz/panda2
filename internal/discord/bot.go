@@ -99,6 +99,7 @@ const discordContentLimit = 2000
 const discordEmbedDescriptionLimit = 4096
 const discordEmbedFieldNameLimit = 256
 const discordEmbedFieldValueLimit = 1024
+const discordMaxEmbeds = 10
 const discordGeneratedFileLimit = 8 * 1024 * 1024
 
 const (
@@ -1581,7 +1582,8 @@ func embedsFromResponsePart(response commands.Response, content string) ([]disgo
 		embeds = append(embeds, embed)
 		contentValue = ""
 	}
-	embeds = append(embeds, selectionEmbedsFromResponse(response)...)
+	embeds = append(embeds, mediaEmbedsFromResponse(response, discordMaxEmbeds-len(embeds))...)
+	embeds = append(embeds, selectionEmbedsFromResponse(response, discordMaxEmbeds-len(embeds))...)
 	if len(embeds) == 0 {
 		return nil, "", false
 	}
@@ -1624,12 +1626,41 @@ func embedFromResponsePart(response commands.Response, content string) (disgoDis
 	return embed, true
 }
 
-func selectionEmbedsFromResponse(response commands.Response) []disgoDiscord.Embed {
-	selection := response.Selection
-	if selection == nil || len(selection.Options) == 0 {
+func mediaEmbedsFromResponse(response commands.Response, limit int) []disgoDiscord.Embed {
+	if limit <= 0 || len(response.MediaItems) == 0 {
 		return nil
 	}
-	embeds := make([]disgoDiscord.Embed, 0, len(selection.Options))
+	embeds := make([]disgoDiscord.Embed, 0, minInt(len(response.MediaItems), limit))
+	for _, item := range response.MediaItems {
+		title := strings.TrimSpace(item.Title)
+		if title == "" || !validHTTPURL(item.ThumbnailURL) {
+			continue
+		}
+		embed := disgoDiscord.NewEmbed().
+			WithColor(embedColor(response.Presentation.Accent)).
+			WithTitle(limitRunes(title, 256)).
+			WithThumbnail(strings.TrimSpace(item.ThumbnailURL))
+		if description := strings.TrimSpace(item.Description); description != "" {
+			embed = embed.WithDescription(limitRunes(description, discordEmbedDescriptionLimit))
+		}
+		if validHTTPURL(item.URL) {
+			embed = embed.WithURL(strings.TrimSpace(item.URL))
+		}
+		embeds = append(embeds, embed)
+		if len(embeds) == limit {
+			break
+		}
+	}
+	return embeds
+}
+
+func selectionEmbedsFromResponse(response commands.Response, limit int) []disgoDiscord.Embed {
+	selection := response.Selection
+	if limit <= 0 || selection == nil || len(selection.Options) == 0 {
+		return nil
+	}
+	limit = minInt(limit, 3)
+	embeds := make([]disgoDiscord.Embed, 0, minInt(len(selection.Options), limit))
 	for index, option := range selection.Options {
 		title := strings.TrimSpace(option.Label)
 		if title == "" {
@@ -1648,11 +1679,18 @@ func selectionEmbedsFromResponse(response commands.Response) []disgoDiscord.Embe
 			embed = embed.WithThumbnail(strings.TrimSpace(option.ThumbnailURL))
 		}
 		embeds = append(embeds, embed)
-		if len(embeds) == 3 {
+		if len(embeds) == limit {
 			break
 		}
 	}
 	return embeds
+}
+
+func minInt(left int, right int) int {
+	if left < right {
+		return left
+	}
+	return right
 }
 
 func responsePresentation(presentation commands.Presentation, content string) commands.Presentation {
@@ -2140,6 +2178,7 @@ func (b *Bot) respondToNaturalMessage(ctx context.Context, channelID snowflake.I
 	typing := newNaturalMessageTyping(ctx, b.client.Rest, channelID, typingRefreshInterval)
 	startTyping := typing.Start
 	defer typing.Stop()
+	startTyping()
 	progress := &naturalMessageProgress{
 		bot:       b,
 		channelID: channelID,
@@ -2252,6 +2291,7 @@ func hasDirectChannelResponsePayload(response commands.Response) bool {
 	return strings.TrimSpace(response.Content) != "" ||
 		response.Poll != nil ||
 		presentationHasExplicitDisplay(response.Presentation) ||
+		len(response.MediaItems) > 0 ||
 		len(response.Actions) > 0 ||
 		len(response.Confirmations) > 0 ||
 		response.Confirmation != nil ||

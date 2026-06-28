@@ -53,6 +53,8 @@ type Config struct {
 	BaseURL             string
 	YTDLPPath           string
 	FFmpegPath          string
+	CaptionFontPath     string
+	CaptionFontFamily   string
 	ToolProvider        ToolProvider
 	ClipDetector        ClipDetector
 	ClipPlanner         ClipCompositionPlanner
@@ -99,6 +101,8 @@ type Service struct {
 	baseURL             string
 	ytdlpPath           string
 	ffmpegPath          string
+	captionFontPath     string
+	captionFontFamily   string
 	toolProvider        ToolProvider
 	clipDetector        ClipDetector
 	clipPlanner         ClipCompositionPlanner
@@ -147,14 +151,16 @@ type SummaryResult struct {
 }
 
 type ClipRequest struct {
-	Query              string
-	Instructions       string
-	Language           string
-	AspectRatio        string
-	LayoutInstructions string
-	GuildID            string
-	RequestID          string
-	Progress           func(ClipProgress)
+	Query               string
+	Instructions        string
+	Language            string
+	AspectRatio         string
+	LayoutInstructions  string
+	Captions            string
+	CaptionInstructions string
+	GuildID             string
+	RequestID           string
+	Progress            func(ClipProgress)
 }
 
 type ClipProgress struct {
@@ -171,28 +177,44 @@ type ClipResult struct {
 }
 
 type RenderedClip struct {
-	Rank                  int
-	Title                 string
-	Type                  string
-	WatchURL              string
-	ObjectKey             string
-	Duration              time.Duration
-	SourceStartSeconds    float64
-	SourceEndSeconds      float64
-	Segments              []RenderedClipSegment
-	Reason                string
-	Confidence            float64
-	ViralityScore         int
-	HookScore             int
-	RetentionScore        int
-	ShareabilityScore     int
-	DurationPolicy        string
-	ExceptionReason       string
-	OutputSizeBytes       int64
-	AspectRatio           string
-	LayoutMode            string
-	CompositionReason     string
-	CompositionConfidence float64
+	Rank                     int
+	Title                    string
+	Type                     string
+	WatchURL                 string
+	ObjectKey                string
+	ThumbnailURL             string
+	ThumbnailObjectKey       string
+	Duration                 time.Duration
+	SourceStartSeconds       float64
+	SourceEndSeconds         float64
+	Segments                 []RenderedClipSegment
+	Reason                   string
+	Confidence               float64
+	ViralityScore            int
+	HookScore                int
+	RetentionScore           int
+	ShareabilityScore        int
+	DurationPolicy           string
+	ExceptionReason          string
+	OutputSizeBytes          int64
+	AspectRatio              string
+	LayoutMode               string
+	CompositionReason        string
+	CompositionConfidence    float64
+	CaptionRendered          bool
+	CaptionMode              string
+	CaptionStylePreset       string
+	CaptionStyleSource       string
+	CaptionTimingQuality     string
+	CaptionConfidence        float64
+	CaptionReason            string
+	CaptionFontFamily        string
+	CaptionFontColor         string
+	CaptionHighlightColor    string
+	CaptionBorderColor       string
+	CaptionBorderThickness   string
+	CaptionBackgroundColor   string
+	CaptionBackgroundOpacity float64
 }
 
 type RenderedClipSegment struct {
@@ -203,6 +225,15 @@ type RenderedClipSegment struct {
 }
 
 type TranscriptSegment struct {
+	StartSeconds float64          `json:"start_seconds"`
+	EndSeconds   float64          `json:"end_seconds"`
+	Text         string           `json:"text"`
+	ID           string           `json:"id,omitempty"`
+	Words        []TranscriptWord `json:"words,omitempty"`
+}
+
+type TranscriptWord struct {
+	ID           string  `json:"id"`
 	StartSeconds float64 `json:"start_seconds"`
 	EndSeconds   float64 `json:"end_seconds"`
 	Text         string  `json:"text"`
@@ -253,14 +284,16 @@ type ClipResolution struct {
 }
 
 type ClipCompositionRequest struct {
-	Title              string
-	URL                string
-	Uploader           string
-	RequestedAspect    string
-	LayoutInstructions string
-	Clip               ClipDecision
-	TranscriptTimeline []ClipCompositionTranscriptSegment
-	Thumbnails         []ClipThumbnail
+	Title               string
+	URL                 string
+	Uploader            string
+	RequestedAspect     string
+	LayoutInstructions  string
+	CaptionMode         string
+	CaptionInstructions string
+	Clip                ClipDecision
+	TranscriptTimeline  []ClipCompositionTranscriptSegment
+	Thumbnails          []ClipThumbnail
 }
 
 type ClipThumbnail struct {
@@ -277,16 +310,19 @@ type ClipThumbnail struct {
 }
 
 type ClipCompositionTranscriptSegment struct {
-	ClipSegmentIndex int     `json:"clip_segment_index"`
-	StartSeconds     float64 `json:"start_seconds"`
-	EndSeconds       float64 `json:"end_seconds"`
-	Text             string  `json:"text"`
+	ClipSegmentIndex int              `json:"clip_segment_index"`
+	ID               string           `json:"id"`
+	StartSeconds     float64          `json:"start_seconds"`
+	EndSeconds       float64          `json:"end_seconds"`
+	Text             string           `json:"text"`
+	Words            []TranscriptWord `json:"words,omitempty"`
 }
 
 type ClipCompositionResult struct {
 	AspectRatio string                `json:"aspect_ratio"`
 	LayoutMode  string                `json:"layout_mode"`
 	Plans       []ClipFrameRenderPlan `json:"plans"`
+	CaptionPlan *ClipCaptionPlan      `json:"caption_plan"`
 	Confidence  float64               `json:"confidence"`
 	Reason      string                `json:"reason"`
 }
@@ -304,6 +340,40 @@ type ClipRenderRegion struct {
 	OutputRect ClipRect `json:"output_rect"`
 	Fit        string   `json:"fit"`
 	ZIndex     int      `json:"z_index"`
+}
+
+type ClipCaptionPlan struct {
+	Mode              string              `json:"mode"`
+	StylePreset       string              `json:"style_preset"`
+	StyleSource       string              `json:"style_source"`
+	TimingQuality     string              `json:"timing_quality"`
+	FontFamily        string              `json:"font_family"`
+	FontColor         string              `json:"font_color"`
+	HighlightColor    string              `json:"highlight_color"`
+	BorderColor       string              `json:"border_color"`
+	BorderThickness   string              `json:"border_thickness"`
+	BackgroundColor   string              `json:"background_color"`
+	BackgroundOpacity float64             `json:"background_opacity"`
+	Regions           []ClipCaptionRegion `json:"regions"`
+	Cues              []ClipCaptionCue    `json:"cues"`
+	Confidence        float64             `json:"confidence"`
+	Reason            string              `json:"reason"`
+}
+
+type ClipCaptionRegion struct {
+	ID              string   `json:"id"`
+	OutputRect      ClipRect `json:"output_rect"`
+	HorizontalAlign string   `json:"horizontal_align"`
+	VerticalAlign   string   `json:"vertical_align"`
+	MaxLines        int      `json:"max_lines"`
+	ZIndex          int      `json:"z_index"`
+}
+
+type ClipCaptionCue struct {
+	CaptionRegionID  string   `json:"caption_region_id"`
+	WordIDs          []string `json:"word_ids"`
+	SourceSegmentIDs []string `json:"source_segment_ids"`
+	EmphasisWordIDs  []string `json:"emphasis_word_ids"`
 }
 
 type ClipRect struct {
@@ -359,17 +429,29 @@ type thumbnailInfo struct {
 type transcriptionResponse struct {
 	Text     string                 `json:"text"`
 	Segments []transcriptionSegment `json:"segments"`
+	Words    []transcriptionWord    `json:"words"`
 }
 
 type transcriptionSegment struct {
-	Text  string  `json:"text"`
-	Start float64 `json:"start"`
-	End   float64 `json:"end"`
+	Text                string              `json:"text"`
+	Start               float64             `json:"start"`
+	End                 float64             `json:"end"`
+	Words               []transcriptionWord `json:"words"`
+	WholeWordTimestamps []transcriptionWord `json:"whole_word_timestamps"`
+}
+
+type transcriptionWord struct {
+	Word           string  `json:"word"`
+	Text           string  `json:"text"`
+	PunctuatedWord string  `json:"punctuated_word"`
+	Start          float64 `json:"start"`
+	End            float64 `json:"end"`
 }
 
 type chunkTranscription struct {
 	Text     string
 	Segments []transcriptionSegment
+	Words    []transcriptionWord
 }
 
 type youtubeFeed struct {
@@ -412,6 +494,14 @@ func NewService(config Config) *Service {
 	client := config.HTTPClient
 	if client == nil {
 		client = &http.Client{Timeout: defaultHTTPTimeout}
+	}
+	captionFontPath := strings.TrimSpace(config.CaptionFontPath)
+	if captionFontPath == "" {
+		captionFontPath = defaultCaptionFontPath()
+	}
+	captionFontFamily := strings.TrimSpace(config.CaptionFontFamily)
+	if captionFontFamily == "" {
+		captionFontFamily = defaultCaptionFontFamily()
 	}
 	lookupTimeout := config.LookupTimeout
 	if lookupTimeout <= 0 {
@@ -458,6 +548,8 @@ func NewService(config Config) *Service {
 		baseURL:             baseURL,
 		ytdlpPath:           strings.TrimSpace(config.YTDLPPath),
 		ffmpegPath:          strings.TrimSpace(config.FFmpegPath),
+		captionFontPath:     captionFontPath,
+		captionFontFamily:   captionFontFamily,
 		toolProvider:        config.ToolProvider,
 		clipDetector:        config.ClipDetector,
 		clipPlanner:         config.ClipPlanner,
@@ -581,13 +673,11 @@ func (s *Service) Search(ctx context.Context, request SearchRequest) ([]VideoCan
 		return nil, err
 	}
 	searchLimit := youtubeSearchFetchLimit(limit, request)
-	args := []string{
+	args := youtubeYTDLPBaseArgs(
 		"--dump-json",
 		"--flat-playlist",
-		"--no-warnings",
-		"--no-cache-dir",
 		"--skip-download",
-	}
+	)
 	if date := normalizedYTDLPDate(request.Date); date != "" {
 		args = append(args, "--date", date)
 	}
@@ -913,15 +1003,13 @@ func (s *Service) searchChannelUploadsWithYTDLP(ctx context.Context, tools ToolP
 }
 
 func (s *Service) channelUploadCandidates(ctx context.Context, tools ToolPaths, source string, limit int, request SearchRequest) ([]VideoCandidate, error) {
-	args := []string{
+	args := youtubeYTDLPBaseArgs(
 		"--dump-json",
 		"--flat-playlist",
 		"--extractor-args", "youtubetab:approximate_date",
 		"--playlist-end", strconv.Itoa(limit),
-		"--no-warnings",
-		"--no-cache-dir",
 		"--skip-download",
-	}
+	)
 	if date := normalizedYTDLPDate(request.Date); date != "" {
 		args = append(args, "--date", date)
 	}
@@ -1036,15 +1124,14 @@ func (s *Service) resolveChannelUploadSources(ctx context.Context, tools ToolPat
 	if query == "" {
 		return nil, ErrMissingVideo
 	}
-	cmd := exec.CommandContext(ctx, tools.YTDLPPath,
+	args := youtubeYTDLPBaseArgs(
 		"--dump-json",
 		"--flat-playlist",
 		"--playlist-end", "5",
-		"--no-warnings",
-		"--no-cache-dir",
 		"--skip-download",
 		fmt.Sprintf("ytsearch%d:%s", 5, query),
 	)
+	cmd := exec.CommandContext(ctx, tools.YTDLPPath, args...)
 	var stderr limitedBuffer
 	cmd.Stderr = &stderr
 	output, err := cmd.Output()
@@ -1219,16 +1306,15 @@ func uploadDateDay(value time.Time) time.Time {
 func (s *Service) resolve(ctx context.Context, tools ToolPaths, query string) (videoMetadata, error) {
 	lookupCtx, cancel := context.WithTimeout(ctx, s.lookupTimeout)
 	defer cancel()
-	cmd := exec.CommandContext(lookupCtx, tools.YTDLPPath,
+	args := youtubeYTDLPBaseArgs(
 		"--dump-json",
 		"--no-playlist",
 		"--default-search", "ytsearch1",
 		"--format", "bestaudio/best",
-		"--no-warnings",
-		"--no-cache-dir",
 		"--skip-download",
 		query,
 	)
+	cmd := exec.CommandContext(lookupCtx, tools.YTDLPPath, args...)
 	var stderr limitedBuffer
 	cmd.Stderr = &stderr
 	output, err := cmd.Output()
@@ -1372,14 +1458,13 @@ func (s *Service) lookupSearchCandidateMetadata(ctx context.Context, tools ToolP
 	if source == "" {
 		return videoMetadata{}, ErrMissingVideo
 	}
-	cmd := exec.CommandContext(ctx, tools.YTDLPPath,
+	args := youtubeYTDLPBaseArgs(
 		"--dump-json",
 		"--no-playlist",
-		"--no-warnings",
-		"--no-cache-dir",
 		"--skip-download",
 		source,
 	)
+	cmd := exec.CommandContext(ctx, tools.YTDLPPath, args...)
 	var stderr limitedBuffer
 	cmd.Stderr = &stderr
 	output, err := cmd.Output()
@@ -1480,15 +1565,12 @@ func (s *Service) extractAudioChunks(ctx context.Context, tools ToolPaths, sourc
 
 func (s *Service) downloadAudioSource(ctx context.Context, tools ToolPaths, source string, dir string) (string, error) {
 	outputTemplate := filepath.Join(dir, "audio.%(ext)s")
-	ytdlpCmd := exec.CommandContext(ctx, tools.YTDLPPath,
-		"--no-playlist",
-		"--no-warnings",
-		"--no-progress",
-		"--no-cache-dir",
+	args := youtubeYTDLPDownloadArgs(
 		"--format", "bestaudio[ext=m4a]/bestaudio/best",
 		"--output", outputTemplate,
 		source,
 	)
+	ytdlpCmd := exec.CommandContext(ctx, tools.YTDLPPath, args...)
 	var ytdlpErr limitedBuffer
 	ytdlpCmd.Stderr = &ytdlpErr
 	if err := ytdlpCmd.Run(); err != nil {
@@ -1589,6 +1671,12 @@ func (s *Service) transcribeChunkDetailed(ctx context.Context, path string, lang
 	if err := writer.WriteField("response_format", "verbose_json"); err != nil {
 		return chunkTranscription{}, err
 	}
+	if err := writer.WriteField("timestamp_granularities[]", "segment"); err != nil {
+		return chunkTranscription{}, err
+	}
+	if err := writer.WriteField("timestamp_granularities[]", "word"); err != nil {
+		return chunkTranscription{}, err
+	}
 	if value := strings.TrimSpace(language); value != "" {
 		if err := writer.WriteField("language", value); err != nil {
 			return chunkTranscription{}, err
@@ -1626,7 +1714,7 @@ func (s *Service) transcribeChunkDetailed(ctx context.Context, path string, lang
 		return chunkTranscription{}, fmt.Errorf("parse lemonfox transcription response: %w", err)
 	}
 	if text := strings.TrimSpace(decoded.Text); text != "" {
-		return chunkTranscription{Text: text, Segments: decoded.Segments}, nil
+		return chunkTranscription{Text: text, Segments: decoded.Segments, Words: decoded.Words}, nil
 	}
 	segments := make([]string, 0, len(decoded.Segments))
 	for _, segment := range decoded.Segments {
@@ -1634,7 +1722,7 @@ func (s *Service) transcribeChunkDetailed(ctx context.Context, path string, lang
 			segments = append(segments, text)
 		}
 	}
-	return chunkTranscription{Text: strings.Join(segments, " "), Segments: decoded.Segments}, nil
+	return chunkTranscription{Text: strings.Join(segments, " "), Segments: decoded.Segments, Words: decoded.Words}, nil
 }
 
 func (s *Service) ensureTools(ctx context.Context) (ToolPaths, error) {

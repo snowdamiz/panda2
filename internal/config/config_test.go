@@ -115,7 +115,9 @@ func TestLoadConfigFile(t *testing.T) {
 			"youtube_clip_thumbnail_max_count": 6,
 			"youtube_clip_thumbnail_max_edge": 640,
 			"youtube_clip_vertical_resolution": "720x1280",
-			"youtube_clip_landscape_resolution": "1280x720"
+			"youtube_clip_landscape_resolution": "1280x720",
+			"youtube_clip_caption_font_path": "/fonts/file-caption.ttf",
+			"youtube_clip_caption_font_family": "File Caption"
 		},
 		"music": {
 			"ytdlp_path": "/usr/local/bin/yt-dlp",
@@ -201,6 +203,9 @@ func TestLoadConfigFile(t *testing.T) {
 	if cfg.YouTubeClipThumbnailMaxCount != 6 || cfg.YouTubeClipThumbnailMaxEdge != 640 || cfg.YouTubeClipVerticalResolution != "720x1280" || cfg.YouTubeClipLandscapeResolution != "1280x720" {
 		t.Fatalf("unexpected YouTube clip visual config: count=%d edge=%d vertical=%q landscape=%q", cfg.YouTubeClipThumbnailMaxCount, cfg.YouTubeClipThumbnailMaxEdge, cfg.YouTubeClipVerticalResolution, cfg.YouTubeClipLandscapeResolution)
 	}
+	if cfg.YouTubeClipCaptionFontPath != "/fonts/file-caption.ttf" || cfg.YouTubeClipCaptionFontFamily != "File Caption" {
+		t.Fatalf("unexpected YouTube caption font config: path=%q family=%q", cfg.YouTubeClipCaptionFontPath, cfg.YouTubeClipCaptionFontFamily)
+	}
 	if cfg.MusicYTDLPPath != "/usr/local/bin/yt-dlp" || cfg.MusicFFmpegPath != "/usr/local/bin/ffmpeg" {
 		t.Fatalf("unexpected music paths: ytdlp=%q ffmpeg=%q", cfg.MusicYTDLPPath, cfg.MusicFFmpegPath)
 	}
@@ -267,6 +272,8 @@ func TestEnvOverridesConfigFile(t *testing.T) {
 	t.Setenv("YOUTUBE_CLIP_THUMBNAIL_MAX_EDGE", "512")
 	t.Setenv("YOUTUBE_CLIP_VERTICAL_RESOLUTION", "900x1600")
 	t.Setenv("YOUTUBE_CLIP_LANDSCAPE_RESOLUTION", "1600x900")
+	t.Setenv("YOUTUBE_CLIP_CAPTION_FONT_PATH", "/fonts/env-caption.ttf")
+	t.Setenv("YOUTUBE_CLIP_CAPTION_FONT_FAMILY", "Env Caption")
 	t.Setenv("YTDLP_PATH", "/opt/bin/yt-dlp")
 	t.Setenv("FFMPEG_PATH", "/opt/bin/ffmpeg")
 	t.Setenv("MUSIC_SIDECAR_DIR", "/opt/panda/music-bin")
@@ -330,6 +337,9 @@ func TestEnvOverridesConfigFile(t *testing.T) {
 	}
 	if cfg.YouTubeClipThumbnailMaxCount != 5 || cfg.YouTubeClipThumbnailMaxEdge != 512 || cfg.YouTubeClipVerticalResolution != "900x1600" || cfg.YouTubeClipLandscapeResolution != "1600x900" {
 		t.Fatalf("expected env YouTube visual clip settings, count=%d edge=%d vertical=%q landscape=%q", cfg.YouTubeClipThumbnailMaxCount, cfg.YouTubeClipThumbnailMaxEdge, cfg.YouTubeClipVerticalResolution, cfg.YouTubeClipLandscapeResolution)
+	}
+	if cfg.YouTubeClipCaptionFontPath != "/fonts/env-caption.ttf" || cfg.YouTubeClipCaptionFontFamily != "Env Caption" {
+		t.Fatalf("expected env YouTube caption font settings, path=%q family=%q", cfg.YouTubeClipCaptionFontPath, cfg.YouTubeClipCaptionFontFamily)
 	}
 	if cfg.MusicYTDLPPath != "/opt/bin/yt-dlp" || cfg.MusicFFmpegPath != "/opt/bin/ffmpeg" {
 		t.Fatalf("expected env music paths, ytdlp=%q ffmpeg=%q", cfg.MusicYTDLPPath, cfg.MusicFFmpegPath)
@@ -591,6 +601,12 @@ func clearConfigEnv(t *testing.T) {
 		"YOUTUBE_CLIP_MIN_DURATION",
 		"YOUTUBE_CLIP_MAX_DURATION",
 		"YOUTUBE_CLIP_MAX_BYTES",
+		"YOUTUBE_CLIP_THUMBNAIL_MAX_COUNT",
+		"YOUTUBE_CLIP_THUMBNAIL_MAX_EDGE",
+		"YOUTUBE_CLIP_VERTICAL_RESOLUTION",
+		"YOUTUBE_CLIP_LANDSCAPE_RESOLUTION",
+		"YOUTUBE_CLIP_CAPTION_FONT_PATH",
+		"YOUTUBE_CLIP_CAPTION_FONT_FAMILY",
 		"PUBLIC_APP_URL",
 		"BILLING_ALLOWED_ORIGINS",
 		"SOLANA_RPC_URL",

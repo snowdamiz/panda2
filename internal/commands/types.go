@@ -34,6 +34,7 @@ type Response struct {
 	ThreadID          string
 	ThreadName        string
 	Presentation      Presentation
+	MediaItems        []MediaItem
 	Actions           []Action
 	Followups         []Response
 	Confirmation      *Confirmation
@@ -91,6 +92,13 @@ type Field struct {
 type Action struct {
 	Label string
 	URL   string
+}
+
+type MediaItem struct {
+	Title        string
+	Description  string
+	URL          string
+	ThumbnailURL string
 }
 
 type FeedbackControls struct {

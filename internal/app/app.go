@@ -167,6 +167,8 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 		ThumbnailMaxEdge:    cfg.YouTubeClipThumbnailMaxEdge,
 		VerticalResolution:  parseClipResolution(cfg.YouTubeClipVerticalResolution),
 		LandscapeResolution: parseClipResolution(cfg.YouTubeClipLandscapeResolution),
+		CaptionFontPath:     cfg.YouTubeClipCaptionFontPath,
+		CaptionFontFamily:   cfg.YouTubeClipCaptionFontFamily,
 	})
 	memoryService := memory.NewServiceWithEmbeddings(knowledge, openRouter, cfg.OpenRouterEmbeddingModel)
 	billingService := billing.NewService(billingRepo, billing.Config{

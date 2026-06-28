@@ -21,6 +21,8 @@ FROM debian:12.12-slim AS runtime
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     ffmpeg \
+    fonts-dejavu-core \
+    fonts-inter \
   && rm -rf /var/lib/apt/lists/* \
   && groupadd --system panda \
   && useradd --system --gid panda --home-dir /nonexistent --shell /usr/sbin/nologin panda \

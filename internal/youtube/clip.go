@@ -42,6 +42,10 @@ func (s *Service) Clip(ctx context.Context, request ClipRequest) (ClipResult, er
 	if err != nil {
 		return ClipResult{}, err
 	}
+	captionMode, err := normalizeClipCaptionMode(request.Captions)
+	if err != nil {
+		return ClipResult{}, err
+	}
 	instructions := normalizedClipInstructions(request.Instructions)
 	reportClipProgress(request, clipProgressSearching)
 	tools, err := s.ensureTools(ctx)
@@ -129,21 +133,25 @@ func (s *Service) Clip(ctx context.Context, request ClipRequest) (ClipResult, er
 			return ClipResult{}, err
 		}
 		composition, err := s.clipPlanner.Plan(ctx, ClipCompositionRequest{
-			Title:              strings.TrimSpace(metadata.Title),
-			URL:                strings.TrimSpace(firstNonEmpty(metadata.WebpageURL, metadata.OriginalURL, source)),
-			Uploader:           strings.TrimSpace(metadata.Uploader),
-			RequestedAspect:    requestedAspect,
-			LayoutInstructions: strings.TrimSpace(request.LayoutInstructions),
-			Clip:               decision,
-			TranscriptTimeline: transcriptTimeline,
-			Thumbnails:         thumbnails,
+			Title:               strings.TrimSpace(metadata.Title),
+			URL:                 strings.TrimSpace(firstNonEmpty(metadata.WebpageURL, metadata.OriginalURL, source)),
+			Uploader:            strings.TrimSpace(metadata.Uploader),
+			RequestedAspect:     requestedAspect,
+			LayoutInstructions:  strings.TrimSpace(request.LayoutInstructions),
+			CaptionMode:         captionMode,
+			CaptionInstructions: strings.TrimSpace(request.CaptionInstructions),
+			Clip:                decision,
+			TranscriptTimeline:  transcriptTimeline,
+			Thumbnails:          thumbnails,
 		})
 		if err != nil {
 			return ClipResult{}, err
 		}
 		if err := ValidateClipCompositionResult(composition, ClipCompositionRequest{
-			RequestedAspect: requestedAspect,
-			Clip:            decision,
+			RequestedAspect:    requestedAspect,
+			CaptionMode:        captionMode,
+			Clip:               decision,
+			TranscriptTimeline: transcriptTimeline,
 		}); err != nil {
 			return ClipResult{}, fmt.Errorf("clip composition response failed validation: %w", err)
 		}
@@ -156,7 +164,7 @@ func (s *Service) Clip(ctx context.Context, request ClipRequest) (ClipResult, er
 			slog.String("aspect_ratio", composition.AspectRatio),
 			slog.String("layout_mode", composition.LayoutMode),
 		)
-		if err := s.renderVideoClip(ctx, tools, sourceVideoPath, decision, composition, tempDir, outputPath); err != nil {
+		if err := s.renderVideoClip(ctx, tools, sourceVideoPath, decision, composition, transcriptTimeline, tempDir, outputPath); err != nil {
 			return ClipResult{}, err
 		}
 		info, err := os.Stat(outputPath)
@@ -197,29 +205,49 @@ func (s *Service) Clip(ctx context.Context, request ClipRequest) (ClipResult, er
 			slog.String("object_key", upload.Key),
 			slog.Int64("size_bytes", upload.SizeBytes),
 		)
+		thumbnailUpload, err := s.uploadRenderedClipThumbnail(ctx, tools, outputPath, request, decision, index+1, filepath.Join(tempDir, fmt.Sprintf("clip-%02d-thumbnail.jpg", index+1)))
+		if err != nil {
+			return ClipResult{}, err
+		}
 		rendered = append(rendered, RenderedClip{
-			Rank:                  decision.Rank,
-			Title:                 strings.TrimSpace(decision.Title),
-			Type:                  strings.TrimSpace(decision.Type),
-			WatchURL:              upload.URL,
-			ObjectKey:             upload.Key,
-			Duration:              clipSegmentsDuration(decision.Segments),
-			SourceStartSeconds:    clipSourceStartSeconds(decision.Segments),
-			SourceEndSeconds:      clipSourceEndSeconds(decision.Segments),
-			Segments:              renderedClipSegments(decision.Segments),
-			Reason:                strings.TrimSpace(decision.Reason),
-			Confidence:            decision.Confidence,
-			ViralityScore:         decision.ViralityScore,
-			HookScore:             decision.HookScore,
-			RetentionScore:        decision.RetentionScore,
-			ShareabilityScore:     decision.ShareabilityScore,
-			DurationPolicy:        strings.TrimSpace(decision.DurationPolicy),
-			ExceptionReason:       strings.TrimSpace(decision.ExceptionReason),
-			OutputSizeBytes:       upload.SizeBytes,
-			AspectRatio:           strings.TrimSpace(composition.AspectRatio),
-			LayoutMode:            strings.TrimSpace(composition.LayoutMode),
-			CompositionReason:     strings.TrimSpace(composition.Reason),
-			CompositionConfidence: composition.Confidence,
+			Rank:                     decision.Rank,
+			Title:                    strings.TrimSpace(decision.Title),
+			Type:                     strings.TrimSpace(decision.Type),
+			WatchURL:                 upload.URL,
+			ObjectKey:                upload.Key,
+			ThumbnailURL:             thumbnailUpload.URL,
+			ThumbnailObjectKey:       thumbnailUpload.Key,
+			Duration:                 clipSegmentsDuration(decision.Segments),
+			SourceStartSeconds:       clipSourceStartSeconds(decision.Segments),
+			SourceEndSeconds:         clipSourceEndSeconds(decision.Segments),
+			Segments:                 renderedClipSegments(decision.Segments),
+			Reason:                   strings.TrimSpace(decision.Reason),
+			Confidence:               decision.Confidence,
+			ViralityScore:            decision.ViralityScore,
+			HookScore:                decision.HookScore,
+			RetentionScore:           decision.RetentionScore,
+			ShareabilityScore:        decision.ShareabilityScore,
+			DurationPolicy:           strings.TrimSpace(decision.DurationPolicy),
+			ExceptionReason:          strings.TrimSpace(decision.ExceptionReason),
+			OutputSizeBytes:          upload.SizeBytes,
+			AspectRatio:              strings.TrimSpace(composition.AspectRatio),
+			LayoutMode:               strings.TrimSpace(composition.LayoutMode),
+			CompositionReason:        strings.TrimSpace(composition.Reason),
+			CompositionConfidence:    composition.Confidence,
+			CaptionRendered:          composition.CaptionPlan != nil && strings.TrimSpace(composition.CaptionPlan.Mode) == clipCaptionPlanModeBurnedIn,
+			CaptionMode:              captionPlanMode(composition.CaptionPlan),
+			CaptionStylePreset:       captionPlanStylePreset(composition.CaptionPlan),
+			CaptionStyleSource:       captionPlanStyleSource(composition.CaptionPlan),
+			CaptionTimingQuality:     captionPlanTimingQuality(composition.CaptionPlan),
+			CaptionConfidence:        captionPlanConfidence(composition.CaptionPlan),
+			CaptionReason:            captionPlanReason(composition.CaptionPlan),
+			CaptionFontFamily:        captionPlanFontFamily(composition.CaptionPlan),
+			CaptionFontColor:         captionPlanFontColor(composition.CaptionPlan),
+			CaptionHighlightColor:    captionPlanHighlightColor(composition.CaptionPlan),
+			CaptionBorderColor:       captionPlanBorderColor(composition.CaptionPlan),
+			CaptionBorderThickness:   captionPlanBorderThickness(composition.CaptionPlan),
+			CaptionBackgroundColor:   captionPlanBackgroundColor(composition.CaptionPlan),
+			CaptionBackgroundOpacity: captionPlanBackgroundOpacity(composition.CaptionPlan),
 		})
 	}
 	return ClipResult{
@@ -245,9 +273,11 @@ func clipCompositionTranscriptTimeline(decision ClipDecision, transcript []Trans
 			}
 			timeline = append(timeline, ClipCompositionTranscriptSegment{
 				ClipSegmentIndex: segmentIndex,
+				ID:               sourceSegment.ID,
 				StartSeconds:     sourceSegment.StartSeconds,
 				EndSeconds:       sourceSegment.EndSeconds,
 				Text:             text,
+				Words:            append([]TranscriptWord(nil), sourceSegment.Words...),
 			})
 		}
 	}
@@ -283,6 +313,7 @@ func (s *Service) transcribeClipSegments(ctx context.Context, chunks []string, l
 		return nil, fmt.Errorf("youtube audio extraction produced no chunks")
 	}
 	segments := make([]TranscriptSegment, 0, len(chunks)*16)
+	wordIndex := 1
 	for index, chunk := range chunks {
 		transcription, err := s.transcribeChunkDetailed(ctx, chunk, language)
 		if err != nil {
@@ -297,10 +328,27 @@ func (s *Service) transcribeClipSegments(ctx context.Context, chunks []string, l
 			if segment.End <= segment.Start {
 				continue
 			}
+			words := transcriptionWordsForSegment(segment, transcription.Words)
+			transcriptWords := make([]TranscriptWord, 0, len(words))
+			for _, word := range words {
+				wordText := cleanTranscriptText(word.captionText())
+				if wordText == "" || word.End <= word.Start {
+					continue
+				}
+				transcriptWords = append(transcriptWords, TranscriptWord{
+					ID:           fmt.Sprintf("w_%04d", wordIndex),
+					StartSeconds: chunkOffset + word.Start,
+					EndSeconds:   chunkOffset + word.End,
+					Text:         wordText,
+				})
+				wordIndex++
+			}
 			segments = append(segments, TranscriptSegment{
 				StartSeconds: chunkOffset + segment.Start,
 				EndSeconds:   chunkOffset + segment.End,
 				Text:         text,
+				ID:           fmt.Sprintf("s_%04d", len(segments)+1),
+				Words:        transcriptWords,
 			})
 		}
 	}
@@ -308,6 +356,39 @@ func (s *Service) transcribeClipSegments(ctx context.Context, chunks []string, l
 		return nil, fmt.Errorf("lemonfox returned no timestamped transcript segments")
 	}
 	return segments, nil
+}
+
+func transcriptionWordsForSegment(segment transcriptionSegment, topLevelWords []transcriptionWord) []transcriptionWord {
+	if len(segment.Words) > 0 {
+		return segment.Words
+	}
+	if len(segment.WholeWordTimestamps) > 0 {
+		return segment.WholeWordTimestamps
+	}
+	if len(topLevelWords) == 0 {
+		return nil
+	}
+	words := make([]transcriptionWord, 0)
+	for _, word := range topLevelWords {
+		if word.End <= word.Start {
+			continue
+		}
+		if word.End < segment.Start-0.05 || word.Start > segment.End+0.05 {
+			continue
+		}
+		words = append(words, word)
+	}
+	return words
+}
+
+func (word transcriptionWord) captionText() string {
+	if text := strings.TrimSpace(word.PunctuatedWord); text != "" {
+		return text
+	}
+	if text := strings.TrimSpace(word.Word); text != "" {
+		return text
+	}
+	return strings.TrimSpace(word.Text)
 }
 
 func validateClipDetectionResult(result ClipDetectionResult, videoDuration time.Duration, minDuration time.Duration, maxDuration time.Duration, maxClips int) error {
@@ -441,16 +522,13 @@ func (s *Service) downloadClipSourceVideo(ctx context.Context, tools ToolPaths, 
 	processCtx, cancel := context.WithTimeout(ctx, s.processTimeout)
 	defer cancel()
 	outputTemplate := filepath.Join(tempDir, "source.%(ext)s")
-	cmd := exec.CommandContext(processCtx, tools.YTDLPPath,
-		"--no-playlist",
-		"--no-warnings",
-		"--no-progress",
-		"--no-cache-dir",
+	args := youtubeYTDLPDownloadArgs(
 		"--format", "best[ext=mp4]/best",
 		"--merge-output-format", "mp4",
 		"--output", outputTemplate,
 		source,
 	)
+	cmd := exec.CommandContext(processCtx, tools.YTDLPPath, args...)
 	var stderr limitedBuffer
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
@@ -477,7 +555,7 @@ func (s *Service) downloadClipSourceVideo(ctx context.Context, tools ToolPaths, 
 	return "", fmt.Errorf("youtube clip source download produced no video file")
 }
 
-func (s *Service) renderVideoClip(ctx context.Context, tools ToolPaths, sourcePath string, decision ClipDecision, composition ClipCompositionResult, tempDir string, outputPath string) error {
+func (s *Service) renderVideoClip(ctx context.Context, tools ToolPaths, sourcePath string, decision ClipDecision, composition ClipCompositionResult, transcriptTimeline []ClipCompositionTranscriptSegment, tempDir string, outputPath string) error {
 	if len(decision.Segments) == 0 {
 		return fmt.Errorf("youtube clip render failed: no segments to render")
 	}
@@ -486,8 +564,20 @@ func (s *Service) renderVideoClip(ctx context.Context, tools ToolPaths, sourcePa
 		return fmt.Errorf("youtube clip render failed: composition returned no plans")
 	}
 	target := s.clipResolutionForAspect(composition.AspectRatio)
+	captionRefs := newClipCaptionReferences(transcriptTimeline)
+	var captionStyle *clipCaptionASSStyle
+	if composition.CaptionPlan != nil && strings.TrimSpace(composition.CaptionPlan.Mode) == clipCaptionPlanModeBurnedIn {
+		style, err := s.buildClipCaptionASSStyle(*composition.CaptionPlan, target)
+		if err != nil {
+			return err
+		}
+		captionStyle = &style
+		if err := validateCaptionRenderer(ctx, tools); err != nil {
+			return err
+		}
+	}
 	if len(plans) == 1 {
-		return s.renderVideoPlanSegment(ctx, tools, sourcePath, composition.LayoutMode, plans[0], target, outputPath)
+		return s.renderVideoPlanSegment(ctx, tools, sourcePath, composition.LayoutMode, plans[0], target, composition.CaptionPlan, captionRefs, captionStyle, outputPath)
 	}
 	segmentDir := filepath.Join(tempDir, strings.TrimSuffix(filepath.Base(outputPath), filepath.Ext(outputPath))+"-segments")
 	if err := os.MkdirAll(segmentDir, 0o700); err != nil {
@@ -496,7 +586,7 @@ func (s *Service) renderVideoClip(ctx context.Context, tools ToolPaths, sourcePa
 	paths := make([]string, 0, len(plans))
 	for index, plan := range plans {
 		segmentPath := filepath.Join(segmentDir, fmt.Sprintf("segment-%02d.mp4", index+1))
-		if err := s.renderVideoPlanSegment(ctx, tools, sourcePath, composition.LayoutMode, plan, target, segmentPath); err != nil {
+		if err := s.renderVideoPlanSegment(ctx, tools, sourcePath, composition.LayoutMode, plan, target, composition.CaptionPlan, captionRefs, captionStyle, segmentPath); err != nil {
 			return err
 		}
 		paths = append(paths, segmentPath)
@@ -529,7 +619,7 @@ func (s *Service) clipResolutionForAspect(aspect string) ClipResolution {
 	}
 }
 
-func (s *Service) renderVideoPlanSegment(ctx context.Context, tools ToolPaths, sourcePath string, layout string, plan ClipFrameRenderPlan, target ClipResolution, outputPath string) error {
+func (s *Service) renderVideoPlanSegment(ctx context.Context, tools ToolPaths, sourcePath string, layout string, plan ClipFrameRenderPlan, target ClipResolution, captionPlan *ClipCaptionPlan, captionRefs clipCaptionReferences, captionStyle *clipCaptionASSStyle, outputPath string) error {
 	processCtx, cancel := context.WithTimeout(ctx, s.processTimeout)
 	defer cancel()
 	durationSeconds := plan.SourceEndSeconds - plan.SourceStartSeconds
@@ -540,6 +630,22 @@ func (s *Service) renderVideoPlanSegment(ctx context.Context, tools ToolPaths, s
 	if err != nil {
 		return err
 	}
+	videoOutputLabel := "vout"
+	if captionPlan != nil && strings.TrimSpace(captionPlan.Mode) == clipCaptionPlanModeBurnedIn {
+		if captionStyle == nil {
+			return fmt.Errorf("youtube clip captions failed: caption style was not resolved")
+		}
+		ass, err := buildClipASSSubtitle(*captionPlan, plan, target, captionRefs, *captionStyle)
+		if err != nil {
+			return err
+		}
+		assPath := outputPath + ".ass"
+		if err := os.WriteFile(assPath, []byte(ass), 0o600); err != nil {
+			return fmt.Errorf("write youtube clip captions: %w", err)
+		}
+		filterGraph = appendClipCaptionFilterGraph(filterGraph, assPath, captionStyle.Font.Path)
+		videoOutputLabel = "vcaption"
+	}
 	ffmpegCmd := exec.CommandContext(processCtx, tools.FFmpegPath,
 		"-hide_banner",
 		"-loglevel", "error",
@@ -548,7 +654,7 @@ func (s *Service) renderVideoPlanSegment(ctx context.Context, tools ToolPaths, s
 		"-i", sourcePath,
 		"-t", formatClipSeconds(durationSeconds),
 		"-filter_complex", filterGraph,
-		"-map", "[vout]",
+		"-map", "["+videoOutputLabel+"]",
 		"-map", "0:a:0?",
 		"-c:v", "libx264",
 		"-preset", "veryfast",
@@ -726,6 +832,43 @@ func escapeFFmpegConcatPath(path string) string {
 	return strings.ReplaceAll(path, "'", "'\\''")
 }
 
+func (s *Service) uploadRenderedClipThumbnail(ctx context.Context, tools ToolPaths, renderedPath string, request ClipRequest, decision ClipDecision, rank int, thumbnailPath string) (objectstore.UploadResult, error) {
+	if err := s.extractClipThumbnail(ctx, tools, renderedPath, renderedClipThumbnailOffset(decision), thumbnailPath); err != nil {
+		return objectstore.UploadResult{}, err
+	}
+	data, err := os.ReadFile(thumbnailPath)
+	if err != nil {
+		return objectstore.UploadResult{}, fmt.Errorf("read rendered clip thumbnail: %w", err)
+	}
+	upload, err := s.clipUploader.Upload(ctx, objectstore.UploadRequest{
+		Key:         clipThumbnailObjectKey(request, rank, decision.Title),
+		ContentType: "image/jpeg",
+		Body:        data,
+	})
+	if err != nil {
+		return objectstore.UploadResult{}, err
+	}
+	slog.Info("youtube clip thumbnail upload completed",
+		slog.String("guild_id", request.GuildID),
+		slog.String("request_id", request.RequestID),
+		slog.Int("rank", rank),
+		slog.String("object_key", upload.Key),
+		slog.Int64("size_bytes", upload.SizeBytes),
+	)
+	return upload, nil
+}
+
+func renderedClipThumbnailOffset(decision ClipDecision) float64 {
+	duration := clipSegmentsDuration(decision.Segments).Seconds()
+	if duration <= 1 {
+		return 0.05
+	}
+	if duration < 2 {
+		return duration / 2
+	}
+	return 1
+}
+
 func clipSegmentsDuration(segments []ClipDecisionSegment) time.Duration {
 	total := 0.0
 	for _, segment := range segments {
@@ -769,6 +912,15 @@ func clipObjectKey(request ClipRequest, rank int, title string) string {
 	return safeObjectPathSegment(firstNonEmpty(request.GuildID, "unknown-guild")) + "/" +
 		safeObjectPathSegment(firstNonEmpty(request.RequestID, "unknown-request")) + "/" +
 		fmt.Sprintf("%02d-%s", rank, safeClipFilename(title))
+}
+
+func clipThumbnailObjectKey(request ClipRequest, rank int, title string) string {
+	key := clipObjectKey(request, rank, title)
+	extension := filepath.Ext(key)
+	if extension == "" {
+		return key + ".jpg"
+	}
+	return strings.TrimSuffix(key, extension) + ".jpg"
 }
 
 func safeClipFilename(title string) string {

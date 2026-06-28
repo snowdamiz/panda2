@@ -94,7 +94,7 @@ func TestOpenRouterClipDetectorUsesConfiguredModelAndJSONSchemaPrompt(t *testing
 		t.Fatalf("expected default max tokens %d, got %d", defaultClipDetectionMaxTokens, request.MaxTokens)
 	}
 	systemPrompt := request.Messages[0].Content
-	for _, want := range []string{`supplied strict JSON schema`, "atomic cut units", "start_segment_index", "Do not invent interior timestamps", "Every clip must make sense when watched alone", "prepositions"} {
+	for _, want := range []string{`supplied strict JSON schema`, "atomic cut units", "start_segment_index", "Do not invent interior timestamps", "Clip type must match segment count exactly", "Every clip must make sense when watched alone", "prepositions"} {
 		if !strings.Contains(systemPrompt, want) {
 			t.Fatalf("expected schema prompt to contain %s, got %s", want, systemPrompt)
 		}
@@ -180,11 +180,14 @@ func TestOpenRouterClipDetectorRejectsEmptyStructuredOutput(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "empty response") {
 		t.Fatalf("expected empty response error, got %v", err)
 	}
-	if len(client.requests) != 1 {
-		t.Fatalf("expected one structured-output request, got %d request(s)", len(client.requests))
+	if len(client.requests) != 2 {
+		t.Fatalf("expected one repair retry, got %d request(s)", len(client.requests))
 	}
 	if client.requests[0].ResponseFormat == nil || client.requests[0].ResponseFormat.Type != "json_schema" {
 		t.Fatalf("expected json schema request, got %+v", client.requests[0].ResponseFormat)
+	}
+	if !strings.Contains(client.requests[1].Messages[0].Content, "failed validation") {
+		t.Fatalf("expected repair prompt to include validation context, got %s", client.requests[1].Messages[0].Content)
 	}
 }
 
@@ -228,6 +231,41 @@ func TestOpenRouterClipDetectorExpandsRepairBudgetForTruncatedJSON(t *testing.T)
 	}
 	if !strings.Contains(client.requests[1].Messages[0].Content, "incomplete or truncated") {
 		t.Fatalf("expected repair prompt to call out truncation, got %s", client.requests[1].Messages[0].Content)
+	}
+}
+
+func TestOpenRouterClipDetectorRepairsContinuousClipWithMultipleSegments(t *testing.T) {
+	client := &fakeClipLLM{
+		responses: []llm.ChatResponse{
+			{Content: `{"clips":[{"rank":1,"title":"Bad Type","type":"continuous","segments":[{"start_segment_index":0,"end_segment_index":0,"start_seconds":10,"end_seconds":18,"transcript":"The hook lands."},{"start_segment_index":1,"end_segment_index":1,"start_seconds":24,"end_seconds":35,"transcript":"The payoff lands."}],"reason":"Good hook and payoff, wrong type.","confidence":0.82,"virality_score":84,"hook_score":86,"retention_score":80,"shareability_score":82,"duration_policy":"short_exception","exception_reason":"Standalone soundbite works shorter."},{"rank":2,"title":"Second Moment","type":"continuous","segments":[{"start_segment_index":2,"end_segment_index":2,"start_seconds":40,"end_seconds":55,"transcript":"The second moment lands."}],"reason":"Second viable moment.","confidence":0.76,"virality_score":77,"hook_score":78,"retention_score":76,"shareability_score":75,"duration_policy":"short_exception","exception_reason":"Standalone soundbite works shorter."}]}`},
+			{Content: `{"clips":[{"rank":1,"title":"Bad Type","type":"spliced","segments":[{"start_segment_index":0,"end_segment_index":0,"start_seconds":10,"end_seconds":18,"transcript":"The hook lands."},{"start_segment_index":1,"end_segment_index":1,"start_seconds":24,"end_seconds":35,"transcript":"The payoff lands."}],"reason":"Good hook and payoff with a source-backed splice.","confidence":0.82,"virality_score":84,"hook_score":86,"retention_score":80,"shareability_score":82,"duration_policy":"short_exception","exception_reason":"Standalone soundbite works shorter."},{"rank":2,"title":"Second Moment","type":"continuous","segments":[{"start_segment_index":2,"end_segment_index":2,"start_seconds":40,"end_seconds":55,"transcript":"The second moment lands."}],"reason":"Second viable moment.","confidence":0.76,"virality_score":77,"hook_score":78,"retention_score":76,"shareability_score":75,"duration_policy":"short_exception","exception_reason":"Standalone soundbite works shorter."}]}`},
+		},
+	}
+	detector := NewOpenRouterClipDetector(ClipDetectorConfig{Client: client, Model: "provider/clip-model"})
+
+	result, err := detector.Detect(context.Background(), ClipDetectionRequest{
+		Duration:           time.Minute,
+		Instructions:       "clip something",
+		MinDurationSeconds: 5,
+		MaxDurationSeconds: 30,
+		Segments: []TranscriptSegment{
+			{StartSeconds: 10, EndSeconds: 18, Text: "The hook lands."},
+			{StartSeconds: 24, EndSeconds: 35, Text: "The payoff lands."},
+			{StartSeconds: 40, EndSeconds: 55, Text: "The second moment lands."},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Detect: %v", err)
+	}
+	if len(result.Clips) != 2 || result.Clips[0].Type != "spliced" || len(result.Clips[0].Segments) != 2 {
+		t.Fatalf("expected repaired spliced clip, got %+v", result)
+	}
+	if len(client.requests) != 2 {
+		t.Fatalf("expected one repair retry, got %d requests", len(client.requests))
+	}
+	repairPrompt := client.requests[1].Messages[0].Content
+	if !strings.Contains(repairPrompt, "continuous means exactly one") || !strings.Contains(repairPrompt, "continuous clip must contain exactly one segment") {
+		t.Fatalf("expected repair prompt to explain segment-count validation, got %s", repairPrompt)
 	}
 }
 

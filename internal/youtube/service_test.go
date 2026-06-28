@@ -115,6 +115,21 @@ func TestSummarizeRequiresLemonfoxKey(t *testing.T) {
 	}
 }
 
+func TestYouTubeYTDLPDownloadArgsIncludeRequestHardening(t *testing.T) {
+	args := youtubeYTDLPDownloadArgs("--format", "best", "https://www.youtube.com/watch?v=test")
+	requireArgValue(t, args, "--user-agent", youtubeYTDLPUserAgent)
+	requireArgValue(t, args, "--referer", "https://www.youtube.com/")
+	requireArgValue(t, args, "--add-headers", "Accept-Language:en-US,en;q=0.9")
+	requireArgValue(t, args, "--extractor-args", "youtube:player_client="+youtubeYTDLPPlayerClients)
+	requireArgValue(t, args, "--retries", "3")
+	requireArgValue(t, args, "--fragment-retries", "3")
+	requireArgValue(t, args, "--retry-sleep", "exp=1:20")
+	requireArgValue(t, args, "--extractor-retries", "3")
+	requireArg(t, args, "--no-cache-dir")
+	requireArg(t, args, "--no-progress")
+	requireArgValue(t, args, "--format", "best")
+}
+
 func TestExtractAudioChunksReportsYTDLPFailureWithoutPipeNoise(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("shell executable fixtures are unix-only")
@@ -200,6 +215,9 @@ for arg in "$@"; do
   last="$arg"
 done
 case " $* " in
+*" -filters "*)
+  echo ' ... subtitles         V->V       Render text subtitles onto input video using the libass library.'
+  ;;
 *" -f segment "*)
   printf 'audio one' > "$(printf "$last" 0)"
   printf 'audio two' > "$(printf "$last" 1)"
@@ -250,15 +268,22 @@ esac`)
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"text": "Intro",
 				"segments": []map[string]any{
-					{"start": 1.0, "end": 3.0, "text": "Intro"},
-					{"start": 10.0, "end": 14.0, "text": "Setup"},
+					{"start": 1.0, "end": 3.0, "text": "Intro", "words": []map[string]any{
+						{"start": 1.0, "end": 1.6, "word": "Intro"},
+					}},
+					{"start": 10.0, "end": 14.0, "text": "Setup", "words": []map[string]any{
+						{"start": 10.0, "end": 10.5, "word": "Setup"},
+					}},
 				},
 			})
 		case 2:
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"text": "Best part",
 				"segments": []map[string]any{
-					{"start": 3.0, "end": 9.0, "text": "Best part"},
+					{"start": 3.0, "end": 9.0, "text": "Best part", "words": []map[string]any{
+						{"start": 3.0, "end": 3.4, "word": "Best"},
+						{"start": 3.45, "end": 3.9, "word": "part"},
+					}},
 				},
 			})
 		default:
@@ -320,6 +345,7 @@ esac`)
 		ClipMinDuration: 5 * time.Second,
 		ClipMaxDuration: 30 * time.Second,
 		ClipMaxBytes:    1 << 20,
+		CaptionFontPath: testCaptionFontPath(t),
 	})
 
 	var progress []string
@@ -358,8 +384,11 @@ esac`)
 	if len(planner.requests) != 2 {
 		t.Fatalf("expected two composition planner requests, got %d", len(planner.requests))
 	}
-	if planner.requests[0].RequestedAspect != "9:16" || planner.requests[0].LayoutInstructions != "keep the full frame readable" || len(planner.requests[0].Thumbnails) == 0 {
+	if planner.requests[0].RequestedAspect != "9:16" || planner.requests[0].LayoutInstructions != "keep the full frame readable" || planner.requests[0].CaptionMode != "auto" || len(planner.requests[0].Thumbnails) == 0 {
 		t.Fatalf("unexpected composition request: %+v", planner.requests[0])
+	}
+	if len(planner.requests[0].TranscriptTimeline) == 0 || len(planner.requests[0].TranscriptTimeline[0].Words) == 0 || planner.requests[0].TranscriptTimeline[0].Words[0].ID != "w_0003" || planner.requests[0].TranscriptTimeline[0].Words[0].StartSeconds != 63 {
+		t.Fatalf("expected word timing in composition request: %+v", planner.requests[0].TranscriptTimeline)
 	}
 	detection := detector.requests[0]
 	if detection.Title != "Deep Dive" || detection.URL != "https://www.youtube.com/watch?v=video-1" || !strings.Contains(detection.Instructions, "viral short-form clips") {
@@ -368,22 +397,52 @@ esac`)
 	if len(detection.Segments) != 3 || detection.Segments[2].StartSeconds != 63 || detection.Segments[2].EndSeconds != 69 {
 		t.Fatalf("expected second chunk segments to be offset, got %+v", detection.Segments)
 	}
-	if len(uploader.requests) != 2 {
-		t.Fatalf("expected two uploads, got %d", len(uploader.requests))
+	if len(uploader.requests) != 4 {
+		t.Fatalf("expected video and thumbnail uploads for two clips, got %d", len(uploader.requests))
 	}
 	upload := uploader.requests[0]
 	if upload.Key != "guild-1/request-1/01-best-moment.mp4" || upload.ContentType != "video/mp4" || string(upload.Body) != "spliced clip bytes" {
 		t.Fatalf("unexpected upload request: %+v body=%q", upload, string(upload.Body))
 	}
-	secondUpload := uploader.requests[1]
+	thumbnailUpload := uploader.requests[1]
+	if thumbnailUpload.Key != "guild-1/request-1/01-best-moment.jpg" || thumbnailUpload.ContentType != "image/jpeg" || len(thumbnailUpload.Body) == 0 {
+		t.Fatalf("unexpected thumbnail upload request: %+v", thumbnailUpload)
+	}
+	secondUpload := uploader.requests[2]
 	if secondUpload.Key != "guild-1/request-1/02-setup-payoff.mp4" || string(secondUpload.Body) != "clip bytes" {
 		t.Fatalf("unexpected second upload request: %+v body=%q", secondUpload, string(secondUpload.Body))
 	}
-	if len(result.Clips) != 2 || result.Clips[0].WatchURL != "https://cdn.example.test/clips/guild-1/request-1/01-best-moment.mp4" || result.Clips[0].Type != "spliced" || len(result.Clips[0].Segments) != 2 || result.Clips[0].SourceStartSeconds != 63 || result.Clips[0].SourceEndSeconds != 72 || result.Clips[0].Duration != 6*time.Second || result.TranscriptSegmentCount != 3 {
+	secondThumbnailUpload := uploader.requests[3]
+	if secondThumbnailUpload.Key != "guild-1/request-1/02-setup-payoff.jpg" || secondThumbnailUpload.ContentType != "image/jpeg" || len(secondThumbnailUpload.Body) == 0 {
+		t.Fatalf("unexpected second thumbnail upload request: %+v", secondThumbnailUpload)
+	}
+	if len(result.Clips) != 2 || result.Clips[0].WatchURL != "https://cdn.example.test/clips/guild-1/request-1/01-best-moment.mp4" || result.Clips[0].ThumbnailURL != "https://cdn.example.test/clips/guild-1/request-1/01-best-moment.jpg" || result.Clips[0].Type != "spliced" || len(result.Clips[0].Segments) != 2 || result.Clips[0].SourceStartSeconds != 63 || result.Clips[0].SourceEndSeconds != 72 || result.Clips[0].Duration != 6*time.Second || result.TranscriptSegmentCount != 3 {
 		t.Fatalf("unexpected clip result: %+v", result)
 	}
 	if result.Clips[0].AspectRatio != "9:16" || result.Clips[0].LayoutMode != "full_frame" || result.Clips[0].CompositionConfidence != 0.8 {
 		t.Fatalf("expected composition metadata on rendered clip, got %+v", result.Clips[0])
+	}
+	if !result.Clips[0].CaptionRendered || result.Clips[0].CaptionMode != "burned_in" || result.Clips[0].CaptionTimingQuality == "" || result.Clips[0].CaptionReason == "" {
+		t.Fatalf("expected caption metadata on rendered clip, got %+v", result.Clips[0])
+	}
+	if result.Clips[0].CaptionStyleSource != clipCaptionStyleSourceOpusDefault || result.Clips[0].CaptionFontFamily != clipCaptionFontDefault || result.Clips[0].CaptionFontColor != "white" || result.Clips[0].CaptionBorderThickness != clipCaptionBorderThick {
+		t.Fatalf("expected caption style metadata on rendered clip, got %+v", result.Clips[0])
+	}
+}
+
+func TestResolveCaptionFontUsesConfiguredDefaultFont(t *testing.T) {
+	path := testCaptionFontPath(t)
+	service := NewService(Config{
+		CaptionFontPath:   path,
+		CaptionFontFamily: "Fixture Sans",
+	})
+
+	font, err := service.resolveCaptionFont(clipCaptionFontDefault)
+	if err != nil {
+		t.Fatalf("resolveCaptionFont: %v", err)
+	}
+	if font.Path != path || font.Family != "Fixture Sans" || font.Key != clipCaptionFontDefault {
+		t.Fatalf("unexpected resolved font: %+v", font)
 	}
 }
 
@@ -678,6 +737,26 @@ func writeShellExecutable(t *testing.T, name string, body string) string {
 	return path
 }
 
+func requireArg(t *testing.T, args []string, flag string) {
+	t.Helper()
+	for _, arg := range args {
+		if arg == flag {
+			return
+		}
+	}
+	t.Fatalf("expected args to include %q, got %#v", flag, args)
+}
+
+func requireArgValue(t *testing.T, args []string, flag string, value string) {
+	t.Helper()
+	for index, arg := range args {
+		if arg == flag && index+1 < len(args) && args[index+1] == value {
+			return
+		}
+	}
+	t.Fatalf("expected args to include %q %q, got %#v", flag, value, args)
+}
+
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (fn roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {
@@ -759,9 +838,85 @@ func (f *fakeClipPlanner) Plan(_ context.Context, request ClipCompositionRequest
 		AspectRatio: aspect,
 		LayoutMode:  "full_frame",
 		Plans:       plans,
+		CaptionPlan: fakeCaptionPlanForRequest(request),
 		Confidence:  0.8,
 		Reason:      "Preserve the full source frame for this test fixture.",
 	}, nil
+}
+
+func fakeCaptionPlanForRequest(request ClipCompositionRequest) *ClipCaptionPlan {
+	if strings.TrimSpace(request.CaptionMode) == clipCaptionRequestOff {
+		return applyTestCaptionStyle(&ClipCaptionPlan{
+			Mode:          clipCaptionPlanModeDisabled,
+			StylePreset:   clipCaptionStyleNone,
+			TimingQuality: clipCaptionTimingNone,
+			Confidence:    1,
+			Reason:        "Captions were disabled by request.",
+		})
+	}
+	for _, segment := range request.TranscriptTimeline {
+		if len(segment.Words) == 0 {
+			continue
+		}
+		end := len(segment.Words) - 1
+		if end > 3 {
+			end = 3
+		}
+		return applyTestCaptionStyle(&ClipCaptionPlan{
+			Mode:          clipCaptionPlanModeBurnedIn,
+			StylePreset:   clipCaptionStyleOpusBold,
+			TimingQuality: clipCaptionTimingWord,
+			Regions: []ClipCaptionRegion{{
+				ID:              "bottom_global",
+				OutputRect:      ClipRect{X: 80, Y: 760, W: 840, H: 160},
+				HorizontalAlign: clipCaptionAlignCenter,
+				VerticalAlign:   clipCaptionAlignMiddle,
+				MaxLines:        2,
+				ZIndex:          20,
+			}},
+			Cues: []ClipCaptionCue{{
+				CaptionRegionID: "bottom_global",
+				WordIDs:         []string{segment.Words[0].ID, segment.Words[end].ID},
+				EmphasisWordIDs: []string{segment.Words[0].ID},
+			}},
+			Confidence: 0.85,
+			Reason:     "Bottom captions stay clear of the main frame in this fixture.",
+		})
+	}
+	for _, segment := range request.TranscriptTimeline {
+		if strings.TrimSpace(segment.ID) == "" {
+			continue
+		}
+		return applyTestCaptionStyle(&ClipCaptionPlan{
+			Mode:          clipCaptionPlanModeBurnedIn,
+			StylePreset:   clipCaptionStyleOpusBold,
+			TimingQuality: clipCaptionTimingSegment,
+			Regions: []ClipCaptionRegion{{
+				ID:              "bottom_global",
+				OutputRect:      ClipRect{X: 80, Y: 760, W: 840, H: 160},
+				HorizontalAlign: clipCaptionAlignCenter,
+				VerticalAlign:   clipCaptionAlignMiddle,
+				MaxLines:        2,
+				ZIndex:          20,
+			}},
+			Cues: []ClipCaptionCue{{
+				CaptionRegionID:  "bottom_global",
+				SourceSegmentIDs: []string{segment.ID},
+			}},
+			Confidence: 0.7,
+			Reason:     "Segment-timed captions are explicit because no words were available in this fixture.",
+		})
+	}
+	return nil
+}
+
+func testCaptionFontPath(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "caption.ttf")
+	if err := os.WriteFile(path, []byte("fake font bytes"), 0o600); err != nil {
+		t.Fatalf("write test caption font: %v", err)
+	}
+	return path
 }
 
 type fakeClipUploader struct {

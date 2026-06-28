@@ -3571,12 +3571,17 @@ func (r *Router) responseFromAssistantAnswer(ctx context.Context, request Reques
 			response.ThreadName = threadName
 			response.GeneratedFiles = generated.CloneFiles(answer.GeneratedFiles)
 			response.UsageReservations = append([]billing.Reservation(nil), answer.UsageReservations...)
-			if followupContent := standaloneCardFollowupContent(answer.Content); followupContent != "" {
+			if followupContent := standaloneCardFollowupContent(answer.Content); followupContent != "" && len(cardResponse.MediaItems) == 0 {
 				response.Followups = append(response.Followups, Response{Content: followupContent})
 			}
 		} else {
-			response.Content = firstNonEmpty(response.Content, answer.Card.Content)
+			if len(cardResponse.MediaItems) > 0 {
+				response.Content = cardResponse.Content
+			} else {
+				response.Content = firstNonEmpty(response.Content, answer.Card.Content)
+			}
 			response.Presentation = cardResponse.Presentation
+			response.MediaItems = cardResponse.MediaItems
 			response.Actions = cardResponse.Actions
 			response.Selection = cardResponse.Selection
 		}
@@ -3629,9 +3634,19 @@ func responseFromAssistantCard(userID string, card *assistant.ToolCard) Response
 	if card == nil {
 		return Response{}
 	}
+	content := card.Content
+	presentation := presentationFromAssistantCard(card)
+	mediaItems := mediaItemsFromAssistantCard(card.MediaItems)
+	if len(mediaItems) > 0 {
+		content = ""
+		presentation.Title = ""
+		presentation.URL = ""
+		presentation.Fields = nil
+	}
 	return Response{
-		Content:      card.Content,
-		Presentation: presentationFromAssistantCard(card),
+		Content:      content,
+		Presentation: presentation,
+		MediaItems:   mediaItems,
 		Actions:      actionsFromAssistantCard(card),
 		Selection:    selectionFromAssistantCard(userID, card.Selection),
 	}
@@ -3683,6 +3698,7 @@ func assistantAnswerHasPayload(answer assistant.AskResponse) bool {
 		strings.TrimSpace(card.Title) != "" ||
 		strings.TrimSpace(card.URL) != "" ||
 		len(card.Fields) > 0 ||
+		len(card.MediaItems) > 0 ||
 		len(card.Actions) > 0 ||
 		card.Selection != nil
 }
@@ -3763,6 +3779,19 @@ func fieldsFromAssistantCard(fields []assistant.ToolCardField) []Field {
 			Name:   field.Name,
 			Value:  field.Value,
 			Inline: field.Inline,
+		})
+	}
+	return result
+}
+
+func mediaItemsFromAssistantCard(items []assistant.ToolCardMediaItem) []MediaItem {
+	result := make([]MediaItem, 0, len(items))
+	for _, item := range items {
+		result = append(result, MediaItem{
+			Title:        item.Title,
+			Description:  item.Description,
+			URL:          item.URL,
+			ThumbnailURL: item.ThumbnailURL,
 		})
 	}
 	return result

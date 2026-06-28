@@ -137,6 +137,7 @@ type ToolCard struct {
 	URL        string
 	Accent     string
 	Fields     []ToolCardField
+	MediaItems []ToolCardMediaItem
 	Actions    []ToolCardAction
 	Selection  *ToolCardSelection
 	Standalone bool
@@ -152,6 +153,13 @@ type ToolCardField struct {
 type ToolCardAction struct {
 	Label string
 	URL   string
+}
+
+type ToolCardMediaItem struct {
+	Title        string
+	Description  string
+	URL          string
+	ThumbnailURL string
 }
 
 type ToolCardSelection struct {
@@ -1659,14 +1667,15 @@ func toolCardFromPayloadMap(toolName string, payload map[string]any) *ToolCard {
 		return nil
 	}
 	card := &ToolCard{
-		Content:   stringValue(result["content"]),
-		Title:     stringValue(result["title"]),
-		URL:       stringValue(result["url"]),
-		Accent:    firstNonEmpty(stringValue(result["accent"]), toolCardDefaultAccent(toolName)),
-		Fields:    toolCardFields(result["fields"]),
-		Actions:   toolCardActions(result["actions"]),
-		Selection: toolCardSelectionForTool(toolName, result["selection"]),
-		Terminal:  boolValue(result["terminal"]) || toolCardTerminal(toolName),
+		Content:    stringValue(result["content"]),
+		Title:      stringValue(result["title"]),
+		URL:        stringValue(result["url"]),
+		Accent:     firstNonEmpty(stringValue(result["accent"]), toolCardDefaultAccent(toolName)),
+		Fields:     toolCardFields(result["fields"]),
+		MediaItems: toolCardMediaItems(result["media"]),
+		Actions:    toolCardActions(result["actions"]),
+		Selection:  toolCardSelectionForTool(toolName, result["selection"]),
+		Terminal:   boolValue(result["terminal"]) || toolCardTerminal(toolName),
 	}
 	applyToolCardDefaults(toolName, card)
 	if !toolCardHasRenderablePayload(card) {
@@ -1726,6 +1735,7 @@ func toolCardHasRenderablePayload(card *ToolCard) bool {
 		strings.TrimSpace(card.Title) != "" ||
 		strings.TrimSpace(card.URL) != "" ||
 		len(card.Fields) > 0 ||
+		len(card.MediaItems) > 0 ||
 		len(card.Actions) > 0 ||
 		card.Selection != nil
 }
@@ -1837,6 +1847,33 @@ func toolCardActions(value any) []ToolCardAction {
 		actions = append(actions, ToolCardAction{Label: label, URL: rawURL})
 	}
 	return actions
+}
+
+func toolCardMediaItems(value any) []ToolCardMediaItem {
+	items, ok := value.([]any)
+	if !ok {
+		return nil
+	}
+	mediaItems := make([]ToolCardMediaItem, 0, len(items))
+	for _, item := range items {
+		media, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		title := stringValue(media["title"])
+		thumbnailURL := stringValue(media["thumbnail_url"])
+		rawURL := stringValue(media["url"])
+		if strings.TrimSpace(title) == "" || strings.TrimSpace(thumbnailURL) == "" {
+			continue
+		}
+		mediaItems = append(mediaItems, ToolCardMediaItem{
+			Title:        title,
+			Description:  stringValue(media["description"]),
+			URL:          rawURL,
+			ThumbnailURL: thumbnailURL,
+		})
+	}
+	return mediaItems
 }
 
 func toolCardSelectionForTool(toolName string, value any) *ToolCardSelection {
@@ -2061,7 +2098,7 @@ func toolCardVisibleContent(card *ToolCard) string {
 	if card == nil {
 		return ""
 	}
-	lines := make([]string, 0, 2+len(card.Fields)+len(card.Actions))
+	lines := make([]string, 0, 2+len(card.Fields)+len(card.MediaItems)+len(card.Actions))
 	if title := strings.TrimSpace(card.Title); title != "" {
 		lines = append(lines, title)
 	}
@@ -2075,6 +2112,11 @@ func toolCardVisibleContent(card *ToolCard) string {
 			continue
 		}
 		lines = append(lines, name+": "+value)
+	}
+	for _, item := range card.MediaItems {
+		if title := strings.TrimSpace(item.Title); title != "" {
+			lines = append(lines, title)
+		}
 	}
 	for _, action := range card.Actions {
 		if label := strings.TrimSpace(action.Label); label != "" {

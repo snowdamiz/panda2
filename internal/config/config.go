@@ -8,44 +8,63 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
 )
 
 const (
-	configPathEnv                 = "PANDA_CONFIG"
-	envFilePathEnv                = "PANDA_ENV_FILE"
-	defaultConfigPath             = "panda.config.json"
-	defaultEnvFilePath            = ".env"
-	defaultDevDataDir             = "data"
-	defaultProdDataDir            = "/data"
-	defaultOpenRouterModel        = "openai/gpt-oss-120b"
-	defaultOpenRouterImageModel   = "google/gemini-3.1-flash-image"
-	defaultOpenRouterProvider     = "cerebras"
-	defaultClipDetectionTimeout   = 2 * time.Minute
-	defaultClipDetectionTokens    = 8192
-	defaultClipCompositionModel   = "google/gemini-3.5-flash"
-	defaultClipCompositionTimeout = 2 * time.Minute
-	defaultClipCompositionTokens  = 8192
-	defaultLemonfoxBaseURL        = "https://api.lemonfox.ai/v1"
-	defaultYouTubeChunkDuration   = 10 * time.Minute
-	defaultYouTubeClipMinDuration = 5 * time.Second
-	defaultYouTubeClipMaxDuration = 90 * time.Second
-	defaultYouTubeClipMaxBytes    = 100 * 1024 * 1024
-	defaultYouTubeThumbnailCount  = 12
-	defaultYouTubeThumbnailEdge   = 720
-	defaultYouTubeVerticalRes     = "1080x1920"
-	defaultYouTubeLandscapeRes    = "1920x1080"
-	defaultSolanaCluster          = "devnet"
-	defaultSolanaConfirmation     = "finalized"
-	defaultImageTimeout           = 90 * time.Second
-	defaultImageMaxBytes          = 8 * 1024 * 1024
-	defaultSolanaOrderExpiration  = 30 * time.Minute
-	defaultSolanaActivationKeyTTL = 48 * time.Hour
+	configPathEnv                  = "PANDA_CONFIG"
+	envFilePathEnv                 = "PANDA_ENV_FILE"
+	defaultConfigPath              = "panda.config.json"
+	defaultEnvFilePath             = ".env"
+	defaultDevDataDir              = "data"
+	defaultProdDataDir             = "/data"
+	defaultOpenRouterModel         = "openai/gpt-oss-120b"
+	defaultOpenRouterImageModel    = "google/gemini-3.1-flash-image"
+	defaultOpenRouterProvider      = "cerebras"
+	defaultClipDetectionTimeout    = 2 * time.Minute
+	defaultClipDetectionTokens     = 8192
+	defaultClipCompositionModel    = "google/gemini-3.5-flash"
+	defaultClipCompositionTimeout  = 2 * time.Minute
+	defaultClipCompositionTokens   = 12288
+	defaultLemonfoxBaseURL         = "https://api.lemonfox.ai/v1"
+	defaultYouTubeChunkDuration    = 10 * time.Minute
+	defaultYouTubeClipMinDuration  = 5 * time.Second
+	defaultYouTubeClipMaxDuration  = 90 * time.Second
+	defaultYouTubeClipMaxBytes     = 100 * 1024 * 1024
+	defaultYouTubeThumbnailCount   = 12
+	defaultYouTubeThumbnailEdge    = 720
+	defaultYouTubeVerticalRes      = "1080x1920"
+	defaultYouTubeLandscapeRes     = "1920x1080"
+	linuxYouTubeCaptionFontPath    = "/usr/share/fonts/truetype/dejavu/DejaVuSansCondensed-Bold.ttf"
+	linuxYouTubeCaptionFontFamily  = "DejaVu Sans Condensed"
+	darwinYouTubeCaptionFontPath   = "/System/Library/Fonts/Supplemental/Arial Bold.ttf"
+	darwinYouTubeCaptionFontFamily = "Arial"
+	defaultSolanaCluster           = "devnet"
+	defaultSolanaConfirmation      = "finalized"
+	defaultImageTimeout            = 90 * time.Second
+	defaultImageMaxBytes           = 8 * 1024 * 1024
+	defaultSolanaOrderExpiration   = 30 * time.Minute
+	defaultSolanaActivationKeyTTL  = 48 * time.Hour
 )
 
 var paidPlanNames = []string{"starter", "plus", "pro", "business"}
+
+func defaultYouTubeCaptionFontPath() string {
+	if runtime.GOOS == "darwin" {
+		return darwinYouTubeCaptionFontPath
+	}
+	return linuxYouTubeCaptionFontPath
+}
+
+func defaultYouTubeCaptionFontFamily() string {
+	if runtime.GOOS == "darwin" {
+		return darwinYouTubeCaptionFontFamily
+	}
+	return linuxYouTubeCaptionFontFamily
+}
 
 type Config struct {
 	DiscordBotToken                          string
@@ -87,6 +106,8 @@ type Config struct {
 	YouTubeClipThumbnailMaxEdge              int
 	YouTubeClipVerticalResolution            string
 	YouTubeClipLandscapeResolution           string
+	YouTubeClipCaptionFontPath               string
+	YouTubeClipCaptionFontFamily             string
 	PublicAppURL                             string
 	BillingAllowedOrigins                    []string
 	SolanaRPCURL                             string
@@ -178,6 +199,8 @@ type fileLemonfoxConfig struct {
 	YouTubeThumbnailMaxEdge    *int   `json:"youtube_clip_thumbnail_max_edge"`
 	YouTubeVerticalResolution  string `json:"youtube_clip_vertical_resolution"`
 	YouTubeLandscapeResolution string `json:"youtube_clip_landscape_resolution"`
+	YouTubeCaptionFontPath     string `json:"youtube_clip_caption_font_path"`
+	YouTubeCaptionFontFamily   string `json:"youtube_clip_caption_font_family"`
 }
 
 type fileBillingConfig struct {
@@ -306,6 +329,12 @@ func (c Config) Validate() ([]string, error) {
 	}
 	if err := validateResolution("lemonfox.youtube_clip_landscape_resolution", c.YouTubeClipLandscapeResolution); err != nil {
 		return nil, err
+	}
+	if strings.TrimSpace(c.YouTubeClipCaptionFontPath) == "" {
+		return nil, errors.New("lemonfox.youtube_clip_caption_font_path (YOUTUBE_CLIP_CAPTION_FONT_PATH) must not be empty")
+	}
+	if strings.TrimSpace(c.YouTubeClipCaptionFontFamily) == "" {
+		return nil, errors.New("lemonfox.youtube_clip_caption_font_family (YOUTUBE_CLIP_CAPTION_FONT_FAMILY) must not be empty")
 	}
 	if c.SolanaPlanLamports == nil {
 		c.SolanaPlanLamports = map[string]int64{}
@@ -566,6 +595,8 @@ func defaultConfig() Config {
 		YouTubeClipThumbnailMaxEdge:              defaultYouTubeThumbnailEdge,
 		YouTubeClipVerticalResolution:            defaultYouTubeVerticalRes,
 		YouTubeClipLandscapeResolution:           defaultYouTubeLandscapeRes,
+		YouTubeClipCaptionFontPath:               defaultYouTubeCaptionFontPath(),
+		YouTubeClipCaptionFontFamily:             defaultYouTubeCaptionFontFamily(),
 		R2ClipPrefix:                             "clips",
 		SolanaCluster:                            defaultSolanaCluster,
 		SolanaConfirmation:                       defaultSolanaConfirmation,
@@ -942,6 +973,12 @@ func applyFileConfig(cfg *Config, file fileConfig) error {
 	if value := strings.TrimSpace(file.Lemonfox.YouTubeLandscapeResolution); value != "" {
 		cfg.YouTubeClipLandscapeResolution = value
 	}
+	if value := strings.TrimSpace(file.Lemonfox.YouTubeCaptionFontPath); value != "" {
+		cfg.YouTubeClipCaptionFontPath = value
+	}
+	if value := strings.TrimSpace(file.Lemonfox.YouTubeCaptionFontFamily); value != "" {
+		cfg.YouTubeClipCaptionFontFamily = value
+	}
 	if value := strings.TrimSpace(file.Billing.PublicURL); value != "" {
 		cfg.PublicAppURL = value
 	}
@@ -1086,6 +1123,8 @@ func applyEnvValues(cfg *Config, lookup func(string) (string, bool)) {
 	cfg.YouTubeClipThumbnailMaxEdge = intFromLookup(lookup, "YOUTUBE_CLIP_THUMBNAIL_MAX_EDGE", cfg.YouTubeClipThumbnailMaxEdge)
 	cfg.YouTubeClipVerticalResolution = nonEmptyStringFromLookup(lookup, "YOUTUBE_CLIP_VERTICAL_RESOLUTION", cfg.YouTubeClipVerticalResolution)
 	cfg.YouTubeClipLandscapeResolution = nonEmptyStringFromLookup(lookup, "YOUTUBE_CLIP_LANDSCAPE_RESOLUTION", cfg.YouTubeClipLandscapeResolution)
+	cfg.YouTubeClipCaptionFontPath = nonEmptyStringFromLookup(lookup, "YOUTUBE_CLIP_CAPTION_FONT_PATH", cfg.YouTubeClipCaptionFontPath)
+	cfg.YouTubeClipCaptionFontFamily = nonEmptyStringFromLookup(lookup, "YOUTUBE_CLIP_CAPTION_FONT_FAMILY", cfg.YouTubeClipCaptionFontFamily)
 	cfg.PublicAppURL = nonEmptyStringFromLookup(lookup, "PUBLIC_APP_URL", cfg.PublicAppURL)
 	if value, ok := csvListFromLookup(lookup, "BILLING_ALLOWED_ORIGINS"); ok {
 		cfg.BillingAllowedOrigins = value

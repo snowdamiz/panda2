@@ -496,6 +496,19 @@ func TestNaturalMessageTypingStopCancelsRefreshes(t *testing.T) {
 	typing.Stop()
 }
 
+func TestNaturalMessageTypingStartIsIdempotent(t *testing.T) {
+	sender := &fakeTypingSender{}
+	typing := newNaturalMessageTyping(context.Background(), sender, snowflake.MustParse("100000000000000002"), time.Hour)
+
+	typing.Start()
+	typing.Start()
+	defer typing.Stop()
+
+	if got := sender.count(); got != 1 {
+		t.Fatalf("expected duplicate typing start to be ignored, got %d calls", got)
+	}
+}
+
 func TestNaturalMessageTypingStopBeforeStartPreventsTyping(t *testing.T) {
 	sender := &fakeTypingSender{}
 	typing := newNaturalMessageTyping(context.Background(), sender, snowflake.MustParse("100000000000000002"), time.Millisecond)
@@ -1484,6 +1497,41 @@ func TestResponseMessageCreatesPandaEmbed(t *testing.T) {
 	button, ok := row.Components[0].(disgoDiscord.ButtonComponent)
 	if !ok || button.Style != disgoDiscord.ButtonStyleLink || button.URL != "https://example.com/commands" {
 		t.Fatalf("unexpected link button: %+v", row.Components[0])
+	}
+}
+
+func TestResponseMessageCreatesMediaItemEmbeds(t *testing.T) {
+	response := commands.Response{
+		Content: "Clips ready.",
+		Presentation: commands.Presentation{
+			Title:  "YouTube clips ready",
+			Accent: commands.AccentInfo,
+		},
+		MediaItems: []commands.MediaItem{
+			{
+				Title:        "1. Best Moment",
+				Description:  "Strong standalone hook. - 20s",
+				URL:          "https://cdn.example.test/clips/01-best-moment.mp4",
+				ThumbnailURL: "https://cdn.example.test/clips/01-best-moment.jpg",
+			},
+			{
+				Title:        "2. Second Moment",
+				URL:          "https://cdn.example.test/clips/02-second-moment.mp4",
+				ThumbnailURL: "https://cdn.example.test/clips/02-second-moment.jpg",
+			},
+		},
+		Actions: []commands.Action{{Label: "1. Best Moment", URL: "https://cdn.example.test/clips/01-best-moment.mp4"}},
+	}
+
+	message := messageCreateFromResponsePart(response, response.Content, true)
+	if message.Content != "" || len(message.Embeds) != 3 || message.Flags.Has(disgoDiscord.MessageFlagSuppressEmbeds) {
+		t.Fatalf("expected main embed plus media embeds, got %+v", message)
+	}
+	if message.Embeds[1].Title != "1. Best Moment" || message.Embeds[1].URL != "https://cdn.example.test/clips/01-best-moment.mp4" || message.Embeds[1].Thumbnail == nil || message.Embeds[1].Thumbnail.URL != "https://cdn.example.test/clips/01-best-moment.jpg" {
+		t.Fatalf("unexpected first media embed: %+v", message.Embeds[1])
+	}
+	if message.Embeds[2].Title != "2. Second Moment" || message.Embeds[2].Thumbnail == nil || message.Embeds[2].Thumbnail.URL != "https://cdn.example.test/clips/02-second-moment.jpg" {
+		t.Fatalf("unexpected second media embed: %+v", message.Embeds[2])
 	}
 }
 

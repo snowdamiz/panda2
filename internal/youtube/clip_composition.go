@@ -14,9 +14,9 @@ import (
 )
 
 const (
-	defaultClipCompositionMaxTokens = 8192
+	defaultClipCompositionMaxTokens = 12288
 	defaultClipCompositionTimeout   = 2 * time.Minute
-	minClipCompositionRepairTokens  = 8192
+	minClipCompositionRepairTokens  = 16384
 
 	clipAspectAuto      = "auto"
 	clipAspectLandscape = "16:9"
@@ -26,6 +26,27 @@ const (
 	clipLayoutSingleCrop  = "single_crop"
 	clipLayoutStacked     = "stacked_regions"
 	clipLayoutFaceOverlay = "content_with_face_overlay"
+
+	clipCaptionRequestAuto = "auto"
+	clipCaptionRequestOn   = "on"
+	clipCaptionRequestOff  = "off"
+
+	clipCaptionPlanModeBurnedIn = "burned_in"
+	clipCaptionPlanModeDisabled = "disabled"
+
+	clipCaptionStyleOpusBold = "opus_bold"
+	clipCaptionStyleNone     = "none"
+
+	clipCaptionTimingWord    = "word"
+	clipCaptionTimingSegment = "segment"
+	clipCaptionTimingNone    = "none"
+
+	clipCaptionAlignLeft   = "left"
+	clipCaptionAlignCenter = "center"
+	clipCaptionAlignRight  = "right"
+	clipCaptionAlignTop    = "top"
+	clipCaptionAlignMiddle = "middle"
+	clipCaptionAlignBottom = "bottom"
 )
 
 type OpenRouterClipCompositionPlanner struct {
@@ -77,6 +98,9 @@ func (p *OpenRouterClipCompositionPlanner) Plan(ctx context.Context, request Cli
 	}
 	if len(request.Thumbnails) == 0 {
 		return ClipCompositionResult{}, fmt.Errorf("clip composition requires sampled thumbnails")
+	}
+	if _, err := normalizeClipCaptionMode(request.CaptionMode); err != nil {
+		return ClipCompositionResult{}, err
 	}
 	response, err := p.chat(ctx, p.clipCompositionChatRequest(request, "", p.maxTokens))
 	if err != nil {
@@ -158,7 +182,7 @@ func (p *OpenRouterClipCompositionPlanner) clipCompositionChatRequest(request Cl
 func clipCompositionRepairMessage(validationErr error, response llm.ChatResponse) string {
 	message := strings.TrimSpace(validationErr.Error())
 	if clipStructuredResponseWasTruncated(response, validationErr) {
-		return "The previous structured JSON response was incomplete or truncated before the object ended. Regenerate one complete JSON object from scratch, keep it concise, and ensure every opened object and array is closed. Validation error: " + message
+		return "The previous structured JSON response was incomplete or truncated before the object ended. Regenerate one complete JSON object from scratch, keep it concise, use compact caption cues with word_ids instead of cue source seconds, and ensure every opened object and array is closed. Validation error: " + message
 	}
 	return message
 }
@@ -169,17 +193,30 @@ func clipCompositionSystemPrompt() string {
 		"Use only the supplied thumbnails, transcript snippets, and metadata.",
 		"Return strict JSON matching the schema. Do not include Markdown or commentary.",
 		"Choose watchable render composition, not a summary.",
-		"For 9:16, identify whether primary content, facecam, speaker, captions, or full-frame source should be cropped, stacked, or overlaid.",
+		"For 9:16, identify whether primary content, facecam, speaker, source captions, or full-frame source should be cropped, stacked, or overlaid.",
 		"For streamer layouts, preserve both primary_content and facecam when that is more watchable than a single crop.",
 		"Use normalized coordinates from 0 to 1000. source_rect crops the original video frame; output_rect places that crop on the final canvas.",
 		"For stacked_regions, output rectangles must tile the whole 1000x1000 output coordinate space with no gaps or overlaps.",
-		"Preserve important UI, captions, speaker faces, and context needed to understand the clip.",
+		"Preserve important UI, source captions, speaker faces, and context needed to understand the clip.",
 		"Do not invent regions that are not visible in the thumbnails.",
 		"For split-screen interviews, panels, debates, podcasts, and reaction layouts, identify which visible person or region should be emphasized for each time range.",
 		"When the active speaker or most important visual focus switches mid-clip, return multiple plans for the same clip segment with contiguous source_start_seconds/source_end_seconds ranges and different source_rect choices.",
 		"Use thumbnails marked possible_speaker_switch_before and possible_speaker_switch_after to decide whether the crop should switch at that transcript boundary.",
 		"If the visible layout changes by source segment or time range, return separate plans covering those exact ranges.",
 		"Use fit=cover when the crop should fill its output rectangle, and fit=contain when preserving the whole crop is more important than filling.",
+		"Panda renders a separate ASS subtitle layer after the video composition. Plan caption regions in caption_plan, not as video crop regions; caption output_rect values are safe placement anchors and text is not clipped to them.",
+		"Require burned-in captions for normal spoken clips unless caption mode is off. Use disabled captions only when the request explicitly asks for no captions.",
+		"Caption cues must reference the supplied transcript word IDs for word timing, or supplied source segment IDs only when timing_quality is explicitly segment.",
+		"Use concise caption beats: one or two rows only, usually 1-4 words per row. For word-timed cues, word_ids are an inclusive [start_word_id,end_word_id] range; choose ranges that span no more than max_lines*4 words. Split dense speech into more cues instead of placing long phrases in one cue.",
+		"Choose caption regions that avoid faces, split dividers, important UI, source captions, and stacked or overlay panels. Use per-panel caption regions when one global region would hide important content.",
+		"Honor user caption style instructions in caption_plan style fields: font_family, font_color, highlight_color, border_color, border_thickness, background_color, and background_opacity.",
+		"Supported caption fonts are default, inter, arial, arial_narrow, and dejavu_sans_condensed. Use inter when the user asks for Inter.",
+		"When the user does not ask for caption style variation, use style_source=opus_default with font_family=default, font_color=white, highlight_color=yellow, border_color=black, border_thickness=thick, background_color=transparent, and background_opacity=0.",
+		"For requests like white Inter font with green medium outline, set font_family=inter, font_color=white, border_color=green, border_thickness=medium, and background_color=transparent.",
+		"If the user asks to mix it up, make it colorful, surprise them, or choose creatively, set style_source=creative_mix and choose concrete high-contrast style fields.",
+		"If the user asks to match, sample, harmonize with, or choose colors from the clip, set style_source=clip_palette and infer a high-contrast accent or border color from visible thumbnail colors.",
+		"When user wording names exact style properties, set style_source=user_specified and honor those properties exactly within the supported schema.",
+		"Use background_color/background_opacity only for a rectangular caption bubble; use border_color/border_thickness for Opus-style text outlines.",
 		"Never return ffmpeg filters.",
 	}, " ")
 }
@@ -216,11 +253,14 @@ func clipCompositionUserPrompt(request ClipCompositionRequest, validationError s
 		},
 		"requested_aspect_ratio": strings.TrimSpace(request.RequestedAspect),
 		"layout_instructions":    strings.TrimSpace(request.LayoutInstructions),
+		"caption_mode":           normalizedCaptionModeForPrompt(request.CaptionMode),
+		"caption_instructions":   strings.TrimSpace(request.CaptionInstructions),
 		"clip":                   request.Clip,
 		"transcript_timeline":    request.TranscriptTimeline,
 		"thumbnails":             thumbnails,
 		"coordinate_system":      "normalized 0..1000; output_rect maps to the final 16:9 or 9:16 canvas",
 		"dynamic_regions":        "Return multiple contiguous plans inside the same clip segment when the crop/layout should switch mid-clip, such as speaker A on the left then speaker B on the right.",
+		"caption_requirements":   "Return caption_plan in the same JSON object. For auto/on captions, use mode=burned_in, style_preset=opus_bold, timing_quality=word when word IDs are available, and assign every cue to a planned caption region. Keep cue JSON compact: word-timed cues must use word_ids=[start_word_id,end_word_id], source_segment_ids=[], and emphasis_word_ids=[] unless emphasizing supplied word IDs; do not include cue source_start_seconds/source_end_seconds. The two word_ids define an inclusive word range, so choose start/end pairs that span no more than max_lines*4 words. Segment-timed cues must use word_ids=[] and source_segment_ids with supplied transcript segment IDs. Every caption_plan must include style_source, font_family, font_color, highlight_color, border_color, border_thickness, background_color, and background_opacity. Supported style_source values are opus_default, user_specified, creative_mix, and clip_palette for burned-in captions, and none for disabled captions. Caption regions are safe placement anchors, not clipping masks; set max_lines to 1 or 2. Each cue should fit one or two rows, usually 1-4 words per row; split dense speech into more cues instead of using long phrases. When the user does not request caption style variation, use style_source=opus_default, font_family=default, font_color=white, highlight_color=yellow, border_color=black, border_thickness=thick, background_color=transparent, and background_opacity=0. For mix it up / surprise me / make it colorful requests, use style_source=creative_mix and choose validated high-contrast style fields. For match the clip colors / choose based on colors in the video requests, use style_source=clip_palette and infer concrete high-contrast colors from thumbnails. Supported font_family values are default, inter, arial, arial_narrow, and dejavu_sans_condensed. Colors may be white, black, green, yellow, red, blue, cyan, magenta, orange, purple, pink, lime, or #RRGGBB. border_thickness must be none, thin, medium, thick, or extra_thick. Use background_color=transparent and background_opacity=0 unless the user asks for a caption bubble/background. For off captions, use mode=disabled, style_preset=none, style_source=none, timing_quality=none, the default style fields, empty regions/cues, and explain why.",
 	}
 	data, _ := json.Marshal(payload)
 	prompt := "Plan the visual render composition for this clip. Return one complete JSON object only.\n\n" + string(data)
@@ -258,7 +298,7 @@ func clipCompositionSchema() json.RawMessage {
 								"type":                 "object",
 								"additionalProperties": false,
 								"properties": map[string]any{
-									"role":        map[string]any{"type": "string", "enum": []string{"primary_content", "facecam", "speaker", "captions", "full_frame"}},
+									"role":        map[string]any{"type": "string", "enum": []string{"primary_content", "facecam", "speaker", "source_captions", "full_frame"}},
 									"source_rect": clipRectSchema(),
 									"output_rect": clipRectSchema(),
 									"fit":         map[string]any{"type": "string", "enum": []string{"cover", "contain"}},
@@ -271,12 +311,108 @@ func clipCompositionSchema() json.RawMessage {
 					"required": []string{"applies_to_segment_index", "source_start_seconds", "source_end_seconds", "regions"},
 				},
 			},
+			"caption_plan": clipCaptionPlanSchema(),
+			"confidence":   map[string]any{"type": "number"},
+			"reason":       map[string]any{"type": "string"},
+		},
+		"required": []string{"aspect_ratio", "layout_mode", "plans", "caption_plan", "confidence", "reason"},
+	})
+	return json.RawMessage(schema)
+}
+
+func clipCaptionPlanSchema() map[string]any {
+	return map[string]any{
+		"type":                 "object",
+		"additionalProperties": false,
+		"properties": map[string]any{
+			"mode": map[string]any{
+				"type": "string",
+				"enum": []string{clipCaptionPlanModeBurnedIn, clipCaptionPlanModeDisabled},
+			},
+			"style_preset": map[string]any{
+				"type": "string",
+				"enum": []string{clipCaptionStyleOpusBold, clipCaptionStyleNone},
+			},
+			"style_source": map[string]any{
+				"type": "string",
+				"enum": []string{clipCaptionStyleSourceNone, clipCaptionStyleSourceOpusDefault, clipCaptionStyleSourceUserSpecified, clipCaptionStyleSourceCreativeMix, clipCaptionStyleSourceClipPalette},
+			},
+			"timing_quality": map[string]any{
+				"type": "string",
+				"enum": []string{clipCaptionTimingWord, clipCaptionTimingSegment, clipCaptionTimingNone},
+			},
+			"font_family": map[string]any{
+				"type": "string",
+				"enum": []string{clipCaptionFontDefault, clipCaptionFontInter, clipCaptionFontArial, clipCaptionFontArialNarrow, clipCaptionFontDejaVuSansCondensed},
+			},
+			"font_color": map[string]any{
+				"type":        "string",
+				"description": "Caption text color as a supported named color or #RRGGBB.",
+			},
+			"highlight_color": map[string]any{
+				"type":        "string",
+				"description": "Emphasis word color as a supported named color or #RRGGBB.",
+			},
+			"border_color": map[string]any{
+				"type":        "string",
+				"description": "Caption outline/border color as a supported named color or #RRGGBB.",
+			},
+			"border_thickness": map[string]any{
+				"type": "string",
+				"enum": []string{clipCaptionBorderNone, clipCaptionBorderThin, clipCaptionBorderMedium, clipCaptionBorderThick, clipCaptionBorderExtraThick},
+			},
+			"background_color": map[string]any{
+				"type":        "string",
+				"description": "Rectangular caption bubble/background color as transparent, a supported named color, or #RRGGBB.",
+			},
+			"background_opacity": map[string]any{
+				"type":        "number",
+				"description": "Caption bubble opacity from 0 to 1. Use 0 when background_color is transparent.",
+			},
+			"regions": map[string]any{
+				"type": "array",
+				"items": map[string]any{
+					"type":                 "object",
+					"additionalProperties": false,
+					"properties": map[string]any{
+						"id":               map[string]any{"type": "string"},
+						"output_rect":      clipRectSchema(),
+						"horizontal_align": map[string]any{"type": "string", "enum": []string{clipCaptionAlignLeft, clipCaptionAlignCenter, clipCaptionAlignRight}},
+						"vertical_align":   map[string]any{"type": "string", "enum": []string{clipCaptionAlignTop, clipCaptionAlignMiddle, clipCaptionAlignBottom}},
+						"max_lines":        map[string]any{"type": "integer", "minimum": 1, "maximum": 2},
+						"z_index":          map[string]any{"type": "integer"},
+					},
+					"required": []string{"id", "output_rect", "horizontal_align", "vertical_align", "max_lines", "z_index"},
+				},
+			},
+			"cues": map[string]any{
+				"type": "array",
+				"items": map[string]any{
+					"type":                 "object",
+					"additionalProperties": false,
+					"properties": map[string]any{
+						"caption_region_id": map[string]any{"type": "string"},
+						"word_ids": map[string]any{
+							"type":  "array",
+							"items": map[string]any{"type": "string"},
+						},
+						"source_segment_ids": map[string]any{
+							"type":  "array",
+							"items": map[string]any{"type": "string"},
+						},
+						"emphasis_word_ids": map[string]any{
+							"type":  "array",
+							"items": map[string]any{"type": "string"},
+						},
+					},
+					"required": []string{"caption_region_id", "word_ids", "source_segment_ids", "emphasis_word_ids"},
+				},
+			},
 			"confidence": map[string]any{"type": "number"},
 			"reason":     map[string]any{"type": "string"},
 		},
-		"required": []string{"aspect_ratio", "layout_mode", "plans", "confidence", "reason"},
-	})
-	return json.RawMessage(schema)
+		"required": []string{"mode", "style_preset", "style_source", "timing_quality", "font_family", "font_color", "highlight_color", "border_color", "border_thickness", "background_color", "background_opacity", "regions", "cues", "confidence", "reason"},
+	}
 }
 
 func clipRectSchema() map[string]any {
@@ -348,7 +484,10 @@ func ValidateClipCompositionResult(result ClipCompositionResult, request ClipCom
 	if len(result.Plans) == 0 {
 		return fmt.Errorf("clip composition returned no render plans")
 	}
-	return validateClipCompositionCoverage(result, request)
+	if err := validateClipCompositionCoverage(result, request); err != nil {
+		return err
+	}
+	return validateClipCaptionPlan(result, request)
 }
 
 func validateClipCompositionCoverage(result ClipCompositionResult, request ClipCompositionRequest) error {
@@ -438,7 +577,7 @@ func validateClipCompositionRegions(layout string, regions []ClipRenderRegion) e
 
 func validClipRegionRole(role string) bool {
 	switch role {
-	case "primary_content", "facecam", "speaker", "captions", "full_frame":
+	case "primary_content", "facecam", "speaker", "source_captions", "full_frame":
 		return true
 	default:
 		return false

@@ -3067,6 +3067,63 @@ func TestAssistantStandaloneCardWithCardMarkupDoesNotCreateFollowup(t *testing.T
 	}
 }
 
+func TestResponseFromAssistantCardPreservesMediaItems(t *testing.T) {
+	response := responseFromAssistantCard("user-1", &assistant.ToolCard{
+		Title:  "YouTube clips ready",
+		Accent: "info",
+		MediaItems: []assistant.ToolCardMediaItem{{
+			Title:        "1. Best Moment",
+			Description:  "Strong standalone hook. - 20s",
+			URL:          "https://cdn.example.test/clips/01-best-moment.mp4",
+			ThumbnailURL: "https://cdn.example.test/clips/01-best-moment.jpg",
+		}},
+	})
+
+	if response.Content != "" {
+		t.Fatalf("media card response should not duplicate clip content, got %q", response.Content)
+	}
+	if response.Presentation.Title != "" || len(response.Presentation.Fields) != 0 || response.Presentation.Accent != AccentInfo {
+		t.Fatalf("unexpected presentation: %+v", response.Presentation)
+	}
+	if len(response.MediaItems) != 1 {
+		t.Fatalf("expected one media item, got %+v", response.MediaItems)
+	}
+	item := response.MediaItems[0]
+	if item.Title != "1. Best Moment" || item.Description != "Strong standalone hook. - 20s" || item.URL != "https://cdn.example.test/clips/01-best-moment.mp4" || item.ThumbnailURL != "https://cdn.example.test/clips/01-best-moment.jpg" {
+		t.Fatalf("unexpected media item: %+v", item)
+	}
+}
+
+func TestAssistantResponseWithCardPreservesMediaItems(t *testing.T) {
+	router := &Router{}
+	response := router.responseFromAssistantAnswer(context.Background(), Request{UserID: "user-1"}, assistant.AskResponse{
+		Content: "YouTube clips ready",
+		Card: &assistant.ToolCard{
+			Title:  "YouTube clips ready",
+			Accent: "info",
+			MediaItems: []assistant.ToolCardMediaItem{{
+				Title:        "1. Best Moment",
+				URL:          "https://cdn.example.test/clips/01-best-moment.mp4",
+				ThumbnailURL: "https://cdn.example.test/clips/01-best-moment.jpg",
+			}},
+			Actions: []assistant.ToolCardAction{{Label: "1. Best Moment", URL: "https://cdn.example.test/clips/01-best-moment.mp4"}},
+		},
+	}, "", "")
+
+	if response.Content != "" {
+		t.Fatalf("media assistant response should not duplicate clip content, got %q", response.Content)
+	}
+	if response.Presentation.Title != "" || len(response.Presentation.Fields) != 0 || response.Presentation.Accent != AccentInfo {
+		t.Fatalf("expected card presentation, got %+v", response.Presentation)
+	}
+	if len(response.MediaItems) != 1 || response.MediaItems[0].ThumbnailURL != "https://cdn.example.test/clips/01-best-moment.jpg" {
+		t.Fatalf("expected clip media item to reach command response, got %+v", response.MediaItems)
+	}
+	if len(response.Actions) != 1 {
+		t.Fatalf("expected clip action to remain attached, got %+v", response.Actions)
+	}
+}
+
 func TestAssistantResponseWithGeneratedFileIsPayload(t *testing.T) {
 	router := &Router{}
 	answer := assistant.AskResponse{

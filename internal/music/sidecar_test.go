@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestSidecarManagerUsesConfiguredExecutables(t *testing.T) {
@@ -69,6 +70,53 @@ func TestSidecarManagerDownloadsMissingTools(t *testing.T) {
 		if info.Mode()&0o111 == 0 {
 			t.Fatalf("expected sidecar %q to be executable, mode=%s", path, info.Mode())
 		}
+	}
+}
+
+func TestSidecarManagerRefreshesStaleManagedYTDLP(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fixture uses a POSIX executable script")
+	}
+	dir := t.TempDir()
+	ytdlp := filepath.Join(dir, sidecarExecutableName("yt-dlp"))
+	if err := os.WriteFile(ytdlp, []byte("#!/bin/sh\nexit 42\n"), 0o755); err != nil {
+		t.Fatalf("write stale yt-dlp fixture: %v", err)
+	}
+	old := time.Now().Add(-(defaultYTDLPSidecarMaxAge + time.Hour))
+	if err := os.Chtimes(ytdlp, old, old); err != nil {
+		t.Fatalf("age stale yt-dlp fixture: %v", err)
+	}
+	ffmpeg := executableFixture(t, dir, "ffmpeg")
+	downloads := 0
+	manager := NewSidecarManager(SidecarConfig{
+		Dir: dir,
+		HTTPClient: &http.Client{
+			Transport: roundTripFunc(func(_ *http.Request) (*http.Response, error) {
+				downloads++
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Body:       io.NopCloser(strings.NewReader("#!/bin/sh\n# refreshed yt-dlp\nexit 0\n")),
+					Header:     make(http.Header),
+				}, nil
+			}),
+		},
+	})
+	tools, err := manager.Ensure(context.Background())
+	if err != nil {
+		t.Fatalf("Ensure returned error: %v", err)
+	}
+	if tools.YTDLPPath != ytdlp || tools.FFmpegPath != ffmpeg {
+		t.Fatalf("unexpected tool paths: %#v", tools)
+	}
+	if downloads != 1 {
+		t.Fatalf("expected one yt-dlp refresh download, got %d", downloads)
+	}
+	contents, err := os.ReadFile(ytdlp)
+	if err != nil {
+		t.Fatalf("read refreshed yt-dlp fixture: %v", err)
+	}
+	if !strings.Contains(string(contents), "refreshed yt-dlp") {
+		t.Fatalf("expected stale yt-dlp fixture to be replaced, got %q", string(contents))
 	}
 }
 

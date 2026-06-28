@@ -16,7 +16,7 @@
     "clip_detection_max_tokens": 8192,
     "clip_composition_model": "google/gemini-3.5-flash",
     "clip_composition_timeout": "2m",
-    "clip_composition_max_tokens": 8192,
+    "clip_composition_max_tokens": 12288,
     "image_timeout": "90s",
     "image_max_bytes": 8388608
   },

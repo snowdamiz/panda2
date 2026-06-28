@@ -103,7 +103,7 @@ func TestAdminSetupToolSchemasExposeNaturalLanguageFields(t *testing.T) {
 	assertToolSchemaContains("panda.manage_soul", "soul", "enum", "status", "set", "update")
 	assertToolSchemaContains("panda.manage_music", "search", "voice_channel_id", "voice_channel_name", "voice_channel", "vc")
 	assertToolSchemaContains("panda.summarize_youtube", "query", "url", "title", "detail", "language")
-	assertToolSchemaContains("panda.clip_youtube", "query", "url", "instructions", "aspect_ratio", "9:16", "layout_instructions", "language")
+	assertToolSchemaContains("panda.clip_youtube", "query", "url", "instructions", "aspect_ratio", "9:16", "layout_instructions", "captions", "caption_instructions", "language")
 	assertToolSchemaContains("panda.search_youtube", "query", "title", "video", "limit", "purpose", "clip", "instructions", "source", "channel_uploads", "channel_url", "handle", "sort_by", "upload_date", "date_after", "date_before", "uploaded_after")
 	assertToolSchemaContains("panda.manage_composed_tool", "voice_channel_id", "voice_channel_name", "voice_channel")
 }
@@ -1370,6 +1370,8 @@ func TestExecutorRunsYouTubeClipper(t *testing.T) {
 					Type:               "spliced",
 					WatchURL:           "https://cdn.example.test/clips/guild-1/request-1/01-best-explanation.mp4",
 					ObjectKey:          "clips/guild-1/request-1/01-best-explanation.mp4",
+					ThumbnailURL:       "https://cdn.example.test/clips/guild-1/request-1/01-best-explanation.jpg",
+					ThumbnailObjectKey: "clips/guild-1/request-1/01-best-explanation.jpg",
 					Duration:           33 * time.Second,
 					SourceStartSeconds: 42,
 					SourceEndSeconds:   90,
@@ -1377,19 +1379,33 @@ func TestExecutorRunsYouTubeClipper(t *testing.T) {
 						{StartSeconds: 42, EndSeconds: 58, Duration: 16 * time.Second, Transcript: "First point."},
 						{StartSeconds: 73, EndSeconds: 90, Duration: 17 * time.Second, Transcript: "Second point."},
 					},
-					Reason:                "This segment answers the requested question.",
-					Confidence:            0.91,
-					ViralityScore:         82,
-					HookScore:             80,
-					RetentionScore:        83,
-					ShareabilityScore:     81,
-					DurationPolicy:        "target_30_45",
-					ExceptionReason:       "",
-					OutputSizeBytes:       12345,
-					AspectRatio:           "9:16",
-					LayoutMode:            "stacked_regions",
-					CompositionReason:     "Main content and facecam are stacked for vertical viewing.",
-					CompositionConfidence: 0.87,
+					Reason:                   "This segment answers the requested question.",
+					Confidence:               0.91,
+					ViralityScore:            82,
+					HookScore:                80,
+					RetentionScore:           83,
+					ShareabilityScore:        81,
+					DurationPolicy:           "target_30_45",
+					ExceptionReason:          "",
+					OutputSizeBytes:          12345,
+					AspectRatio:              "9:16",
+					LayoutMode:               "stacked_regions",
+					CompositionReason:        "Main content and facecam are stacked for vertical viewing.",
+					CompositionConfidence:    0.87,
+					CaptionRendered:          true,
+					CaptionMode:              "burned_in",
+					CaptionStylePreset:       "opus_bold",
+					CaptionStyleSource:       "user_specified",
+					CaptionTimingQuality:     "word",
+					CaptionConfidence:        0.88,
+					CaptionReason:            "Bottom captions avoid the webcam.",
+					CaptionFontFamily:        "inter",
+					CaptionFontColor:         "white",
+					CaptionHighlightColor:    "yellow",
+					CaptionBorderColor:       "green",
+					CaptionBorderThickness:   "medium",
+					CaptionBackgroundColor:   "transparent",
+					CaptionBackgroundOpacity: 0,
 				},
 				{
 					Rank:               2,
@@ -1397,21 +1413,37 @@ func TestExecutorRunsYouTubeClipper(t *testing.T) {
 					Type:               "continuous",
 					WatchURL:           "https://cdn.example.test/clips/guild-1/request-1/02-short-answer.mp4",
 					ObjectKey:          "clips/guild-1/request-1/02-short-answer.mp4",
+					ThumbnailURL:       "https://cdn.example.test/clips/guild-1/request-1/02-short-answer.jpg",
+					ThumbnailObjectKey: "clips/guild-1/request-1/02-short-answer.jpg",
 					Duration:           15 * time.Second,
 					SourceStartSeconds: 50,
 					SourceEndSeconds:   65,
 					Segments: []youtube.RenderedClipSegment{
 						{StartSeconds: 50, EndSeconds: 65, Duration: 15 * time.Second, Transcript: "Short answer."},
 					},
-					Reason:            "This is a tighter soundbite.",
-					Confidence:        0.82,
-					ViralityScore:     76,
-					HookScore:         78,
-					RetentionScore:    75,
-					ShareabilityScore: 77,
-					DurationPolicy:    "short_exception",
-					ExceptionReason:   "Standalone answer works as a quick clip.",
-					OutputSizeBytes:   6789,
+					Reason:                   "This is a tighter soundbite.",
+					Confidence:               0.82,
+					ViralityScore:            76,
+					HookScore:                78,
+					RetentionScore:           75,
+					ShareabilityScore:        77,
+					DurationPolicy:           "short_exception",
+					ExceptionReason:          "Standalone answer works as a quick clip.",
+					OutputSizeBytes:          6789,
+					CaptionRendered:          true,
+					CaptionMode:              "burned_in",
+					CaptionStylePreset:       "opus_bold",
+					CaptionStyleSource:       "user_specified",
+					CaptionTimingQuality:     "word",
+					CaptionConfidence:        0.83,
+					CaptionReason:            "Captions stay in a safe lower band.",
+					CaptionFontFamily:        "inter",
+					CaptionFontColor:         "white",
+					CaptionHighlightColor:    "yellow",
+					CaptionBorderColor:       "green",
+					CaptionBorderThickness:   "medium",
+					CaptionBackgroundColor:   "transparent",
+					CaptionBackgroundOpacity: 0,
 				},
 			},
 		},
@@ -1428,7 +1460,7 @@ func TestExecutorRunsYouTubeClipper(t *testing.T) {
 			Type: "function",
 			Function: llm.ToolCallFunction{
 				Name:      "panda_clip_youtube",
-				Arguments: `{"query":"https://www.youtube.com/watch?v=deep","instructions":"clip the best explanation","aspect_ratio":"9:16","layout_instructions":"keep the webcam visible","language":"en"}`,
+				Arguments: `{"query":"https://www.youtube.com/watch?v=deep","instructions":"clip the best explanation","aspect_ratio":"9:16","layout_instructions":"keep the webcam visible","captions":"on","caption_instructions":"big captions at the top; do not cover the webcam","language":"en"}`,
 			},
 		},
 	})
@@ -1439,14 +1471,14 @@ func TestExecutorRunsYouTubeClipper(t *testing.T) {
 		t.Fatalf("expected one YouTube clip request, got %d", len(summarizer.clipRequests))
 	}
 	request := summarizer.clipRequests[0]
-	if request.Query != "https://www.youtube.com/watch?v=deep" || request.Instructions != "clip the best explanation" || request.AspectRatio != "9:16" || request.LayoutInstructions != "keep the webcam visible" || request.Language != "en" || request.GuildID != "guild-1" || request.RequestID != "request-1" {
+	if request.Query != "https://www.youtube.com/watch?v=deep" || request.Instructions != "clip the best explanation" || request.AspectRatio != "9:16" || request.LayoutInstructions != "keep the webcam visible" || request.Captions != "on" || request.CaptionInstructions != "big captions at the top; do not cover the webcam" || request.Language != "en" || request.GuildID != "guild-1" || request.RequestID != "request-1" {
 		t.Fatalf("unexpected YouTube clip request: %+v", request)
 	}
 	if !result.Terminal {
 		t.Fatalf("expected YouTube clip result to be terminal")
 	}
 	content := result.Message.Content
-	for _, want := range []string{`"terminal":true`, `"content":"1. [Best explanation]`, `"actions":[`, `"label":"1. Best explanation"`, `"clip_count":2`, `"clips":[`, `"type":"spliced"`, `"watch_url":"https://cdn.example.test/clips/guild-1/request-1/01-best-explanation.mp4"`, `"source_start_seconds":42`, `"source_end_seconds":90`, `"segments":[`, `"start_seconds":42`, `"end_seconds":58`, `"transcript_segment_count":4`, `"virality_score":82`, `"aspect_ratio":"9:16"`, `"layout_mode":"stacked_regions"`} {
+	for _, want := range []string{`"terminal":true`, `"content":"1. [Best explanation]`, `"media":[`, `"thumbnail_url":"https://cdn.example.test/clips/guild-1/request-1/01-best-explanation.jpg"`, `"thumbnail_object_key":"[redacted]"`, `"actions":[`, `"label":"1. Best explanation"`, `"clip_count":2`, `"clips":[`, `"type":"spliced"`, `"watch_url":"https://cdn.example.test/clips/guild-1/request-1/01-best-explanation.mp4"`, `"source_start_seconds":42`, `"source_end_seconds":90`, `"segments":[`, `"start_seconds":42`, `"end_seconds":58`, `"transcript_segment_count":4`, `"virality_score":82`, `"aspect_ratio":"9:16"`, `"layout_mode":"stacked_regions"`, `"caption_rendered":true`, `"caption_mode":"burned_in"`, `"caption_style_source":"user_specified"`, `"caption_timing_quality":"word"`, `"caption_reason":"Bottom captions avoid the webcam."`, `"caption_font_family":"inter"`, `"caption_font_color":"white"`, `"caption_border_color":"green"`, `"caption_border_thickness":"medium"`} {
 		if !strings.Contains(content, want) {
 			t.Fatalf("expected clip result content to contain %s, got %s", want, content)
 		}
@@ -1478,6 +1510,7 @@ func TestExecutorRunsYouTubeClipperWithoutGuidance(t *testing.T) {
 					Type:               "continuous",
 					WatchURL:           "https://cdn.example.test/clips/guild-1/request-1/01-best-moment.mp4",
 					ObjectKey:          "clips/guild-1/request-1/01-best-moment.mp4",
+					ThumbnailURL:       "https://cdn.example.test/clips/guild-1/request-1/01-best-moment.jpg",
 					Duration:           20 * time.Second,
 					SourceStartSeconds: 10,
 					SourceEndSeconds:   30,

@@ -4397,7 +4397,7 @@ func TestToolCardFromYouTubeClipPayloadIsTerminal(t *testing.T) {
 	}, llm.Message{
 		Role:       "tool",
 		ToolCallID: "call-youtube-clip",
-		Content:    `{"result":{"title":"YouTube clip ready","content":"1. [Best Moment](https://cdn.example.test/clip.mp4) - 20s","accent":"info","terminal":true,"actions":[{"label":"1. Best Moment","url":"https://cdn.example.test/clip.mp4"}],"clips":[{"rank":1,"watch_url":"https://cdn.example.test/clip.mp4"}]}}`,
+		Content:    `{"result":{"title":"YouTube clip ready","content":"1. [Best Moment](https://cdn.example.test/clip.mp4) - 20s","accent":"info","terminal":true,"media":[{"title":"1. Best Moment","description":"Strong standalone hook. - 20s","url":"https://cdn.example.test/clip.mp4","thumbnail_url":"https://cdn.example.test/clip.jpg"}],"actions":[{"label":"1. Best Moment","url":"https://cdn.example.test/clip.mp4"}],"clips":[{"rank":1,"watch_url":"https://cdn.example.test/clip.mp4","thumbnail_url":"https://cdn.example.test/clip.jpg"}]}}`,
 	})
 
 	if card == nil {
@@ -4408,6 +4408,9 @@ func TestToolCardFromYouTubeClipPayloadIsTerminal(t *testing.T) {
 	}
 	if !strings.Contains(card.Content, "Best Moment") || len(card.Actions) != 1 || card.Actions[0].URL != "https://cdn.example.test/clip.mp4" {
 		t.Fatalf("expected clip card content and action, got %+v", card)
+	}
+	if len(card.MediaItems) != 1 || card.MediaItems[0].Title != "1. Best Moment" || card.MediaItems[0].URL != "https://cdn.example.test/clip.mp4" || card.MediaItems[0].ThumbnailURL != "https://cdn.example.test/clip.jpg" {
+		t.Fatalf("expected clip media item to be preserved, got %+v", card.MediaItems)
 	}
 }
 

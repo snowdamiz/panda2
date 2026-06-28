@@ -112,11 +112,8 @@ func (d *OpenRouterClipDetector) Detect(ctx context.Context, request ClipDetecti
 	if parseErr == nil {
 		return result, nil
 	}
-	if !clipStructuredResponseWasTruncated(response, parseErr) {
-		return ClipDetectionResult{}, parseErr
-	}
 
-	repairResponse, err := d.chat(ctx, d.clipDetectionChatRequest(data, clipDetectionResponseFormat(), clipDetectionRepairMessage(parseErr), d.repairMaxTokens()))
+	repairResponse, err := d.chat(ctx, d.clipDetectionChatRequest(data, clipDetectionResponseFormat(), clipDetectionRepairMessage(parseErr, response), d.repairMaxTokens()))
 	if err != nil {
 		return ClipDetectionResult{}, err
 	}
@@ -158,9 +155,12 @@ func parseAndValidateClipDetection(content string, request ClipDetectionRequest,
 	return result, nil
 }
 
-func clipDetectionRepairMessage(parseErr error) string {
-	message := strings.TrimSpace(parseErr.Error())
-	return "The previous structured JSON response was incomplete or truncated before the object ended. Regenerate one complete JSON object from scratch, keep every field concise, and ensure every opened object and array is closed. Validation error: " + message
+func clipDetectionRepairMessage(validationErr error, response llm.ChatResponse) string {
+	message := strings.TrimSpace(validationErr.Error())
+	if clipStructuredResponseWasTruncated(response, validationErr) {
+		return "The previous structured JSON response was incomplete or truncated before the object ended. Regenerate one complete JSON object from scratch, keep every field concise, and ensure every opened object and array is closed. Validation error: " + message
+	}
+	return "The previous structured JSON response failed validation. Regenerate one complete JSON object from scratch using the same transcript. Do not locally reinterpret the prior answer. A clip with one segment must use type=continuous; a clip with 2-6 segments must use type=spliced; never return type=continuous with multiple segments. Validation error: " + message
 }
 
 type clipDetectionChatResult struct {
@@ -257,6 +257,7 @@ func clipDetectionSystemPrompt() string {
 		"Set start_seconds exactly to transcript_segments[start_segment_index].start_seconds and end_seconds exactly to transcript_segments[end_segment_index].end_seconds. Do not invent interior timestamps.",
 		"Set transcript to the exact source text covered by that inclusive range, lightly joined with spaces only when the range spans multiple transcript segments.",
 		"Each clip may be type=continuous with one segment or type=spliced with 2-6 ordered segments. Use spliced clips when cutting dead air, repeated filler, meandering setup, or distant setup/payoff moments creates a more cohesive short-form story.",
+		"Clip type must match segment count exactly: continuous means exactly one returned segment; spliced means two to six returned segments. Never label a multi-segment clip as continuous.",
 		"Spliced segments must preserve narrative logic. Do not create deceptive edits that reverse meaning. Do not splice unrelated moments just because each moment is individually interesting.",
 		"For spliced clips, each segment must have a clear role: hook, setup, escalation, punchline, reveal, reaction, or payoff. Keep only the smallest segments needed for flow.",
 		"Keep title, reason, exception_reason, and segment transcript snippets concise so up to 12 clips can fit in one JSON response.",
