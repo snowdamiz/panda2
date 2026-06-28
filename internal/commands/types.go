@@ -100,7 +100,6 @@ type FeedbackControls struct {
 type Confirmation struct {
 	ID           string
 	ConfirmLabel string
-	CancelID     string
 	CancelLabel  string
 	Danger       bool
 }

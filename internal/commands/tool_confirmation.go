@@ -120,7 +120,6 @@ func ToolConfirmationFromAssistant(userID string, pending *assistant.Interaction
 	return &Confirmation{
 		ID:           id,
 		ConfirmLabel: label,
-		CancelID:     ConfirmationCancelID,
 		CancelLabel:  "Cancel",
 		Danger:       pending.Danger,
 	}
@@ -179,7 +178,6 @@ func confirmationFromPendingTool(userID string, pending *assistant.InteractionCo
 	return &Confirmation{
 		ID:           id,
 		ConfirmLabel: label,
-		CancelID:     ConfirmationCancelID,
 		CancelLabel:  "Cancel",
 		Danger:       pending.Danger,
 	}

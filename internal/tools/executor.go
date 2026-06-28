@@ -3590,8 +3590,15 @@ func (e *Executor) searchYouTube(ctx context.Context, arguments string) (any, er
 		return nil, fmt.Errorf("query is required")
 	}
 	candidates, err := e.youtube.Search(ctx, youtube.SearchRequest{
-		Query: query,
-		Limit: youtubeSearchChoiceLimit(args["limit"]),
+		Query:      query,
+		Limit:      youtubeSearchChoiceLimit(args["limit"]),
+		Source:     firstNonEmpty(stringArgument(args, "source"), stringArgument(args, "mode")),
+		ChannelURL: firstNonEmpty(stringArgument(args, "channel_url"), stringArgument(args, "channel")),
+		Handle:     firstNonEmpty(stringArgument(args, "handle"), stringArgument(args, "channel_handle")),
+		SortBy:     firstNonEmpty(stringArgument(args, "sort_by"), stringArgument(args, "sort")),
+		Date:       firstNonEmpty(stringArgument(args, "date"), stringArgument(args, "uploaded_on")),
+		DateAfter:  firstNonEmpty(stringArgument(args, "date_after"), firstNonEmpty(stringArgument(args, "uploaded_after"), stringArgument(args, "published_after"))),
+		DateBefore: firstNonEmpty(stringArgument(args, "date_before"), firstNonEmpty(stringArgument(args, "uploaded_before"), stringArgument(args, "published_before"))),
 	})
 	if err != nil {
 		return nil, err
@@ -3655,6 +3662,9 @@ func youtubeCandidateDescription(candidate youtube.VideoCandidate) string {
 	parts := []string{}
 	if uploader := strings.TrimSpace(candidate.Uploader); uploader != "" {
 		parts = append(parts, uploader)
+	}
+	if !candidate.UploadDate.IsZero() {
+		parts = append(parts, candidate.UploadDate.Format("2006-01-02"))
 	}
 	if candidate.Duration > 0 {
 		totalSeconds := int(candidate.Duration.Round(time.Second).Seconds())

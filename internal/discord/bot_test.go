@@ -296,8 +296,47 @@ func TestStringSelectInteractionDispatchesSelectionAsync(t *testing.T) {
 	}
 }
 
+func TestButtonInteractionRejectsScopedCancelFromOtherUser(t *testing.T) {
+	applicationID := snowflake.MustParse("100000000000000200")
+	ownerID := snowflake.MustParse("100000000000000101")
+	otherID := snowflake.MustParse("100000000000000102")
+	event := buttonComponentInteractionEvent(t, commands.ConfirmationCancelID(ownerID.String()), applicationID, snowflake.MustParse("100000000000000300"), snowflake.MustParse("100000000000000301"), otherID)
+
+	var responseTypes []disgoDiscord.InteractionResponseType
+	var messages []disgoDiscord.MessageCreate
+	event.Respond = func(responseType disgoDiscord.InteractionResponseType, data disgoDiscord.InteractionResponseData, _ ...rest.RequestOpt) error {
+		responseTypes = append(responseTypes, responseType)
+		if message, ok := data.(disgoDiscord.MessageCreate); ok {
+			messages = append(messages, message)
+		}
+		return nil
+	}
+
+	bot := &Bot{cfg: config.Config{OwnerUserIDs: map[string]struct{}{otherID.String(): {}}}}
+	bot.onButtonInteraction(event)
+
+	if len(responseTypes) != 1 || responseTypes[0] != disgoDiscord.InteractionResponseTypeCreateMessage {
+		t.Fatalf("expected one ephemeral create-message rejection, got %+v", responseTypes)
+	}
+	if len(messages) != 1 || !messages[0].Flags.Has(disgoDiscord.MessageFlagEphemeral) {
+		t.Fatalf("expected unauthorized cancel rejection to be ephemeral, got %+v", messages)
+	}
+}
+
 func selectionComponentInteractionEvent(t *testing.T, customID string, value string, applicationID snowflake.ID, guildID snowflake.ID, channelID snowflake.ID, userID snowflake.ID) *events.ComponentInteractionCreate {
+	return componentInteractionEvent(t, int(disgoDiscord.ComponentTypeStringSelectMenu), customID, value, applicationID, guildID, channelID, userID)
+}
+
+func buttonComponentInteractionEvent(t *testing.T, customID string, applicationID snowflake.ID, guildID snowflake.ID, channelID snowflake.ID, userID snowflake.ID) *events.ComponentInteractionCreate {
+	return componentInteractionEvent(t, int(disgoDiscord.ComponentTypeButton), customID, "", applicationID, guildID, channelID, userID)
+}
+
+func componentInteractionEvent(t *testing.T, componentType int, customID string, value string, applicationID snowflake.ID, guildID snowflake.ID, channelID snowflake.ID, userID snowflake.ID) *events.ComponentInteractionCreate {
 	t.Helper()
+	values := ""
+	if strings.TrimSpace(value) != "" {
+		values = fmt.Sprintf(`,"values":[%q]`, value)
+	}
 	raw := fmt.Sprintf(`{
 		"id":"100000000000000500",
 		"application_id":%q,
@@ -307,7 +346,7 @@ func selectionComponentInteractionEvent(t *testing.T, customID string, value str
 		"guild_id":%q,
 		"channel":{"id":%q,"type":0,"name":"bot-test","permissions":"0"},
 		"member":{"user":{"id":%q,"username":"tester","discriminator":"0001","avatar":null},"roles":[],"permissions":"0"},
-		"data":{"component_type":3,"custom_id":%q,"values":[%q]},
+		"data":{"component_type":%d,"custom_id":%q%s},
 		"message":{
 			"id":"100000000000000501",
 			"channel_id":%q,
@@ -325,7 +364,7 @@ func selectionComponentInteractionEvent(t *testing.T, customID string, value str
 			"pinned":false,
 			"type":0
 		}
-	}`, applicationID.String(), guildID.String(), channelID.String(), userID.String(), customID, value, channelID.String(), applicationID.String())
+	}`, applicationID.String(), guildID.String(), channelID.String(), userID.String(), componentType, customID, values, channelID.String(), applicationID.String())
 	interaction, err := disgoDiscord.UnmarshalInteraction([]byte(raw))
 	if err != nil {
 		t.Fatalf("UnmarshalInteraction: %v", err)
@@ -1133,7 +1172,6 @@ func TestConfirmationResponseRendersButtons(t *testing.T) {
 		Confirmation: &commands.Confirmation{
 			ID:           "p2c:md:admin:1",
 			ConfirmLabel: "Delete document",
-			CancelID:     commands.ConfirmationCancelID,
 			CancelLabel:  "Cancel",
 			Danger:       true,
 		},
@@ -1152,7 +1190,7 @@ func TestConfirmationResponseRendersButtons(t *testing.T) {
 		t.Fatalf("unexpected confirm button: %+v", row.Components[0])
 	}
 	cancel, ok := row.Components[1].(disgoDiscord.ButtonComponent)
-	if !ok || cancel.CustomID != commands.ConfirmationCancelID || cancel.Style != disgoDiscord.ButtonStyleSecondary {
+	if !ok || cancel.CustomID != commands.ConfirmationCancelID("admin") || cancel.Style != disgoDiscord.ButtonStyleSecondary {
 		t.Fatalf("unexpected cancel button: %+v", row.Components[1])
 	}
 }
@@ -1164,14 +1202,12 @@ func TestConfirmationResponseRendersMultipleButtons(t *testing.T) {
 			{
 				ID:           "p2t:cs:admin:100000000000000123:allow",
 				ConfirmLabel: "Set rule",
-				CancelID:     commands.ConfirmationCancelID,
 				CancelLabel:  "Cancel",
 				Danger:       true,
 			},
 			{
 				ID:           "p2t:ra:admin:100000000000000456:moderator",
 				ConfirmLabel: "Set role profile",
-				CancelID:     commands.ConfirmationCancelID,
 				CancelLabel:  "Cancel",
 				Danger:       true,
 			},
@@ -1193,7 +1229,7 @@ func TestConfirmationResponseRendersMultipleButtons(t *testing.T) {
 		}
 	}
 	cancel, ok := row.Components[2].(disgoDiscord.ButtonComponent)
-	if !ok || cancel.CustomID != commands.ConfirmationCancelID || cancel.Style != disgoDiscord.ButtonStyleSecondary {
+	if !ok || cancel.CustomID != commands.ConfirmationCancelID("admin") || cancel.Style != disgoDiscord.ButtonStyleSecondary {
 		t.Fatalf("unexpected cancel button: %+v", row.Components[2])
 	}
 }
@@ -1234,7 +1270,6 @@ func TestResponsePartOnlyRendersComponentsWhenRequested(t *testing.T) {
 		Confirmation: &commands.Confirmation{
 			ID:           "p2c:md:admin:1",
 			ConfirmLabel: "Approve",
-			CancelID:     commands.ConfirmationCancelID,
 			CancelLabel:  "Cancel",
 		},
 	}

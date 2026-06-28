@@ -4,7 +4,7 @@ import "strings"
 
 const (
 	confirmationPrefix   = "p2c"
-	ConfirmationCancelID = "p2c:cancel"
+	confirmationOpCancel = "cancel"
 
 	confirmationOpAdminDisable = "ad"
 	confirmationOpDataDelete   = "dd"
@@ -20,6 +20,26 @@ func dataDeleteConfirmationID(userID, scope string) string {
 
 func confirmationID(op, userID string) string {
 	return strings.Join([]string{confirmationPrefix, op, cleanConfirmationPart(userID)}, ":")
+}
+
+func ConfirmationCancelID(userID string) string {
+	return strings.Join([]string{confirmationPrefix, confirmationOpCancel, cleanConfirmationPart(userID)}, ":")
+}
+
+func ConfirmationCancelIDForConfirmation(id string) string {
+	parts := strings.Split(id, ":")
+	if len(parts) < 3 || parts[0] == "" || strings.TrimSpace(parts[2]) == "" {
+		return ""
+	}
+	return ConfirmationCancelID(parts[2])
+}
+
+func IsConfirmationCancelID(id string, base Request) bool {
+	parts := strings.Split(id, ":")
+	return len(parts) == 3 &&
+		parts[0] == confirmationPrefix &&
+		parts[1] == confirmationOpCancel &&
+		parts[2] == cleanConfirmationPart(base.UserID)
 }
 
 func cleanConfirmationPart(value string) string {
@@ -39,7 +59,6 @@ func destructiveConfirmation(id, label, summary string) Response {
 		Confirmation: &Confirmation{
 			ID:           id,
 			ConfirmLabel: label,
-			CancelID:     ConfirmationCancelID,
 			CancelLabel:  "Cancel",
 			Danger:       true,
 		},

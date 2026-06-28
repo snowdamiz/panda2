@@ -548,7 +548,7 @@ func DefaultDefinitions() []Definition {
 		},
 		{
 			Name:                  "panda.search_youtube",
-			Description:           "Search YouTube for the top candidate videos and render a Discord selection prompt with thumbnails. Use this before panda.summarize_youtube for title/name-only YouTube summary requests, including requests that also name a channel/creator, unless the user provided an exact YouTube URL or explicitly asked to use the top result without choosing. Do not use for music playback; use panda.manage_music action=search for track choices.",
+			Description:           "Search YouTube for the top candidate videos and render a Discord selection prompt with thumbnails. Use this before panda.summarize_youtube for title/name-only YouTube summary requests, including requests that also name a channel/creator, unless the user provided an exact YouTube URL or explicitly asked to use the top result without choosing. For latest/newest/most recent video requests on a channel or creator, set source=channel_uploads and put only the channel/creator name in query; include channel_url or handle when the user provided one. For user-specified upload-date constraints, pass date, date_after, or date_before. Do not use for music playback; use panda.manage_music action=search for track choices.",
 			RequiredPermission:    admin.PermissionAssistantUse,
 			FeatureID:             features.AssistantChat,
 			ToolClass:             ToolClassMedia,
@@ -1155,7 +1155,7 @@ func youtubeSearchSchema() json.RawMessage {
 		"query": map[string]any{
 			"type":        "string",
 			"minLength":   1,
-			"description": "YouTube video title/name/search phrase to search before asking the user to choose a result.",
+			"description": "YouTube video title/name/search phrase to search before asking the user to choose a result. For latest/newest channel requests, use only the channel or creator name; omit generic words like latest video or channel unless they are part of the proper name.",
 		},
 		"title": map[string]any{
 			"type":        "string",
@@ -1170,6 +1170,64 @@ func youtubeSearchSchema() json.RawMessage {
 			"minimum":     3,
 			"maximum":     3,
 			"description": "Number of choices to return. Use 3 for Discord selection prompts.",
+		},
+		"source": map[string]any{
+			"type":        "string",
+			"enum":        []string{"search", "channel_uploads"},
+			"description": "Use channel_uploads for latest/newest/most recent upload requests on a channel or creator; otherwise use search.",
+		},
+		"mode": map[string]any{
+			"type":        "string",
+			"description": "Alias for source. Use channel_uploads for latest/newest/most recent upload requests on a channel or creator.",
+		},
+		"channel_url": map[string]any{
+			"type":        "string",
+			"description": "Exact YouTube channel URL when the user provides one. Use with source=channel_uploads.",
+		},
+		"channel": map[string]any{
+			"type":        "string",
+			"description": "Alias for channel_url when the user provides an exact channel URL.",
+		},
+		"handle": map[string]any{
+			"type":        "string",
+			"description": "Exact YouTube handle, such as @orangiebuilds, when the user provides one. Use with source=channel_uploads.",
+		},
+		"channel_handle": map[string]any{
+			"type":        "string",
+			"description": "Alias for handle.",
+		},
+		"sort_by": map[string]any{
+			"type":        "string",
+			"enum":        []string{"relevance", "upload_date"},
+			"description": "Search ordering. Use upload_date for latest, newest, most recent, or channel-latest requests; otherwise use relevance.",
+		},
+		"sort": map[string]any{
+			"type":        "string",
+			"description": "Alias for sort_by. Values like upload_date, latest, newest, recent, or relevance are accepted.",
+		},
+		"date": map[string]any{
+			"type":        "string",
+			"description": "Only videos uploaded on this date. Use YYYY-MM-DD or YYYYMMDD when the user specifies an exact upload date.",
+		},
+		"date_after": map[string]any{
+			"type":        "string",
+			"description": "Only videos uploaded after this date. Use YYYY-MM-DD or YYYYMMDD for explicit dates.",
+		},
+		"date_before": map[string]any{
+			"type":        "string",
+			"description": "Only videos uploaded before this date. Use YYYY-MM-DD or YYYYMMDD for explicit dates.",
+		},
+		"uploaded_after": map[string]any{
+			"type":        "string",
+			"description": "Alias for date_after.",
+		},
+		"uploaded_before": map[string]any{
+			"type":        "string",
+			"description": "Alias for date_before.",
+		},
+		"uploaded_on": map[string]any{
+			"type":        "string",
+			"description": "Alias for date.",
 		},
 	})
 }
