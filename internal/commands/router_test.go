@@ -3859,6 +3859,61 @@ func TestNaturalMessageRendersYouTubeSearchSelectionCard(t *testing.T) {
 	}
 }
 
+func TestNaturalMessageRendersLatestYouTubeSearchSelectionCard(t *testing.T) {
+	client := &fakeLLM{responses: []llm.ChatResponse{
+		{ToolCalls: []llm.ToolCall{{
+			ID:   "call-youtube-search",
+			Type: "function",
+			Function: llm.ToolCallFunction{
+				Name:      "panda_search_youtube",
+				Arguments: `{"query":"Fireship","limit":3,"source":"channel_uploads","sort_by":"upload_date"}`,
+			},
+		}}},
+	}}
+	youtubeSearch := &fakeCommandYouTubeSummarizer{
+		candidates: []youtube.VideoCandidate{
+			{
+				Title:        "Newest Fireship Upload",
+				URL:          "https://www.youtube.com/watch?v=newest",
+				Uploader:     "Fireship",
+				ThumbnailURL: "https://i.ytimg.com/vi/newest/hqdefault.jpg",
+				UploadDate:   time.Date(2026, 6, 20, 0, 0, 0, 0, time.UTC),
+			},
+			{
+				Title:      "Previous Fireship Upload",
+				URL:        "https://www.youtube.com/watch?v=previous",
+				Uploader:   "Fireship",
+				UploadDate: time.Date(2026, 6, 10, 0, 0, 0, 0, time.UTC),
+			},
+		},
+	}
+	router := newTestRouter(t, client, 5, func(executor *tools.Executor) {
+		executor.WithYouTubeSummarizer(youtubeSearch)
+	})
+
+	response := router.HandleNaturalMessage(context.Background(), Request{
+		UserID:    "user-1",
+		GuildID:   "guild-1",
+		ChannelID: "channel-1",
+		Options: map[string]string{
+			"message": "panda summarize the latest video on the Fireship channel",
+		},
+	})
+
+	if response.Presentation.Title != "Choose a YouTube video" || response.Selection == nil || len(response.Selection.Options) != 2 {
+		t.Fatalf("expected latest YouTube selection card, got %+v", response)
+	}
+	if len(youtubeSearch.searches) != 1 ||
+		youtubeSearch.searches[0].Query != "Fireship" ||
+		youtubeSearch.searches[0].Source != "channel_uploads" ||
+		youtubeSearch.searches[0].SortBy != "upload_date" {
+		t.Fatalf("expected date-sorted YouTube search request, got %+v", youtubeSearch.searches)
+	}
+	if first := response.Selection.Options[0]; first.Label != "Newest Fireship Upload" || !strings.Contains(first.Description, "2026-06-20") || first.ThumbnailURL == "" {
+		t.Fatalf("unexpected latest selection option: %+v", first)
+	}
+}
+
 func TestNaturalMessageRetriesPlainYouTubeOptionsWithSearchTool(t *testing.T) {
 	client := &fakeLLM{responses: []llm.ChatResponse{
 		{Content: "<panda_respond>\nHere are the video options I found for **GPT-5.6 Sol Is Here**:\n\n- **Universe of AI - 9:07** - GPT-5.6 Sol Is Here, BUT You Can't Use It!\nWatch on YouTube\n\nPick the one you'd like summarized."},

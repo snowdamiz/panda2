@@ -103,7 +103,7 @@ func TestAdminSetupToolSchemasExposeNaturalLanguageFields(t *testing.T) {
 	assertToolSchemaContains("panda.manage_soul", "soul", "enum", "status", "set", "update")
 	assertToolSchemaContains("panda.manage_music", "search", "voice_channel_id", "voice_channel_name", "voice_channel", "vc")
 	assertToolSchemaContains("panda.summarize_youtube", "query", "url", "title", "detail", "language")
-	assertToolSchemaContains("panda.search_youtube", "query", "title", "video", "limit")
+	assertToolSchemaContains("panda.search_youtube", "query", "title", "video", "limit", "source", "channel_uploads", "channel_url", "handle", "sort_by", "upload_date", "date_after", "date_before", "uploaded_after")
 	assertToolSchemaContains("panda.manage_composed_tool", "voice_channel_id", "voice_channel_name", "voice_channel")
 }
 
@@ -1320,6 +1320,7 @@ func TestExecutorSearchesYouTubeForSelection(t *testing.T) {
 				Uploader:     "Creator",
 				ThumbnailURL: "https://i.ytimg.com/vi/one/hqdefault.jpg",
 				Duration:     2*time.Minute + 4*time.Second,
+				UploadDate:   time.Date(2026, 1, 30, 0, 0, 0, 0, time.UTC),
 			},
 			{
 				Title:    "Second Result",
@@ -1339,7 +1340,7 @@ func TestExecutorSearchesYouTubeForSelection(t *testing.T) {
 			Type: "function",
 			Function: llm.ToolCallFunction{
 				Name:      "panda_search_youtube",
-				Arguments: `{"query":"deep dive","limit":1}`,
+				Arguments: `{"query":"deep dive","limit":1,"source":"channel_uploads","channel_url":"https://www.youtube.com/@creator","handle":"@creator","sort_by":"upload_date","date_after":"2026-01-01","date_before":"2026-02-01"}`,
 			},
 		},
 	})
@@ -1352,7 +1353,15 @@ func TestExecutorSearchesYouTubeForSelection(t *testing.T) {
 	if result.Payload == nil {
 		t.Fatalf("expected YouTube search selection to preserve structured payload")
 	}
-	if len(summarizer.searches) != 1 || summarizer.searches[0].Query != "deep dive" || summarizer.searches[0].Limit != 3 {
+	if len(summarizer.searches) != 1 ||
+		summarizer.searches[0].Query != "deep dive" ||
+		summarizer.searches[0].Limit != 3 ||
+		summarizer.searches[0].Source != "channel_uploads" ||
+		summarizer.searches[0].ChannelURL != "https://www.youtube.com/@creator" ||
+		summarizer.searches[0].Handle != "@creator" ||
+		summarizer.searches[0].SortBy != "upload_date" ||
+		summarizer.searches[0].DateAfter != "2026-01-01" ||
+		summarizer.searches[0].DateBefore != "2026-02-01" {
 		t.Fatalf("unexpected YouTube search request: %+v", summarizer.searches)
 	}
 	var payload struct {
@@ -1362,6 +1371,7 @@ func TestExecutorSearchesYouTubeForSelection(t *testing.T) {
 			Selection struct {
 				Options []struct {
 					Label        string `json:"label"`
+					Description  string `json:"description"`
 					URL          string `json:"url"`
 					ThumbnailURL string `json:"thumbnail_url"`
 					Prompt       string `json:"prompt"`
@@ -1376,7 +1386,7 @@ func TestExecutorSearchesYouTubeForSelection(t *testing.T) {
 		t.Fatalf("unexpected selection payload: %+v", payload.Result)
 	}
 	first := payload.Result.Selection.Options[0]
-	if first.Label != "First Result" || first.URL != "https://www.youtube.com/watch?v=one" || first.ThumbnailURL == "" || !strings.Contains(first.Prompt, "https://www.youtube.com/watch?v=one") {
+	if first.Label != "First Result" || first.URL != "https://www.youtube.com/watch?v=one" || first.ThumbnailURL == "" || !strings.Contains(first.Prompt, "https://www.youtube.com/watch?v=one") || !strings.Contains(first.Description, "2026-01-30") {
 		t.Fatalf("unexpected first option: %+v", first)
 	}
 }

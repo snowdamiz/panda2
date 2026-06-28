@@ -4,14 +4,17 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"encoding/xml"
 	"errors"
 	"fmt"
 	"io"
 	"mime/multipart"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -27,11 +30,17 @@ const (
 	defaultHTTPTimeout      = 2 * time.Minute
 	lemonfoxUploadLimit     = 100 << 20
 	lemonfoxResponseMaxSize = 4 << 20
+	youtubePageMaxSize      = 4 << 20
+	youtubeFeedMaxSize      = 1 << 20
 )
 
 var (
 	ErrNotConfigured = errors.New("lemonfox api key is not configured")
 	ErrMissingVideo  = errors.New("missing youtube video query")
+
+	youtubeRSSURLPattern     = regexp.MustCompile(`"rssUrl":"([^"]+)`)
+	youtubeExternalIDPattern = regexp.MustCompile(`"externalId":"(UC[0-9A-Za-z_-]+)`)
+	youtubeChannelIDPattern  = regexp.MustCompile(`"channelId":"(UC[0-9A-Za-z_-]+)`)
 )
 
 type Config struct {
@@ -75,8 +84,15 @@ type SummaryRequest struct {
 }
 
 type SearchRequest struct {
-	Query string
-	Limit int
+	Query      string
+	Limit      int
+	Source     string
+	ChannelURL string
+	Handle     string
+	SortBy     string
+	Date       string
+	DateAfter  string
+	DateBefore string
 }
 
 type SummaryResult struct {
@@ -97,20 +113,33 @@ type VideoCandidate struct {
 	Uploader     string
 	ThumbnailURL string
 	Duration     time.Duration
+	UploadDate   time.Time
 }
 
 type videoMetadata struct {
-	ID          string          `json:"id"`
-	Type        string          `json:"_type"`
-	Title       string          `json:"title"`
-	WebpageURL  string          `json:"webpage_url"`
-	OriginalURL string          `json:"original_url"`
-	URL         string          `json:"url"`
-	Uploader    string          `json:"uploader"`
-	Thumbnail   string          `json:"thumbnail"`
-	Thumbnails  []thumbnailInfo `json:"thumbnails"`
-	Duration    float64         `json:"duration"`
-	Entries     []videoMetadata `json:"entries"`
+	ID               string          `json:"id"`
+	Type             string          `json:"_type"`
+	Title            string          `json:"title"`
+	WebpageURL       string          `json:"webpage_url"`
+	OriginalURL      string          `json:"original_url"`
+	URL              string          `json:"url"`
+	IEKey            string          `json:"ie_key"`
+	Extractor        string          `json:"extractor"`
+	ExtractorKey     string          `json:"extractor_key"`
+	Uploader         string          `json:"uploader"`
+	UploaderID       string          `json:"uploader_id"`
+	UploaderURL      string          `json:"uploader_url"`
+	Channel          string          `json:"channel"`
+	ChannelID        string          `json:"channel_id"`
+	ChannelURL       string          `json:"channel_url"`
+	Thumbnail        string          `json:"thumbnail"`
+	Thumbnails       []thumbnailInfo `json:"thumbnails"`
+	Duration         float64         `json:"duration"`
+	UploadDate       string          `json:"upload_date"`
+	Timestamp        int64           `json:"timestamp"`
+	PlaylistUploader string          `json:"playlist_uploader"`
+	PlaylistChannel  string          `json:"playlist_channel"`
+	Entries          []videoMetadata `json:"entries"`
 }
 
 type thumbnailInfo struct {
@@ -127,6 +156,38 @@ type transcriptionResponse struct {
 
 type transcriptionSegment struct {
 	Text string `json:"text"`
+}
+
+type youtubeFeed struct {
+	Title   string             `xml:"title"`
+	Author  youtubeFeedAuthor  `xml:"author"`
+	Entries []youtubeFeedEntry `xml:"entry"`
+}
+
+type youtubeFeedAuthor struct {
+	Name string `xml:"name"`
+}
+
+type youtubeFeedEntry struct {
+	VideoID    string            `xml:"videoId"`
+	Title      string            `xml:"title"`
+	Link       youtubeFeedLink   `xml:"link"`
+	Author     youtubeFeedAuthor `xml:"author"`
+	Published  string            `xml:"published"`
+	MediaGroup youtubeMediaGroup `xml:"group"`
+}
+
+type youtubeFeedLink struct {
+	Href string `xml:"href,attr"`
+}
+
+type youtubeMediaGroup struct {
+	Title     string                `xml:"title"`
+	Thumbnail youtubeMediaThumbnail `xml:"thumbnail"`
+}
+
+type youtubeMediaThumbnail struct {
+	URL string `xml:"url,attr"`
 }
 
 func NewService(config Config) *Service {
@@ -240,20 +301,41 @@ func (s *Service) Search(ctx context.Context, request SearchRequest) ([]VideoCan
 	if limit > 10 {
 		limit = 10
 	}
+	lookupCtx, cancel := context.WithTimeout(ctx, s.lookupTimeout)
+	defer cancel()
+	if youtubeSearchUsesChannelUploads(request) {
+		if candidates, err := s.searchChannelUploadsFeed(lookupCtx, request, limit); err == nil && len(candidates) > 0 {
+			return candidates, nil
+		}
+		tools, err := s.ensureTools(ctx)
+		if err != nil {
+			return nil, err
+		}
+		return s.searchChannelUploadsWithYTDLP(lookupCtx, tools, request, limit)
+	}
 	tools, err := s.ensureTools(ctx)
 	if err != nil {
 		return nil, err
 	}
-	lookupCtx, cancel := context.WithTimeout(ctx, s.lookupTimeout)
-	defer cancel()
-	cmd := exec.CommandContext(lookupCtx, tools.YTDLPPath,
+	searchLimit := youtubeSearchFetchLimit(limit, request)
+	args := []string{
 		"--dump-json",
 		"--flat-playlist",
 		"--no-warnings",
 		"--no-cache-dir",
 		"--skip-download",
-		fmt.Sprintf("ytsearch%d:%s", limit, query),
-	)
+	}
+	if date := normalizedYTDLPDate(request.Date); date != "" {
+		args = append(args, "--date", date)
+	}
+	if dateAfter := normalizedYTDLPDate(request.DateAfter); dateAfter != "" {
+		args = append(args, "--dateafter", dateAfter)
+	}
+	if dateBefore := normalizedYTDLPDate(request.DateBefore); dateBefore != "" {
+		args = append(args, "--datebefore", dateBefore)
+	}
+	args = append(args, fmt.Sprintf("ytsearch%d:%s", searchLimit, query))
+	cmd := exec.CommandContext(lookupCtx, tools.YTDLPPath, args...)
 	var stderr limitedBuffer
 	cmd.Stderr = &stderr
 	output, err := cmd.Output()
@@ -266,8 +348,609 @@ func (s *Service) Search(ctx context.Context, request SearchRequest) ([]VideoCan
 		}
 		return nil, fmt.Errorf("youtube search failed: %s", detail)
 	}
-	candidates := parseSearchCandidates(output, limit)
-	return s.enrichSearchCandidates(lookupCtx, tools, candidates), nil
+	candidates := parseSearchCandidates(output, searchLimit)
+	candidates = s.enrichSearchCandidates(lookupCtx, tools, candidates)
+	candidates = filterSearchCandidatesByDate(candidates, request)
+	if youtubeSearchSortsByUploadDate(request.SortBy) {
+		sortSearchCandidatesByUploadDate(candidates)
+	}
+	return limitSearchCandidates(candidates, limit), nil
+}
+
+func youtubeSearchUsesChannelUploads(request SearchRequest) bool {
+	switch strings.ToLower(strings.TrimSpace(request.Source)) {
+	case "channel_uploads", "channel", "uploads", "latest_uploads":
+		return true
+	default:
+		return false
+	}
+}
+
+func (s *Service) searchChannelUploadsFeed(ctx context.Context, request SearchRequest, limit int) ([]VideoCandidate, error) {
+	feedURLs, err := s.channelFeedURLs(ctx, request)
+	if err != nil {
+		return nil, err
+	}
+	fetchLimit := youtubeChannelUploadFetchLimit(limit, request)
+	var lastErr error
+	for _, feedURL := range feedURLs {
+		candidates, err := s.channelFeedCandidates(ctx, feedURL, fetchLimit)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		candidates = filterSearchCandidatesByDate(candidates, request)
+		sortSearchCandidatesByUploadDate(candidates)
+		if len(candidates) > 0 {
+			return limitSearchCandidates(candidates, limit), nil
+		}
+	}
+	if lastErr != nil {
+		return nil, lastErr
+	}
+	return nil, ErrMissingVideo
+}
+
+func (s *Service) channelFeedURLs(ctx context.Context, request SearchRequest) ([]string, error) {
+	feedURLs := []string{}
+	add := func(feedURL string) {
+		feedURL = strings.TrimSpace(feedURL)
+		if feedURL == "" {
+			return
+		}
+		for _, existing := range feedURLs {
+			if existing == feedURL {
+				return
+			}
+		}
+		feedURLs = append(feedURLs, feedURL)
+	}
+	for _, source := range []string{request.ChannelURL, normalizedYouTubeHandle(request.Handle), request.Query} {
+		source = strings.TrimSpace(source)
+		if source == "" {
+			continue
+		}
+		if source != request.Query || youtubeChannelSourceLooksExplicit(source) {
+			feedURL, err := s.channelFeedURLFromSource(ctx, source)
+			if err == nil {
+				add(feedURL)
+			}
+		}
+	}
+	if len(feedURLs) > 0 {
+		return feedURLs, nil
+	}
+	feedURL, err := s.resolveChannelFeedURL(ctx, request.Query)
+	if err != nil {
+		return nil, err
+	}
+	add(feedURL)
+	return feedURLs, nil
+}
+
+func (s *Service) channelFeedURLFromSource(ctx context.Context, source string) (string, error) {
+	source = strings.TrimSpace(source)
+	if source == "" {
+		return "", ErrMissingVideo
+	}
+	if strings.HasPrefix(source, "UC") && !strings.Contains(source, "/") {
+		return youtubeChannelFeedURL(source), nil
+	}
+	if strings.HasPrefix(source, "@") {
+		return s.resolveChannelPageFeedURL(ctx, "https://www.youtube.com/"+source+"/videos")
+	}
+	parsed, err := url.Parse(source)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return "", ErrMissingVideo
+	}
+	channelID := youtubeChannelIDFromPath(parsed.Path)
+	if channelID != "" {
+		return youtubeChannelFeedURL(channelID), nil
+	}
+	return s.resolveChannelPageFeedURL(ctx, channelUploadsURL(source))
+}
+
+func (s *Service) resolveChannelFeedURL(ctx context.Context, query string) (string, error) {
+	query = strings.TrimSpace(query)
+	if query == "" {
+		return "", ErrMissingVideo
+	}
+	searchURL := "https://www.youtube.com/results?search_query=" + url.QueryEscape(query)
+	body, err := s.fetchYouTubeURL(ctx, searchURL, youtubePageMaxSize)
+	if err != nil {
+		return "", err
+	}
+	if feedURL := youtubeFeedURLFromPage(body); feedURL != "" {
+		return feedURL, nil
+	}
+	if channelID := youtubeChannelIDFromPage(body); channelID != "" {
+		return youtubeChannelFeedURL(channelID), nil
+	}
+	return "", fmt.Errorf("youtube channel lookup failed: no channel feed found")
+}
+
+func (s *Service) resolveChannelPageFeedURL(ctx context.Context, pageURL string) (string, error) {
+	pageURL = strings.TrimSpace(pageURL)
+	if pageURL == "" {
+		return "", ErrMissingVideo
+	}
+	body, err := s.fetchYouTubeURL(ctx, pageURL, youtubePageMaxSize)
+	if err != nil {
+		return "", err
+	}
+	if feedURL := youtubeFeedURLFromPage(body); feedURL != "" {
+		return feedURL, nil
+	}
+	if channelID := youtubeExternalIDFromPage(body); channelID != "" {
+		return youtubeChannelFeedURL(channelID), nil
+	}
+	if channelID := youtubeChannelIDFromPage(body); channelID != "" {
+		return youtubeChannelFeedURL(channelID), nil
+	}
+	return "", fmt.Errorf("youtube channel lookup failed: no channel feed found")
+}
+
+func (s *Service) channelFeedCandidates(ctx context.Context, feedURL string, limit int) ([]VideoCandidate, error) {
+	body, err := s.fetchYouTubeURL(ctx, feedURL, youtubeFeedMaxSize)
+	if err != nil {
+		return nil, err
+	}
+	var feed youtubeFeed
+	if err := xml.Unmarshal(body, &feed); err != nil {
+		return nil, fmt.Errorf("youtube channel feed lookup failed: parse feed: %w", err)
+	}
+	candidates := make([]VideoCandidate, 0, limit)
+	for _, entry := range feed.Entries {
+		candidate, ok := videoCandidateFromFeedEntry(entry, feed)
+		if !ok {
+			continue
+		}
+		candidates = append(candidates, candidate)
+		if len(candidates) >= limit {
+			break
+		}
+	}
+	return candidates, nil
+}
+
+func (s *Service) fetchYouTubeURL(ctx context.Context, rawURL string, maxSize int64) ([]byte, error) {
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("youtube lookup failed: %w", err)
+	}
+	request.Header.Set("User-Agent", "Mozilla/5.0 (compatible; Panda/1.0)")
+	response, err := s.client.Do(request)
+	if err != nil {
+		if ctx.Err() != nil {
+			return nil, fmt.Errorf("youtube lookup failed: %s", ctx.Err().Error())
+		}
+		return nil, fmt.Errorf("youtube lookup failed: %w", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		return nil, fmt.Errorf("youtube lookup failed: http %d", response.StatusCode)
+	}
+	body, err := io.ReadAll(io.LimitReader(response.Body, maxSize+1))
+	if err != nil {
+		return nil, fmt.Errorf("youtube lookup failed: read response: %w", err)
+	}
+	if int64(len(body)) > maxSize {
+		return nil, fmt.Errorf("youtube lookup failed: response too large")
+	}
+	return body, nil
+}
+
+func videoCandidateFromFeedEntry(entry youtubeFeedEntry, feed youtubeFeed) (VideoCandidate, bool) {
+	id := strings.TrimSpace(entry.VideoID)
+	title := strings.TrimSpace(firstNonEmpty(entry.MediaGroup.Title, entry.Title))
+	url := strings.TrimSpace(entry.Link.Href)
+	if url == "" && id != "" {
+		url = "https://www.youtube.com/watch?v=" + id
+	}
+	if title == "" || url == "" {
+		return VideoCandidate{}, false
+	}
+	return VideoCandidate{
+		ID:           id,
+		Title:        title,
+		URL:          url,
+		Uploader:     strings.TrimSpace(firstNonEmpty(entry.Author.Name, feed.Author.Name, feed.Title)),
+		ThumbnailURL: strings.TrimSpace(entry.MediaGroup.Thumbnail.URL),
+		UploadDate:   parseFeedTime(entry.Published),
+	}, true
+}
+
+func youtubeChannelIDFromPath(path string) string {
+	parts := strings.Split(strings.Trim(path, "/"), "/")
+	for i, part := range parts {
+		if part == "channel" && i+1 < len(parts) && strings.HasPrefix(parts[i+1], "UC") {
+			return parts[i+1]
+		}
+	}
+	return ""
+}
+
+func youtubeFeedURLFromPage(body []byte) string {
+	if match := youtubeRSSURLPattern.FindSubmatch(body); len(match) == 2 {
+		return decodeYouTubeEscapedString(string(match[1]))
+	}
+	return ""
+}
+
+func youtubeExternalIDFromPage(body []byte) string {
+	if match := youtubeExternalIDPattern.FindSubmatch(body); len(match) == 2 {
+		return string(match[1])
+	}
+	return ""
+}
+
+func youtubeChannelIDFromPage(body []byte) string {
+	if match := youtubeChannelIDPattern.FindSubmatch(body); len(match) == 2 {
+		return string(match[1])
+	}
+	return ""
+}
+
+func youtubeChannelFeedURL(channelID string) string {
+	channelID = strings.TrimSpace(channelID)
+	if channelID == "" {
+		return ""
+	}
+	return "https://www.youtube.com/feeds/videos.xml?channel_id=" + url.QueryEscape(channelID)
+}
+
+func decodeYouTubeEscapedString(value string) string {
+	if decoded, err := strconv.Unquote(`"` + value + `"`); err == nil {
+		return decoded
+	}
+	value = strings.ReplaceAll(value, `\/`, `/`)
+	value = strings.ReplaceAll(value, `\u0026`, "&")
+	return value
+}
+
+func parseFeedTime(value string) time.Time {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return time.Time{}
+	}
+	parsed, err := time.Parse(time.RFC3339, value)
+	if err != nil {
+		return time.Time{}
+	}
+	return parsed.UTC()
+}
+
+func (s *Service) searchChannelUploadsWithYTDLP(ctx context.Context, tools ToolPaths, request SearchRequest, limit int) ([]VideoCandidate, error) {
+	searchLimit := youtubeChannelUploadFetchLimit(limit, request)
+	sources := channelUploadSources(request)
+	var lastErr error
+	if len(sources) == 0 {
+		resolved, err := s.resolveChannelUploadSources(ctx, tools, request.Query)
+		if err != nil {
+			lastErr = err
+		}
+		sources = resolved
+	}
+	for _, source := range sources {
+		candidates, err := s.channelUploadCandidates(ctx, tools, source, searchLimit, request)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		candidates = filterSearchCandidatesByDate(candidates, request)
+		sortSearchCandidatesByUploadDate(candidates)
+		if len(candidates) > 0 {
+			return limitSearchCandidates(candidates, limit), nil
+		}
+	}
+	if lastErr != nil {
+		return nil, lastErr
+	}
+	return nil, nil
+}
+
+func (s *Service) channelUploadCandidates(ctx context.Context, tools ToolPaths, source string, limit int, request SearchRequest) ([]VideoCandidate, error) {
+	args := []string{
+		"--dump-json",
+		"--flat-playlist",
+		"--extractor-args", "youtubetab:approximate_date",
+		"--playlist-end", strconv.Itoa(limit),
+		"--no-warnings",
+		"--no-cache-dir",
+		"--skip-download",
+	}
+	if date := normalizedYTDLPDate(request.Date); date != "" {
+		args = append(args, "--date", date)
+	}
+	if dateAfter := normalizedYTDLPDate(request.DateAfter); dateAfter != "" {
+		args = append(args, "--dateafter", dateAfter)
+	}
+	if dateBefore := normalizedYTDLPDate(request.DateBefore); dateBefore != "" {
+		args = append(args, "--datebefore", dateBefore)
+	}
+	args = append(args, source)
+	cmd := exec.CommandContext(ctx, tools.YTDLPPath, args...)
+	var stderr limitedBuffer
+	cmd.Stderr = &stderr
+	output, err := cmd.Output()
+	if err != nil {
+		detail := strings.TrimSpace(stderr.String())
+		if ctx.Err() != nil {
+			detail = ctx.Err().Error()
+		} else if detail == "" {
+			detail = err.Error()
+		}
+		return nil, fmt.Errorf("youtube channel uploads lookup failed: %s", detail)
+	}
+	return parseSearchCandidates(output, limit), nil
+}
+
+func channelUploadSources(request SearchRequest) []string {
+	sources := []string{}
+	add := func(source string) {
+		source = strings.TrimSpace(source)
+		if source == "" {
+			return
+		}
+		source = channelUploadsURL(source)
+		if source == "" {
+			return
+		}
+		for _, existing := range sources {
+			if existing == source {
+				return
+			}
+		}
+		sources = append(sources, source)
+	}
+	addExplicit := func(source string) {
+		if youtubeChannelSourceLooksExplicit(source) {
+			add(source)
+		}
+	}
+	addHandle := func(handle string) {
+		handle = normalizedYouTubeHandle(handle)
+		if handle == "" {
+			return
+		}
+		add(handle)
+	}
+	addExplicit(request.ChannelURL)
+	addHandle(request.Handle)
+	if youtubeChannelSourceLooksExplicit(request.Query) {
+		add(request.Query)
+	}
+	return sources
+}
+
+func channelUploadsURL(source string) string {
+	source = strings.TrimSpace(source)
+	if source == "" {
+		return ""
+	}
+	if strings.HasPrefix(source, "@") {
+		return "https://www.youtube.com/" + source + "/videos"
+	}
+	if strings.HasPrefix(source, "UC") && !strings.Contains(source, "/") {
+		return "https://www.youtube.com/channel/" + source + "/videos"
+	}
+	if !strings.HasPrefix(source, "http://") && !strings.HasPrefix(source, "https://") {
+		return source
+	}
+	trimmed := strings.TrimRight(source, "/")
+	for _, suffix := range []string{"/videos", "/shorts", "/streams", "/featured", "/community"} {
+		if strings.HasSuffix(trimmed, suffix) {
+			trimmed = strings.TrimSuffix(trimmed, suffix)
+			break
+		}
+	}
+	return trimmed + "/videos"
+}
+
+func normalizedYouTubeHandle(handle string) string {
+	handle = strings.TrimSpace(handle)
+	if handle == "" ||
+		strings.HasPrefix(handle, "@") ||
+		strings.HasPrefix(handle, "http://") ||
+		strings.HasPrefix(handle, "https://") {
+		return handle
+	}
+	return "@" + handle
+}
+
+func youtubeChannelSourceLooksExplicit(source string) bool {
+	source = strings.TrimSpace(source)
+	return strings.HasPrefix(source, "@") ||
+		(strings.HasPrefix(source, "UC") && !strings.Contains(source, "/")) ||
+		strings.Contains(source, "youtube.com/@") ||
+		strings.Contains(source, "youtube.com/channel/") ||
+		strings.Contains(source, "youtube.com/c/") ||
+		strings.Contains(source, "youtube.com/user/")
+}
+
+func (s *Service) resolveChannelUploadSources(ctx context.Context, tools ToolPaths, query string) ([]string, error) {
+	query = strings.TrimSpace(query)
+	if query == "" {
+		return nil, ErrMissingVideo
+	}
+	cmd := exec.CommandContext(ctx, tools.YTDLPPath,
+		"--dump-json",
+		"--flat-playlist",
+		"--playlist-end", "5",
+		"--no-warnings",
+		"--no-cache-dir",
+		"--skip-download",
+		fmt.Sprintf("ytsearch%d:%s", 5, query),
+	)
+	var stderr limitedBuffer
+	cmd.Stderr = &stderr
+	output, err := cmd.Output()
+	if err != nil {
+		detail := strings.TrimSpace(stderr.String())
+		if ctx.Err() != nil {
+			detail = ctx.Err().Error()
+		} else if detail == "" {
+			detail = err.Error()
+		}
+		return nil, fmt.Errorf("youtube channel lookup failed: %s", detail)
+	}
+	return parseChannelUploadSources(output), nil
+}
+
+func parseChannelUploadSources(output []byte) []string {
+	output = bytes.TrimSpace(output)
+	if len(output) == 0 {
+		return nil
+	}
+	sources := []string{}
+	add := func(source string) {
+		source = channelUploadsURL(source)
+		if source == "" {
+			return
+		}
+		for _, existing := range sources {
+			if existing == source {
+				return
+			}
+		}
+		sources = append(sources, source)
+	}
+	decoder := json.NewDecoder(bytes.NewReader(output))
+	for {
+		var metadata videoMetadata
+		if err := decoder.Decode(&metadata); err != nil {
+			break
+		}
+		addChannelUploadSourcesFromMetadata(metadata, add)
+		for _, entry := range metadata.Entries {
+			addChannelUploadSourcesFromMetadata(entry, add)
+		}
+	}
+	return sources
+}
+
+func addChannelUploadSourcesFromMetadata(metadata videoMetadata, add func(string)) {
+	add(metadata.ChannelURL)
+	add(metadata.UploaderURL)
+	if strings.HasPrefix(strings.TrimSpace(metadata.UploaderID), "@") {
+		add(metadata.UploaderID)
+	}
+	if strings.HasPrefix(strings.TrimSpace(metadata.ChannelID), "UC") {
+		add(metadata.ChannelID)
+	}
+	if metadataIsYouTubeTab(metadata) {
+		add(metadata.WebpageURL)
+		add(metadata.OriginalURL)
+		add(metadata.URL)
+	}
+}
+
+func metadataIsYouTubeTab(metadata videoMetadata) bool {
+	for _, value := range []string{metadata.IEKey, metadata.Extractor, metadata.ExtractorKey} {
+		value = strings.ToLower(strings.TrimSpace(value))
+		if value == "youtubetab" || value == "youtube:tab" {
+			return true
+		}
+	}
+	return false
+}
+
+func youtubeSearchFetchLimit(limit int, request SearchRequest) int {
+	if !youtubeSearchSortsByUploadDate(request.SortBy) &&
+		normalizedYTDLPDate(request.Date) == "" &&
+		normalizedYTDLPDate(request.DateAfter) == "" &&
+		normalizedYTDLPDate(request.DateBefore) == "" {
+		return limit
+	}
+	if limit < 10 {
+		return 10
+	}
+	return limit
+}
+
+func youtubeChannelUploadFetchLimit(limit int, request SearchRequest) int {
+	if normalizedYTDLPDate(request.Date) == "" &&
+		normalizedYTDLPDate(request.DateAfter) == "" &&
+		normalizedYTDLPDate(request.DateBefore) == "" {
+		return limit
+	}
+	if limit < 10 {
+		return 10
+	}
+	return limit
+}
+
+func youtubeSearchSortsByUploadDate(sortBy string) bool {
+	switch strings.ToLower(strings.TrimSpace(sortBy)) {
+	case "upload_date", "date", "latest", "newest", "recent", "recently_uploaded":
+		return true
+	default:
+		return false
+	}
+}
+
+func normalizedYTDLPDate(value string) string {
+	value = strings.TrimSpace(value)
+	if len(value) == len("2006-01-02") && value[4] == '-' && value[7] == '-' {
+		return strings.ReplaceAll(value, "-", "")
+	}
+	return value
+}
+
+func filterSearchCandidatesByDate(candidates []VideoCandidate, request SearchRequest) []VideoCandidate {
+	exact := parseUploadDate(request.Date)
+	after := parseUploadDate(request.DateAfter)
+	before := parseUploadDate(request.DateBefore)
+	if exact.IsZero() && after.IsZero() && before.IsZero() {
+		return candidates
+	}
+	filtered := make([]VideoCandidate, 0, len(candidates))
+	for _, candidate := range candidates {
+		if candidate.UploadDate.IsZero() {
+			continue
+		}
+		uploadDate := uploadDateDay(candidate.UploadDate)
+		if !exact.IsZero() && !uploadDate.Equal(exact) {
+			continue
+		}
+		if !after.IsZero() && uploadDate.Before(after) {
+			continue
+		}
+		if !before.IsZero() && uploadDate.After(before) {
+			continue
+		}
+		filtered = append(filtered, candidate)
+	}
+	return filtered
+}
+
+func sortSearchCandidatesByUploadDate(candidates []VideoCandidate) {
+	sort.SliceStable(candidates, func(i, j int) bool {
+		left := candidates[i].UploadDate
+		right := candidates[j].UploadDate
+		if left.IsZero() {
+			return false
+		}
+		if right.IsZero() {
+			return true
+		}
+		return left.After(right)
+	})
+}
+
+func limitSearchCandidates(candidates []VideoCandidate, limit int) []VideoCandidate {
+	if limit <= 0 || len(candidates) <= limit {
+		return candidates
+	}
+	return candidates[:limit]
+}
+
+func uploadDateDay(value time.Time) time.Time {
+	if value.IsZero() {
+		return time.Time{}
+	}
+	year, month, day := value.UTC().Date()
+	return time.Date(year, month, day, 0, 0, 0, 0, time.UTC)
 }
 
 func (s *Service) resolve(ctx context.Context, tools ToolPaths, query string) (videoMetadata, error) {
@@ -387,9 +1070,10 @@ func videoCandidateFromMetadata(metadata videoMetadata) (VideoCandidate, bool) {
 		ID:           id,
 		Title:        title,
 		URL:          url,
-		Uploader:     strings.TrimSpace(metadata.Uploader),
+		Uploader:     strings.TrimSpace(firstNonEmpty(metadata.Uploader, firstNonEmpty(metadata.Channel, firstNonEmpty(metadata.PlaylistUploader, metadata.PlaylistChannel)))),
 		ThumbnailURL: bestThumbnailURL(metadata.Thumbnail, metadata.Thumbnails),
 		Duration:     durationFromSeconds(metadata.Duration),
+		UploadDate:   uploadDateFromMetadata(metadata),
 	}, true
 }
 
@@ -416,7 +1100,8 @@ func (s *Service) enrichSearchCandidates(ctx context.Context, tools ToolPaths, c
 func needsVideoCandidateEnrichment(candidate VideoCandidate) bool {
 	return strings.TrimSpace(candidate.ThumbnailURL) == "" ||
 		strings.TrimSpace(candidate.Uploader) == "" ||
-		candidate.Duration == 0
+		candidate.Duration == 0 ||
+		candidate.UploadDate.IsZero()
 }
 
 func (s *Service) lookupSearchCandidateMetadata(ctx context.Context, tools ToolPaths, source string) (videoMetadata, error) {
@@ -466,7 +1151,32 @@ func mergeVideoCandidate(base VideoCandidate, extra VideoCandidate) VideoCandida
 	if base.Duration == 0 {
 		base.Duration = extra.Duration
 	}
+	if base.UploadDate.IsZero() {
+		base.UploadDate = extra.UploadDate
+	}
 	return base
+}
+
+func uploadDateFromMetadata(metadata videoMetadata) time.Time {
+	if uploadDate := parseUploadDate(metadata.UploadDate); !uploadDate.IsZero() {
+		return uploadDate
+	}
+	if metadata.Timestamp <= 0 {
+		return time.Time{}
+	}
+	return time.Unix(metadata.Timestamp, 0).UTC()
+}
+
+func parseUploadDate(value string) time.Time {
+	value = normalizedYTDLPDate(value)
+	if len(value) != len("20060102") {
+		return time.Time{}
+	}
+	parsed, err := time.Parse("20060102", value)
+	if err != nil {
+		return time.Time{}
+	}
+	return parsed
 }
 
 func bestThumbnailURL(primary string, thumbnails []thumbnailInfo) string {

@@ -838,14 +838,14 @@ func (b *Bot) onComponentInteraction(event *events.ComponentInteractionCreate) {
 
 func (b *Bot) onButtonInteraction(event *events.ComponentInteractionCreate) {
 	customID := event.ButtonInteractionData().CustomID()
-	if customID == commands.ConfirmationCancelID {
+	baseRequest := b.requestFromComponentEvent(event)
+	if commands.IsConfirmationCancelID(customID, baseRequest) {
 		if err := event.UpdateMessage(messageUpdateFromResponse(commands.Response{Content: "Cancelled.", Presentation: commands.Presentation{Title: "Cancelled", Accent: commands.AccentWarning}}).WithComponents()); err != nil {
 			b.logger.Warn("failed to cancel confirmation", slog.Any("err", err))
 		}
 		return
 	}
 
-	baseRequest := b.requestFromComponentEvent(event)
 	if feedbackRequest, ok := commands.RequestFromFeedbackID(customID, baseRequest); ok {
 		response := b.router.HandleFeedback(context.Background(), feedbackRequest)
 		if err := event.CreateMessage(messageCreateFromResponse(response)); err != nil {
@@ -1584,12 +1584,13 @@ func confirmationComponentsFromResponse(response commands.Response) []disgoDisco
 	}
 	if len(confirmations) == 1 {
 		confirmation := confirmations[0]
+		cancelButton := cancelButtonFromConfirmation(confirmation)
+		if cancelButton == nil {
+			return []disgoDiscord.LayoutComponent{disgoDiscord.NewActionRow(confirmationButton(confirmation))}
+		}
 		return []disgoDiscord.LayoutComponent{disgoDiscord.NewActionRow(
 			confirmationButton(confirmation),
-			disgoDiscord.NewSecondaryButton(
-				firstNonEmptyText(confirmation.CancelLabel, "Cancel"),
-				firstNonEmptyText(confirmation.CancelID, commands.ConfirmationCancelID),
-			),
+			cancelButton,
 		)}
 	}
 
@@ -1606,17 +1607,16 @@ func confirmationComponentsFromResponse(response commands.Response) []disgoDisco
 		}
 	}
 	cancelSource := confirmations[0]
-	cancelButton := disgoDiscord.NewSecondaryButton(
-		firstNonEmptyText(cancelSource.CancelLabel, "Cancel"),
-		firstNonEmptyText(cancelSource.CancelID, commands.ConfirmationCancelID),
-	)
+	cancelButton := cancelButtonFromConfirmation(cancelSource)
 	if len(row) == 0 {
-		if len(rows) < 5 {
+		if len(rows) < 5 && cancelButton != nil {
 			rows = append(rows, disgoDiscord.NewActionRow(cancelButton))
 		}
 		return rows
 	}
-	row = append(row, cancelButton)
+	if cancelButton != nil {
+		row = append(row, cancelButton)
+	}
 	rows = append(rows, disgoDiscord.NewActionRow(row...))
 	return rows
 }
@@ -1651,6 +1651,14 @@ func confirmationButton(confirmation commands.Confirmation) disgoDiscord.Interac
 		return disgoDiscord.NewDangerButton(label, confirmation.ID)
 	}
 	return disgoDiscord.NewSuccessButton(label, confirmation.ID)
+}
+
+func cancelButtonFromConfirmation(confirmation commands.Confirmation) disgoDiscord.InteractiveComponent {
+	id := commands.ConfirmationCancelIDForConfirmation(confirmation.ID)
+	if id == "" {
+		return nil
+	}
+	return disgoDiscord.NewSecondaryButton(firstNonEmptyText(confirmation.CancelLabel, "Cancel"), id)
 }
 
 func actionButtonsFromResponse(actions []commands.Action) []disgoDiscord.InteractiveComponent {
