@@ -1,0 +1,21 @@
+---
+import LogoMark from '../LogoMark.astro';
+
+/**
+ * Dashboard sidebar: brand lockup, a `nav` slot, and a `foot` slot
+ * (the account chip / session footer).
+ */
+---
+
+<aside class="dash-sidebar">
+  <a class="dash-brand" href="/" aria-label="Panda home">
+    <LogoMark class="brand-mark" loading="eager" />
+    <span>PANDA</span>
+  </a>
+
+  <slot name="nav" />
+
+  <div class="dash-sidebar-foot">
+    <slot name="foot" />
+  </div>
+</aside>

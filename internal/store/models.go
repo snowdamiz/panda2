@@ -544,6 +544,10 @@ type BillingOrder struct {
 	BillingOwnerUserID           string     `gorm:"index;not null;default:'';size:32"`
 	SupportEmail                 string     `gorm:"not null;default:'';size:320"`
 	Plan                         string     `gorm:"index;not null;size:32"`
+	Pack                         string     `gorm:"index;not null;default:'';size:32"`
+	Credits                      int64      `gorm:"not null;default:0"`
+	USDTargetCents               int64      `gorm:"not null;default:0"`
+	SOLUSDCents                  int64      `gorm:"column:sol_usd_cents;not null;default:0"`
 	Provider                     string     `gorm:"index;not null;default:'sol';size:32"`
 	ListLamports                 int64      `gorm:"not null"`
 	DiscountLamports             int64      `gorm:"not null;default:0"`
@@ -570,6 +574,7 @@ type BillingCoupon struct {
 	CodeHash         string     `gorm:"uniqueIndex;not null;size:96"`
 	CodePrefix       string     `gorm:"index;not null;size:24"`
 	Plan             string     `gorm:"index;not null;size:32"`
+	Pack             string     `gorm:"index;not null;default:'';size:32"`
 	DiscountLamports int64      `gorm:"not null"`
 	MaxRedemptions   int        `gorm:"not null;default:0"`
 	Status           string     `gorm:"index;not null;size:32"`
@@ -589,6 +594,8 @@ type BillingCouponRedemption struct {
 	GuildID            string     `gorm:"index;not null;size:32"`
 	BillingOwnerUserID string     `gorm:"index;not null;default:'';size:32"`
 	Plan               string     `gorm:"index;not null;size:32"`
+	Pack               string     `gorm:"index;not null;default:'';size:32"`
+	Credits            int64      `gorm:"not null;default:0"`
 	ListLamports       int64      `gorm:"not null"`
 	DiscountLamports   int64      `gorm:"not null"`
 	DueLamports        int64      `gorm:"not null"`
@@ -625,6 +632,8 @@ type ActivationAPIKey struct {
 	BillingOrderID          string     `gorm:"uniqueIndex;not null;size:64"`
 	GuildID                 string     `gorm:"index;not null;size:32"`
 	Plan                    string     `gorm:"index;not null;size:32"`
+	Pack                    string     `gorm:"index;not null;default:'';size:32"`
+	Credits                 int64      `gorm:"not null;default:0"`
 	Status                  string     `gorm:"index;not null;size:32"`
 	ExpiresAt               time.Time  `gorm:"index;not null"`
 	ConsumedAt              *time.Time `gorm:"index"`
@@ -675,6 +684,8 @@ type CostLedgerEvent struct {
 	ID                  uint      `gorm:"primaryKey"`
 	GuildID             string    `gorm:"index;not null;default:'';size:32"`
 	RequestID           string    `gorm:"index;not null;default:'';size:64"`
+	ReservationID       string    `gorm:"index;not null;default:'';size:64"`
+	Action              string    `gorm:"index;not null;default:'';size:64"`
 	Source              string    `gorm:"index;not null;size:64"`
 	Operation           string    `gorm:"index;not null;size:64"`
 	Command             string    `gorm:"index;not null;default:'';size:64"`
@@ -689,4 +700,74 @@ type CostLedgerEvent struct {
 	Success             bool      `gorm:"not null;default:false"`
 	ErrorCode           string    `gorm:"not null;default:'';size:64"`
 	CreatedAt           time.Time `gorm:"index;not null"`
+}
+
+type CreditAccount struct {
+	ID                         uint       `gorm:"primaryKey"`
+	GuildID                    string     `gorm:"uniqueIndex;not null;size:32"`
+	BillingOwnerUserID         string     `gorm:"index;not null;default:'';size:32"`
+	Status                     string     `gorm:"index;not null;size:32"`
+	PaymentProvider            string     `gorm:"index;not null;default:'';size:32"`
+	ActivePack                 string     `gorm:"index;not null;default:'';size:32"`
+	AvailableCredits           int64      `gorm:"not null;default:0"`
+	ReservedCredits            int64      `gorm:"not null;default:0"`
+	RetentionDays              int        `gorm:"not null;default:0"`
+	KnowledgeStorageBytesLimit int64      `gorm:"not null;default:0"`
+	StorageRentGraceUntil      *time.Time `gorm:"index"`
+	SupportState               string     `gorm:"index;not null;default:'';size:32"`
+	ExportState                string     `gorm:"index;not null;default:'';size:32"`
+	DepletedAt                 *time.Time `gorm:"index"`
+	ReadOnlyAt                 *time.Time `gorm:"index"`
+	SuspendedAt                *time.Time `gorm:"index"`
+	CreatedAt                  time.Time  `gorm:"not null"`
+	UpdatedAt                  time.Time  `gorm:"not null"`
+}
+
+type CreditGrant struct {
+	ID               uint       `gorm:"primaryKey"`
+	GrantID          string     `gorm:"uniqueIndex;not null;size:64"`
+	GuildID          string     `gorm:"uniqueIndex:idx_credit_grants_source_once;index;not null;size:32"`
+	AccountID        uint       `gorm:"index;not null"`
+	Source           string     `gorm:"uniqueIndex:idx_credit_grants_source_once;index;not null;size:32"`
+	SourceID         string     `gorm:"uniqueIndex:idx_credit_grants_source_once;index;not null;size:128"`
+	Pack             string     `gorm:"index;not null;default:'';size:32"`
+	CreditsGranted   int64      `gorm:"not null"`
+	CreditsRemaining int64      `gorm:"not null"`
+	ExpiresAt        *time.Time `gorm:"index"`
+	MetadataJSON     string     `gorm:"not null;default:'{}'"`
+	CreatedAt        time.Time  `gorm:"index;not null"`
+	UpdatedAt        time.Time  `gorm:"not null"`
+}
+
+type CreditReservation struct {
+	ID               uint      `gorm:"primaryKey"`
+	ReservationID    string    `gorm:"uniqueIndex;not null;size:64"`
+	GuildID          string    `gorm:"index;not null;size:32"`
+	AccountID        uint      `gorm:"index;not null"`
+	Action           string    `gorm:"index;not null;size:64"`
+	RequestID        string    `gorm:"index;not null;default:'';size:64"`
+	ExpectedCredits  int64     `gorm:"not null"`
+	MaxCredits       int64     `gorm:"not null"`
+	CommittedCredits int64     `gorm:"not null;default:0"`
+	Status           string    `gorm:"index;not null;size:32"`
+	ExpiresAt        time.Time `gorm:"index;not null"`
+	MetadataJSON     string    `gorm:"not null;default:'{}'"`
+	CreatedAt        time.Time `gorm:"not null"`
+	UpdatedAt        time.Time `gorm:"not null"`
+}
+
+type CreditLedgerEntry struct {
+	ID            uint      `gorm:"primaryKey"`
+	EntryID       string    `gorm:"uniqueIndex;not null;size:64"`
+	GuildID       string    `gorm:"index;not null;size:32"`
+	AccountID     uint      `gorm:"index;not null"`
+	ReservationID string    `gorm:"index;not null;default:'';size:64"`
+	GrantID       string    `gorm:"index;not null;default:'';size:64"`
+	Type          string    `gorm:"index;not null;size:32"`
+	Action        string    `gorm:"index;not null;default:'';size:64"`
+	Credits       int64     `gorm:"not null"`
+	BalanceAfter  int64     `gorm:"not null;default:0"`
+	RequestID     string    `gorm:"index;not null;default:'';size:64"`
+	MetadataJSON  string    `gorm:"not null;default:'{}'"`
+	CreatedAt     time.Time `gorm:"index;not null"`
 }

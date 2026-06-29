@@ -1,0 +1,18 @@
+---
+/**
+ * Compact key/value tile. The default slot is the value `strong`, which
+ * receives any pass-through controller data attributes.
+ */
+interface Props {
+  label: string;
+  class?: string;
+  [key: string]: unknown;
+}
+
+const { label, class: className, ...rest } = Astro.props;
+---
+
+<div class="dash-tile">
+  <span>{label}</span>
+  <strong class:list={[className]} {...rest}><slot /></strong>
+</div>

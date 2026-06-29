@@ -673,14 +673,14 @@ func (s *Service) Run(ctx context.Context, request RunRequest) (RunResult, error
 	if limited, status, err := s.enforceRunLimits(ctx, record.Tool, spec, request); err != nil || limited {
 		return s.createSkippedRun(ctx, record, request, status, err)
 	}
-	reservation, err := s.beginRunQuota(ctx, request)
+	reservation, err := s.beginRunCredits(ctx, request)
 	if err != nil {
 		return s.createSkippedRun(ctx, record, request, RunBlocked, err)
 	}
-	committedQuota := false
+	committedCredits := false
 	defer func() {
-		if !committedQuota {
-			_ = s.releaseRunQuota(context.Background(), reservation)
+		if !committedCredits {
+			_ = s.releaseRunCredits(context.Background(), reservation)
 		}
 	}()
 
@@ -722,8 +722,8 @@ func (s *Service) Run(ctx context.Context, request RunRequest) (RunResult, error
 	if runErr != nil {
 		s.autoPauseAfterFailures(ctx, record.Tool, spec, request)
 	} else {
-		_ = s.commitRunQuota(ctx, reservation)
-		committedQuota = true
+		_ = s.commitRunCredits(ctx, reservation)
+		committedCredits = true
 	}
 	s.recordAudit(ctx, request.GuildID, firstNonEmpty(request.InvokingUserID, record.Tool.ApprovedBy), "composed_tool.invocation_"+status, "composed_tool", spec.Name, map[string]string{
 		"run_id":          strconv.FormatUint(uint64(run.ID), 10),
@@ -734,7 +734,7 @@ func (s *Service) Run(ctx context.Context, request RunRequest) (RunResult, error
 	return RunResult{RunID: run.ID, Status: status, Output: output, Transcript: transcript, Error: message}, runErr
 }
 
-func (s *Service) beginRunQuota(ctx context.Context, request RunRequest) (billing.Reservation, error) {
+func (s *Service) beginRunCredits(ctx context.Context, request RunRequest) (billing.Reservation, error) {
 	if s.billing == nil || strings.TrimSpace(request.GuildID) == "" {
 		return billing.Reservation{}, nil
 	}
@@ -776,14 +776,14 @@ func (s *Service) terminalDiscordWriteTool(toolName string) bool {
 	}
 }
 
-func (s *Service) commitRunQuota(ctx context.Context, reservation billing.Reservation) error {
+func (s *Service) commitRunCredits(ctx context.Context, reservation billing.Reservation) error {
 	if s.billing == nil || reservation.ID == "" {
 		return nil
 	}
 	return s.billing.CommitUsage(ctx, reservation)
 }
 
-func (s *Service) releaseRunQuota(ctx context.Context, reservation billing.Reservation) error {
+func (s *Service) releaseRunCredits(ctx context.Context, reservation billing.Reservation) error {
 	if s.billing == nil || reservation.ID == "" {
 		return nil
 	}

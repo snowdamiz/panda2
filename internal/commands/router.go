@@ -643,17 +643,15 @@ func (r *Router) handleSupport(ctx context.Context, request Request) Response {
 	if r.billing != nil {
 		if entitlement, err := r.billing.Resolve(ctx, request.GuildID); err == nil {
 			lines = append(lines,
-				fmt.Sprintf("- Plan: `%s`", entitlement.Plan.DisplayName),
-				fmt.Sprintf("- Subscription: `%s`", entitlement.Status),
-				fmt.Sprintf("- AI responses: `%s`", entitlement.UsageLine(billing.MetricAIResponse)),
-				fmt.Sprintf("- Web searches: `%s`", entitlement.UsageLine(billing.MetricWebSearch)),
-				fmt.Sprintf("- Image generations: `%s`", entitlement.UsageLine(billing.MetricImageGeneration)),
-				fmt.Sprintf("- Knowledge storage: `%s`", entitlement.UsageLine(billing.MetricKnowledgeStorageByte)),
+				fmt.Sprintf("- Pack: `%s`", entitlement.Pack.DisplayName),
+				fmt.Sprintf("- Credit account: `%s`", entitlement.Status),
+				fmt.Sprintf("- Credits: `%s`", billing.FormatCredits(entitlement.AvailableCredits, entitlement.ReservedCredits)),
+				fmt.Sprintf("- Retention: `%d day(s)`", entitlement.RetentionDays),
 			)
-		} else if errors.Is(err, billing.ErrNoSubscription) {
-			lines = append(lines, "- Subscription: `none`")
+		} else if errors.Is(err, billing.ErrNoCreditAccount) {
+			lines = append(lines, "- Credit account: `none`")
 		} else {
-			lines = append(lines, "- Subscription: `lookup failed`")
+			lines = append(lines, "- Credit account: `lookup failed`")
 		}
 	}
 	if r.data != nil {
@@ -662,7 +660,7 @@ func (r *Router) handleSupport(ctx context.Context, request Request) Response {
 				fmt.Sprintf("- Knowledge documents: `%d`", summary.KnowledgeDocuments),
 				fmt.Sprintf("- Conversation records: `%d conversations / %d messages`", summary.Conversations, summary.Messages),
 				fmt.Sprintf("- Memory consent records: `%d`", summary.MemoryConsentRecords),
-				fmt.Sprintf("- Billing records: `%d account(s) / %d subscription(s)`", summary.CustomerAccounts, summary.Subscriptions),
+				fmt.Sprintf("- Billing records: `%d account(s) / %d historical billing record(s)`", summary.CustomerAccounts, summary.Subscriptions),
 			)
 		}
 	}
@@ -773,17 +771,17 @@ func (r *Router) handleBilling(ctx context.Context, request Request) Response {
 	}
 
 	entitlement, err := r.billing.Resolve(ctx, request.GuildID)
-	if err != nil && !errors.Is(err, billing.ErrNoSubscription) {
+	if err != nil && !errors.Is(err, billing.ErrNoCreditAccount) {
 		return Response{Content: "Billing status could not be loaded.", Ephemeral: true, Presentation: Presentation{Title: "Billing lookup failed", Accent: AccentWarning}}
 	}
-	if errors.Is(err, billing.ErrNoSubscription) {
-		content := "No Panda subscription is active for this server."
-		content += "\nStart a SOL purchase from the Panda landing page, then run `/billing action:activate api_key:<key>`."
-		return Response{Content: content, Ephemeral: true, Presentation: Presentation{Title: "No active subscription", Accent: AccentWarning}}
+	if errors.Is(err, billing.ErrNoCreditAccount) {
+		content := "No Panda credit account is active for this server."
+		content += "\nBuy credits from the Panda landing page, then run `/billing action:activate api_key:<key>`."
+		return Response{Content: content, Ephemeral: true, Presentation: Presentation{Title: "No active credit account", Accent: AccentWarning}}
 	}
 	content := entitlement.SummaryText()
 	if entitlement.UpgradeURL != "" {
-		content += "\n\nPurchase or renew on the Panda landing page, then activate with `/billing action:activate api_key:<key>`."
+		content += "\n\nBuy credits on the Panda landing page, then activate with `/billing action:activate api_key:<key>`."
 		return Response{
 			Content:      content,
 			Ephemeral:    true,
@@ -791,7 +789,7 @@ func (r *Router) handleBilling(ctx context.Context, request Request) Response {
 			Actions:      []Action{{Label: "Open Panda pricing", URL: entitlement.UpgradeURL}},
 		}
 	}
-	content += "\n\nPurchase or renew on the Panda landing page, then activate with `/billing action:activate api_key:<key>`."
+	content += "\n\nBuy another pack on the Panda landing page, then activate it with `/billing action:activate api_key:<key>`."
 	return Response{Content: content, Ephemeral: true, Presentation: Presentation{Title: "Panda Billing", Accent: AccentInfo}}
 }
 
@@ -811,9 +809,9 @@ func (r *Router) handleBillingActivate(ctx context.Context, request Request) Res
 		return billingActivationErrorResponse(err)
 	}
 	return Response{
-		Content:      fmt.Sprintf("Panda %s is active for this server through %s.", result.Entitlement.Plan.DisplayName, result.Entitlement.PeriodEnd.Format("2006-01-02")),
+		Content:      fmt.Sprintf("Panda %s is active for this server through %s.", result.Entitlement.Pack.DisplayName, result.Entitlement.PeriodEnd.Format("2006-01-02")),
 		Ephemeral:    true,
-		Presentation: Presentation{Title: "Plan activated", Accent: AccentSuccess},
+		Presentation: Presentation{Title: "Pack activated", Accent: AccentSuccess},
 	}
 }
 
@@ -843,14 +841,14 @@ func renderDataSummary(summary repository.GuildDataSummary) string {
 		fmt.Sprintf("- Knowledge: `%d document(s), %d chunk(s), %s`", summary.KnowledgeDocuments, summary.KnowledgeChunks, formatDataBytes(summary.KnowledgeStorageBytes)),
 		fmt.Sprintf("- Conversations: `%d conversation(s), %d message metadata row(s), %d Discord event(s), %d attachment record(s)`", summary.Conversations, summary.Messages, summary.DiscordEvents, summary.Attachments),
 		fmt.Sprintf("- Memory consent records: `%d`", summary.MemoryConsentRecords),
-		fmt.Sprintf("- Billing: `%d account(s), %d subscription(s), %d invoice/payment event(s)`", summary.CustomerAccounts, summary.Subscriptions, summary.InvoicePaymentEvents),
-		fmt.Sprintf("- Usage and cost: `%d usage period(s), %d reservation(s), %d cost ledger event(s)`", summary.UsagePeriods, summary.UsageReservations, summary.CostLedgerEvents),
+		fmt.Sprintf("- Billing: `%d account(s), %d historical billing record(s), %d payment event(s)`", summary.CustomerAccounts, summary.Subscriptions, summary.InvoicePaymentEvents),
+		fmt.Sprintf("- Usage and cost: `%d historical usage period(s), %d historical reservation(s), %d cost ledger event(s)`", summary.UsagePeriods, summary.UsageReservations, summary.CostLedgerEvents),
 		fmt.Sprintf("- Automations: `%d schedule(s), %d alert rule(s), %d composed tool(s), %d composed run(s)`", summary.Schedules, summary.AlertRules, summary.ComposedTools, summary.ComposedToolRuns),
 		fmt.Sprintf("- Music: `%d queue item(s), %d playlist(s)`", summary.MusicQueueItems, summary.MusicPlaylists),
 		"- Raw prompts/messages and provider diagnostics are not included in this Discord export.",
 	}
 	if summary.CurrentSubscriptionPlan != "" || summary.CurrentSubscriptionState != "" {
-		lines = append(lines, fmt.Sprintf("- Current subscription: `%s / %s`", firstNonEmpty(summary.CurrentSubscriptionPlan, "none"), firstNonEmpty(summary.CurrentSubscriptionState, "none")))
+		lines = append(lines, fmt.Sprintf("- Historical account state: `%s / %s`", firstNonEmpty(summary.CurrentSubscriptionPlan, "none"), firstNonEmpty(summary.CurrentSubscriptionState, "none")))
 	}
 	return strings.Join(lines, "\n")
 }
@@ -1784,7 +1782,7 @@ func (r *Router) handleAsk(ctx context.Context, request Request, command string)
 		r.releaseAIUsage(ctx, reservation)
 		return Response{Content: "Panda returned an empty response. Please try again.", Ephemeral: true}
 	}
-	r.commitAIUsage(ctx, reservation)
+	r.commitAIUsage(ctx, reservation, answer.Usage)
 	return r.responseFromAssistantAnswer(ctx, request, answer, "", "")
 }
 
@@ -1926,14 +1924,18 @@ func (r *Router) handleChatModeWithOptionsResult(ctx context.Context, request Re
 		return assistantError(err), nil
 	}
 	if answer.Silent {
-		r.releaseAIUsage(ctx, reservation)
+		if options.naturalMessage {
+			r.commitRoutingUsage(ctx, request, reservation)
+		} else {
+			r.releaseAIUsage(ctx, reservation)
+		}
 		return Response{}, nil
 	}
 	if !assistantAnswerHasPayload(answer) {
 		r.releaseAIUsage(ctx, reservation)
 		return Response{Content: "Panda returned an empty response. Please try again.", Ephemeral: true}, nil
 	}
-	r.commitAIUsage(ctx, reservation)
+	r.commitAIUsage(ctx, reservation, answer.Usage)
 	return r.responseFromAssistantAnswer(ctx, request, answer, threadID, threadName), nil
 }
 
@@ -2048,7 +2050,7 @@ func (r *Router) HandleBackgroundTask(ctx context.Context, task BackgroundTask) 
 		r.releaseAIUsage(ctx, reservation)
 		return Response{Content: "Panda returned an empty response. Please try again.", Ephemeral: true}
 	}
-	r.commitAIUsage(ctx, reservation)
+	r.commitAIUsage(ctx, reservation, answer.Usage)
 	return r.responseFromAssistantAnswer(ctx, Request{
 		RequestID: task.RequestID,
 		Command:   task.Command,
@@ -3478,7 +3480,27 @@ func (r *Router) checkAIUsageAvailable(ctx context.Context, request Request) Res
 	if r.billing == nil || request.GuildID == "" {
 		return Response{}
 	}
-	_, err := r.billing.Check(ctx, request.GuildID, billing.MetricAIResponse, 1)
+	quote, err := r.billing.QuoteAction(billing.ActionQuoteRequest{Action: billing.ActionAssistantModelRound, RequestID: request.RequestID})
+	if err != nil {
+		return billingErrorResponse(err)
+	}
+	entitlement, err := r.billing.Resolve(ctx, request.GuildID)
+	if err == nil {
+		if !entitlement.CanUsePaidFeatures || entitlement.ReadOnly {
+			err = billing.ErrReadOnly
+		} else if entitlement.AvailableCredits < quote.MaxCredits {
+			err = billing.CreditError{
+				Action:           quote.Action,
+				Used:             entitlement.Pack.Credits - entitlement.AvailableCredits,
+				Reserved:         entitlement.ReservedCredits,
+				Limit:            entitlement.Pack.Credits,
+				Pack:             entitlement.Pack.Pack,
+				RequiredCredits:  quote.MaxCredits,
+				AvailableCredits: entitlement.AvailableCredits,
+				UpgradeURL:       entitlement.UpgradeURL,
+			}
+		}
+	}
 	return billingErrorResponse(err)
 }
 
@@ -3486,13 +3508,36 @@ func (r *Router) beginAIUsage(ctx context.Context, request Request) (billing.Res
 	if r.billing == nil || request.GuildID == "" {
 		return billing.Reservation{}, Response{}
 	}
-	reservation, err := r.billing.BeginUsage(ctx, request.GuildID, billing.MetricAIResponse, 1)
+	quote, err := r.billing.QuoteAction(billing.ActionQuoteRequest{
+		Action:    billing.ActionAssistantModelRound,
+		RequestID: request.RequestID,
+	})
+	if err != nil {
+		return billing.Reservation{}, billingErrorResponse(err)
+	}
+	reservation, err := r.billing.BeginCreditUsage(ctx, request.GuildID, quote)
 	return reservation, billingErrorResponse(err)
 }
 
-func (r *Router) commitAIUsage(ctx context.Context, reservation billing.Reservation) {
+func (r *Router) commitAIUsage(ctx context.Context, reservation billing.Reservation, usage llm.Usage) {
 	if r.billing != nil && reservation.ID != "" {
-		_ = r.billing.CommitUsage(ctx, reservation)
+		final := billing.CreditUsageFinal{}
+		if usage.PromptTokens > 0 || usage.CompletionTokens > 0 {
+			if quote, err := r.billing.QuoteAction(billing.ActionQuoteRequest{
+				Action:       billing.ActionAssistantModelRound,
+				RequestID:    reservation.RequestID,
+				InputTokens:  usage.PromptTokens,
+				OutputTokens: usage.CompletionTokens,
+				Metadata: map[string]any{
+					"prompt_tokens":     usage.PromptTokens,
+					"completion_tokens": usage.CompletionTokens,
+					"total_tokens":      usage.TotalTokens,
+				},
+			}); err == nil {
+				final.Credits = quote.ExpectedCredits
+			}
+		}
+		_ = r.billing.CommitCreditUsage(ctx, reservation, final)
 	}
 }
 
@@ -3502,21 +3547,40 @@ func (r *Router) releaseAIUsage(ctx context.Context, reservation billing.Reserva
 	}
 }
 
+func (r *Router) commitRoutingUsage(ctx context.Context, request Request, assistantReservation billing.Reservation) {
+	if r.billing == nil || strings.TrimSpace(request.GuildID) == "" {
+		return
+	}
+	r.releaseAIUsage(ctx, assistantReservation)
+	quote, err := r.billing.QuoteAction(billing.ActionQuoteRequest{
+		Action:    billing.ActionRoutingCheck,
+		RequestID: request.RequestID,
+	})
+	if err != nil {
+		return
+	}
+	reservation, err := r.billing.BeginCreditUsage(ctx, request.GuildID, quote)
+	if err != nil {
+		return
+	}
+	_ = r.billing.CommitCreditUsage(ctx, reservation, billing.CreditUsageFinal{Credits: quote.ExpectedCredits})
+}
+
 func billingErrorResponse(err error) Response {
 	if err == nil {
 		return Response{}
 	}
-	var quotaErr billing.QuotaError
-	if errors.As(err, &quotaErr) {
-		content := fmt.Sprintf("This server has used its included %s for the current billing period.", billing.MetricLabel(quotaErr.Metric))
-		content += "\nThe billing owner can run `/billing` for the Panda pricing link, then activate a verified SOL purchase with `/billing action:activate api_key:<key>`."
-		return Response{Content: content, Ephemeral: true, Presentation: Presentation{Title: "Usage limit reached", Accent: AccentWarning}}
+	var creditErr billing.CreditError
+	if errors.As(err, &creditErr) {
+		content := fmt.Sprintf("This action needs %d credits for %s, but this server only has %d credits available.", creditErr.RequiredCredits, billing.ActionLabel(creditErr.Action), creditErr.AvailableCredits)
+		content += "\nThe billing owner can run `/billing` to buy credits, then activate a verified SOL payment with `/billing action:activate api_key:<key>`."
+		return Response{Content: content, Ephemeral: true, Presentation: Presentation{Title: "Credits depleted", Accent: AccentWarning}}
 	}
-	if errors.Is(err, billing.ErrNoSubscription) {
-		return Response{Content: "This server does not have an active Panda subscription. Use `/billing` for status and the SOL purchase link.", Ephemeral: true, Presentation: Presentation{Title: "Subscription required", Accent: AccentWarning}}
+	if errors.Is(err, billing.ErrNoCreditAccount) {
+		return Response{Content: "This server does not have an active Panda credit account. Use `/billing` for status and the SOL purchase link.", Ephemeral: true, Presentation: Presentation{Title: "Credits required", Accent: AccentWarning}}
 	}
 	if errors.Is(err, billing.ErrReadOnly) {
-		return Response{Content: "This server's Panda subscription is read-only. Billing, help, export/delete, and support access remain available.", Ephemeral: true, Presentation: Presentation{Title: "Subscription read-only", Accent: AccentWarning}}
+		return Response{Content: "This server's Panda credit account is read-only. Billing, help, export/delete, and support access remain available.", Ephemeral: true, Presentation: Presentation{Title: "Credit account read-only", Accent: AccentWarning}}
 	}
 	return Response{Content: "Billing status could not be checked. Please try again later.", Ephemeral: true, Presentation: Presentation{Title: "Billing check failed", Accent: AccentWarning}}
 }
@@ -3525,8 +3589,8 @@ func billingErrorResponseIfBilling(err error) (Response, bool) {
 	if err == nil {
 		return Response{}, false
 	}
-	var quotaErr billing.QuotaError
-	if errors.As(err, &quotaErr) || errors.Is(err, billing.ErrNoSubscription) || errors.Is(err, billing.ErrReadOnly) {
+	var creditErr billing.CreditError
+	if errors.As(err, &creditErr) || errors.Is(err, billing.ErrNoCreditAccount) || errors.Is(err, billing.ErrReadOnly) {
 		return billingErrorResponse(err), true
 	}
 	return Response{}, false
@@ -3562,6 +3626,7 @@ func (r *Router) responseFromAssistantAnswer(ctx context.Context, request Reques
 		ThreadName:        threadName,
 		GeneratedFiles:    generated.CloneFiles(answer.GeneratedFiles),
 		UsageReservations: append([]billing.Reservation(nil), answer.UsageReservations...),
+		Usage:             answer.Usage,
 	}
 	if answer.Card != nil {
 		cardResponse := responseFromAssistantCard(request.UserID, answer.Card)

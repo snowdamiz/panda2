@@ -1,278 +1,258 @@
 ---
-import LogoMark from '../components/LogoMark.astro';
+import DashConsole from '../components/dashboard/DashConsole.astro';
+import DashGate from '../components/dashboard/DashGate.astro';
+import DashLoginCard from '../components/dashboard/DashLoginCard.astro';
+import DashNav from '../components/dashboard/DashNav.astro';
+import DashNavItem from '../components/dashboard/DashNavItem.astro';
+import DashPanel from '../components/dashboard/DashPanel.astro';
+import DashPanelHead from '../components/dashboard/DashPanelHead.astro';
+import DashSession from '../components/dashboard/DashSession.astro';
+import DashSidebar from '../components/dashboard/DashSidebar.astro';
 import Kicker from '../components/ui/Kicker.astro';
-import { planOptions } from '../data/landing';
+import { packOptions } from '../data/landing';
 import BaseLayout from '../layouts/BaseLayout.astro';
 
 const adminApiBase = import.meta.env.PUBLIC_PANDA_API_BASE_URL || (import.meta.env.DEV ? 'http://localhost:8080' : 'https://panda-assistant.fly.dev');
-const defaultPlan = planOptions.find((plan) => plan.featured) ?? planOptions[0];
+const defaultPack = packOptions.find((pack) => pack.featured) ?? packOptions[0];
 ---
 
 <BaseLayout
   title="Panda admin - Operator console"
-  description="Manage every Panda guild, subscription, and billing coupon from the operator console."
+  description="Manage every Panda guild, credit account, and billing coupon from the operator console."
 >
-  <main id="main" class="admin-page">
-    <section class="admin-shell" data-admin-root data-api-base={adminApiBase}>
-      <div class="admin-gate reveal" data-admin-login>
-        <div class="admin-gate-intro">
+  <main id="main" class="dash-page">
+    <section class="dash-shell" data-admin-root data-api-base={adminApiBase}>
+      <!-- Signed-out gate -->
+      <DashGate data-admin-login>
+        <div class="dash-gate-intro">
           <Kicker tone="paper">Admin</Kicker>
           <h1>Operator console.</h1>
           <p>
             See, update, and manage every guild using Panda, plus billing coupons, from one operator surface.
           </p>
         </div>
-        <div class="admin-login-card">
-          <div class="account-panel-head">
-            <span>Operator access</span>
-            <strong>Treasury wallet</strong>
-          </div>
-          <div class="admin-wallet-login-body">
-            <button class="app-primary" type="button" data-admin-wallet-connect>Sign in with treasury wallet</button>
-          </div>
-        </div>
-      </div>
 
-      <div class="admin-console reveal" data-admin-dashboard hidden>
-        <aside class="admin-sidebar">
-          <a class="admin-brand" href="/" aria-label="Panda home">
-            <LogoMark class="brand-mark" loading="eager" />
-            <span>PANDA</span>
-          </a>
+        <DashLoginCard eyebrow="Operator access" title="Treasury wallet">
+          <button class="app-primary dash-login-button" type="button" data-admin-wallet-connect>Sign in with treasury wallet</button>
+        </DashLoginCard>
+      </DashGate>
 
-          <nav class="admin-nav" role="tablist" aria-label="Admin sections">
-            <button type="button" class="admin-nav-item active" role="tab" aria-selected="true" data-admin-tab-button="runtime">
+      <!-- Signed-in console -->
+      <DashConsole data-admin-dashboard hidden>
+        <DashSidebar slot="sidebar">
+          <DashNav slot="nav" label="Admin sections">
+            <DashNavItem scope="admin" tab="runtime" label="Runtime" active>
               <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
                 <path d="M12 3v4" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" />
                 <path d="M7.2 5.1A8 8 0 1 0 16.8 5.1" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" />
                 <path d="M9 11.5h6M9 15h4" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" />
               </svg>
-              <span>Runtime</span>
-            </button>
-            <button type="button" class="admin-nav-item" role="tab" aria-selected="false" data-admin-tab-button="guilds">
+            </DashNavItem>
+            <DashNavItem scope="admin" tab="guilds" label="Guilds">
               <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
                 <rect x="3" y="4" width="18" height="6" rx="1.5" stroke="currentColor" stroke-width="1.6" />
                 <rect x="3" y="14" width="18" height="6" rx="1.5" stroke="currentColor" stroke-width="1.6" />
                 <circle cx="7" cy="7" r="1" fill="currentColor" />
                 <circle cx="7" cy="17" r="1" fill="currentColor" />
               </svg>
-              <span>Guilds</span>
-            </button>
-            <button type="button" class="admin-nav-item" role="tab" aria-selected="false" data-admin-tab-button="coupons">
+            </DashNavItem>
+            <DashNavItem scope="admin" tab="coupons" label="Coupons">
               <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
                 <path d="M4 8.5A1.5 1.5 0 0 1 5.5 7h13A1.5 1.5 0 0 1 20 8.5v2a2 2 0 0 0 0 4v2A1.5 1.5 0 0 1 18.5 22h-13A1.5 1.5 0 0 1 4 20.5v-2a2 2 0 0 0 0-4v-6Z" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" transform="translate(0 -2)" />
                 <path d="M14 7v10" stroke="currentColor" stroke-width="1.6" stroke-dasharray="2 2.4" />
               </svg>
-              <span>Coupons</span>
-            </button>
-          </nav>
+            </DashNavItem>
+          </DashNav>
 
-          <div class="admin-sidebar-foot">
-            <div class="admin-session-card">
-              <span>Operator session</span>
-              <small data-admin-wallet-summary></small>
-            </div>
-            <div class="admin-sidebar-actions">
-              <button type="button" data-admin-refresh>Refresh</button>
-              <button type="button" data-admin-lock>Log out</button>
-            </div>
+          <DashSession slot="foot" scope="admin" label="Operator session" />
+        </DashSidebar>
+
+        <!-- Runtime -->
+        <DashPanel data-admin-tab="runtime">
+          <DashPanelHead title="Runtime">
+            <span class="admin-count" slot="badge" data-admin-runtime-state>--</span>
+          </DashPanelHead>
+
+          <div class="admin-runtime">
+            <article class="admin-detail-card admin-runtime-card" data-admin-runtime-card>
+              <h3 class="admin-detail-card-title">Current status</h3>
+              <div class="admin-detail-card-body">
+                <div class="admin-runtime-state">
+                  <span class="admin-runtime-dot" aria-hidden="true"></span>
+                  <strong data-admin-runtime-title>--</strong>
+                </div>
+                <p class="admin-runtime-message" data-admin-runtime-effective-message></p>
+                <dl class="admin-kv">
+                  <div class="admin-kv-row">
+                    <dt>Updated</dt>
+                    <dd data-admin-runtime-updated>--</dd>
+                  </div>
+                  <div class="admin-kv-row">
+                    <dt>Actor</dt>
+                    <dd data-admin-runtime-actor>--</dd>
+                  </div>
+                </dl>
+              </div>
+            </article>
+
+            <form class="admin-detail-card admin-runtime-card" data-admin-runtime-form>
+              <h3 class="admin-detail-card-title">Maintenance controls</h3>
+              <div class="admin-detail-card-body admin-runtime-controls">
+                <label class="admin-toggle">
+                  <span class="admin-toggle-text">
+                    <strong>Maintenance mode</strong>
+                    <small>Pause Panda for everyone and show the message below.</small>
+                  </span>
+                  <span class="admin-switch">
+                    <input type="checkbox" data-admin-runtime-disabled />
+                    <span class="admin-switch-track" aria-hidden="true"></span>
+                  </span>
+                </label>
+
+                <label class="admin-field">
+                  <span>Maintenance message</span>
+                  <textarea
+                    rows="4"
+                    maxlength="500"
+                    spellcheck="true"
+                    data-admin-runtime-message
+                  ></textarea>
+                </label>
+
+                <div class="admin-runtime-actions">
+                  <button class="admin-secondary-button" type="button" data-admin-runtime-enable>Re-enable Panda</button>
+                  <button class="app-primary" type="submit">Save runtime state</button>
+                </div>
+              </div>
+            </form>
           </div>
-        </aside>
+        </DashPanel>
 
-        <div class="admin-main">
-          <section class="admin-panel" role="tabpanel" data-admin-tab="runtime">
-            <header class="admin-panel-head">
-              <div class="admin-panel-title">
-                <h2>Runtime</h2>
-                <span class="admin-count" data-admin-runtime-state>--</span>
+        <!-- Guilds -->
+        <DashPanel scroll={false} data-admin-tab="guilds" hidden>
+          <DashPanelHead title="Guilds">
+            <span class="admin-count" slot="badge" data-admin-guild-count>--</span>
+            <form class="admin-search" slot="actions" data-admin-guild-search-form>
+              <input
+                type="search"
+                name="q"
+                placeholder="Search id, name, or owner"
+                autocomplete="off"
+                spellcheck="false"
+                data-admin-guild-search
+              />
+              <button type="submit">Search</button>
+            </form>
+          </DashPanelHead>
+
+          <div class="admin-table-wrap">
+            <table class="admin-table admin-guild-table">
+              <thead>
+                <tr>
+                  <th scope="col">Guild</th>
+                  <th scope="col">Pack</th>
+                  <th scope="col">Status</th>
+                  <th scope="col">Owner</th>
+                  <th scope="col">Expires</th>
+                  <th scope="col" class="admin-th-action">Manage</th>
+                </tr>
+              </thead>
+              <tbody data-admin-guild-list></tbody>
+            </table>
+          </div>
+        </DashPanel>
+
+        <!-- Coupons -->
+        <DashPanel scroll={false} data-admin-tab="coupons" hidden>
+          <DashPanelHead title="Coupons">
+            <span class="admin-count" slot="badge" data-admin-count>--</span>
+          </DashPanelHead>
+
+          <details class="admin-create" open>
+            <summary>
+              <span>Create coupon</span>
+              <em>New code</em>
+            </summary>
+
+            <form class="admin-coupon-form" data-admin-coupon-form>
+              <fieldset>
+                <legend>Pack</legend>
+                <div class="admin-plan-picker" role="group" aria-label="Coupon pack">
+                  {
+                    packOptions.map((pack) => (
+                      <button
+                        type="button"
+                        class:list={['admin-plan-option', pack.slug === defaultPack.slug && 'active']}
+                        data-admin-pack={pack.slug}
+                        aria-pressed={pack.slug === defaultPack.slug ? 'true' : 'false'}
+                      >
+                        <span>{pack.name}</span>
+                        <strong>{pack.price}</strong>
+                      </button>
+                    ))
+                  }
+                </div>
+              </fieldset>
+
+              <div class="admin-form-grid">
+                <label>
+                  <span>Coupon code</span>
+                  <input name="coupon_code" autocomplete="off" spellcheck="false" data-admin-coupon-code />
+                </label>
+                <label>
+                  <span>Discount lamports</span>
+                  <input type="number" name="discount_lamports" min="1" step="1" required data-admin-discount />
+                </label>
+                <label>
+                  <span>Max redemptions</span>
+                  <input type="number" name="max_redemptions" min="0" step="1" data-admin-max-redemptions />
+                </label>
+                <label>
+                  <span>Expires</span>
+                  <input name="expires_at" placeholder="YYYY-MM-DD" autocomplete="off" spellcheck="false" data-admin-expires />
+                </label>
+                <label class="admin-note-field">
+                  <span>Owner note</span>
+                  <input name="note" autocomplete="off" spellcheck="false" data-admin-note />
+                </label>
               </div>
-            </header>
 
-            <div class="admin-runtime">
-              <article class="admin-detail-card admin-runtime-card" data-admin-runtime-card>
-                <h3 class="admin-detail-card-title">Current status</h3>
-                <div class="admin-detail-card-body">
-                  <div class="admin-runtime-state">
-                    <span class="admin-runtime-dot" aria-hidden="true"></span>
-                    <strong data-admin-runtime-title>--</strong>
-                  </div>
-                  <p class="admin-runtime-message" data-admin-runtime-effective-message></p>
-                  <dl class="admin-kv">
-                    <div class="admin-kv-row">
-                      <dt>Updated</dt>
-                      <dd data-admin-runtime-updated>--</dd>
-                    </div>
-                    <div class="admin-kv-row">
-                      <dt>Actor</dt>
-                      <dd data-admin-runtime-actor>--</dd>
-                    </div>
-                  </dl>
-                </div>
-              </article>
+              <div class="admin-create-actions">
+                <button class="admin-secondary-button" type="button" data-admin-fill-discount>Use pack price</button>
+                <button class="app-primary" type="submit" data-admin-create>Create coupon</button>
+              </div>
+            </form>
 
-              <form class="admin-detail-card admin-runtime-card" data-admin-runtime-form>
-                <h3 class="admin-detail-card-title">Maintenance controls</h3>
-                <div class="admin-detail-card-body admin-runtime-controls">
-                  <label class="admin-toggle">
-                    <span class="admin-toggle-text">
-                      <strong>Maintenance mode</strong>
-                      <small>Pause Panda for everyone and show the message below.</small>
-                    </span>
-                    <span class="admin-switch">
-                      <input type="checkbox" data-admin-runtime-disabled />
-                      <span class="admin-switch-track" aria-hidden="true"></span>
-                    </span>
-                  </label>
-
-                  <label class="admin-field">
-                    <span>Maintenance message</span>
-                    <textarea
-                      rows="4"
-                      maxlength="500"
-                      spellcheck="true"
-                      data-admin-runtime-message
-                    ></textarea>
-                  </label>
-
-                  <div class="admin-runtime-actions">
-                    <button class="admin-secondary-button" type="button" data-admin-runtime-enable>Re-enable Panda</button>
-                    <button class="app-primary" type="submit">Save runtime state</button>
-                  </div>
-                </div>
-              </form>
+            <div class="admin-created-code" data-admin-created hidden>
+              <div>
+                <span>New coupon code</span>
+                <code data-admin-created-code></code>
+              </div>
+              <button type="button" data-admin-copy-code>Copy</button>
             </div>
-          </section>
+          </details>
 
-          <section class="admin-panel" role="tabpanel" data-admin-tab="guilds" hidden>
-            <header class="admin-panel-head">
-              <div class="admin-panel-title">
-                <h2>Guilds</h2>
-                <span class="admin-count" data-admin-guild-count>--</span>
-              </div>
-              <form class="admin-search" data-admin-guild-search-form>
-                <input
-                  type="search"
-                  name="q"
-                  placeholder="Search id, name, or owner"
-                  autocomplete="off"
-                  spellcheck="false"
-                  data-admin-guild-search
-                />
-                <button type="submit">Search</button>
-              </form>
-            </header>
+          <div class="admin-table-wrap">
+            <table class="admin-table admin-coupon-table">
+              <thead>
+                <tr>
+                  <th scope="col">Coupon</th>
+                  <th scope="col">Pack</th>
+                  <th scope="col">Discount</th>
+                  <th scope="col">Limit</th>
+                  <th scope="col">Used</th>
+                  <th scope="col">Expires</th>
+                  <th scope="col">Status</th>
+                  <th scope="col" class="admin-th-action">Action</th>
+                </tr>
+              </thead>
+              <tbody data-admin-coupon-list></tbody>
+            </table>
+          </div>
+        </DashPanel>
+      </DashConsole>
 
-            <div class="admin-table-wrap">
-              <table class="admin-table admin-guild-table">
-                <thead>
-                  <tr>
-                    <th scope="col">Guild</th>
-                    <th scope="col">Plan</th>
-                    <th scope="col">Status</th>
-                    <th scope="col">Owner</th>
-                    <th scope="col">Renews</th>
-                    <th scope="col" class="admin-th-action">Manage</th>
-                  </tr>
-                </thead>
-                <tbody data-admin-guild-list></tbody>
-              </table>
-            </div>
-          </section>
-
-          <section class="admin-panel" role="tabpanel" data-admin-tab="coupons" hidden>
-            <header class="admin-panel-head">
-              <div class="admin-panel-title">
-                <h2>Coupons</h2>
-                <span class="admin-count" data-admin-count>--</span>
-              </div>
-            </header>
-
-            <details class="admin-create" open>
-              <summary>
-                <span>Create coupon</span>
-                <em>New code</em>
-              </summary>
-
-              <form class="admin-coupon-form" data-admin-coupon-form>
-                <fieldset>
-                  <legend>Plan</legend>
-                  <div class="admin-plan-picker" role="group" aria-label="Coupon plan">
-                    {
-                      planOptions.map((plan) => (
-                        <button
-                          type="button"
-                          class:list={['admin-plan-option', plan.slug === defaultPlan.slug && 'active']}
-                          data-admin-plan={plan.slug}
-                          aria-pressed={plan.slug === defaultPlan.slug ? 'true' : 'false'}
-                        >
-                          <span>{plan.label}</span>
-                          <strong>{plan.price}</strong>
-                        </button>
-                      ))
-                    }
-                  </div>
-                </fieldset>
-
-                <div class="admin-form-grid">
-                  <label>
-                    <span>Coupon code</span>
-                    <input name="coupon_code" autocomplete="off" spellcheck="false" data-admin-coupon-code />
-                  </label>
-                  <label>
-                    <span>Discount lamports</span>
-                    <input type="number" name="discount_lamports" min="1" step="1" required data-admin-discount />
-                  </label>
-                  <label>
-                    <span>Max redemptions</span>
-                    <input type="number" name="max_redemptions" min="0" step="1" data-admin-max-redemptions />
-                  </label>
-                  <label>
-                    <span>Expires</span>
-                    <input name="expires_at" placeholder="YYYY-MM-DD" autocomplete="off" spellcheck="false" data-admin-expires />
-                  </label>
-                  <label class="admin-note-field">
-                    <span>Owner note</span>
-                    <input name="note" autocomplete="off" spellcheck="false" data-admin-note />
-                  </label>
-                </div>
-
-                <div class="admin-create-actions">
-                  <button class="admin-secondary-button" type="button" data-admin-fill-discount>Use plan price</button>
-                  <button class="app-primary" type="submit" data-admin-create>Create coupon</button>
-                </div>
-              </form>
-
-              <div class="admin-created-code" data-admin-created hidden>
-                <div>
-                  <span>New coupon code</span>
-                  <code data-admin-created-code></code>
-                </div>
-                <button type="button" data-admin-copy-code>Copy</button>
-              </div>
-            </details>
-
-            <div class="admin-table-wrap">
-              <table class="admin-table admin-coupon-table">
-                <thead>
-                  <tr>
-                    <th scope="col">Coupon</th>
-                    <th scope="col">Plan</th>
-                    <th scope="col">Discount</th>
-                    <th scope="col">Limit</th>
-                    <th scope="col">Used</th>
-                    <th scope="col">Expires</th>
-                    <th scope="col">Status</th>
-                    <th scope="col" class="admin-th-action">Action</th>
-                  </tr>
-                </thead>
-                <tbody data-admin-coupon-list></tbody>
-              </table>
-            </div>
-          </section>
-        </div>
-      </div>
-
-      <p class="admin-status" role="status" aria-live="polite" data-admin-status></p>
+      <p class="dash-status" role="status" aria-live="polite" data-admin-status></p>
 
       <dialog class="wallet-dialog admin-wallet-dialog" data-admin-wallet-dialog>
         <div class="wallet-dialog-head">

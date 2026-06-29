@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"net/url"
 	"strings"
 	"time"
@@ -14,12 +15,13 @@ import (
 )
 
 var (
-	ErrNoSubscription           = errors.New("billing subscription is not configured")
-	ErrReadOnly                 = errors.New("billing account is read-only")
-	ErrQuotaExceeded            = errors.New("billing quota exceeded")
-	ErrUnknownPlan              = errors.New("unknown billing plan")
+	ErrNoCreditAccount          = errors.New("billing credit account is not configured")
+	ErrReadOnly                 = errors.New("billing credit account is read-only")
+	ErrCreditsDepleted          = errors.New("billing credits depleted")
+	ErrUnknownPack              = errors.New("unknown billing pack")
 	ErrBillingAccess            = errors.New("billing can only be managed by the billing owner")
 	ErrSolPaymentsNotConfigured = errors.New("sol payments are not configured")
+	ErrSolPriceNotConfigured    = errors.New("SOL/USD price is not configured")
 )
 
 type Config struct {
@@ -29,6 +31,8 @@ type Config struct {
 	SolanaTreasuryWallet   string
 	SolanaConfirmation     string
 	SolanaPlanLamports     map[string]int64
+	SolanaPackLamports     map[string]int64
+	SolanaUSDCentsPerSOL   int64
 	SolanaOrderExpiration  time.Duration
 	SolanaActivationKeyTTL time.Duration
 }
@@ -51,46 +55,63 @@ type TrialSeed struct {
 }
 
 type Entitlement struct {
-	GuildID            string
-	SubscriptionID     uint
-	Plan               PlanLimits
-	Status             string
-	GraceState         string
-	PaymentProvider    string
-	PeriodStart        time.Time
-	PeriodEnd          time.Time
-	TrialEndsAt        *time.Time
-	CancelAtPeriodEnd  bool
-	CanUsePaidFeatures bool
-	ReadOnly           bool
-	Usage              repository.BillingUsageTotals
-	UpgradeURL         string
+	GuildID                    string
+	AccountID                  uint
+	Pack                       PackDefinition
+	Status                     string
+	GraceState                 string
+	PaymentProvider            string
+	PeriodStart                time.Time
+	PeriodEnd                  time.Time
+	TrialEndsAt                *time.Time
+	CancelAtPeriodEnd          bool
+	CanUsePaidFeatures         bool
+	ReadOnly                   bool
+	AvailableCredits           int64
+	ReservedCredits            int64
+	RetentionDays              int
+	KnowledgeStorageBytesLimit int64
+	StorageRentGraceUntil      *time.Time
+	UpgradeURL                 string
 }
 
 type Reservation struct {
 	ID          string
 	GuildID     string
+	Action      string
 	Metric      string
 	Units       int64
+	Credits     int64
+	MaxCredits  int64
+	RequestID   string
 	Entitlement Entitlement
 }
 
-type QuotaError struct {
-	Metric     string
-	Used       int64
-	Reserved   int64
-	Limit      int64
-	Plan       string
-	UpgradeURL string
+type CreditError struct {
+	Metric           string
+	Action           string
+	Used             int64
+	Reserved         int64
+	Limit            int64
+	Pack             string
+	RequiredCredits  int64
+	AvailableCredits int64
+	UpgradeURL       string
 }
 
-func (e QuotaError) Error() string {
-	return fmt.Sprintf("%s quota exhausted", MetricLabel(e.Metric))
+func (e CreditError) Error() string {
+	action := firstNonEmpty(e.Action, e.Metric)
+	if action == "" {
+		action = "paid action"
+	}
+	return fmt.Sprintf("%s needs %d credits", ActionLabel(action), e.RequiredCredits)
 }
 
 type CostEvent struct {
 	GuildID             string
 	RequestID           string
+	ReservationID       string
+	Action              string
 	Source              string
 	Operation           string
 	Command             string
@@ -104,6 +125,13 @@ type CostEvent struct {
 	FinalCostMicros     int64
 	Success             bool
 	ErrorCode           string
+}
+
+type CreditUsageFinal struct {
+	Credits             int64
+	FinalCostMicros     int64
+	EstimatedCostMicros int64
+	Metadata            map[string]any
 }
 
 func NewService(repo *repository.BillingRepository, cfg Config) *Service {
@@ -124,7 +152,8 @@ func NewService(repo *repository.BillingRepository, cfg Config) *Service {
 	if cfg.SolanaActivationKeyTTL <= 0 {
 		cfg.SolanaActivationKeyTTL = 48 * time.Hour
 	}
-	cfg.SolanaPlanLamports = normalizePlanLamports(cfg.SolanaPlanLamports)
+	cfg.SolanaPackLamports = normalizePackLamports(firstLamportsMap(cfg.SolanaPackLamports, cfg.SolanaPlanLamports))
+	cfg.SolanaPlanLamports = cfg.SolanaPackLamports
 	service := &Service{repo: repo, cfg: cfg, now: time.Now}
 	if cfg.SolanaRPCURL != "" {
 		service.solana = NewHTTPSolanaRPCClient(cfg.SolanaRPCURL)
@@ -150,12 +179,13 @@ func (s *Service) SetClock(now func() time.Time) {
 
 func (s *Service) EnsureTrial(ctx context.Context, seed TrialSeed) (Entitlement, error) {
 	if s == nil || s.repo == nil {
-		return Entitlement{}, ErrNoSubscription
+		return Entitlement{}, ErrNoCreditAccount
 	}
 	now := s.currentTime()
 	if !seed.AuthorizedAt.IsZero() {
 		now = seed.AuthorizedAt.UTC()
 	}
+	pack := packDefinitions[PackTrial]
 	account, err := s.repo.EnsureCustomerAccount(ctx, store.CustomerAccount{
 		GuildID:            seed.GuildID,
 		BillingOwnerUserID: seed.BillingOwnerUserID,
@@ -166,44 +196,47 @@ func (s *Service) EnsureTrial(ctx context.Context, seed TrialSeed) (Entitlement,
 	if err != nil {
 		return Entitlement{}, err
 	}
-	existing, ok, err := s.repo.GetSubscriptionByGuild(ctx, seed.GuildID)
+	trialEnd := now.Add(pack.ExpiresAfter)
+	creditAccount, err := s.repo.EnsureCreditAccount(ctx, store.CreditAccount{
+		GuildID:                    strings.TrimSpace(seed.GuildID),
+		BillingOwnerUserID:         firstNonEmpty(seed.BillingOwnerUserID, account.BillingOwnerUserID),
+		Status:                     StatusTrialing,
+		PaymentProvider:            ProviderTrial,
+		ActivePack:                 PackTrial,
+		RetentionDays:              pack.RetentionDays,
+		KnowledgeStorageBytesLimit: pack.KnowledgeStorageBytes,
+		CreatedAt:                  now,
+		UpdatedAt:                  now,
+	})
 	if err != nil {
 		return Entitlement{}, err
 	}
-	if ok {
-		return s.entitlementFromSubscription(ctx, existing)
-	}
-	limits := planLimits[PlanTrial]
-	trialEnd := now.Add(TrialDuration)
-	subscription, err := s.repo.UpsertSubscriptionWithSnapshot(ctx, store.GuildSubscription{
-		GuildID:            strings.TrimSpace(seed.GuildID),
-		CustomerAccountID:  account.ID,
-		Plan:               PlanTrial,
-		Status:             StatusTrialing,
-		GraceState:         GraceTrialing,
-		PaymentProvider:    ProviderTrial,
-		BillingOwnerUserID: strings.TrimSpace(seed.BillingOwnerUserID),
-		CurrentPeriodStart: now,
-		CurrentPeriodEnd:   trialEnd,
-		TrialEndsAt:        &trialEnd,
-	}, snapshotForLimits("", 0, limits, StatusTrialing, GraceTrialing, now))
+	_, creditAccount, _, err = s.repo.GrantCredits(ctx, repository.CreditGrantRequest{
+		GrantID:      "grant_trial_" + safeLedgerID(seed.GuildID),
+		GuildID:      seed.GuildID,
+		Source:       ProviderTrial,
+		SourceID:     "trial:" + strings.TrimSpace(seed.GuildID),
+		Pack:         PackTrial,
+		Credits:      pack.Credits,
+		ExpiresAt:    &trialEnd,
+		MetadataJSON: MarshalRaw(map[string]any{"pack": PackTrial, "source": ProviderTrial}),
+	})
 	if err != nil {
 		return Entitlement{}, err
 	}
-	return s.entitlementFromSubscription(ctx, subscription)
+	return s.entitlementFromCreditAccount(creditAccount), nil
 }
 
 func (s *Service) EnsureTrialIfMissing(ctx context.Context, seed TrialSeed) (Entitlement, bool, error) {
 	if s == nil || s.repo == nil {
-		return Entitlement{}, false, ErrNoSubscription
+		return Entitlement{}, false, ErrNoCreditAccount
 	}
-	existing, ok, err := s.repo.GetSubscriptionByGuild(ctx, seed.GuildID)
+	existing, ok, err := s.repo.GetCreditAccountByGuild(ctx, seed.GuildID)
 	if err != nil {
 		return Entitlement{}, false, err
 	}
 	if ok {
-		entitlement, err := s.entitlementFromSubscription(ctx, existing)
-		return entitlement, false, err
+		return s.entitlementFromCreditAccount(existing), false, nil
 	}
 	entitlement, err := s.EnsureTrial(ctx, seed)
 	return entitlement, err == nil, err
@@ -211,16 +244,16 @@ func (s *Service) EnsureTrialIfMissing(ctx context.Context, seed TrialSeed) (Ent
 
 func (s *Service) Resolve(ctx context.Context, guildID string) (Entitlement, error) {
 	if s == nil || s.repo == nil {
-		return Entitlement{}, ErrNoSubscription
+		return Entitlement{}, ErrNoCreditAccount
 	}
-	subscription, ok, err := s.repo.GetSubscriptionByGuild(ctx, guildID)
+	account, ok, err := s.repo.GetCreditAccountByGuild(ctx, guildID)
 	if err != nil {
 		return Entitlement{}, err
 	}
 	if !ok {
-		return Entitlement{GuildID: strings.TrimSpace(guildID), UpgradeURL: s.upgradeURL(guildID)}, ErrNoSubscription
+		return Entitlement{GuildID: strings.TrimSpace(guildID), UpgradeURL: s.upgradeURL(guildID)}, ErrNoCreditAccount
 	}
-	return s.entitlementFromSubscription(ctx, subscription)
+	return s.entitlementFromCreditAccount(account), nil
 }
 
 func (s *Service) CanManageBilling(ctx context.Context, guildID, userID string, operator bool) (bool, error) {
@@ -232,33 +265,37 @@ func (s *Service) CanManageBilling(ctx context.Context, guildID, userID string, 
 	if s == nil || s.repo == nil || guildID == "" || userID == "" {
 		return false, nil
 	}
-	account, ok, err := s.repo.GetCustomerAccountByGuild(ctx, guildID)
+	account, ok, err := s.repo.GetCreditAccountByGuild(ctx, guildID)
 	if err != nil {
 		return false, err
 	}
 	if ok && strings.TrimSpace(account.BillingOwnerUserID) == userID {
 		return true, nil
 	}
-	subscription, ok, err := s.repo.GetSubscriptionByGuild(ctx, guildID)
+	customer, ok, err := s.repo.GetCustomerAccountByGuild(ctx, guildID)
 	if err != nil {
 		return false, err
 	}
-	return ok && strings.TrimSpace(subscription.BillingOwnerUserID) == userID, nil
+	return ok && strings.TrimSpace(customer.BillingOwnerUserID) == userID, nil
 }
 
 func (s *Service) billingOwnerUnclaimed(ctx context.Context, guildID string) (bool, error) {
-	account, accountOK, err := s.repo.GetCustomerAccountByGuild(ctx, guildID)
+	account, ok, err := s.repo.GetCreditAccountByGuild(ctx, guildID)
 	if err != nil {
 		return false, err
 	}
-	if accountOK && strings.TrimSpace(account.BillingOwnerUserID) != "" {
+	if ok && strings.TrimSpace(account.BillingOwnerUserID) != "" {
 		return false, nil
 	}
-	subscription, subscriptionOK, err := s.repo.GetSubscriptionByGuild(ctx, guildID)
+	customer, customerOK, err := s.repo.GetCustomerAccountByGuild(ctx, guildID)
 	if err != nil {
 		return false, err
 	}
-	return !subscriptionOK || strings.TrimSpace(subscription.BillingOwnerUserID) == "", nil
+	return !customerOK || strings.TrimSpace(customer.BillingOwnerUserID) == "", nil
+}
+
+func (s *Service) QuoteAction(request ActionQuoteRequest) (CreditQuote, error) {
+	return quoteForAction(request)
 }
 
 func (s *Service) Check(ctx context.Context, guildID, metric string, units int64) (Entitlement, error) {
@@ -266,153 +303,218 @@ func (s *Service) Check(ctx context.Context, guildID, metric string, units int64
 	if err != nil {
 		return entitlement, err
 	}
-	metric, ok := NormalizeMetric(metric)
-	if !ok {
-		return entitlement, fmt.Errorf("unsupported usage metric")
-	}
-	if units <= 0 {
-		units = 1
+	quote, err := quoteFromMetric(metric, units, "")
+	if err != nil {
+		return entitlement, err
 	}
 	if !entitlement.CanUsePaidFeatures || entitlement.ReadOnly {
 		return entitlement, ErrReadOnly
 	}
-	limit := IncludedLimit(entitlement.Plan, metric)
-	used := entitlement.metricConsumed(metric)
-	reserved := entitlement.metricReserved(metric)
-	if used+reserved+units > limit {
-		return entitlement, QuotaError{Metric: metric, Used: used, Reserved: reserved, Limit: limit, Plan: entitlement.Plan.Plan, UpgradeURL: entitlement.UpgradeURL}
+	if entitlement.AvailableCredits < quote.MaxCredits {
+		return entitlement, creditError(entitlement, quote, metric)
 	}
 	return entitlement, nil
 }
 
 func (s *Service) BeginUsage(ctx context.Context, guildID, metric string, units int64) (Reservation, error) {
-	entitlement, err := s.Check(ctx, guildID, metric, units)
+	quote, err := quoteFromMetric(metric, units, "")
 	if err != nil {
-		return Reservation{GuildID: strings.TrimSpace(guildID), Metric: metric, Units: units, Entitlement: entitlement}, err
+		return Reservation{GuildID: strings.TrimSpace(guildID), Metric: metric, Units: units}, err
 	}
-	metric, _ = NormalizeMetric(metric)
-	now := s.currentTime()
-	reservation, totals, denied, err := s.repo.BeginUsageReservation(ctx, store.GuildSubscription{
-		ID:                 entitlement.SubscriptionID,
-		GuildID:            entitlement.GuildID,
-		Plan:               entitlement.Plan.Plan,
-		Status:             entitlement.Status,
-		GraceState:         entitlement.GraceState,
-		PaymentProvider:    entitlement.PaymentProvider,
-		CurrentPeriodStart: entitlement.PeriodStart,
-		CurrentPeriodEnd:   entitlement.PeriodEnd,
-	}, metric, units, IncludedLimit(entitlement.Plan, metric), now)
-	if err != nil {
-		return Reservation{}, err
-	}
-	entitlement.Usage = totals
-	if denied {
-		used := entitlement.metricConsumed(metric)
-		reserved := entitlement.metricReserved(metric)
-		return Reservation{GuildID: entitlement.GuildID, Metric: metric, Units: units, Entitlement: entitlement}, QuotaError{
-			Metric: metric, Used: used, Reserved: reserved, Limit: IncludedLimit(entitlement.Plan, metric), Plan: entitlement.Plan.Plan, UpgradeURL: entitlement.UpgradeURL,
-		}
-	}
-	return Reservation{
-		ID:          reservation.ReservationID,
-		GuildID:     reservation.GuildID,
-		Metric:      metric,
-		Units:       units,
-		Entitlement: entitlement,
-	}, nil
+	return s.BeginCreditUsage(ctx, guildID, quote)
 }
 
 func (s *Service) BeginCurrentUsage(ctx context.Context, guildID, metric string, currentUsed int64, units int64) (Reservation, error) {
+	quote, err := quoteFromMetric(metric, units, "")
+	if err != nil {
+		return Reservation{GuildID: strings.TrimSpace(guildID), Metric: metric, Units: units}, err
+	}
+	quote.Metadata["current_used"] = currentUsed
+	return s.BeginCreditUsage(ctx, guildID, quote)
+}
+
+func (s *Service) BeginCreditUsage(ctx context.Context, guildID string, quote CreditQuote) (Reservation, error) {
+	if s == nil || s.repo == nil {
+		return Reservation{}, ErrNoCreditAccount
+	}
 	entitlement, err := s.Resolve(ctx, guildID)
 	if err != nil {
-		return Reservation{GuildID: strings.TrimSpace(guildID), Metric: metric, Units: units, Entitlement: entitlement}, err
-	}
-	metric, ok := NormalizeMetric(metric)
-	if !ok {
-		return Reservation{}, fmt.Errorf("unsupported usage metric")
-	}
-	if units <= 0 {
-		units = 1
-	}
-	if currentUsed < 0 {
-		currentUsed = 0
+		return Reservation{GuildID: strings.TrimSpace(guildID), Action: quote.Action, Credits: quote.ExpectedCredits, MaxCredits: quote.MaxCredits, Entitlement: entitlement}, err
 	}
 	if !entitlement.CanUsePaidFeatures || entitlement.ReadOnly {
-		return Reservation{GuildID: entitlement.GuildID, Metric: metric, Units: units, Entitlement: entitlement}, ErrReadOnly
+		return Reservation{GuildID: entitlement.GuildID, Action: quote.Action, Credits: quote.ExpectedCredits, MaxCredits: quote.MaxCredits, Entitlement: entitlement}, ErrReadOnly
+	}
+	if entitlement.AvailableCredits < quote.MaxCredits {
+		return Reservation{GuildID: entitlement.GuildID, Action: quote.Action, Credits: quote.ExpectedCredits, MaxCredits: quote.MaxCredits, Entitlement: entitlement}, creditError(entitlement, quote, "")
 	}
 	now := s.currentTime()
-	reservation, totals, denied, err := s.repo.BeginCurrentUsageReservation(ctx, store.GuildSubscription{
-		ID:                 entitlement.SubscriptionID,
-		GuildID:            entitlement.GuildID,
-		Plan:               entitlement.Plan.Plan,
-		Status:             entitlement.Status,
-		GraceState:         entitlement.GraceState,
-		PaymentProvider:    entitlement.PaymentProvider,
-		CurrentPeriodStart: entitlement.PeriodStart,
-		CurrentPeriodEnd:   entitlement.PeriodEnd,
-	}, metric, units, currentUsed, IncludedLimit(entitlement.Plan, metric), now)
+	reservationID, err := randomBase58(18)
 	if err != nil {
 		return Reservation{}, err
 	}
-	entitlement.Usage = totals
+	stored, account, denied, err := s.repo.BeginCreditReservation(ctx, repository.CreditReservationRequest{
+		ReservationID:   "crr_" + reservationID,
+		GuildID:         entitlement.GuildID,
+		Action:          quote.Action,
+		RequestID:       quote.RequestID,
+		ExpectedCredits: quote.ExpectedCredits,
+		MaxCredits:      quote.MaxCredits,
+		ExpiresAt:       now.Add(30 * time.Minute),
+		MetadataJSON:    MarshalRaw(quote.Metadata),
+	}, now)
+	if err != nil {
+		return Reservation{}, err
+	}
+	entitlement = s.entitlementFromCreditAccount(account)
 	if denied {
-		used := entitlement.metricConsumed(metric)
-		reserved := entitlement.metricReserved(metric)
-		return Reservation{GuildID: entitlement.GuildID, Metric: metric, Units: units, Entitlement: entitlement}, QuotaError{
-			Metric: metric, Used: used, Reserved: reserved, Limit: IncludedLimit(entitlement.Plan, metric), Plan: entitlement.Plan.Plan, UpgradeURL: entitlement.UpgradeURL,
-		}
+		return Reservation{GuildID: entitlement.GuildID, Action: quote.Action, Credits: quote.ExpectedCredits, MaxCredits: quote.MaxCredits, Entitlement: entitlement}, creditError(entitlement, quote, "")
 	}
 	return Reservation{
-		ID:          reservation.ReservationID,
-		GuildID:     reservation.GuildID,
-		Metric:      metric,
-		Units:       units,
+		ID:          stored.ReservationID,
+		GuildID:     stored.GuildID,
+		Action:      stored.Action,
+		Metric:      stored.Action,
+		Units:       quote.ExpectedCredits,
+		Credits:     quote.ExpectedCredits,
+		MaxCredits:  quote.MaxCredits,
+		RequestID:   quote.RequestID,
 		Entitlement: entitlement,
 	}, nil
 }
 
 func (s *Service) SyncCurrentUsage(ctx context.Context, guildID, metric string, currentUsed int64) error {
+	if metric == ActionStorageRent {
+		return s.ChargeStorageRent(ctx, guildID, currentUsed)
+	}
+	return nil
+}
+
+func (s *Service) CommitUsage(ctx context.Context, reservation Reservation) error {
+	return s.CommitCreditUsage(ctx, reservation, CreditUsageFinal{})
+}
+
+func (s *Service) CommitCreditUsage(ctx context.Context, reservation Reservation, final CreditUsageFinal) error {
+	if s == nil || s.repo == nil || strings.TrimSpace(reservation.ID) == "" {
+		return nil
+	}
+	metadata := final.Metadata
+	if metadata == nil {
+		metadata = map[string]any{}
+	}
+	if final.FinalCostMicros > 0 {
+		metadata["final_cost_micros"] = final.FinalCostMicros
+	}
+	if final.EstimatedCostMicros > 0 {
+		metadata["estimated_cost_micros"] = final.EstimatedCostMicros
+	}
+	return s.repo.CommitCreditReservation(ctx, repository.CreditCommitRequest{
+		ReservationID: reservation.ID,
+		FinalCredits:  final.Credits,
+		MetadataJSON:  MarshalRaw(metadata),
+	}, s.currentTime())
+}
+
+func (s *Service) ReleaseUsage(ctx context.Context, reservation Reservation) error {
+	return s.ReleaseCreditUsage(ctx, reservation, "released")
+}
+
+func (s *Service) ReleaseCreditUsage(ctx context.Context, reservation Reservation, reason string) error {
+	if s == nil || s.repo == nil || strings.TrimSpace(reservation.ID) == "" {
+		return nil
+	}
+	return s.repo.ReleaseCreditReservation(ctx, reservation.ID, reason, s.currentTime())
+}
+
+func (s *Service) GrantPack(ctx context.Context, guildID, source, sourceID, packID string) (Entitlement, error) {
+	if s == nil || s.repo == nil {
+		return Entitlement{}, ErrNoCreditAccount
+	}
+	pack, ok := PackForID(packID)
+	if !ok {
+		return Entitlement{}, ErrUnknownPack
+	}
+	now := s.currentTime()
+	expiresAt := now.Add(pack.ExpiresAfter)
+	account, err := s.repo.EnsureCreditAccount(ctx, store.CreditAccount{
+		GuildID:                    guildID,
+		Status:                     statusForPack(pack.Pack),
+		PaymentProvider:            source,
+		ActivePack:                 pack.Pack,
+		RetentionDays:              pack.RetentionDays,
+		KnowledgeStorageBytesLimit: pack.KnowledgeStorageBytes,
+		CreatedAt:                  now,
+		UpdatedAt:                  now,
+	})
+	if err != nil {
+		return Entitlement{}, err
+	}
+	grantID, err := randomBase58(18)
+	if err != nil {
+		return Entitlement{}, err
+	}
+	_, account, _, err = s.repo.GrantCredits(ctx, repository.CreditGrantRequest{
+		GrantID:      "grant_" + grantID,
+		GuildID:      guildID,
+		Source:       source,
+		SourceID:     sourceID,
+		Pack:         pack.Pack,
+		Credits:      pack.Credits,
+		ExpiresAt:    &expiresAt,
+		MetadataJSON: MarshalRaw(map[string]any{"pack": pack.Pack, "source": source, "source_id": sourceID}),
+	})
+	if err != nil {
+		return Entitlement{}, err
+	}
+	return s.entitlementFromCreditAccount(account), nil
+}
+
+func (s *Service) ExpireCredits(ctx context.Context, now time.Time) (int64, error) {
+	if s == nil || s.repo == nil {
+		return 0, nil
+	}
+	released, err := s.repo.ExpireCreditReservations(ctx, now)
+	if err != nil {
+		return released, err
+	}
+	expired, err := s.repo.ExpireCreditGrants(ctx, now)
+	return released + expired, err
+}
+
+func (s *Service) ChargeStorageRent(ctx context.Context, guildID string, bytes int64) error {
+	if bytes <= 0 {
+		return nil
+	}
 	entitlement, err := s.Resolve(ctx, guildID)
 	if err != nil {
 		return err
 	}
-	metric, ok := NormalizeMetric(metric)
-	if !ok {
-		return fmt.Errorf("unsupported usage metric")
-	}
-	return s.repo.SyncCurrentUsage(ctx, store.GuildSubscription{
-		ID:                 entitlement.SubscriptionID,
-		GuildID:            entitlement.GuildID,
-		Plan:               entitlement.Plan.Plan,
-		Status:             entitlement.Status,
-		GraceState:         entitlement.GraceState,
-		PaymentProvider:    entitlement.PaymentProvider,
-		CurrentPeriodStart: entitlement.PeriodStart,
-		CurrentPeriodEnd:   entitlement.PeriodEnd,
-	}, metric, currentUsed, s.currentTime())
-}
-
-func (s *Service) CommitUsage(ctx context.Context, reservation Reservation) error {
-	if s == nil || s.repo == nil || strings.TrimSpace(reservation.ID) == "" {
+	if entitlement.StorageRentGraceUntil != nil && s.currentTime().Before(entitlement.StorageRentGraceUntil.UTC()) {
 		return nil
 	}
-	return s.repo.CommitUsageReservation(ctx, reservation.ID)
-}
-
-func (s *Service) ReleaseUsage(ctx context.Context, reservation Reservation) error {
-	if s == nil || s.repo == nil || strings.TrimSpace(reservation.ID) == "" {
-		return nil
+	quote, err := s.QuoteAction(ActionQuoteRequest{Action: ActionStorageRent, Bytes: bytes})
+	if err != nil {
+		return err
 	}
-	return s.repo.ReleaseUsageReservation(ctx, reservation.ID)
+	reservation, err := s.BeginCreditUsage(ctx, guildID, quote)
+	if err != nil {
+		return err
+	}
+	return s.CommitCreditUsage(ctx, reservation, CreditUsageFinal{Credits: quote.ExpectedCredits})
 }
 
 func (s *Service) RecordCost(ctx context.Context, event CostEvent) error {
 	if s == nil || s.repo == nil {
 		return nil
 	}
+	action := strings.TrimSpace(event.Action)
+	if action == "" {
+		action = strings.TrimSpace(event.Operation)
+	}
 	return s.repo.RecordCostLedgerEvent(ctx, store.CostLedgerEvent{
 		GuildID:             event.GuildID,
 		RequestID:           event.RequestID,
+		ReservationID:       event.ReservationID,
+		Action:              action,
 		Source:              event.Source,
 		Operation:           event.Operation,
 		Command:             event.Command,
@@ -429,110 +531,56 @@ func (s *Service) RecordCost(ctx context.Context, event CostEvent) error {
 	})
 }
 
-func (s *Service) entitlementFromSubscription(ctx context.Context, subscription store.GuildSubscription) (Entitlement, error) {
-	limits, ok := LimitsForPlan(subscription.Plan)
+func (s *Service) entitlementFromCreditAccount(account store.CreditAccount) Entitlement {
+	pack, ok := PackForID(firstNonEmpty(account.ActivePack, PackTrial))
 	if !ok {
-		return Entitlement{}, ErrUnknownPlan
+		pack = packDefinitions[PackTrial]
 	}
-	now := s.currentTime()
-	status, grace, canUse, readOnly := effectiveState(subscription, now)
-	totals, err := s.repo.UsageTotals(ctx, subscription.GuildID, subscription.CurrentPeriodStart.UTC(), subscription.CurrentPeriodEnd.UTC())
-	if err != nil {
-		return Entitlement{}, err
+	status, grace, canUse, readOnly := effectiveCreditState(account, s.currentTime())
+	periodStart := account.CreatedAt.UTC()
+	periodEnd := periodStart.Add(pack.ExpiresAfter)
+	var trialEndsAt *time.Time
+	if pack.Pack == PackTrial {
+		trialEndsAt = &periodEnd
 	}
 	return Entitlement{
-		GuildID:            subscription.GuildID,
-		SubscriptionID:     subscription.ID,
-		Plan:               limits,
-		Status:             status,
-		GraceState:         grace,
-		PaymentProvider:    subscription.PaymentProvider,
-		PeriodStart:        subscription.CurrentPeriodStart.UTC(),
-		PeriodEnd:          subscription.CurrentPeriodEnd.UTC(),
-		TrialEndsAt:        subscription.TrialEndsAt,
-		CancelAtPeriodEnd:  subscription.CancelAtPeriodEnd,
-		CanUsePaidFeatures: canUse,
-		ReadOnly:           readOnly,
-		Usage:              totals,
-		UpgradeURL:         s.upgradeURL(subscription.GuildID),
-	}, nil
-}
-
-func (s *Service) setGuildReadOnly(ctx context.Context, guildID, provider, entitlementID string, now time.Time) error {
-	return s.setGuildReadOnlyWithRepo(ctx, s.repo, guildID, provider, entitlementID, now)
-}
-
-func (s *Service) setGuildReadOnlyWithRepo(ctx context.Context, repo *repository.BillingRepository, guildID, provider, entitlementID string, now time.Time) error {
-	subscription, ok, err := repo.GetSubscriptionByGuild(ctx, guildID)
-	if err != nil || !ok {
-		return err
-	}
-	limits, ok := LimitsForPlan(subscription.Plan)
-	if !ok {
-		return ErrUnknownPlan
-	}
-	_, err = repo.UpsertSubscriptionWithSnapshot(ctx, store.GuildSubscription{
-		GuildID:                subscription.GuildID,
-		CustomerAccountID:      subscription.CustomerAccountID,
-		Plan:                   subscription.Plan,
-		Status:                 StatusReadOnly,
-		GraceState:             GraceReadOnly,
-		PaymentProvider:        firstNonEmpty(provider, subscription.PaymentProvider),
-		ExternalSubscriptionID: subscription.ExternalSubscriptionID,
-		ExternalEntitlementID:  firstNonEmpty(entitlementID, subscription.ExternalEntitlementID),
-		BillingOwnerUserID:     subscription.BillingOwnerUserID,
-		CurrentPeriodStart:     subscription.CurrentPeriodStart,
-		CurrentPeriodEnd:       firstFuture(subscription.CurrentPeriodEnd, now),
-		TrialEndsAt:            subscription.TrialEndsAt,
-		CancelAtPeriodEnd:      true,
-	}, snapshotForLimits(guildID, subscription.ID, limits, StatusReadOnly, GraceReadOnly, now))
-	return err
-}
-
-func snapshotForLimits(guildID string, subscriptionID uint, limits PlanLimits, status, grace string, now time.Time) store.EntitlementSnapshot {
-	return store.EntitlementSnapshot{
-		GuildID:                    guildID,
-		SubscriptionID:             subscriptionID,
-		Plan:                       limits.Plan,
+		GuildID:                    account.GuildID,
+		AccountID:                  account.ID,
+		Pack:                       pack,
 		Status:                     status,
 		GraceState:                 grace,
-		AIResponsesLimit:           limits.AIResponses,
-		WebSearchesLimit:           limits.WebSearches,
-		ImageGenerationsLimit:      limits.ImageGenerations,
-		KnowledgeStorageBytesLimit: limits.KnowledgeStorageBytes,
-		SchedulesLimit:             limits.Schedules,
-		RetentionDays:              limits.RetentionDays,
-		MusicEnabled:               limits.MusicEnabled,
-		PremiumToolsEnabled:        limits.PremiumToolsEnabled,
-		CreatedAt:                  now,
+		PaymentProvider:            account.PaymentProvider,
+		PeriodStart:                periodStart,
+		PeriodEnd:                  periodEnd,
+		TrialEndsAt:                trialEndsAt,
+		CanUsePaidFeatures:         canUse,
+		ReadOnly:                   readOnly,
+		AvailableCredits:           account.AvailableCredits,
+		ReservedCredits:            account.ReservedCredits,
+		RetentionDays:              account.RetentionDays,
+		KnowledgeStorageBytesLimit: account.KnowledgeStorageBytesLimit,
+		StorageRentGraceUntil:      account.StorageRentGraceUntil,
+		UpgradeURL:                 s.upgradeURL(account.GuildID),
 	}
 }
 
-func effectiveState(subscription store.GuildSubscription, now time.Time) (status string, grace string, canUse bool, readOnly bool) {
-	status = strings.TrimSpace(subscription.Status)
-	grace = strings.TrimSpace(subscription.GraceState)
+func effectiveCreditState(account store.CreditAccount, now time.Time) (status string, grace string, canUse bool, readOnly bool) {
+	status = strings.TrimSpace(account.Status)
 	if status == "" {
 		status = StatusReadOnly
 	}
-	if grace == "" {
-		grace = status
-	}
-	if subscription.CurrentPeriodEnd.IsZero() || !now.Before(subscription.CurrentPeriodEnd.Add(GraceDuration)) {
-		switch status {
-		case StatusActive, StatusPastDue, StatusGrace:
-			return StatusSuspended, GraceSuspended, false, true
-		case StatusTrialing:
-			return StatusReadOnly, GraceReadOnly, false, true
-		}
-	}
-	if now.After(subscription.CurrentPeriodEnd) && status == StatusPastDue {
-		return StatusGrace, GraceGrace, true, false
-	}
+	grace = status
 	switch status {
-	case StatusTrialing, StatusActive, StatusGrace:
+	case StatusTrialing, StatusActive, StatusGrace, StatusPastDue:
+		if account.AvailableCredits <= 0 && account.ReservedCredits <= 0 {
+			return StatusDepleted, GraceDepleted, false, true
+		}
 		return status, grace, true, false
-	case StatusPastDue:
-		return status, GracePastDue, true, false
+	case StatusDepleted:
+		if account.AvailableCredits > 0 || account.ReservedCredits > 0 {
+			return StatusActive, GraceActive, true, false
+		}
+		return StatusDepleted, GraceDepleted, false, true
 	case StatusReadOnly, StatusCanceled, StatusSuspended:
 		return status, grace, false, true
 	default:
@@ -540,11 +588,105 @@ func effectiveState(subscription store.GuildSubscription, now time.Time) (status
 	}
 }
 
-func firstFuture(value time.Time, now time.Time) time.Time {
-	if value.After(now) {
-		return value
+func quoteFromMetric(metric string, units int64, requestID string) (CreditQuote, error) {
+	action, ok := NormalizeMetric(metric)
+	if !ok {
+		return CreditQuote{}, fmt.Errorf("unsupported usage action")
 	}
-	return now
+	if units <= 0 {
+		units = 1
+	}
+	request := ActionQuoteRequest{Action: action, RequestID: requestID, Metadata: map[string]any{"legacy_metric": metric, "legacy_units": units}}
+	switch action {
+	case ActionAssistantModelRound:
+		quote, err := quoteForAction(request)
+		if err != nil {
+			return CreditQuote{}, err
+		}
+		quote.ExpectedCredits *= units
+		quote.MaxCredits *= units
+		quote.Metadata["expected_credits"] = quote.ExpectedCredits
+		quote.Metadata["max_credits"] = quote.MaxCredits
+		return quote, nil
+	case ActionKnowledgeWrite:
+		request.Bytes = units
+	case ActionMusicPlayback:
+		if units > math.MaxInt32 {
+			units = math.MaxInt32
+		}
+		request.Minutes = int(units)
+	}
+	return quoteForAction(request)
+}
+
+func creditError(entitlement Entitlement, quote CreditQuote, metric string) CreditError {
+	return CreditError{
+		Metric:           metric,
+		Action:           quote.Action,
+		Used:             entitlement.Pack.Credits - entitlement.AvailableCredits,
+		Reserved:         entitlement.ReservedCredits,
+		Limit:            entitlement.Pack.Credits,
+		Pack:             entitlement.Pack.Pack,
+		RequiredCredits:  quote.MaxCredits,
+		AvailableCredits: entitlement.AvailableCredits,
+		UpgradeURL:       entitlement.UpgradeURL,
+	}
+}
+
+func statusForPack(pack string) string {
+	if pack == PackTrial {
+		return StatusTrialing
+	}
+	return StatusActive
+}
+
+func normalizePackLamports(values map[string]int64) map[string]int64 {
+	normalized := map[string]int64{}
+	for key, value := range values {
+		pack, ok := NormalizePack(key)
+		if !ok || pack == PackTrial || value <= 0 {
+			continue
+		}
+		normalized[pack] = value
+	}
+	return normalized
+}
+
+func firstLamportsMap(primary, secondary map[string]int64) map[string]int64 {
+	if len(primary) > 0 {
+		return primary
+	}
+	return secondary
+}
+
+func (s *Service) lamportsForPack(pack PackDefinition) (int64, int64, error) {
+	if override := s.cfg.SolanaPackLamports[pack.Pack]; override > 0 {
+		return override, s.cfg.SolanaUSDCentsPerSOL, nil
+	}
+	if s.cfg.SolanaUSDCentsPerSOL <= 0 {
+		return 0, 0, ErrSolPriceNotConfigured
+	}
+	lamports := (int64(pack.PriceCents)*1_000_000_000 + s.cfg.SolanaUSDCentsPerSOL - 1) / s.cfg.SolanaUSDCentsPerSOL
+	return lamports, s.cfg.SolanaUSDCentsPerSOL, nil
+}
+
+func (s *Service) setGuildReadOnly(ctx context.Context, guildID, provider, _ string, now time.Time) error {
+	account, ok, err := s.repo.GetCreditAccountByGuild(ctx, guildID)
+	if err != nil || !ok {
+		return err
+	}
+	readOnlyAt := now
+	_, err = s.repo.EnsureCreditAccount(ctx, store.CreditAccount{
+		GuildID:                    account.GuildID,
+		BillingOwnerUserID:         account.BillingOwnerUserID,
+		Status:                     StatusReadOnly,
+		PaymentProvider:            firstNonEmpty(provider, account.PaymentProvider),
+		ActivePack:                 account.ActivePack,
+		RetentionDays:              account.RetentionDays,
+		KnowledgeStorageBytesLimit: account.KnowledgeStorageBytesLimit,
+		ReadOnlyAt:                 &readOnlyAt,
+	})
+	return err
 }
 
 func (s *Service) currentTime() time.Time {
@@ -609,60 +751,21 @@ func withBillingQuery(base, guildID string, includeSessionPlaceholder bool) stri
 	return parsed.String()
 }
 
-func (e Entitlement) metricConsumed(metric string) int64 {
-	switch metric {
-	case MetricAIResponse:
-		return e.Usage.AIResponsesConsumed
-	case MetricWebSearch:
-		return e.Usage.WebSearchesConsumed
-	case MetricImageGeneration:
-		return e.Usage.ImageGenerationsConsumed
-	case MetricKnowledgeStorageByte:
-		return e.Usage.KnowledgeStorageBytesConsumed
-	case MetricScheduledRun:
-		return e.Usage.ScheduledRunsConsumed
-	case MetricMusicMinute:
-		return e.Usage.MusicMinutesConsumed
-	default:
-		return 0
-	}
-}
-
-func (e Entitlement) metricReserved(metric string) int64 {
-	switch metric {
-	case MetricAIResponse:
-		return e.Usage.AIResponsesReserved
-	case MetricWebSearch:
-		return e.Usage.WebSearchesReserved
-	case MetricImageGeneration:
-		return e.Usage.ImageGenerationsReserved
-	case MetricKnowledgeStorageByte:
-		return e.Usage.KnowledgeStorageBytesReserved
-	case MetricScheduledRun:
-		return e.Usage.ScheduledRunsReserved
-	case MetricMusicMinute:
-		return e.Usage.MusicMinutesReserved
-	default:
-		return 0
-	}
-}
-
 func (e Entitlement) UsageLine(metric string) string {
-	metric, _ = NormalizeMetric(metric)
-	limit := IncludedLimit(e.Plan, metric)
-	return FormatUsage(e.metricConsumed(metric)+e.metricReserved(metric), limit, metric)
+	return e.CreditLine()
+}
+
+func (e Entitlement) CreditLine() string {
+	return FormatCredits(e.AvailableCredits, e.ReservedCredits)
 }
 
 func (e Entitlement) SummaryText() string {
 	return strings.Join([]string{
-		fmt.Sprintf("Plan: %s (%s)", e.Plan.DisplayName, e.Status),
+		fmt.Sprintf("Pack: %s (%s)", e.Pack.DisplayName, e.Status),
 		fmt.Sprintf("Provider: %s", firstNonEmpty(e.PaymentProvider, "unknown")),
-		fmt.Sprintf("Renewal/reset: %s", e.PeriodEnd.Format("2006-01-02")),
-		fmt.Sprintf("AI responses: %s", e.UsageLine(MetricAIResponse)),
-		fmt.Sprintf("Web searches: %s", e.UsageLine(MetricWebSearch)),
-		fmt.Sprintf("Image generations: %s", e.UsageLine(MetricImageGeneration)),
-		fmt.Sprintf("Knowledge storage: %s", e.UsageLine(MetricKnowledgeStorageByte)),
-		fmt.Sprintf("Retention: %d days", e.Plan.RetentionDays),
+		fmt.Sprintf("Credits: %s", e.CreditLine()),
+		fmt.Sprintf("Retention: %d days", e.Pack.RetentionDays),
+		fmt.Sprintf("Knowledge cap: %s", formatBytes(e.Pack.KnowledgeStorageBytes)),
 	}, "\n")
 }
 
@@ -681,4 +784,27 @@ func MarshalRaw(value any) string {
 		return "{}"
 	}
 	return string(data)
+}
+
+func safeLedgerID(value string) string {
+	value = strings.TrimSpace(value)
+	value = strings.Map(func(r rune) rune {
+		switch {
+		case r >= 'a' && r <= 'z':
+			return r
+		case r >= 'A' && r <= 'Z':
+			return r
+		case r >= '0' && r <= '9':
+			return r
+		default:
+			return '_'
+		}
+	}, value)
+	if value == "" {
+		return "guild"
+	}
+	if len(value) > 40 {
+		return value[:40]
+	}
+	return value
 }

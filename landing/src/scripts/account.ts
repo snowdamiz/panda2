@@ -16,7 +16,7 @@ export type StoredWalletAccount = {
 
 export type AccountBillingOrder = {
   order_id: string;
-  plan?: string;
+  pack?: string;
   display_name?: string;
   amount_sol?: string;
   status: string;
@@ -36,7 +36,7 @@ export type AccountUsageMetric = {
 
 export type AccountEntitlement = {
   guild_id: string;
-  plan: string;
+  pack: string;
   display_name: string;
   status: string;
   grace_state: string;
@@ -47,16 +47,13 @@ export type AccountEntitlement = {
   can_use_paid_features: boolean;
   read_only: boolean;
   usage: {
-    ai_responses?: AccountUsageMetric;
-    web_searches?: AccountUsageMetric;
-    image_generations?: AccountUsageMetric;
-    knowledge_storage?: AccountUsageMetric;
+    credits?: AccountUsageMetric;
   };
 };
 
 export type StoredBillingOrder = {
   order_id: string;
-  plan: string;
+  pack: string;
   display_name: string;
   amount_sol: string;
   status: string;
@@ -90,10 +87,7 @@ type AccountNodes = {
 type UsageUnit = 'count' | 'bytes';
 
 const usageMeters: ReadonlyArray<{ key: string; metric: keyof AccountEntitlement['usage']; unit: UsageUnit }> = [
-  { key: 'ai', metric: 'ai_responses', unit: 'count' },
-  { key: 'search', metric: 'web_searches', unit: 'count' },
-  { key: 'images', metric: 'image_generations', unit: 'count' },
-  { key: 'storage', metric: 'knowledge_storage', unit: 'bytes' },
+  { key: 'credits', metric: 'credits', unit: 'count' },
 ];
 
 type ConnectFeature = {
@@ -125,7 +119,7 @@ export const readStoredBillingOrder = (): StoredBillingOrder | null => {
     if (!order.order_id || !order.status) return null;
     return {
       order_id: order.order_id,
-      plan: order.plan || '',
+      pack: order.pack || '',
       display_name: order.display_name || '',
       amount_sol: order.amount_sol || '',
       status: order.status,
@@ -159,7 +153,7 @@ export const rememberBillingOrder = (order: AccountBillingOrder): StoredBillingO
 
   const snapshot: StoredBillingOrder = {
     order_id: orderID,
-    plan: stringValue(order.plan),
+    pack: stringValue(order.pack),
     display_name: stringValue(order.display_name),
     amount_sol: stringValue(order.amount_sol),
     status,
@@ -191,16 +185,16 @@ export const clearStoredWalletAccount = () => {
   window.localStorage.removeItem(accountStorageKey);
 };
 
-export const billingURLForPlan = (plan: string | null): string => {
+export const billingURLForPack = (pack: string | null): string => {
   const params = new URLSearchParams();
-  if (plan) params.set('plan', plan);
+  if (pack) params.set('pack', pack);
   const query = params.toString();
   return query ? `/billing?${query}` : '/billing';
 };
 
-export const accountURLForPlan = (plan: string | null): string => {
+export const accountURLForPack = (pack: string | null): string => {
   const params = new URLSearchParams();
-  if (plan) params.set('plan', plan);
+  if (pack) params.set('pack', pack);
   const query = params.toString();
   return query ? `/account?${query}` : '/account';
 };
@@ -222,7 +216,8 @@ class WalletAccountController {
   private readonly nodes: AccountNodes;
   private readonly walletRegistry = getWallets();
   private wallets: readonly Wallet[] = [];
-  private readonly intendedPlan = new URLSearchParams(window.location.search).get('plan');
+  private readonly intendedPack = new URLSearchParams(window.location.search).get('pack') ||
+    new URLSearchParams(window.location.search).get('plan');
 
   constructor(nodes: AccountNodes) {
     this.nodes = nodes;
@@ -339,9 +334,9 @@ class WalletAccountController {
     };
     window.localStorage.setItem(accountStorageKey, JSON.stringify(account));
     this.closeWalletDialog();
-    if (this.intendedPlan) {
+    if (this.intendedPack) {
       this.setStatus('Signed in. Returning to checkout.');
-      window.location.assign(billingURLForPlan(this.intendedPlan));
+      window.location.assign(billingURLForPack(this.intendedPack));
       return;
     }
     this.renderSavedSession();
@@ -360,8 +355,8 @@ class WalletAccountController {
       this.renderTrialUnavailable('No server connected');
       return;
     }
-    if (this.intendedPlan) {
-      window.location.replace(billingURLForPlan(this.intendedPlan));
+    if (this.intendedPack) {
+      window.location.replace(billingURLForPack(this.intendedPack));
       return;
     }
     this.nodes.root.dataset.accountState = 'ready';
@@ -457,7 +452,7 @@ class WalletAccountController {
       this.renderTrialEntitlement(entitlement);
     } catch (error) {
       const message = readableError(error);
-      if (message === 'subscription_not_found') {
+      if (message === 'credit_account_not_found') {
         this.renderTrialUnavailable('No trial found');
         return;
       }
@@ -467,7 +462,7 @@ class WalletAccountController {
   }
 
   private renderTrialEntitlement(entitlement: AccountEntitlement) {
-    const isTrial = entitlement.plan === 'trial';
+    const isTrial = entitlement.pack === 'trial';
     const isUsable = entitlement.can_use_paid_features && !entitlement.read_only;
     let status: string;
     let tone: string;
@@ -481,9 +476,9 @@ class WalletAccountController {
       tone = 'bad';
       timeLeft = 'Expired';
     } else {
-      status = `${entitlement.display_name || formatStatus(entitlement.plan)} active`;
+      status = `${entitlement.display_name || formatStatus(entitlement.pack)} active`;
       tone = isUsable ? 'good' : 'bad';
-      timeLeft = 'Paid plan';
+      timeLeft = 'Paid pack';
     }
     this.setText('[data-account-trial-status]', status);
     this.setTone('[data-account-trial-status]', 'trialTone', tone);
@@ -534,19 +529,19 @@ class WalletAccountController {
     if (!order) {
       this.setText('[data-account-payment-status]', 'No payment yet');
       this.setTone('[data-account-payment-status]', 'paymentTone', 'idle');
-      this.setText('[data-account-payment-plan]', '--');
+      this.setText('[data-account-payment-pack]', '--');
       this.setText('[data-account-payment-amount]', '--');
       this.setText('[data-account-payment-expires]', '--');
-      this.nodes.billingLink.href = billingURLForPlan(null);
+      this.nodes.billingLink.href = billingURLForPack(null);
       return;
     }
 
     this.setText('[data-account-payment-status]', formatStatus(order.status));
     this.setTone('[data-account-payment-status]', 'paymentTone', paymentTone(order.status));
-    this.setText('[data-account-payment-plan]', order.display_name || formatStatus(order.plan));
+    this.setText('[data-account-payment-pack]', order.display_name || formatStatus(order.pack));
     this.setText('[data-account-payment-amount]', order.amount_sol ? `${order.amount_sol} SOL` : '--');
     this.setText('[data-account-payment-expires]', formatDate(order.expires_at));
-    this.nodes.billingLink.href = billingURLForPlan(order.plan || null);
+    this.nodes.billingLink.href = billingURLForPack(order.pack || null);
   }
 
   private deleteAccount() {

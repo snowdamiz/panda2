@@ -2918,7 +2918,7 @@ func TestChatEmptyAssistantResponseReleasesBillingReservation(t *testing.T) {
 	if !response.Ephemeral || !strings.Contains(response.Content, "empty response") {
 		t.Fatalf("expected empty response guard, got %+v", response)
 	}
-	reservation, err := billingService.BeginUsage(ctx, "guild-1", billing.MetricAIResponse, int64(entitlement.Plan.AIResponses))
+	reservation, err := billingService.BeginUsage(ctx, "guild-1", billing.MetricAIResponse, entitlement.Pack.Credits/4-1)
 	if err != nil {
 		t.Fatalf("empty chat response should release billing reservation: %v", err)
 	}
@@ -2943,7 +2943,7 @@ func TestBackgroundTaskEmptyAssistantResponseReleasesBillingReservation(t *testi
 	if !response.Ephemeral || !strings.Contains(response.Content, "empty response") {
 		t.Fatalf("expected empty response guard, got %+v", response)
 	}
-	reservation, err := billingService.BeginUsage(ctx, "guild-1", billing.MetricAIResponse, int64(entitlement.Plan.AIResponses))
+	reservation, err := billingService.BeginUsage(ctx, "guild-1", billing.MetricAIResponse, entitlement.Pack.Credits/4-1)
 	if err != nil {
 		t.Fatalf("empty background response should release billing reservation: %v", err)
 	}
@@ -3154,7 +3154,7 @@ func TestAssistantResponseWithGeneratedFileIsPayload(t *testing.T) {
 func TestRouterFinalizesImageUsageReservations(t *testing.T) {
 	ctx := context.Background()
 	router := newTestRouter(t, &fakeLLM{response: llm.ChatResponse{Content: "fixture"}}, 20)
-	billingService, _ := attachTestBilling(t, router, "guild-1")
+	billingService, entitlement := attachTestBilling(t, router, "guild-1")
 
 	commitReservation, err := billingService.BeginUsage(ctx, "guild-1", billing.MetricImageGeneration, 1)
 	if err != nil {
@@ -3163,12 +3163,12 @@ func TestRouterFinalizesImageUsageReservations(t *testing.T) {
 	if err := router.CommitResponseUsage(ctx, Response{UsageReservations: []billing.Reservation{commitReservation}}); err != nil {
 		t.Fatalf("CommitResponseUsage: %v", err)
 	}
-	entitlement, err := billingService.Resolve(ctx, "guild-1")
+	entitlement, err = billingService.Resolve(ctx, "guild-1")
 	if err != nil {
 		t.Fatalf("Resolve committed usage: %v", err)
 	}
-	if entitlement.Usage.ImageGenerationsConsumed != 1 || entitlement.Usage.ImageGenerationsReserved != 0 {
-		t.Fatalf("expected one committed image generation, got %+v", entitlement.Usage)
+	if entitlement.AvailableCredits != entitlement.Pack.Credits-commitReservation.Credits || entitlement.ReservedCredits != 0 {
+		t.Fatalf("expected one committed image generation reservation, got %+v", entitlement)
 	}
 
 	releaseReservation, err := billingService.BeginUsage(ctx, "guild-1", billing.MetricImageGeneration, 1)
@@ -3182,8 +3182,8 @@ func TestRouterFinalizesImageUsageReservations(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Resolve released usage: %v", err)
 	}
-	if entitlement.Usage.ImageGenerationsConsumed != 1 || entitlement.Usage.ImageGenerationsReserved != 0 {
-		t.Fatalf("expected released reservation to leave usage unchanged, got %+v", entitlement.Usage)
+	if entitlement.AvailableCredits != entitlement.Pack.Credits-commitReservation.Credits || entitlement.ReservedCredits != 0 {
+		t.Fatalf("expected released reservation to leave credit balance unchanged, got %+v", entitlement)
 	}
 }
 

@@ -523,6 +523,7 @@ func TestLoadBillingPurchaseEnvOverrides(t *testing.T) {
 	t.Setenv("SOLANA_PLAN_LAMPORTS", "starter:19000000,plus:49000000")
 	t.Setenv("SOLANA_PRO_LAMPORTS", "99000000")
 	t.Setenv("SOLANA_BUSINESS_LAMPORTS", "249000000")
+	t.Setenv("SOLANA_USD_CENTS_PER_SOL", "7070")
 
 	cfg, _, err := Load()
 	if err != nil {
@@ -542,6 +543,9 @@ func TestLoadBillingPurchaseEnvOverrides(t *testing.T) {
 	}
 	if cfg.SolanaPlanLamports["starter"] != 19_000_000 || cfg.SolanaPlanLamports["plus"] != 49_000_000 || cfg.SolanaPlanLamports["pro"] != 99_000_000 || cfg.SolanaPlanLamports["business"] != 249_000_000 {
 		t.Fatalf("unexpected SOL lamport map: %#v", cfg.SolanaPlanLamports)
+	}
+	if cfg.SolanaPackLamports["starter"] != 19_000_000 || cfg.SolanaPackLamports["plus"] != 49_000_000 || cfg.SolanaUSDCentsPerSOL != 7070 {
+		t.Fatalf("unexpected SOL pack pricing config: lamports=%#v cents=%d", cfg.SolanaPackLamports, cfg.SolanaUSDCentsPerSOL)
 	}
 }
 
@@ -616,10 +620,16 @@ func clearConfigEnv(t *testing.T) {
 		"SOLANA_ORDER_EXPIRATION",
 		"SOLANA_ACTIVATION_KEY_TTL",
 		"SOLANA_PLAN_LAMPORTS",
+		"SOLANA_PACK_LAMPORTS",
 		"SOLANA_STARTER_LAMPORTS",
 		"SOLANA_PLUS_LAMPORTS",
 		"SOLANA_PRO_LAMPORTS",
 		"SOLANA_BUSINESS_LAMPORTS",
+		"SOLANA_PACK_STARTER_LAMPORTS",
+		"SOLANA_PACK_PLUS_LAMPORTS",
+		"SOLANA_PACK_PRO_LAMPORTS",
+		"SOLANA_PACK_BUSINESS_LAMPORTS",
+		"SOLANA_USD_CENTS_PER_SOL",
 		"YTDLP_PATH",
 		"FFMPEG_PATH",
 		"MUSIC_SIDECAR_DIR",

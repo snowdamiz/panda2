@@ -41,11 +41,12 @@
     "solana_confirmation": "finalized",
     "solana_order_expiration": "30m",
     "solana_activation_key_ttl": "48h",
-    "solana_plan_lamports": {
-      "starter": 250000000,
-      "plus": 650000000,
-      "pro": 1350000000,
-      "business": 3350000000
+    "solana_usd_cents_per_sol": 7070,
+    "solana_pack_lamports": {
+      "starter": 268779177,
+      "plus": 693167350,
+      "pro": 1400480973,
+      "business": 3522421842
     }
   },
   "runtime": {

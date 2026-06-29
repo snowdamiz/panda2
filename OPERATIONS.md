@@ -14,7 +14,7 @@ The default test run covers the SQLite fallback search path. The tagged run cove
 
 ## Production Deployment
 
-1. Run one primary writable database for v1. Keep SQLite attached to one primary Machine unless the storage plan moves to LiteFS, Postgres, or another explicitly owned single-writer design.
+1. Run one primary writable database for v1. Keep SQLite attached to one primary Machine unless the storage design moves to LiteFS, Postgres, or another explicitly owned single-writer design.
 2. Create one Fly volume mounted at `/data`.
 3. Configure Discord application ID, public key, owner user IDs, public landing URL, Discord install callback URL, SOL payment settings, and runtime settings in `panda.config.json` or environment overrides.
 4. Store secrets with the deployment secret manager:
@@ -23,14 +23,14 @@ The default test run covers the SQLite fallback search path. The tagged run cove
    - `BRAVE_SEARCH_API_KEY`
    - `SOLANA_RPC_URL`
    - `SOLANA_TREASURY_WALLET`
-   - `SOLANA_STARTER_LAMPORTS`, `SOLANA_PLUS_LAMPORTS`, `SOLANA_PRO_LAMPORTS`, and `SOLANA_BUSINESS_LAMPORTS`
+   - `SOLANA_PACK_LAMPORTS` (or the per-pack `SOLANA_PACK_STARTER_LAMPORTS`, `SOLANA_PACK_PLUS_LAMPORTS`, `SOLANA_PACK_PRO_LAMPORTS`, and `SOLANA_PACK_BUSINESS_LAMPORTS`)
 5. Store a GitHub Actions secret named `FLY_API_TOKEN` with permission to deploy both `panda-assistant` and `panda2-landing`.
 6. Deploy by merging to the `release` branch. The `CI` GitHub Actions workflow deploys both Fly apps with `flyctl deploy --remote-only`.
 7. In the Discord Developer Portal Webhooks page, set the endpoint to `https://<app-host>/discord/webhook-events`, enable events, and subscribe to `APPLICATION_AUTHORIZED`.
 8. Confirm the landing build args point at the API origin with `PUBLIC_PANDA_API_BASE_URL`. Do not expose Solana RPC endpoints to the static landing app.
 9. Check rollout with `fly status`, `fly releases`, `fly logs`, `/readyz`, `/metrics`, and owner-ops health through Panda chat.
 
-Production validation fails when Discord credentials, the managed AI service key, public app URL, SOL RPC URL, treasury wallet, or paid-plan lamport mappings are missing.
+Production validation fails when Discord credentials, the managed AI service key, public app URL, SOL RPC URL, treasury wallet, or paid-pack lamport mappings are missing.
 
 ## Billing Environment
 
@@ -45,11 +45,12 @@ Required for SOL self-serve billing:
 - `SOLANA_CONFIRMATION`: `confirmed` or `finalized`; defaults to `finalized`.
 - `SOLANA_ORDER_EXPIRATION`: order lifetime; defaults to `30m`.
 - `SOLANA_ACTIVATION_KEY_TTL`: one-time key lifetime after reveal; defaults to `48h`.
-- `SOLANA_STARTER_LAMPORTS`, `SOLANA_PLUS_LAMPORTS`, `SOLANA_PRO_LAMPORTS`, `SOLANA_BUSINESS_LAMPORTS`: exact native SOL prices by plan.
+- `SOLANA_PACK_LAMPORTS`: comma-separated `pack:lamports` entries (for example `starter:268779177,plus:693167350,pro:1400480973,business:3522421842`), the preferred way to set all paid-pack prices in one value. Per-pack `SOLANA_PACK_STARTER_LAMPORTS`, `SOLANA_PACK_PLUS_LAMPORTS`, `SOLANA_PACK_PRO_LAMPORTS`, and `SOLANA_PACK_BUSINESS_LAMPORTS` override individual packs.
 
 Optional billing overrides:
 
-- `SOLANA_PLAN_LAMPORTS`: comma-separated `plan:lamports` entries, useful when setting all plan amounts in one value.
+- Legacy `SOLANA_PLAN_LAMPORTS` and `SOLANA_<TIER>_LAMPORTS` variables are still accepted and merged into the pack lamports for backward compatibility. Prefer the `SOLANA_PACK_*` variables for new deployments.
+- Prefer a fresh SOL/USD quote with `SOLANA_USD_CENTS_PER_SOL` so pack lamports are priced from the public USD targets; treat manual lamport overrides as an emergency control.
 
 Landing build-time values:
 
@@ -57,13 +58,14 @@ Landing build-time values:
 
 SOL payment setup:
 
-- Plan prices must map to integer lamports and match the public plan table.
+- Pack prices must map to integer lamports and match the public pack table.
 - The treasury wallet should be controlled outside the app runtime. Do not store private keys on the Panda host.
 - The landing page creates orders through `POST /billing/sol/orders`, asks the backend to prepare an unsigned transaction through `POST /billing/sol/orders/:order_id/transaction`, asks the user's wallet to sign the server-built transaction bytes, then submits the signed transaction to `POST /billing/sol/orders/:order_id/submit`.
 - The backend fetches the latest blockhash, serializes the native SOL transfer plus memo/reference, submits signed transaction bytes through Solana RPC, verifies structured Solana RPC responses, rejects token transfers, requires one matching native SOL transfer to the treasury wallet, requires the order memo/reference, and only accepts transactions at or above the configured confirmation threshold.
 - Verified orders reveal one activation key once. The key is stored hashed, consumed by `/billing action:activate api_key:<key>`, and cannot be re-revealed.
 - Operators can revoke an unused activation key by payment order through internal operator tooling backed by the billing revocation service. Revocation, creation, one-time viewing, consumption, and expiration are recorded in audit events.
 - Operators manage coupon creation, listing, and revocation from the landing admin page at `/admin`. Admin access requires signing a short login challenge with the configured `SOLANA_TREASURY_WALLET`; coupon management is intentionally not exposed through Discord bot commands.
+- Operators repair credit accounts from the same `/admin` page: assign a pack (which grants its credits), set account status (active, trialing, grace, read-only, suspended, canceled, depleted), adjust the pack expiry, and review available, reserved, and granted credits. Credit grants, reservations, and the credit ledger are the source of truth for a guild's balance; never hand-edit balances outside the credit-account tooling. Exports and deletions run through `/data` in Discord and the data summary covers credit accounts, grants, and historical billing records.
 
 ## Health Checks
 
@@ -82,9 +84,11 @@ Long Discord summaries are queued as `discord.interaction` jobs. If queue depth 
 
 Panda grants entitlements only from verified SOL payment orders activated with one-time keys. Do not grant paid access from wallet connection state, landing UI state, pasted signatures that have not passed backend verification, or support screenshots.
 
+The phased credit-pack refactor proposal, including provider cost math, implementation order, and terminology cleanup, is in `CREDIT_PACKS_REFACTOR_PLAN.md`.
+
 Required billing checks:
 
-- Payment order creation is rate limited and records exact plan, amount, treasury wallet, memo/reference, expiration, and support contact.
+- Payment order creation is rate limited and records exact pack, credits, amount, treasury wallet, memo/reference, expiration, and support contact.
 - SOL transaction verification is idempotent by signature and records successful and failed verification attempts.
 - Activation keys are revealed once, hashed at rest, scoped to the order guild, and consumed atomically.
 - Every paid assistant, web search, schedule, composed-tool, storage, and music path checks entitlement before provider spend.
@@ -94,9 +98,9 @@ Required billing checks:
 Weekly reconciliation:
 
 - Compare internal SOL payment events against treasury wallet transactions and RPC history.
-- Compare internal AI response counts, web search counts, storage bytes, and cost ledger records against provider dashboards.
-- Alert when gross margin drops below 45% for any plan cohort.
-- Alert when a guild consumes more than 50% of its included quota in the first 20% of a billing period.
+- Compare internal credit usage, web search counts, storage bytes, and cost ledger records against provider dashboards.
+- Alert when gross margin drops below 45% for any pack cohort.
+- Alert when a guild consumes more than 50% of its purchased credits in the first 20% of the pack expiration window.
 
 ## Sharding And Scale Path
 
@@ -120,7 +124,7 @@ Recommended destination pattern:
 /data/backups/panda-YYYYMMDD-HHMMSS.db
 ```
 
-Copy backups off the Fly volume after creation. Keep the main database, WAL, and backup retention policy aligned with plan-based server data retention.
+Copy backups off the Fly volume after creation. Keep the main database, WAL, and backup retention policy aligned with pack-based server data retention.
 
 ## SQLite Restore
 
@@ -130,7 +134,7 @@ Copy backups off the Fly volume after creation. Keep the main database, WAL, and
 4. Move the existing database, WAL, and SHM files aside with timestamped names.
 5. Place the backup at the configured SQLite path.
 6. Start the app and check `/readyz`, owner-ops health, `/metrics`, and `fly logs`.
-7. Reconcile subscription snapshots, quota reservations, and cost ledger rows created near the restore point.
+7. Reconcile credit grants, credit reservations, and cost ledger rows created near the restore point.
 8. Ask Panda to resume workers and confirm after the restored database passes health checks.
 
 ## Rollback
@@ -146,12 +150,12 @@ Schema migrations are forward-only. Restore from a SQLite backup if a bad migrat
 
 For managed AI trouble, ask Panda to enable incident mode, drain background work if needed, and disable assistant responses in affected guilds; confirm each privileged change. Removing the AI service key and redeploying is a last-resort global stop; health checks will report the AI service as missing and assistant responses will stop before provider calls.
 
-For SOL payment verification trouble, pause new purchases from the landing page if needed, keep existing entitlement snapshots intact, preserve submitted signatures and order IDs, retry verification after RPC recovery, and verify idempotency before resuming self-serve purchases.
+For SOL payment verification trouble, pause new purchases from the landing page if needed, keep existing credit accounts intact, preserve submitted signatures and order IDs, retry verification after RPC recovery, and verify idempotency before resuming self-serve purchases.
 
-For quota spikes or abuse, suspend the guild, revoke trial credits when warranted, preserve audit logs, and keep export/delete/support paths available.
+For credit-burn spikes or abuse, suspend the guild, revoke trial credits when warranted, preserve audit logs, and keep export/delete/support paths available.
 
 ## Customer Support Boundaries
 
-Customer-facing support may include guild ID, plan, subscription status, quota usage, command failure counts, recent error codes, queue depth, and Discord permission gaps.
+Customer-facing support may include guild ID, pack, account status, credit usage, command failure counts, recent error codes, queue depth, and Discord permission gaps.
 
 Do not include raw prompts, raw Discord messages, provider model names, API keys, billing secrets, hidden tools, internal cost math, or vendor fallback details in normal support responses or screenshots.

@@ -61,7 +61,7 @@ var (
 	ErrCouponInvalid                = errors.New("coupon code is invalid")
 	ErrCouponExpired                = errors.New("coupon expired")
 	ErrCouponRevoked                = errors.New("coupon revoked")
-	ErrCouponPlanMismatch           = errors.New("coupon does not apply to the selected plan")
+	ErrCouponPackMismatch           = errors.New("coupon does not apply to the selected pack")
 	ErrCouponExhausted              = errors.New("coupon redemptions are exhausted")
 	ErrCouponDuplicate              = errors.New("coupon code already exists")
 	ErrCouponNotFound               = errors.New("coupon was not found")
@@ -71,6 +71,7 @@ var (
 type CreateSolPaymentOrderRequest struct {
 	GuildID            string
 	BillingOwnerUserID string
+	Pack               string
 	Plan               string
 	SupportEmail       string
 	CouponCode         string
@@ -80,8 +81,11 @@ type SolPaymentOrderView struct {
 	OrderID                      string    `json:"order_id"`
 	GuildID                      string    `json:"guild_id"`
 	BillingOwnerUserID           string    `json:"billing_owner_user_id,omitempty"`
-	Plan                         string    `json:"plan"`
+	Pack                         string    `json:"pack"`
 	DisplayName                  string    `json:"display_name"`
+	Credits                      int64     `json:"credits"`
+	USDTargetCents               int64     `json:"usd_target_cents"`
+	SOLUSDCents                  int64     `json:"sol_usd_cents,omitempty"`
 	ListLamports                 int64     `json:"list_lamports"`
 	DiscountLamports             int64     `json:"discount_lamports"`
 	DueLamports                  int64     `json:"due_lamports"`
@@ -164,13 +168,18 @@ type ActivationKeyRevocation struct {
 }
 
 type BillingQuoteRequest struct {
+	Pack       string
 	Plan       string
 	CouponCode string
 }
 
 type BillingQuote struct {
+	Pack             string
 	Plan             string
 	DisplayName      string
+	Credits          int64
+	USDTargetCents   int64
+	SOLUSDCents      int64
 	ListLamports     int64
 	DiscountLamports int64
 	DueLamports      int64
@@ -181,6 +190,7 @@ type BillingQuote struct {
 type CreateCouponRequest struct {
 	ActorUserID      string
 	ActorIsOwner     bool
+	Pack             string
 	Plan             string
 	DiscountLamports int64
 	Code             string
@@ -209,8 +219,9 @@ type RevokeCouponRequest struct {
 type CouponView struct {
 	CouponID         string     `json:"coupon_id"`
 	CodePrefix       string     `json:"code_prefix"`
-	Plan             string     `json:"plan"`
+	Pack             string     `json:"pack"`
 	DisplayName      string     `json:"display_name"`
+	Credits          int64      `json:"credits"`
 	DiscountLamports int64      `json:"discount_lamports"`
 	MaxRedemptions   int        `json:"max_redemptions"`
 	Status           string     `json:"status"`
@@ -454,17 +465,17 @@ type solanaParsedInstruction struct {
 
 func (s *Service) QuoteBillingOrder(ctx context.Context, request BillingQuoteRequest) (BillingQuote, error) {
 	if s == nil || s.repo == nil {
-		return BillingQuote{}, ErrNoSubscription
+		return BillingQuote{}, ErrNoCreditAccount
 	}
-	plan, ok := NormalizePlan(request.Plan)
-	if !ok || plan == PlanTrial {
-		return BillingQuote{}, ErrUnknownPlan
+	pack, ok := NormalizePack(firstNonEmpty(request.Pack, request.Plan))
+	if !ok || pack == PackTrial {
+		return BillingQuote{}, ErrUnknownPack
 	}
 	now := s.currentTime()
 	var quote BillingQuote
 	err := s.repo.WithTransaction(ctx, func(repo *repository.BillingRepository) error {
 		var err error
-		quote, err = s.quoteBillingOrderWithRepo(ctx, repo, plan, request.CouponCode, now)
+		quote, err = s.quoteBillingOrderWithRepo(ctx, repo, pack, request.CouponCode, now)
 		return err
 	})
 	return quote, err
@@ -472,12 +483,12 @@ func (s *Service) QuoteBillingOrder(ctx context.Context, request BillingQuoteReq
 
 func (s *Service) CreateSolPaymentOrder(ctx context.Context, request CreateSolPaymentOrderRequest) (SolPaymentOrderView, error) {
 	if s == nil || s.repo == nil {
-		return SolPaymentOrderView{}, ErrNoSubscription
+		return SolPaymentOrderView{}, ErrNoCreditAccount
 	}
 	guildID := strings.TrimSpace(request.GuildID)
-	plan, ok := NormalizePlan(request.Plan)
-	if !ok || plan == PlanTrial {
-		return SolPaymentOrderView{}, ErrUnknownPlan
+	pack, ok := NormalizePack(firstNonEmpty(request.Pack, request.Plan))
+	if !ok || pack == PackTrial {
+		return SolPaymentOrderView{}, ErrUnknownPack
 	}
 	now := s.currentTime()
 	orderID, err := randomBase58(18)
@@ -491,7 +502,7 @@ func (s *Service) CreateSolPaymentOrder(ctx context.Context, request CreateSolPa
 	var order store.BillingOrder
 	var redemption store.BillingCouponRedemption
 	err = s.repo.WithTransaction(ctx, func(repo *repository.BillingRepository) error {
-		quote, err := s.quoteBillingOrderWithRepo(ctx, repo, plan, request.CouponCode, now)
+		quote, err := s.quoteBillingOrderWithRepo(ctx, repo, pack, request.CouponCode, now)
 		if err != nil {
 			return err
 		}
@@ -520,6 +531,10 @@ func (s *Service) CreateSolPaymentOrder(ctx context.Context, request CreateSolPa
 			BillingOwnerUserID:    strings.TrimSpace(request.BillingOwnerUserID),
 			SupportEmail:          strings.TrimSpace(request.SupportEmail),
 			Plan:                  quote.Plan,
+			Pack:                  quote.Pack,
+			Credits:               quote.Credits,
+			USDTargetCents:        quote.USDTargetCents,
+			SOLUSDCents:           quote.SOLUSDCents,
 			Provider:              provider,
 			ListLamports:          quote.ListLamports,
 			DiscountLamports:      quote.DiscountLamports,
@@ -553,6 +568,8 @@ func (s *Service) CreateSolPaymentOrder(ctx context.Context, request CreateSolPa
 			GuildID:            guildID,
 			BillingOwnerUserID: strings.TrimSpace(request.BillingOwnerUserID),
 			Plan:               quote.Plan,
+			Pack:               quote.Pack,
+			Credits:            quote.Credits,
 			ListLamports:       quote.ListLamports,
 			DiscountLamports:   quote.DiscountLamports,
 			DueLamports:        quote.DueLamports,
@@ -567,7 +584,7 @@ func (s *Service) CreateSolPaymentOrder(ctx context.Context, request CreateSolPa
 		return SolPaymentOrderView{}, err
 	}
 	if redemption.RedemptionID != "" {
-		s.recordCouponAudit(ctx, "billing.coupon.redemption.reserved", firstNonEmpty(order.BillingOwnerUserID, order.GuildID), store.BillingCoupon{CouponID: order.CouponID, CodePrefix: order.CouponPrefix, Plan: order.Plan}, map[string]any{
+		s.recordCouponAudit(ctx, "billing.coupon.redemption.reserved", firstNonEmpty(order.BillingOwnerUserID, order.GuildID), store.BillingCoupon{CouponID: order.CouponID, CodePrefix: order.CouponPrefix, Plan: order.Plan, Pack: order.Pack}, map[string]any{
 			"redemption_id":     redemption.RedemptionID,
 			"order_id":          order.OrderID,
 			"guild_id":          order.GuildID,
@@ -581,14 +598,14 @@ func (s *Service) CreateSolPaymentOrder(ctx context.Context, request CreateSolPa
 
 func (s *Service) CreateCoupon(ctx context.Context, request CreateCouponRequest) (CouponCreateResult, error) {
 	if s == nil || s.repo == nil {
-		return CouponCreateResult{}, ErrNoSubscription
+		return CouponCreateResult{}, ErrNoCreditAccount
 	}
 	if !request.ActorIsOwner {
 		return CouponCreateResult{}, ErrBillingAccess
 	}
-	plan, ok := NormalizePlan(request.Plan)
-	if !ok || plan == PlanTrial {
-		return CouponCreateResult{}, ErrUnknownPlan
+	pack, ok := NormalizePack(firstNonEmpty(request.Pack, request.Plan))
+	if !ok || pack == PackTrial {
+		return CouponCreateResult{}, ErrUnknownPack
 	}
 	if request.DiscountLamports <= 0 {
 		return CouponCreateResult{}, fmt.Errorf("discount_lamports must be greater than zero")
@@ -616,7 +633,8 @@ func (s *Service) CreateCoupon(ctx context.Context, request CreateCouponRequest)
 		CouponID:         "cpn_" + couponID,
 		CodeHash:         couponCodeHash(rawCode),
 		CodePrefix:       couponCodePrefix(rawCode),
-		Plan:             plan,
+		Plan:             pack,
+		Pack:             pack,
 		DiscountLamports: request.DiscountLamports,
 		MaxRedemptions:   request.MaxRedemptions,
 		Status:           CouponStatusActive,
@@ -642,7 +660,7 @@ func (s *Service) CreateCoupon(ctx context.Context, request CreateCouponRequest)
 
 func (s *Service) ListCoupons(ctx context.Context, request ListCouponsRequest) ([]CouponView, error) {
 	if s == nil || s.repo == nil {
-		return nil, ErrNoSubscription
+		return nil, ErrNoCreditAccount
 	}
 	if !request.ActorIsOwner {
 		return nil, ErrBillingAccess
@@ -675,7 +693,7 @@ func (s *Service) ListCoupons(ctx context.Context, request ListCouponsRequest) (
 
 func (s *Service) RevokeCoupon(ctx context.Context, request RevokeCouponRequest) (CouponView, error) {
 	if s == nil || s.repo == nil {
-		return CouponView{}, ErrNoSubscription
+		return CouponView{}, ErrNoCreditAccount
 	}
 	if !request.ActorIsOwner {
 		return CouponView{}, ErrBillingAccess
@@ -738,20 +756,27 @@ func (s *Service) RevokeCoupon(ctx context.Context, request RevokeCouponRequest)
 	return s.couponView(coupon, counts), nil
 }
 
-func (s *Service) quoteBillingOrderWithRepo(ctx context.Context, repo *repository.BillingRepository, plan string, couponCode string, now time.Time) (BillingQuote, error) {
-	limits, ok := LimitsForPlan(plan)
-	if !ok || plan == PlanTrial {
-		return BillingQuote{}, ErrUnknownPlan
+func (s *Service) quoteBillingOrderWithRepo(ctx context.Context, repo *repository.BillingRepository, packID string, couponCode string, now time.Time) (BillingQuote, error) {
+	pack, ok := PackForID(packID)
+	if !ok || packID == PackTrial {
+		return BillingQuote{}, ErrUnknownPack
 	}
-	listLamports := s.cfg.SolanaPlanLamports[plan]
-	if listLamports <= 0 {
-		return BillingQuote{}, ErrSolPaymentsNotConfigured
+	listLamports, quoteCents, err := s.lamportsForPack(pack)
+	if err != nil {
+		if errors.Is(err, ErrSolPriceNotConfigured) {
+			return BillingQuote{}, ErrSolPaymentsNotConfigured
+		}
+		return BillingQuote{}, err
 	}
 	quote := BillingQuote{
-		Plan:         plan,
-		DisplayName:  limits.DisplayName,
-		ListLamports: listLamports,
-		DueLamports:  listLamports,
+		Pack:           pack.Pack,
+		Plan:           pack.Pack,
+		DisplayName:    pack.DisplayName,
+		Credits:        pack.Credits,
+		USDTargetCents: int64(pack.PriceCents),
+		SOLUSDCents:    quoteCents,
+		ListLamports:   listLamports,
+		DueLamports:    listLamports,
 	}
 	couponCode = strings.TrimSpace(couponCode)
 	if couponCode == "" {
@@ -776,8 +801,9 @@ func (s *Service) quoteBillingOrderWithRepo(ctx context.Context, repo *repositor
 	if coupon.Status != CouponStatusActive {
 		return BillingQuote{}, ErrCouponInvalid
 	}
-	if coupon.Plan != plan {
-		return BillingQuote{}, ErrCouponPlanMismatch
+	couponPack := firstNonEmpty(coupon.Pack, coupon.Plan)
+	if couponPack != pack.Pack {
+		return BillingQuote{}, ErrCouponPackMismatch
 	}
 	counts, err := repo.CouponRedemptionCounts(ctx, coupon.CouponID)
 	if err != nil {
@@ -799,7 +825,7 @@ func (s *Service) quoteBillingOrderWithRepo(ctx context.Context, repo *repositor
 
 func (s *Service) GetSolPaymentOrder(ctx context.Context, orderID string) (SolPaymentOrderView, error) {
 	if s == nil || s.repo == nil {
-		return SolPaymentOrderView{}, ErrNoSubscription
+		return SolPaymentOrderView{}, ErrNoCreditAccount
 	}
 	order, ok, err := s.repo.GetBillingOrder(ctx, orderID)
 	if err != nil {
@@ -817,7 +843,7 @@ func (s *Service) GetSolPaymentOrder(ctx context.Context, orderID string) (SolPa
 
 func (s *Service) PrepareSolPaymentTransaction(ctx context.Context, request PrepareSolPaymentTransactionRequest) (SolPaymentTransactionPreparation, error) {
 	if s == nil || s.repo == nil {
-		return SolPaymentTransactionPreparation{}, ErrNoSubscription
+		return SolPaymentTransactionPreparation{}, ErrNoCreditAccount
 	}
 	if !s.solPaymentsConfigured() || s.solana == nil {
 		return SolPaymentTransactionPreparation{}, ErrSolPaymentsNotConfigured
@@ -867,7 +893,7 @@ func (s *Service) PrepareSolPaymentTransaction(ctx context.Context, request Prep
 
 func (s *Service) SubmitSolPaymentTransaction(ctx context.Context, request SubmitSolPaymentTransactionRequest) (SolPaymentVerificationResult, error) {
 	if s == nil || s.repo == nil {
-		return SolPaymentVerificationResult{}, ErrNoSubscription
+		return SolPaymentVerificationResult{}, ErrNoCreditAccount
 	}
 	if !s.solPaymentsConfigured() || s.solana == nil {
 		return SolPaymentVerificationResult{}, ErrSolPaymentsNotConfigured
@@ -910,7 +936,7 @@ func (s *Service) SubmitSolPaymentTransaction(ctx context.Context, request Submi
 
 func (s *Service) VerifySolPayment(ctx context.Context, request VerifySolPaymentRequest) (SolPaymentVerificationResult, error) {
 	if s == nil || s.repo == nil {
-		return SolPaymentVerificationResult{}, ErrNoSubscription
+		return SolPaymentVerificationResult{}, ErrNoCreditAccount
 	}
 	if !s.solPaymentsConfigured() || s.solana == nil {
 		return SolPaymentVerificationResult{}, ErrSolPaymentsNotConfigured
@@ -1004,7 +1030,7 @@ func (s *Service) VerifySolPayment(ctx context.Context, request VerifySolPayment
 
 func (s *Service) RevealActivationKey(ctx context.Context, orderID string) (ActivationKeyReveal, error) {
 	if s == nil || s.repo == nil {
-		return ActivationKeyReveal{}, ErrNoSubscription
+		return ActivationKeyReveal{}, ErrNoCreditAccount
 	}
 	var rawKey string
 	var savedKey store.ActivationAPIKey
@@ -1045,6 +1071,8 @@ func (s *Service) RevealActivationKey(ctx context.Context, orderID string) (Acti
 			BillingOrderID: order.OrderID,
 			GuildID:        order.GuildID,
 			Plan:           order.Plan,
+			Pack:           firstNonEmpty(order.Pack, order.Plan),
+			Credits:        order.Credits,
 			Status:         ActivationKeyStatusUnused,
 			ExpiresAt:      now.Add(s.cfg.SolanaActivationKeyTTL),
 			CreatedAt:      now,
@@ -1093,7 +1121,7 @@ func (s *Service) RevealActivationKey(ctx context.Context, orderID string) (Acti
 		"event": "viewed",
 	})
 	if consumedRedemption.RedemptionID != "" {
-		s.recordCouponAudit(ctx, "billing.coupon.redemption.consumed", firstNonEmpty(updatedOrder.BillingOwnerUserID, updatedOrder.GuildID), store.BillingCoupon{CouponID: updatedOrder.CouponID, CodePrefix: updatedOrder.CouponPrefix, Plan: updatedOrder.Plan}, map[string]any{
+		s.recordCouponAudit(ctx, "billing.coupon.redemption.consumed", firstNonEmpty(updatedOrder.BillingOwnerUserID, updatedOrder.GuildID), store.BillingCoupon{CouponID: updatedOrder.CouponID, CodePrefix: updatedOrder.CouponPrefix, Plan: updatedOrder.Plan, Pack: updatedOrder.Pack}, map[string]any{
 			"redemption_id":     consumedRedemption.RedemptionID,
 			"order_id":          updatedOrder.OrderID,
 			"guild_id":          updatedOrder.GuildID,
@@ -1118,14 +1146,14 @@ func (s *Service) RevealActivationKey(ctx context.Context, orderID string) (Acti
 
 func (s *Service) ActivateWithAPIKey(ctx context.Context, request ActivateAPIKeyRequest) (ActivateAPIKeyResult, error) {
 	if s == nil || s.repo == nil {
-		return ActivateAPIKeyResult{}, ErrNoSubscription
+		return ActivateAPIKeyResult{}, ErrNoCreditAccount
 	}
 	request.GuildID = strings.TrimSpace(request.GuildID)
 	request.ActorUserID = strings.TrimSpace(request.ActorUserID)
 	if request.GuildID == "" || strings.TrimSpace(request.APIKey) == "" {
 		return ActivateAPIKeyResult{}, ErrActivationKeyInvalid
 	}
-	var subscription store.GuildSubscription
+	var creditAccount store.CreditAccount
 	var consumedKey store.ActivationAPIKey
 	var consumedOrder store.BillingOrder
 	var expiredKey store.ActivationAPIKey
@@ -1178,12 +1206,14 @@ func (s *Service) ActivateWithAPIKey(ctx context.Context, request ActivateAPIKey
 		if order.GuildID != "" && order.GuildID != request.GuildID {
 			return ErrActivationKeyInvalid
 		}
-		if order.Plan != key.Plan {
+		orderPack := firstNonEmpty(order.Pack, order.Plan)
+		keyPack := firstNonEmpty(key.Pack, key.Plan)
+		if orderPack != keyPack {
 			return ErrActivationKeyInvalid
 		}
-		limits, ok := LimitsForPlan(order.Plan)
-		if !ok || order.Plan == PlanTrial {
-			return ErrUnknownPlan
+		pack, ok := PackForID(orderPack)
+		if !ok || orderPack == PackTrial {
+			return ErrUnknownPack
 		}
 		account, err := repo.EnsureCustomerAccount(ctx, store.CustomerAccount{
 			GuildID:            request.GuildID,
@@ -1193,8 +1223,6 @@ func (s *Service) ActivateWithAPIKey(ctx context.Context, request ActivateAPIKey
 		if err != nil {
 			return err
 		}
-		periodStart := now
-		periodEnd := periodStart.AddDate(0, 1, 0)
 		paymentProvider := ProviderSol
 		paymentStatus := "paid"
 		paymentCurrency := "sol"
@@ -1207,28 +1235,38 @@ func (s *Service) ActivateWithAPIKey(ctx context.Context, request ActivateAPIKey
 			paymentExternalID = order.OrderID
 			paymentIDPrefix = "coupon"
 		}
-		saved, err := repo.UpsertSubscriptionWithSnapshot(ctx, store.GuildSubscription{
-			GuildID:                request.GuildID,
-			CustomerAccountID:      account.ID,
-			Plan:                   order.Plan,
-			Status:                 StatusActive,
-			GraceState:             GraceActive,
-			PaymentProvider:        paymentProvider,
-			ExternalSubscriptionID: order.OrderID,
-			ExternalEntitlementID:  firstNonEmpty(order.VerifiedTransactionSignature, order.CouponPrefix, order.OrderID),
-			BillingOwnerUserID:     request.ActorUserID,
-			CurrentPeriodStart:     periodStart,
-			CurrentPeriodEnd:       periodEnd,
-		}, snapshotForLimits(request.GuildID, 0, limits, StatusActive, GraceActive, now))
+		savedAccount, err := repo.EnsureCreditAccount(ctx, store.CreditAccount{
+			GuildID:                    request.GuildID,
+			BillingOwnerUserID:         firstNonEmpty(request.ActorUserID, account.BillingOwnerUserID),
+			Status:                     StatusActive,
+			PaymentProvider:            paymentProvider,
+			ActivePack:                 pack.Pack,
+			RetentionDays:              pack.RetentionDays,
+			KnowledgeStorageBytesLimit: pack.KnowledgeStorageBytes,
+		})
 		if err != nil {
 			return err
 		}
-		subscription = saved
+		expiresAt := now.Add(pack.ExpiresAfter)
+		_, savedAccount, _, err = repo.GrantCredits(ctx, repository.CreditGrantRequest{
+			GrantID:      "grant_activation_" + key.KeyID,
+			GuildID:      request.GuildID,
+			Source:       paymentProvider,
+			SourceID:     "activation:" + key.KeyID,
+			Pack:         pack.Pack,
+			Credits:      pack.Credits,
+			ExpiresAt:    &expiresAt,
+			MetadataJSON: MarshalRaw(map[string]any{"order_id": order.OrderID, "activation_key_id": key.KeyID, "pack": pack.Pack}),
+		})
+		if err != nil {
+			return err
+		}
+		creditAccount = savedAccount
 		_, err = repo.RecordInvoicePaymentEvent(ctx, store.InvoicePaymentEvent{
 			Provider:       paymentProvider,
 			ExternalID:     paymentExternalID,
 			GuildID:        request.GuildID,
-			SubscriptionID: saved.ID,
+			SubscriptionID: 0,
 			AmountLamports: order.DueLamports,
 			Currency:       paymentCurrency,
 			Status:         paymentStatus,
@@ -1236,7 +1274,8 @@ func (s *Service) ActivateWithAPIKey(ctx context.Context, request ActivateAPIKey
 			RawPayload: MarshalRaw(map[string]any{
 				"order_id":           order.OrderID,
 				"signature":          order.VerifiedTransactionSignature,
-				"plan":               order.Plan,
+				"pack":               pack.Pack,
+				"credits":            pack.Credits,
 				"list_lamports":      order.ListLamports,
 				"discount_lamports":  order.DiscountLamports,
 				"due_lamports":       order.DueLamports,
@@ -1263,6 +1302,8 @@ func (s *Service) ActivateWithAPIKey(ctx context.Context, request ActivateAPIKey
 		}
 		consumedKey = key
 		consumedKey.GuildID = request.GuildID
+		consumedKey.Pack = pack.Pack
+		consumedKey.Credits = pack.Credits
 		consumedKey.Status = ActivationKeyStatusConsumed
 		consumedKey.ConsumedAt = &consumedAt
 		consumedKey.ConsumedByDiscordUserID = request.ActorUserID
@@ -1281,7 +1322,7 @@ func (s *Service) ActivateWithAPIKey(ctx context.Context, request ActivateAPIKey
 	})
 	if err != nil {
 		if errors.Is(err, ErrActivationKeyExpired) && expiredKey.KeyID != "" {
-			s.recordActivationKeyAudit(ctx, "billing.activation_key.expired", request.ActorUserID, expiredKey, store.BillingOrder{OrderID: expiredKey.BillingOrderID, GuildID: expiredKey.GuildID, Plan: expiredKey.Plan}, map[string]string{
+			s.recordActivationKeyAudit(ctx, "billing.activation_key.expired", request.ActorUserID, expiredKey, store.BillingOrder{OrderID: expiredKey.BillingOrderID, GuildID: expiredKey.GuildID, Plan: expiredKey.Plan, Pack: expiredKey.Pack}, map[string]string{
 				"event": "expired",
 			})
 		}
@@ -1290,16 +1331,12 @@ func (s *Service) ActivateWithAPIKey(ctx context.Context, request ActivateAPIKey
 	s.recordActivationKeyAudit(ctx, "billing.activation_key.consumed", request.ActorUserID, consumedKey, consumedOrder, map[string]string{
 		"event": "consumed",
 	})
-	entitlement, err := s.entitlementFromSubscription(ctx, subscription)
-	if err != nil {
-		return ActivateAPIKeyResult{}, err
-	}
-	return ActivateAPIKeyResult{Entitlement: entitlement}, nil
+	return ActivateAPIKeyResult{Entitlement: s.entitlementFromCreditAccount(creditAccount)}, nil
 }
 
 func (s *Service) RevokeActivationAPIKey(ctx context.Context, request RevokeActivationAPIKeyRequest) (ActivationKeyRevocation, error) {
 	if s == nil || s.repo == nil {
-		return ActivationKeyRevocation{}, ErrNoSubscription
+		return ActivationKeyRevocation{}, ErrNoCreditAccount
 	}
 	if !request.ActorIsOperator {
 		return ActivationKeyRevocation{}, ErrBillingAccess
@@ -1469,7 +1506,7 @@ func (s *Service) recordActivationKeyAudit(ctx context.Context, action string, a
 		"key_id":         key.KeyID,
 		"key_prefix":     key.KeyPrefix,
 		"order_id":       firstNonEmpty(order.OrderID, key.BillingOrderID),
-		"plan":           firstNonEmpty(order.Plan, key.Plan),
+		"pack":           firstNonEmpty(order.Pack, key.Pack, order.Plan, key.Plan),
 		"key_status":     key.Status,
 		"payment_status": order.Status,
 	}
@@ -1500,7 +1537,7 @@ func (s *Service) recordCouponAudit(ctx context.Context, action string, actorID 
 	metadata := map[string]any{
 		"coupon_id":     coupon.CouponID,
 		"coupon_prefix": coupon.CodePrefix,
-		"plan":          coupon.Plan,
+		"pack":          firstNonEmpty(coupon.Pack, coupon.Plan),
 		"status":        coupon.Status,
 	}
 	for name, value := range extra {
@@ -1524,12 +1561,13 @@ func (s *Service) recordCouponAudit(ctx context.Context, action string, actorID 
 }
 
 func (s *Service) couponView(coupon store.BillingCoupon, counts repository.CouponRedemptionCounts) CouponView {
-	limits, _ := LimitsForPlan(coupon.Plan)
+	pack, _ := PackForID(firstNonEmpty(coupon.Pack, coupon.Plan))
 	return CouponView{
 		CouponID:         coupon.CouponID,
 		CodePrefix:       coupon.CodePrefix,
-		Plan:             coupon.Plan,
-		DisplayName:      firstNonEmpty(limits.DisplayName, coupon.Plan),
+		Pack:             firstNonEmpty(coupon.Pack, coupon.Plan),
+		DisplayName:      firstNonEmpty(pack.DisplayName, coupon.Pack, coupon.Plan),
+		Credits:          pack.Credits,
 		DiscountLamports: coupon.DiscountLamports,
 		MaxRedemptions:   coupon.MaxRedemptions,
 		Status:           coupon.Status,
@@ -1568,11 +1606,11 @@ func (s *Service) canManageBillingWithRepo(ctx context.Context, repo *repository
 	if accountOK && strings.TrimSpace(account.BillingOwnerUserID) == userID {
 		return true, nil
 	}
-	subscription, subscriptionOK, err := repo.GetSubscriptionByGuild(ctx, guildID)
+	creditAccount, creditOK, err := repo.GetCreditAccountByGuild(ctx, guildID)
 	if err != nil {
 		return false, err
 	}
-	if subscriptionOK && strings.TrimSpace(subscription.BillingOwnerUserID) == userID {
+	if creditOK && strings.TrimSpace(creditAccount.BillingOwnerUserID) == userID {
 		return true, nil
 	}
 	if !canClaim {
@@ -1581,17 +1619,23 @@ func (s *Service) canManageBillingWithRepo(ctx context.Context, repo *repository
 	if accountOK && strings.TrimSpace(account.BillingOwnerUserID) != "" {
 		return false, nil
 	}
-	return !subscriptionOK || strings.TrimSpace(subscription.BillingOwnerUserID) == "", nil
+	if creditOK && strings.TrimSpace(creditAccount.BillingOwnerUserID) != "" {
+		return false, nil
+	}
+	return true, nil
 }
 
 func (s *Service) solPaymentOrderView(order store.BillingOrder) SolPaymentOrderView {
-	limits, _ := LimitsForPlan(order.Plan)
+	pack, _ := PackForID(firstNonEmpty(order.Pack, order.Plan))
 	return SolPaymentOrderView{
 		OrderID:                      order.OrderID,
 		GuildID:                      order.GuildID,
 		BillingOwnerUserID:           order.BillingOwnerUserID,
-		Plan:                         order.Plan,
-		DisplayName:                  firstNonEmpty(limits.DisplayName, order.Plan),
+		Pack:                         firstNonEmpty(order.Pack, order.Plan),
+		DisplayName:                  firstNonEmpty(pack.DisplayName, order.Pack, order.Plan),
+		Credits:                      firstNonZeroInt64(order.Credits, pack.Credits),
+		USDTargetCents:               firstNonZeroInt64(order.USDTargetCents, int64(pack.PriceCents)),
+		SOLUSDCents:                  order.SOLUSDCents,
 		ListLamports:                 order.ListLamports,
 		DiscountLamports:             order.DiscountLamports,
 		DueLamports:                  order.DueLamports,
@@ -1852,16 +1896,13 @@ func formatLamports(lamports int64) string {
 	return strings.TrimRight(text, "0")
 }
 
-func normalizePlanLamports(values map[string]int64) map[string]int64 {
-	result := map[string]int64{}
-	for plan, lamports := range values {
-		plan, ok := NormalizePlan(plan)
-		if !ok || plan == PlanTrial || lamports <= 0 {
-			continue
+func firstNonZeroInt64(values ...int64) int64 {
+	for _, value := range values {
+		if value != 0 {
+			return value
 		}
-		result[plan] = lamports
 	}
-	return result
+	return 0
 }
 
 func activationKeyHash(value string) string {

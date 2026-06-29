@@ -1,0 +1,22 @@
+---
+/**
+ * Headline stat card: eyebrow label, a status dot, the value (default slot,
+ * which receives the controller data attributes), and an optional `meta` slot.
+ */
+interface Props {
+  label: string;
+  class?: string;
+  [key: string]: unknown;
+}
+
+const { label, class: className, ...rest } = Astro.props;
+---
+
+<article class="dash-stat">
+  <span class="dash-stat-label">{label}</span>
+  <div class="dash-stat-value">
+    <span class="dash-stat-dot" aria-hidden="true"></span>
+    <strong class:list={[className]} {...rest}><slot /></strong>
+  </div>
+  <slot name="meta" />
+</article>

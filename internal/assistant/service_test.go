@@ -2505,7 +2505,7 @@ func TestChatFiltersStaleImageGenerationFailureHistory(t *testing.T) {
 		ChannelID:      "channel-1",
 		UserID:         "user-1",
 		Role:           "assistant",
-		ContentPreview: "I'm sorry, but I can't create a meme right now because the server's image-generation quota has been used up for this billing period. You can try again later, or an admin can increase the image-generation budget for the server.",
+		ContentPreview: "I'm sorry, but I can't create a meme right now because the server's image-generation credits have been used up. You can try again later, or an admin can add credits for the server.",
 	}); err != nil {
 		t.Fatalf("AppendMessage assistant: %v", err)
 	}
@@ -2533,7 +2533,7 @@ func TestChatFiltersStaleImageGenerationFailureHistory(t *testing.T) {
 		t.Fatalf("expected image generation tool to be available, got %+v", client.requests[0].Tools)
 	}
 	firstRequest := joinMessages(client.requests[0].Messages)
-	for _, forbidden := range []string{"server's image-generation quota has been used up", "increase the image-generation budget", "this billing period"} {
+	for _, forbidden := range []string{"server's image-generation credits have been used up", "add credits for the server", "this billing period"} {
 		if strings.Contains(firstRequest, forbidden) {
 			t.Fatalf("first request should not contain stale image failure %q:\n%s", forbidden, firstRequest)
 		}
@@ -3549,7 +3549,7 @@ func TestToolAvailabilityMessageRoutesAttachedImagesToInspection(t *testing.T) {
 		"before composing a normal text answer",
 		"even when the user's text does not explicitly say \"image\"",
 		"Do not guess",
-		"Treat old assistant replies about image-generation quota",
+		"Treat old assistant replies about image-generation credits",
 		"re-check through the current tool",
 	} {
 		if !strings.Contains(message, want) {
@@ -4066,7 +4066,7 @@ func TestChatWithFallbackRedactsMessageContentAndToolCallArguments(t *testing.T)
 	client := &fakeClient{response: llm.ChatResponse{Model: "fixture/model", Content: "ok"}}
 	service := NewService(client, nil, nil, nil, nil, "fixture/model", nil)
 
-	_, err := service.chatWithFallback(ctx, store.GuildConfig{}, modelTaskResponse, llm.ChatRequest{
+	_, err := service.chatWithFallback(ctx, store.GuildConfig{}, modelTaskResponse, "request-1", llm.ChatRequest{
 		Messages: []llm.Message{
 			{Role: "system", Content: "Debug token " + secret},
 			{

@@ -1,0 +1,20 @@
+---
+/**
+ * Two-column console frame shared by the account + admin dashboards.
+ * Pass-through attrs carry the controller hooks, e.g.
+ * `data-account-dashboard hidden` or `data-admin-dashboard hidden`.
+ */
+interface Props {
+  class?: string;
+  [key: string]: unknown;
+}
+
+const { class: className, ...rest } = Astro.props;
+---
+
+<div class:list={['dash-console reveal', className]} {...rest}>
+  <slot name="sidebar" />
+  <div class="dash-main">
+    <slot />
+  </div>
+</div>

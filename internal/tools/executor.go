@@ -654,9 +654,9 @@ func (e *Executor) Execute(ctx context.Context, request ExecutionRequest) (Execu
 	case "panda.manage_music":
 		payload, err = e.manageMusic(toolCtx, request, arguments)
 	case "panda.search_youtube":
-		payload, err = e.searchYouTube(toolCtx, arguments)
+		payload, err = e.searchYouTube(toolCtx, request, arguments)
 	case "panda.summarize_youtube":
-		payload, err = e.summarizeYouTube(toolCtx, arguments)
+		payload, err = e.summarizeYouTube(toolCtx, request, arguments)
 	case "panda.clip_youtube":
 		payload, err = e.clipYouTube(toolCtx, request, arguments)
 	case "panda.manage_safety":
@@ -1053,24 +1053,28 @@ func (e *Executor) searchWeb(ctx context.Context, request ExecutionRequest, argu
 	if err != nil {
 		if e.billing != nil {
 			_ = e.billing.RecordCost(ctx, billing.CostEvent{
-				GuildID:   request.GuildID,
-				RequestID: request.RequestID,
-				Source:    "tool",
-				Operation: "web_search",
-				Command:   request.InvocationType,
-				Provider:  "brave",
-				Success:   false,
-				ErrorCode: "web_search_failed",
+				GuildID:       request.GuildID,
+				RequestID:     request.RequestID,
+				ReservationID: reservation.ID,
+				Action:        billing.ActionWebSearch,
+				Source:        "tool",
+				Operation:     "web_search",
+				Command:       request.InvocationType,
+				Provider:      "brave",
+				Success:       false,
+				ErrorCode:     "web_search_failed",
 			})
 		}
 		return nil, err
 	}
 	if e.billing != nil {
+		reservationID := reservation.ID
 		_ = e.billing.CommitUsage(ctx, reservation)
-		reservation.ID = ""
 		_ = e.billing.RecordCost(ctx, billing.CostEvent{
 			GuildID:             request.GuildID,
 			RequestID:           request.RequestID,
+			ReservationID:       reservationID,
+			Action:              billing.ActionWebSearch,
 			Source:              "tool",
 			Operation:           "web_search",
 			Command:             request.InvocationType,
@@ -1078,6 +1082,7 @@ func (e *Executor) searchWeb(ctx context.Context, request ExecutionRequest, argu
 			EstimatedCostMicros: 5000,
 			Success:             true,
 		})
+		reservation.ID = ""
 	}
 	results := make([]map[string]any, 0, len(response.Results))
 	for index, result := range response.Results {
@@ -1138,6 +1143,33 @@ func (e *Executor) inspectImage(ctx context.Context, request ExecutionRequest, a
 		"reference_count": len(references),
 	})
 
+	var reservation billing.Reservation
+	releaseReservation := false
+	if e.billing != nil {
+		quote, err := e.billing.QuoteAction(billing.ActionQuoteRequest{
+			Action:    billing.ActionImageInspection,
+			RequestID: request.RequestID,
+			Metadata: map[string]any{
+				"tool":            "panda.inspect_image",
+				"detail":          detail,
+				"reference_count": len(references),
+			},
+		})
+		if err != nil {
+			return imageInspectionPayload(false, len(references), "", llm.ImageProviderStatusUnavailable, imageBillingMessage(err)), nil
+		}
+		reservation, err = e.billing.BeginCreditUsage(ctx, request.GuildID, quote)
+		if err != nil {
+			return imageInspectionPayload(false, len(references), "", llm.ImageProviderStatusUnavailable, imageBillingMessage(err)), nil
+		}
+		releaseReservation = reservation.ID != ""
+		defer func() {
+			if releaseReservation && reservation.ID != "" {
+				_ = e.billing.ReleaseCreditUsage(context.Background(), reservation, "image_inspection_failed")
+			}
+		}()
+	}
+
 	response, err := e.imageVision.Analyze(ctx, llm.ImageAnalysisRequest{
 		Prompt:          imageAnalysisPrompt(question, detail),
 		InputReferences: references,
@@ -1145,7 +1177,7 @@ func (e *Executor) inspectImage(ctx context.Context, request ExecutionRequest, a
 	})
 	if err != nil {
 		status, userMessage := imageAnalysisErrorStatusAndMessage(err)
-		e.recordImageProviderCost(ctx, request, "image_analysis", "", llm.ImageUsage{}, false, string(status))
+		e.recordImageProviderCost(ctx, request, reservation, billing.ActionImageInspection, "image_analysis", "", llm.ImageUsage{}, false, string(status))
 		e.recordImageAudit(ctx, request, imageAnalysisAuditActionForStatus(status), map[string]any{"provider_status": string(status)})
 		return imageInspectionPayload(false, len(references), "", status, userMessage), nil
 	}
@@ -1153,11 +1185,15 @@ func (e *Executor) inspectImage(ctx context.Context, request ExecutionRequest, a
 	if answer == "" {
 		status := llm.ImageProviderStatusError
 		userMessage := "I could not inspect that image. Please try again later."
-		e.recordImageProviderCost(ctx, request, "image_analysis", response.Model, response.Usage, false, string(status))
+		e.recordImageProviderCost(ctx, request, reservation, billing.ActionImageInspection, "image_analysis", response.Model, response.Usage, false, string(status))
 		e.recordImageAudit(ctx, request, "image_analysis.provider_failure", map[string]any{"provider_status": string(status)})
 		return imageInspectionPayload(false, len(references), "", status, userMessage), nil
 	}
-	e.recordImageProviderCost(ctx, request, "image_analysis", response.Model, response.Usage, true, "")
+	if e.billing != nil && reservation.ID != "" {
+		_ = e.billing.CommitCreditUsage(ctx, reservation, billing.CreditUsageFinal{Credits: reservation.Credits, FinalCostMicros: response.Usage.CostMicros})
+		releaseReservation = false
+	}
+	e.recordImageProviderCost(ctx, request, reservation, billing.ActionImageInspection, "image_analysis", response.Model, response.Usage, true, "")
 	e.recordImageAudit(ctx, request, "image_analysis.success", map[string]any{
 		"provider_status": string(llm.ImageProviderStatusSuccess),
 		"reference_count": len(references),
@@ -1267,7 +1303,22 @@ func (e *Executor) generateImage(ctx context.Context, request ExecutionRequest, 
 	var reservation billing.Reservation
 	releaseReservation := false
 	if e.billing != nil {
-		reservation, err = e.billing.BeginUsage(ctx, request.GuildID, billing.MetricImageGeneration, 1)
+		quote, err := e.billing.QuoteAction(billing.ActionQuoteRequest{
+			Action:     billing.ActionImageGeneration,
+			RequestID:  request.RequestID,
+			Resolution: stringArgument(args, "resolution"),
+			Metadata: map[string]any{
+				"tool":             "panda.generate_image",
+				"aspect_ratio":     stringArgument(args, "aspect_ratio"),
+				"resolution":       stringArgument(args, "resolution"),
+				"reference_count":  len(references),
+				"requested_images": count,
+			},
+		})
+		if err != nil {
+			return imageToolPayload(false, 0, "", caption, llm.ImageProviderStatusUnavailable, imageBillingMessage(err)), nil, nil, nil
+		}
+		reservation, err = e.billing.BeginCreditUsage(ctx, request.GuildID, quote)
 		if err != nil {
 			return imageToolPayload(false, 0, "", caption, llm.ImageProviderStatusUnavailable, imageBillingMessage(err)), nil, nil, nil
 		}
@@ -1288,14 +1339,14 @@ func (e *Executor) generateImage(ctx context.Context, request ExecutionRequest, 
 	})
 	if err != nil {
 		status, userMessage := imageErrorStatusAndMessage(err)
-		e.recordImageProviderCost(ctx, request, "image_generation", "", llm.ImageUsage{}, false, string(status))
+		e.recordImageProviderCost(ctx, request, reservation, billing.ActionImageGeneration, "image_generation", "", llm.ImageUsage{}, false, string(status))
 		e.recordImageAudit(ctx, request, imageAuditActionForStatus(status), map[string]any{"provider_status": string(status)})
 		return imageToolPayload(false, 0, "", caption, status, userMessage), nil, nil, nil
 	}
 	if len(response.Images) == 0 || len(response.Images[0].Bytes) == 0 {
 		status := llm.ImageProviderStatusError
 		userMessage := "I could not generate that image. Please try again later."
-		e.recordImageProviderCost(ctx, request, "image_generation", response.Model, response.Usage, false, string(status))
+		e.recordImageProviderCost(ctx, request, reservation, billing.ActionImageGeneration, "image_generation", response.Model, response.Usage, false, string(status))
 		e.recordImageAudit(ctx, request, "image_generation.provider_failure", map[string]any{"provider_status": string(status)})
 		return imageToolPayload(false, 0, "", caption, status, userMessage), nil, nil, nil
 	}
@@ -1313,7 +1364,7 @@ func (e *Executor) generateImage(ctx context.Context, request ExecutionRequest, 
 	if reservation.ID != "" {
 		reservations = append(reservations, reservation)
 	}
-	e.recordImageProviderCost(ctx, request, "image_generation", response.Model, response.Usage, true, "")
+	e.recordImageProviderCost(ctx, request, reservation, billing.ActionImageGeneration, "image_generation", response.Model, response.Usage, true, "")
 	e.recordImageAudit(ctx, request, "image_generation.success", map[string]any{
 		"provider_status": string(llm.ImageProviderStatusSuccess),
 		"filename":        filename,
@@ -1473,13 +1524,15 @@ func imageAnalysisMaxTokens(detail string) int {
 	}
 }
 
-func (e *Executor) recordImageProviderCost(ctx context.Context, request ExecutionRequest, operation, model string, usage llm.ImageUsage, success bool, errorCode string) {
+func (e *Executor) recordImageProviderCost(ctx context.Context, request ExecutionRequest, reservation billing.Reservation, action, operation, model string, usage llm.ImageUsage, success bool, errorCode string) {
 	if e == nil || e.billing == nil {
 		return
 	}
 	_ = e.billing.RecordCost(ctx, billing.CostEvent{
 		GuildID:          request.GuildID,
 		RequestID:        request.RequestID,
+		ReservationID:    reservation.ID,
+		Action:           action,
 		Source:           "tool",
 		Operation:        operation,
 		Command:          request.InvocationType,
@@ -1678,17 +1731,17 @@ func imageAnalysisAuditActionForStatus(status llm.ImageProviderStatus) string {
 }
 
 func imageBillingMessage(err error) string {
-	var quotaErr billing.QuotaError
-	if errors.As(err, &quotaErr) {
-		return fmt.Sprintf("This server has used its included %s for the current billing period.", billing.MetricLabel(quotaErr.Metric))
+	var creditErr billing.CreditError
+	if errors.As(err, &creditErr) {
+		return fmt.Sprintf("This server needs %d credits for %s, but only %d credits are available.", creditErr.RequiredCredits, billing.ActionLabel(creditErr.Action), creditErr.AvailableCredits)
 	}
-	if errors.Is(err, billing.ErrNoSubscription) {
-		return "This server does not have an active Panda subscription for image generation."
+	if errors.Is(err, billing.ErrNoCreditAccount) {
+		return "This server does not have an active Panda credit account for image generation."
 	}
 	if errors.Is(err, billing.ErrReadOnly) {
-		return "This server's Panda subscription is read-only, so image generation is paused."
+		return "This server's Panda credit account is read-only, so image generation is paused."
 	}
-	return "Image generation quota could not be checked. Please try again later."
+	return "Image generation credits could not be checked. Please try again later."
 }
 
 func generatedImageFilename(hint, mimeType string) string {
@@ -3061,7 +3114,7 @@ func (e *Executor) manageToolAccess(ctx context.Context, request ExecutionReques
 			"access":      "everyone",
 			"tool_names":  strings.Join(selection.toolNames, ","),
 			"permissions": strings.Join(selection.permissions, ","),
-			"note":        "Opening a tool to everyone clears matching Panda permission mappings for registered native tools and tool-specific allowlist rules for every selected tool. Feature gates, runtime configuration, quotas, and Discord-side permissions still apply.",
+			"note":        "Opening a tool to everyone clears matching Panda permission mappings for registered native tools and tool-specific allowlist rules for every selected tool. Feature gates, runtime configuration, credits, and Discord-side permissions still apply.",
 		}
 		if boolArgument(args, "dry_run") {
 			return dryRunToolResult("tool_access.open", preview), nil
@@ -3403,7 +3456,7 @@ func (e *Executor) toolAccessStatus(ctx context.Context, request ExecutionReques
 			"permission_user_rules":       permissionUserRules,
 			"tool_role_rules":             toolRoleRules,
 			"tool_user_rules":             toolUserRules,
-			"notes":                       "Effective access requires passing the Panda permission gate and the tool-specific allowlist gate. If both gates are open, everyone with normal assistant access, enabled features, quota, runtime configuration, and Discord-side permissions can use the tool.",
+			"notes":                       "Effective access requires passing the Panda permission gate and the tool-specific allowlist gate. If both gates are open, everyone with normal assistant access, enabled features, credits, runtime configuration, and Discord-side permissions can use the tool.",
 		})
 	}
 	return status, nil
@@ -3590,7 +3643,8 @@ func (e *Executor) manageMusic(ctx context.Context, request ExecutionRequest, ar
 		return nil, err
 	}
 	action := normalizeMusicManagementAction(stringArgument(args, "action"))
-	if action == "play" || action == "skip_play" || (action == "playlist" && musicPlaylistModeConsumesEntitlement(stringArgument(args, "mode"))) {
+	consumesCredits := action == "play" || action == "skip_play" || (action == "playlist" && musicPlaylistModeConsumesEntitlement(stringArgument(args, "mode")))
+	if consumesCredits {
 		if err := e.musicEntitlementAvailable(ctx, request.GuildID); err != nil {
 			return nil, err
 		}
@@ -3599,7 +3653,34 @@ func (e *Executor) manageMusic(ctx context.Context, request ExecutionRequest, ar
 	if err != nil {
 		return nil, err
 	}
-	return e.music.ManageMusic(ctx, MusicManagementRequest{
+	var reservation billing.Reservation
+	releaseReservation := false
+	if consumesCredits && e.billing != nil {
+		quote, err := e.billing.QuoteAction(billing.ActionQuoteRequest{
+			Action:    billing.ActionMusicPlayback,
+			RequestID: request.RequestID,
+			Minutes:   5,
+			Metadata: map[string]any{
+				"tool":   "panda.manage_music",
+				"action": action,
+				"mode":   stringArgument(args, "mode"),
+			},
+		})
+		if err != nil {
+			return nil, err
+		}
+		reservation, err = e.billing.BeginCreditUsage(ctx, request.GuildID, quote)
+		if err != nil {
+			return nil, err
+		}
+		releaseReservation = reservation.ID != ""
+		defer func() {
+			if releaseReservation && reservation.ID != "" {
+				_ = e.billing.ReleaseCreditUsage(context.Background(), reservation, "music_action_failed")
+			}
+		}()
+	}
+	payload, err := e.music.ManageMusic(ctx, MusicManagementRequest{
 		GuildID:        request.GuildID,
 		ChannelID:      request.ChannelID,
 		VoiceChannelID: voiceChannelID,
@@ -3618,9 +3699,17 @@ func (e *Executor) manageMusic(ctx context.Context, request ExecutionRequest, ar
 		To:             intArgument(args, "to", 0),
 		Volume:         intArgument(args, "volume", 0),
 	})
+	if err != nil {
+		return nil, err
+	}
+	if consumesCredits && e.billing != nil && reservation.ID != "" {
+		_ = e.billing.CommitCreditUsage(ctx, reservation, billing.CreditUsageFinal{Credits: reservation.Credits})
+		releaseReservation = false
+	}
+	return payload, nil
 }
 
-func (e *Executor) searchYouTube(ctx context.Context, arguments string) (any, error) {
+func (e *Executor) searchYouTube(ctx context.Context, request ExecutionRequest, arguments string) (any, error) {
 	if e.youtube == nil || !e.youtube.Configured() {
 		return nil, fmt.Errorf("youtube summarizer is not configured")
 	}
@@ -3640,6 +3729,31 @@ func (e *Executor) searchYouTube(ctx context.Context, arguments string) (any, er
 	}
 	purpose := normalizedYouTubeSearchPurpose(stringArgument(args, "purpose"))
 	instructions := strings.TrimSpace(stringArgument(args, "instructions"))
+	var reservation billing.Reservation
+	releaseReservation := false
+	if e.billing != nil {
+		quote, err := e.billing.QuoteAction(billing.ActionQuoteRequest{
+			Action:    billing.ActionYouTubeSearch,
+			RequestID: request.RequestID,
+			Metadata: map[string]any{
+				"tool":    "panda.search_youtube",
+				"purpose": purpose,
+			},
+		})
+		if err != nil {
+			return nil, err
+		}
+		reservation, err = e.billing.BeginCreditUsage(ctx, request.GuildID, quote)
+		if err != nil {
+			return nil, err
+		}
+		releaseReservation = reservation.ID != ""
+		defer func() {
+			if releaseReservation && reservation.ID != "" {
+				_ = e.billing.ReleaseCreditUsage(context.Background(), reservation, "youtube_search_failed")
+			}
+		}()
+	}
 	candidates, err := e.youtube.Search(ctx, youtube.SearchRequest{
 		Query:      query,
 		Limit:      youtubeSearchChoiceLimit(args["limit"]),
@@ -3653,6 +3767,10 @@ func (e *Executor) searchYouTube(ctx context.Context, arguments string) (any, er
 	})
 	if err != nil {
 		return nil, err
+	}
+	if e.billing != nil && reservation.ID != "" {
+		_ = e.billing.CommitCreditUsage(ctx, reservation, billing.CreditUsageFinal{Credits: reservation.Credits})
+		releaseReservation = false
 	}
 	options := youtubeSelectionOptions(candidates, purpose, instructions)
 	if len(options) == 0 {
@@ -3751,7 +3869,7 @@ func youtubeCandidateDescription(candidate youtube.VideoCandidate) string {
 	return strings.Join(parts, " - ")
 }
 
-func (e *Executor) summarizeYouTube(ctx context.Context, arguments string) (any, error) {
+func (e *Executor) summarizeYouTube(ctx context.Context, request ExecutionRequest, arguments string) (any, error) {
 	if e.youtube == nil || !e.youtube.Configured() {
 		return nil, fmt.Errorf("youtube summarizer is not configured")
 	}
@@ -3770,6 +3888,31 @@ func (e *Executor) summarizeYouTube(ctx context.Context, arguments string) (any,
 		return nil, fmt.Errorf("query is required")
 	}
 	detail := firstNonEmpty(stringArgument(args, "detail"), "standard")
+	var reservation billing.Reservation
+	releaseReservation := false
+	if e.billing != nil {
+		quote, err := e.billing.QuoteAction(billing.ActionQuoteRequest{
+			Action:    billing.ActionYouTubeSummary,
+			RequestID: request.RequestID,
+			Metadata: map[string]any{
+				"tool":   "panda.summarize_youtube",
+				"detail": detail,
+			},
+		})
+		if err != nil {
+			return nil, err
+		}
+		reservation, err = e.billing.BeginCreditUsage(ctx, request.GuildID, quote)
+		if err != nil {
+			return nil, err
+		}
+		releaseReservation = reservation.ID != ""
+		defer func() {
+			if releaseReservation && reservation.ID != "" {
+				_ = e.billing.ReleaseCreditUsage(context.Background(), reservation, "youtube_summary_failed")
+			}
+		}()
+	}
 	result, err := e.youtube.Summarize(ctx, youtube.SummaryRequest{
 		Query:    query,
 		Detail:   detail,
@@ -3777,6 +3920,22 @@ func (e *Executor) summarizeYouTube(ctx context.Context, arguments string) (any,
 	})
 	if err != nil {
 		return nil, err
+	}
+	if e.billing != nil && reservation.ID != "" {
+		finalCredits := reservation.Credits
+		if finalQuote, err := e.billing.QuoteAction(billing.ActionQuoteRequest{
+			Action:       billing.ActionYouTubeSummary,
+			RequestID:    request.RequestID,
+			AudioSeconds: int(result.Duration.Round(time.Second).Seconds()),
+			Metadata: map[string]any{
+				"tool":             "panda.summarize_youtube",
+				"duration_seconds": int(result.Duration.Round(time.Second).Seconds()),
+			},
+		}); err == nil {
+			finalCredits = finalQuote.ExpectedCredits
+		}
+		_ = e.billing.CommitCreditUsage(ctx, reservation, billing.CreditUsageFinal{Credits: finalCredits})
+		releaseReservation = false
 	}
 	const maxTranscriptBytes = 120000
 	transcript := truncateToolText(result.Transcript, maxTranscriptBytes)
@@ -3817,6 +3976,33 @@ func (e *Executor) clipYouTube(ctx context.Context, request ExecutionRequest, ar
 		return nil, fmt.Errorf("query is required")
 	}
 	instructions := strings.TrimSpace(stringArgument(args, "instructions"))
+	var reservation billing.Reservation
+	releaseReservation := false
+	if e.billing != nil {
+		quote, err := e.billing.QuoteAction(billing.ActionQuoteRequest{
+			Action:    billing.ActionYouTubeClip,
+			RequestID: request.RequestID,
+			Metadata: map[string]any{
+				"tool":         "panda.clip_youtube",
+				"has_guidance": instructions != "",
+				"aspect_ratio": stringArgument(args, "aspect_ratio"),
+				"caption_mode": stringArgument(args, "captions"),
+			},
+		})
+		if err != nil {
+			return nil, err
+		}
+		reservation, err = e.billing.BeginCreditUsage(ctx, request.GuildID, quote)
+		if err != nil {
+			return nil, err
+		}
+		releaseReservation = reservation.ID != ""
+		defer func() {
+			if releaseReservation && reservation.ID != "" {
+				_ = e.billing.ReleaseCreditUsage(context.Background(), reservation, "youtube_clip_failed")
+			}
+		}()
+	}
 	result, err := clipper.Clip(ctx, youtube.ClipRequest{
 		Query:               query,
 		Instructions:        instructions,
@@ -3831,6 +4017,25 @@ func (e *Executor) clipYouTube(ctx context.Context, request ExecutionRequest, ar
 	})
 	if err != nil {
 		return nil, err
+	}
+	if e.billing != nil && reservation.ID != "" {
+		durationSeconds := int(result.Duration.Round(time.Second).Seconds())
+		finalCredits := reservation.Credits
+		if finalQuote, err := e.billing.QuoteAction(billing.ActionQuoteRequest{
+			Action:        billing.ActionYouTubeClip,
+			RequestID:     request.RequestID,
+			AudioSeconds:  durationSeconds,
+			RenderedClips: len(result.Clips),
+			Metadata: map[string]any{
+				"tool":             "panda.clip_youtube",
+				"duration_seconds": durationSeconds,
+				"rendered_clips":   len(result.Clips),
+			},
+		}); err == nil {
+			finalCredits = finalQuote.ExpectedCredits
+		}
+		_ = e.billing.CommitCreditUsage(ctx, reservation, billing.CreditUsageFinal{Credits: finalCredits})
+		releaseReservation = false
 	}
 	clips := make([]map[string]any, 0, len(result.Clips))
 	for _, clip := range result.Clips {
@@ -4502,7 +4707,7 @@ func (e *Executor) musicEntitlementAvailable(ctx context.Context, guildID string
 	if err != nil {
 		return err
 	}
-	if !entitlement.CanUsePaidFeatures || entitlement.ReadOnly || !entitlement.Plan.MusicEnabled {
+	if !entitlement.CanUsePaidFeatures || entitlement.ReadOnly {
 		return billing.ErrReadOnly
 	}
 	return nil

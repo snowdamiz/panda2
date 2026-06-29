@@ -8,27 +8,22 @@ import {
 } from './admin-session';
 
 type AdminGuildLimits = {
-  ai_responses: number;
-  web_searches: number;
-  image_generations: number;
+  credits: number;
   knowledge_storage_bytes: number;
-  schedules: number;
   retention_days: number;
-  music_enabled: boolean;
-  premium_tools_enabled: boolean;
 };
 
 type AdminGuildUsage = {
-  ai_responses: number;
-  web_searches: number;
-  image_generations: number;
+  available_credits: number;
+  reserved_credits: number;
+  credits: number;
   knowledge_storage_bytes: number;
 };
 
 type AdminGuildBilling = {
-  has_subscription: boolean;
-  plan: string;
-  plan_display_name: string;
+  has_credit_account: boolean;
+  pack: string;
+  pack_display_name: string;
   status: string;
   stored_status: string;
   grace_state: string;
@@ -57,10 +52,11 @@ type AdminGuild = {
   billing: AdminGuildBilling | null;
 };
 
-type AdminPlan = {
-  plan: string;
+type AdminPack = {
+  pack: string;
   display_name: string;
   price_cents: number;
+  credits: number;
 };
 
 type AdminGuildListResponse = {
@@ -68,7 +64,7 @@ type AdminGuildListResponse = {
   total: number;
   limit: number;
   offset: number;
-  plan_catalog: AdminPlan[];
+  pack_catalog: AdminPack[];
   statuses: string[];
 };
 
@@ -80,11 +76,11 @@ type GuildNodes = {
 };
 
 // GuildsPanel renders every guild using Panda and lets an operator override a
-// guild's plan, status, renewal window, trial, and cancel flag.
+// guild's credit pack, status, trial, and cancel flag.
 export class GuildsPanel implements AdminPanel {
   private readonly nodes: GuildNodes;
   private readonly ctx: AdminPanelContext;
-  private planCatalog: AdminPlan[] = [];
+  private packCatalog: AdminPack[] = [];
   private statuses: string[] = [];
   private search = '';
 
@@ -120,7 +116,7 @@ export class GuildsPanel implements AdminPanel {
       if (this.search) params.set('q', this.search);
       const query = params.toString();
       const response = await this.ctx.request<AdminGuildListResponse>(`/admin/guilds${query ? `?${query}` : ''}`);
-      this.planCatalog = response.plan_catalog || [];
+      this.packCatalog = response.pack_catalog || [];
       this.statuses = response.statuses || [];
       this.renderGuilds(response.guilds || [], response.total ?? 0);
       this.ctx.setStatus('Guilds loaded.');
@@ -146,7 +142,7 @@ export class GuildsPanel implements AdminPanel {
   }
 
   // renderGuild builds the table row plus a collapsed detail row that holds the
-  // usage meters and the inline subscription editor, returned together so the
+  // credit meters and the inline credit-account editor, returned together so the
   // tbody keeps them adjacent.
   private renderGuild(guild: AdminGuild): DocumentFragment {
     const billing = guild.billing;
@@ -166,15 +162,16 @@ export class GuildsPanel implements AdminPanel {
     id.textContent = guild.guild_id;
     primary.append(name, id);
 
-    const planCell = document.createElement('td');
-    if (billing?.has_subscription) {
-      planCell.append(badge(billing.plan_display_name || formatStatus(billing.plan), 'plan'));
+    const hasCreditAccount = Boolean(billing?.has_credit_account);
+    const packCell = document.createElement('td');
+    if (hasCreditAccount) {
+      packCell.append(badge(billing?.pack_display_name || formatStatus(billing?.pack || ''), 'pack'));
     } else {
-      planCell.append(badge('No subscription', 'plan'));
+      packCell.append(badge('No credit account', 'pack'));
     }
 
     const statusCell = document.createElement('td');
-    statusCell.append(badge(billing?.has_subscription ? formatStatus(billing.status) : 'None', 'status'));
+    statusCell.append(badge(hasCreditAccount ? formatStatus(billing?.status || '') : 'None', 'status'));
     if (guild.install_status && guild.install_status !== 'active') {
       statusCell.append(badge(formatStatus(guild.install_status), 'install'));
     }
@@ -183,8 +180,8 @@ export class GuildsPanel implements AdminPanel {
     ownerCell.className = 'admin-cell-mono';
     ownerCell.textContent = guild.owner_user_id || '--';
 
-    const renewsCell = document.createElement('td');
-    renewsCell.textContent = formatDate(billing?.period_end);
+    const expiresCell = document.createElement('td');
+    expiresCell.textContent = formatDate(billing?.period_end);
 
     const actionCell = document.createElement('td');
     actionCell.className = 'admin-cell-action';
@@ -195,7 +192,7 @@ export class GuildsPanel implements AdminPanel {
     toggle.setAttribute('aria-expanded', 'false');
     actionCell.append(toggle);
 
-    row.append(primary, planCell, statusCell, ownerCell, renewsCell, actionCell);
+    row.append(primary, packCell, statusCell, ownerCell, expiresCell, actionCell);
 
     const detailRow = document.createElement('tr');
     detailRow.className = 'admin-detail-row';
@@ -219,6 +216,7 @@ export class GuildsPanel implements AdminPanel {
 
   private renderGuildDetail(guild: AdminGuild, row: HTMLElement, detailRow: HTMLElement): HTMLElement {
     const billing = guild.billing;
+    const hasCreditAccount = Boolean(billing?.has_credit_account);
     const wrapper = document.createElement('div');
     wrapper.className = 'admin-detail';
 
@@ -231,26 +229,26 @@ export class GuildsPanel implements AdminPanel {
       kvRow('Billing owner', billing?.billing_owner_user_id || '--'),
       kvRow('Email', billing?.email || '--'),
       kvRow('Joined', formatDate(guild.joined_at)),
-      kvRow('Renews', formatDate(billing?.period_end)),
+      kvRow('Expires', formatDate(billing?.period_end)),
     );
-    if (billing?.has_subscription) {
+    if (hasCreditAccount) {
       kv.append(
-        kvRow('Trial ends', formatDate(billing.trial_ends_at)),
-        kvRow('Cancel at period end', billing.cancel_at_period_end ? 'Yes' : 'No'),
+        kvRow('Trial ends', formatDate(billing?.trial_ends_at)),
+        kvRow('Cancel at period end', billing?.cancel_at_period_end ? 'Yes' : 'No'),
       );
     }
     accountCard.body.append(kv);
     wrapper.append(accountCard.card);
 
-    if (billing?.has_subscription && billing.limits) {
-      const usageCard = sectionCard('Usage');
+    if (hasCreditAccount && billing?.limits) {
+      const usageCard = sectionCard('Credits');
       usageCard.body.append(this.renderUsage(billing));
       wrapper.append(usageCard.card);
     } else {
       accountCard.card.classList.add('admin-detail-card-wide');
     }
 
-    const manageCard = sectionCard(billing?.has_subscription ? 'Manage subscription' : 'Create subscription');
+    const manageCard = sectionCard(hasCreditAccount ? 'Manage credit account' : 'Create credit account');
     manageCard.card.classList.add('admin-detail-card-wide');
     manageCard.body.append(this.renderManageForm(guild, row, detailRow));
     wrapper.append(manageCard.card);
@@ -262,11 +260,12 @@ export class GuildsPanel implements AdminPanel {
     const usage = document.createElement('div');
     usage.className = 'admin-guild-usage';
     const limits = billing.limits!;
+    const usedCredits = Math.max(0, (billing.usage.credits || limits.credits || 0) - (billing.usage.available_credits || 0));
+    const knowledgeStorageBytes = Math.max(0, billing.usage.knowledge_storage_bytes || 0);
     usage.append(
-      usageMeter('AI responses', billing.usage.ai_responses, limits.ai_responses),
-      usageMeter('Web searches', billing.usage.web_searches, limits.web_searches),
-      usageMeter('Image generations', billing.usage.image_generations, limits.image_generations),
-      usageMeter('Storage', billing.usage.knowledge_storage_bytes, limits.knowledge_storage_bytes, formatBytes),
+      usageMeter('Credits used', usedCredits, billing.usage.credits || limits.credits),
+      usageMeter('Reserved credits', billing.usage.reserved_credits || 0, billing.usage.credits || limits.credits),
+      usageMeter('Knowledge storage', knowledgeStorageBytes, limits.knowledge_storage_bytes, formatBytes),
     );
     return usage;
   }
@@ -276,17 +275,17 @@ export class GuildsPanel implements AdminPanel {
     const form = document.createElement('form');
     form.className = 'admin-guild-form';
 
-    const planSelect = labeledSelect('Plan', this.planCatalog.map((plan) => ({
-      value: plan.plan,
-      label: plan.display_name || formatStatus(plan.plan),
-    })), billing?.plan);
+    const packSelect = labeledSelect('Pack', this.packCatalog.map((pack) => ({
+      value: pack.pack,
+      label: pack.display_name || formatStatus(pack.pack),
+    })), billing?.pack);
 
     const statusSelect = labeledSelect('Status', this.statuses.map((status) => ({
       value: status,
       label: formatStatus(status),
     })), billing?.stored_status);
 
-    const periodEnd = labeledInput('Renews on', 'date', toDateValue(billing?.period_end));
+    const periodEnd = labeledInput('Expires on', 'date', toDateValue(billing?.period_end));
     const trialEnd = labeledInput('Trial ends', 'date', toDateValue(billing?.trial_ends_at));
 
     const cancelWrapper = document.createElement('label');
@@ -300,21 +299,21 @@ export class GuildsPanel implements AdminPanel {
 
     const grid = document.createElement('div');
     grid.className = 'admin-guild-form-grid';
-    grid.append(planSelect.field, statusSelect.field, periodEnd.field, trialEnd.field);
+    grid.append(packSelect.field, statusSelect.field, periodEnd.field, trialEnd.field);
 
     const actions = document.createElement('div');
     actions.className = 'admin-guild-form-actions';
     const save = document.createElement('button');
     save.type = 'submit';
     save.className = 'app-primary';
-    save.textContent = billing?.has_subscription ? 'Save changes' : 'Create subscription';
+    save.textContent = billing?.has_credit_account ? 'Save changes' : 'Create credit account';
     actions.append(cancelWrapper, save);
 
     form.append(grid, actions);
     form.addEventListener('submit', (event) => {
       event.preventDefault();
-      void this.saveSubscription(guild, row, detailRow, {
-        plan: planSelect.select.value,
+      void this.saveCreditAccount(guild, row, detailRow, {
+        pack: packSelect.select.value,
         status: statusSelect.select.value,
         period_end: periodEnd.input.value,
         trial_ends_at: trialEnd.input.value,
@@ -325,19 +324,19 @@ export class GuildsPanel implements AdminPanel {
     return form;
   }
 
-  private async saveSubscription(
+  private async saveCreditAccount(
     guild: AdminGuild,
     row: HTMLElement,
     detailRow: HTMLElement,
-    values: { plan: string; status: string; period_end: string; trial_ends_at: string; cancel_at_period_end: boolean },
+    values: { pack: string; status: string; period_end: string; trial_ends_at: string; cancel_at_period_end: boolean },
   ) {
     this.ctx.setBusy(true);
     this.ctx.setStatus(`Updating ${guild.name || guild.guild_id}.`);
     try {
-      const updated = await this.ctx.request<AdminGuild>(`/admin/guilds/${encodeURIComponent(guild.guild_id)}/subscription`, {
+      const updated = await this.ctx.request<AdminGuild>(`/admin/guilds/${encodeURIComponent(guild.guild_id)}/credit-account`, {
         method: 'POST',
         body: JSON.stringify({
-          plan: values.plan,
+          pack: values.pack,
           status: values.status,
           period_end: values.period_end,
           trial_ends_at: values.trial_ends_at,

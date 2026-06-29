@@ -13,7 +13,7 @@ import (
 	storepkg "github.com/sn0w/panda2/internal/store"
 )
 
-func TestEnsureTrialMetersUsageAndDeniesOverQuota(t *testing.T) {
+func TestEnsureTrialMetersCreditsAndDeniesOverBalance(t *testing.T) {
 	ctx := context.Background()
 	service, database := newBillingTestService(t)
 	defer database.Close()
@@ -29,16 +29,16 @@ func TestEnsureTrialMetersUsageAndDeniesOverQuota(t *testing.T) {
 	if err != nil {
 		t.Fatalf("EnsureTrial: %v", err)
 	}
-	if entitlement.Plan.Plan != PlanTrial || entitlement.Status != StatusTrialing || !entitlement.CanUsePaidFeatures || entitlement.ReadOnly {
+	if entitlement.Pack.Pack != PackTrial || entitlement.Status != StatusTrialing || !entitlement.CanUsePaidFeatures || entitlement.ReadOnly {
 		t.Fatalf("unexpected trial entitlement: %+v", entitlement)
 	}
-	if !entitlement.Plan.MusicEnabled || !entitlement.Plan.PremiumToolsEnabled {
-		t.Fatalf("trial entitlement should include all feature privileges: %+v", entitlement.Plan)
+	if entitlement.AvailableCredits != entitlement.Pack.Credits || entitlement.ReservedCredits != 0 {
+		t.Fatalf("expected full trial credit balance, got %+v", entitlement)
 	}
 
-	reservation, err := service.BeginUsage(ctx, "guild-1", MetricAIResponse, int64(entitlement.Plan.AIResponses))
+	reservation, err := service.BeginUsage(ctx, "guild-1", MetricAIResponse, entitlement.Pack.Credits/4-1)
 	if err != nil {
-		t.Fatalf("BeginUsage at trial limit: %v", err)
+		t.Fatalf("BeginUsage near trial balance: %v", err)
 	}
 	if reservation.ID == "" {
 		t.Fatal("expected reservation id")
@@ -47,13 +47,13 @@ func TestEnsureTrialMetersUsageAndDeniesOverQuota(t *testing.T) {
 		t.Fatalf("CommitUsage: %v", err)
 	}
 
-	_, err = service.BeginUsage(ctx, "guild-1", MetricAIResponse, 1)
-	var quotaErr QuotaError
-	if !errors.As(err, &quotaErr) {
-		t.Fatalf("expected QuotaError after trial limit, got %T %v", err, err)
+	_, err = service.BeginUsage(ctx, "guild-1", MetricAIResponse, 2)
+	var creditErr CreditError
+	if !errors.As(err, &creditErr) {
+		t.Fatalf("expected CreditError after consuming trial credits, got %T %v", err, err)
 	}
-	if quotaErr.Metric != MetricAIResponse || quotaErr.Used != int64(entitlement.Plan.AIResponses) || quotaErr.Limit != int64(entitlement.Plan.AIResponses) {
-		t.Fatalf("unexpected quota error: %+v", quotaErr)
+	if creditErr.Action != ActionAssistantModelRound || creditErr.Used != entitlement.Pack.Credits-4 || creditErr.Limit != entitlement.Pack.Credits || creditErr.RequiredCredits != 8 || creditErr.AvailableCredits != 4 {
+		t.Fatalf("unexpected credit error: %+v", creditErr)
 	}
 }
 
@@ -70,7 +70,7 @@ func TestSolPaymentOrderVerificationRevealAndActivation(t *testing.T) {
 
 	order, err := service.CreateSolPaymentOrder(ctx, CreateSolPaymentOrderRequest{
 		BillingOwnerUserID: "owner-1",
-		Plan:               PlanPlus,
+		Plan:               PackPlus,
 		SupportEmail:       "owner@example.com",
 	})
 	if err != nil {
@@ -114,8 +114,11 @@ func TestSolPaymentOrderVerificationRevealAndActivation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ActivateWithAPIKey: %v", err)
 	}
-	if activated.Entitlement.Plan.Plan != PlanPlus || activated.Entitlement.PaymentProvider != ProviderSol || !activated.Entitlement.CanUsePaidFeatures {
+	if activated.Entitlement.Pack.Pack != PackPlus || activated.Entitlement.PaymentProvider != ProviderSol || !activated.Entitlement.CanUsePaidFeatures {
 		t.Fatalf("unexpected activated entitlement: %+v", activated.Entitlement)
+	}
+	if activated.Entitlement.AvailableCredits < packDefinitions[PackPlus].Credits {
+		t.Fatalf("expected plus pack credits to be granted, got %+v", activated.Entitlement)
 	}
 	activatedOrder, ok, err := repository.NewBillingRepository(database.DB).GetBillingOrder(ctx, order.OrderID)
 	if err != nil || !ok {
@@ -146,7 +149,7 @@ func TestSolVerificationRejectsWrongWalletAndKeepsOrderClosed(t *testing.T) {
 	service.SetClock(func() time.Time { return now })
 	order, err := service.CreateSolPaymentOrder(ctx, CreateSolPaymentOrderRequest{
 		GuildID: "guild-1",
-		Plan:    PlanStarter,
+		Plan:    PackStarter,
 	})
 	if err != nil {
 		t.Fatalf("CreateSolPaymentOrder: %v", err)
@@ -185,7 +188,7 @@ func TestActivationKeyRevocationIsOperatorOnlyAndAudited(t *testing.T) {
 	order, err := service.CreateSolPaymentOrder(ctx, CreateSolPaymentOrderRequest{
 		GuildID:            "guild-1",
 		BillingOwnerUserID: "owner-1",
-		Plan:               PlanPro,
+		Plan:               PackPro,
 	})
 	if err != nil {
 		t.Fatalf("CreateSolPaymentOrder: %v", err)
@@ -244,7 +247,7 @@ func TestCouponCreateDuplicateAndInvalidOrderCreation(t *testing.T) {
 	created, err := service.CreateCoupon(ctx, CreateCouponRequest{
 		ActorUserID:      "owner-1",
 		ActorIsOwner:     true,
-		Plan:             PlanPlus,
+		Plan:             PackPlus,
 		DiscountLamports: 10_000_000,
 		Code:             "PLUS10",
 		MaxRedemptions:   1,
@@ -268,7 +271,7 @@ func TestCouponCreateDuplicateAndInvalidOrderCreation(t *testing.T) {
 	if _, err := service.CreateCoupon(ctx, CreateCouponRequest{
 		ActorUserID:      "owner-1",
 		ActorIsOwner:     true,
-		Plan:             PlanPlus,
+		Plan:             PackPlus,
 		DiscountLamports: 5_000_000,
 		Code:             "PLUS10",
 	}); !errors.Is(err, ErrCouponDuplicate) {
@@ -276,17 +279,17 @@ func TestCouponCreateDuplicateAndInvalidOrderCreation(t *testing.T) {
 	}
 	if _, err := service.CreateCoupon(ctx, CreateCouponRequest{
 		ActorUserID:      "user-1",
-		Plan:             PlanPlus,
+		Plan:             PackPlus,
 		DiscountLamports: 5_000_000,
 	}); !errors.Is(err, ErrBillingAccess) {
 		t.Fatalf("expected owner-only create error, got %v", err)
 	}
 	if _, err := service.CreateSolPaymentOrder(ctx, CreateSolPaymentOrderRequest{
 		GuildID:    "guild-1",
-		Plan:       PlanPro,
+		Plan:       PackPro,
 		CouponCode: created.Code,
-	}); !errors.Is(err, ErrCouponPlanMismatch) {
-		t.Fatalf("expected wrong-plan coupon error, got %v", err)
+	}); !errors.Is(err, ErrCouponPackMismatch) {
+		t.Fatalf("expected wrong-pack coupon error, got %v", err)
 	}
 
 	revoked, err := service.RevokeCoupon(ctx, RevokeCouponRequest{ActorUserID: "owner-1", ActorIsOwner: true, CouponID: created.Coupon.CouponID})
@@ -298,7 +301,7 @@ func TestCouponCreateDuplicateAndInvalidOrderCreation(t *testing.T) {
 	}
 	if _, err := service.CreateSolPaymentOrder(ctx, CreateSolPaymentOrderRequest{
 		GuildID:    "guild-1",
-		Plan:       PlanPlus,
+		Plan:       PackPlus,
 		CouponCode: created.Code,
 	}); !errors.Is(err, ErrCouponRevoked) {
 		t.Fatalf("expected revoked coupon error, got %v", err)
@@ -315,7 +318,7 @@ func TestLimitedCouponReservationAndExpirationRelease(t *testing.T) {
 	coupon, err := service.CreateCoupon(ctx, CreateCouponRequest{
 		ActorUserID:      "owner-1",
 		ActorIsOwner:     true,
-		Plan:             PlanStarter,
+		Plan:             PackStarter,
 		DiscountLamports: 1_000_000,
 		Code:             "ONEUSE",
 		MaxRedemptions:   1,
@@ -325,7 +328,7 @@ func TestLimitedCouponReservationAndExpirationRelease(t *testing.T) {
 	}
 	order, err := service.CreateSolPaymentOrder(ctx, CreateSolPaymentOrderRequest{
 		GuildID:    "guild-1",
-		Plan:       PlanStarter,
+		Plan:       PackStarter,
 		CouponCode: coupon.Code,
 	})
 	if err != nil {
@@ -336,7 +339,7 @@ func TestLimitedCouponReservationAndExpirationRelease(t *testing.T) {
 	}
 	if _, err := service.CreateSolPaymentOrder(ctx, CreateSolPaymentOrderRequest{
 		GuildID:    "guild-2",
-		Plan:       PlanStarter,
+		Plan:       PackStarter,
 		CouponCode: coupon.Code,
 	}); !errors.Is(err, ErrCouponExhausted) {
 		t.Fatalf("expected exhausted coupon error, got %v", err)
@@ -366,7 +369,7 @@ func TestPaidCouponOrderVerifiesDueLamports(t *testing.T) {
 	coupon, err := service.CreateCoupon(ctx, CreateCouponRequest{
 		ActorUserID:      "owner-1",
 		ActorIsOwner:     true,
-		Plan:             PlanPlus,
+		Plan:             PackPlus,
 		DiscountLamports: 10_000_000,
 		Code:             "PLUS-DUE",
 	})
@@ -375,7 +378,7 @@ func TestPaidCouponOrderVerifiesDueLamports(t *testing.T) {
 	}
 	order, err := service.CreateSolPaymentOrder(ctx, CreateSolPaymentOrderRequest{
 		GuildID:    "guild-1",
-		Plan:       PlanPlus,
+		Plan:       PackPlus,
 		CouponCode: coupon.Code,
 	})
 	if err != nil {
@@ -409,7 +412,7 @@ func TestServerPreparedSolTransactionAndSubmission(t *testing.T) {
 	service.SetClock(func() time.Time { return now })
 	order, err := service.CreateSolPaymentOrder(ctx, CreateSolPaymentOrderRequest{
 		GuildID: "guild-1",
-		Plan:    PlanStarter,
+		Plan:    PackStarter,
 	})
 	if err != nil {
 		t.Fatalf("CreateSolPaymentOrder: %v", err)
@@ -464,7 +467,7 @@ func TestFreeCouponOrderRevealsAndActivatesWithoutSolana(t *testing.T) {
 	coupon, err := service.CreateCoupon(ctx, CreateCouponRequest{
 		ActorUserID:      "owner-1",
 		ActorIsOwner:     true,
-		Plan:             PlanBusiness,
+		Plan:             PackBusiness,
 		DiscountLamports: 999_000_000,
 		Code:             "COMP-BIZ",
 	})
@@ -473,7 +476,7 @@ func TestFreeCouponOrderRevealsAndActivatesWithoutSolana(t *testing.T) {
 	}
 	order, err := service.CreateSolPaymentOrder(ctx, CreateSolPaymentOrderRequest{
 		BillingOwnerUserID: "owner-1",
-		Plan:               PlanBusiness,
+		Plan:               PackBusiness,
 		CouponCode:         coupon.Code,
 	})
 	if err != nil {
@@ -498,7 +501,7 @@ func TestFreeCouponOrderRevealsAndActivatesWithoutSolana(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ActivateWithAPIKey free coupon: %v", err)
 	}
-	if activated.Entitlement.Plan.Plan != PlanBusiness || activated.Entitlement.PaymentProvider != ProviderCoupon || !activated.Entitlement.CanUsePaidFeatures {
+	if activated.Entitlement.Pack.Pack != PackBusiness || activated.Entitlement.PaymentProvider != ProviderCoupon || !activated.Entitlement.CanUsePaidFeatures {
 		t.Fatalf("unexpected free coupon entitlement: %+v", activated.Entitlement)
 	}
 	var event storepkg.InvoicePaymentEvent
@@ -567,10 +570,10 @@ func newBillingTestService(t *testing.T) (*Service, *storepkg.Store) {
 		SolanaOrderExpiration:  time.Hour,
 		SolanaActivationKeyTTL: time.Hour,
 		SolanaPlanLamports: map[string]int64{
-			PlanStarter:  19_000_000,
-			PlanPlus:     49_000_000,
-			PlanPro:      99_000_000,
-			PlanBusiness: 249_000_000,
+			PackStarter:  19_000_000,
+			PackPlus:     49_000_000,
+			PackPro:      99_000_000,
+			PackBusiness: 249_000_000,
 		},
 	}).WithAuditRecorder(repository.NewAuditRepository(database.DB))
 	return service, database
@@ -646,10 +649,10 @@ func TestAdminOverviewReportsTrialAndUsage(t *testing.T) {
 
 	overview, err := service.AdminOverview(ctx, "guild-1")
 	if err != nil {
-		t.Fatalf("AdminOverview before subscription: %v", err)
+		t.Fatalf("AdminOverview before credit account: %v", err)
 	}
-	if overview.HasSubscription {
-		t.Fatalf("expected no subscription, got %+v", overview)
+	if overview.HasCreditAccount {
+		t.Fatalf("expected no credit account, got %+v", overview)
 	}
 
 	if _, err := service.EnsureTrial(ctx, TrialSeed{GuildID: "guild-1", BillingOwnerUserID: "owner-1", Email: "owner@example.com", AuthorizedAt: now}); err != nil {
@@ -660,18 +663,18 @@ func TestAdminOverviewReportsTrialAndUsage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("AdminOverview: %v", err)
 	}
-	if !overview.HasSubscription || overview.Plan != PlanTrial || overview.StoredStatus != StatusTrialing {
+	if !overview.HasCreditAccount || overview.Pack != PackTrial || overview.StoredStatus != StatusTrialing {
 		t.Fatalf("unexpected overview: %+v", overview)
 	}
 	if overview.Email != "owner@example.com" || overview.BillingOwnerUserID != "owner-1" {
 		t.Fatalf("expected customer account details, got %+v", overview)
 	}
-	if overview.Limits.AIResponses != planLimits[PlanTrial].AIResponses {
+	if overview.Limits.Credits != packDefinitions[PackTrial].Credits || overview.AvailableCredits != packDefinitions[PackTrial].Credits {
 		t.Fatalf("unexpected limits: %+v", overview.Limits)
 	}
 }
 
-func TestAdminSetSubscriptionOverridesPlanAndStatus(t *testing.T) {
+func TestAdminSetCreditAccountOverridesPackAndStatus(t *testing.T) {
 	ctx := context.Background()
 	service, database := newBillingTestService(t)
 	defer database.Close()
@@ -684,25 +687,25 @@ func TestAdminSetSubscriptionOverridesPlanAndStatus(t *testing.T) {
 
 	periodEnd := now.AddDate(0, 1, 0)
 	cancel := true
-	overview, err := service.AdminSetSubscription(ctx, AdminSetSubscriptionRequest{
+	overview, err := service.AdminSetCreditAccount(ctx, AdminSetCreditAccountRequest{
 		GuildID:           "guild-1",
 		ActorUserID:       "treasury_wallet:abc",
-		Plan:              PlanPro,
+		Pack:              PackPro,
 		Status:            StatusActive,
 		PeriodEnd:         &periodEnd,
 		CancelAtPeriodEnd: &cancel,
 	})
 	if err != nil {
-		t.Fatalf("AdminSetSubscription: %v", err)
+		t.Fatalf("AdminSetCreditAccount: %v", err)
 	}
-	if overview.Plan != PlanPro || overview.StoredStatus != StatusActive {
+	if overview.Pack != PackPro || overview.StoredStatus != StatusActive {
 		t.Fatalf("expected pro/active, got %+v", overview)
 	}
 	if overview.PaymentProvider != ProviderManual {
 		t.Fatalf("expected manual provider, got %q", overview.PaymentProvider)
 	}
-	if !overview.CancelAtPeriodEnd || !overview.PeriodEnd.Equal(periodEnd) {
-		t.Fatalf("unexpected period fields: %+v", overview)
+	if overview.Credits != packDefinitions[PackPro].Credits || overview.AvailableCredits < packDefinitions[PackPro].Credits {
+		t.Fatalf("unexpected pro credit grant fields: %+v", overview)
 	}
 
 	// The override should be persisted and resolvable as paid entitlement.
@@ -710,29 +713,29 @@ func TestAdminSetSubscriptionOverridesPlanAndStatus(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
 	}
-	if entitlement.Plan.Plan != PlanPro || !entitlement.CanUsePaidFeatures {
+	if entitlement.Pack.Pack != PackPro || !entitlement.CanUsePaidFeatures {
 		t.Fatalf("unexpected resolved entitlement: %+v", entitlement)
 	}
 
-	// Suspending should remove paid access without changing the plan.
-	overview, err = service.AdminSetSubscription(ctx, AdminSetSubscriptionRequest{
+	// Suspending should remove paid access without changing the pack.
+	overview, err = service.AdminSetCreditAccount(ctx, AdminSetCreditAccountRequest{
 		GuildID: "guild-1",
 		Status:  StatusSuspended,
 	})
 	if err != nil {
-		t.Fatalf("AdminSetSubscription suspend: %v", err)
+		t.Fatalf("AdminSetCreditAccount suspend: %v", err)
 	}
-	if overview.Plan != PlanPro || overview.StoredStatus != StatusSuspended || !overview.ReadOnly {
-		t.Fatalf("expected suspended read-only pro plan, got %+v", overview)
+	if overview.Pack != PackPro || overview.StoredStatus != StatusSuspended || !overview.ReadOnly {
+		t.Fatalf("expected suspended read-only pro pack, got %+v", overview)
 	}
 }
 
-func TestAdminSetSubscriptionRejectsUnknownPlan(t *testing.T) {
+func TestAdminSetCreditAccountRejectsUnknownPack(t *testing.T) {
 	ctx := context.Background()
 	service, database := newBillingTestService(t)
 	defer database.Close()
 
-	if _, err := service.AdminSetSubscription(ctx, AdminSetSubscriptionRequest{GuildID: "guild-1", Plan: "enterprise"}); err == nil {
-		t.Fatal("expected error for unknown plan")
+	if _, err := service.AdminSetCreditAccount(ctx, AdminSetCreditAccountRequest{GuildID: "guild-1", Pack: "enterprise"}); err == nil {
+		t.Fatal("expected error for unknown pack")
 	}
 }

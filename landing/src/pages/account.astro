@@ -1,5 +1,19 @@
 ---
 import LogoMark from '../components/LogoMark.astro';
+import DashCard from '../components/dashboard/DashCard.astro';
+import DashConsole from '../components/dashboard/DashConsole.astro';
+import DashGate from '../components/dashboard/DashGate.astro';
+import DashKvRow from '../components/dashboard/DashKvRow.astro';
+import DashLoginCard from '../components/dashboard/DashLoginCard.astro';
+import DashNav from '../components/dashboard/DashNav.astro';
+import DashNavItem from '../components/dashboard/DashNavItem.astro';
+import DashPanel from '../components/dashboard/DashPanel.astro';
+import DashPanelHead from '../components/dashboard/DashPanelHead.astro';
+import DashPill from '../components/dashboard/DashPill.astro';
+import DashSession from '../components/dashboard/DashSession.astro';
+import DashSidebar from '../components/dashboard/DashSidebar.astro';
+import DashStat from '../components/dashboard/DashStat.astro';
+import DashTile from '../components/dashboard/DashTile.astro';
 import Kicker from '../components/ui/Kicker.astro';
 import { siteMeta } from '../data/landing';
 import BaseLayout from '../layouts/BaseLayout.astro';
@@ -11,265 +25,150 @@ const billingApiBase = import.meta.env.PUBLIC_PANDA_API_BASE_URL || (import.meta
   title="Panda account - Dashboard"
   description="Manage your Panda wallet account, payment status, trial usage, and billing from one dashboard."
 >
-  <main id="main" class="account-page">
-    <section class="account-shell" data-wallet-account data-api-base={billingApiBase}>
+  <main id="main" class="dash-page">
+    <section class="dash-shell" data-wallet-account data-api-base={billingApiBase}>
       <!-- Signed-out gate -->
-      <div class="account-gate reveal" data-account-login-view>
-        <a class="account-gate-brand" href="/" aria-label="Panda home">
+      <DashGate data-account-login-view>
+        <a class="dash-gate-brand" href="/" aria-label="Panda home">
           <LogoMark class="brand-mark" loading="eager" />
           <span>PANDA</span>
         </a>
 
-        <div class="account-gate-intro">
+        <div class="dash-gate-intro">
           <Kicker tone="paper">Account</Kicker>
           <h1>Your account.</h1>
           <p>
             Sign in with the Solana wallet you use for payment. Panda attaches
-            your plan to Discord later through the activation key.
+            your pack to Discord later through the activation key.
           </p>
         </div>
 
-        <div class="account-login-card">
-          <div class="account-panel-head">
-            <span>Wallet access</span>
-            <strong>Sign in</strong>
-          </div>
-          <div class="account-login-body">
-            <button class="app-primary account-login-button" type="button" data-account-connect>Sign in with wallet</button>
-          </div>
-        </div>
-      </div>
+        <DashLoginCard eyebrow="Wallet access" title="Sign in">
+          <button class="app-primary dash-login-button" type="button" data-account-connect>Sign in with wallet</button>
+        </DashLoginCard>
+      </DashGate>
 
       <!-- Signed-in console -->
-      <div class="account-console reveal" data-account-dashboard hidden>
-        <aside class="account-sidebar">
-          <a class="account-brand" href="/" aria-label="Panda home">
-            <LogoMark class="brand-mark" loading="eager" />
-            <span>PANDA</span>
-          </a>
-
-          <nav class="account-nav" role="tablist" aria-label="Account sections">
-            <button type="button" class="account-nav-item active" role="tab" aria-selected="true" data-account-tab-button="overview">
+      <DashConsole data-account-dashboard hidden>
+        <DashSidebar slot="sidebar">
+          <DashNav slot="nav" label="Account sections">
+            <DashNavItem scope="account" tab="overview" label="Overview" active>
               <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
                 <rect x="3" y="3" width="7.5" height="7.5" rx="1.6" stroke="currentColor" stroke-width="1.6" />
                 <rect x="13.5" y="3" width="7.5" height="7.5" rx="1.6" stroke="currentColor" stroke-width="1.6" />
                 <rect x="3" y="13.5" width="7.5" height="7.5" rx="1.6" stroke="currentColor" stroke-width="1.6" />
                 <rect x="13.5" y="13.5" width="7.5" height="7.5" rx="1.6" stroke="currentColor" stroke-width="1.6" />
               </svg>
-              <span>Overview</span>
-            </button>
-            <button type="button" class="account-nav-item" role="tab" aria-selected="false" data-account-tab-button="billing">
+            </DashNavItem>
+            <DashNavItem scope="account" tab="billing" label="Billing">
               <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
                 <rect x="3" y="5" width="18" height="14" rx="2" stroke="currentColor" stroke-width="1.6" />
                 <path d="M3 9.5h18" stroke="currentColor" stroke-width="1.6" />
                 <path d="M6.5 14.5h4" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" />
               </svg>
-              <span>Billing</span>
-            </button>
-            <button type="button" class="account-nav-item" role="tab" aria-selected="false" data-account-tab-button="usage">
+            </DashNavItem>
+            <DashNavItem scope="account" tab="usage" label="Usage">
               <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
                 <path d="M4 20V10M10 20V4M16 20v-7M22 20H2" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" />
               </svg>
-              <span>Usage</span>
-            </button>
-            <button type="button" class="account-nav-item" role="tab" aria-selected="false" data-account-tab-button="settings">
+            </DashNavItem>
+            <DashNavItem scope="account" tab="settings" label="Settings">
               <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
                 <circle cx="12" cy="12" r="3.2" stroke="currentColor" stroke-width="1.6" />
                 <path d="M12 3v2.4M12 18.6V21M3 12h2.4M18.6 12H21M5.6 5.6l1.7 1.7M16.7 16.7l1.7 1.7M18.4 5.6l-1.7 1.7M7.3 16.7l-1.7 1.7" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" />
               </svg>
-              <span>Settings</span>
-            </button>
-          </nav>
+            </DashNavItem>
+          </DashNav>
 
-          <div class="account-sidebar-foot">
-            <div class="account-session-card">
-              <span>Signed in wallet</span>
-              <small data-account-wallet-summary>--</small>
-            </div>
-            <div class="account-sidebar-actions">
-              <button type="button" data-account-refresh>Refresh</button>
-              <button type="button" data-account-logout>Log out</button>
+          <DashSession slot="foot" scope="account" label="Signed in wallet" />
+        </DashSidebar>
+
+        <!-- Overview -->
+        <DashPanel data-account-tab="overview">
+          <DashPanelHead title="Overview">
+            <DashPill slot="badge" data-account-overview-pill data-tone="idle">No server connected</DashPill>
+          </DashPanelHead>
+
+          <div class="dash-grid">
+            <DashStat label="Payment status" data-account-payment-status data-payment-tone="idle">
+              No payment yet
+              <p class="dash-stat-meta" slot="meta">Pack&nbsp;&middot;&nbsp;<span data-account-payment-pack>--</span></p>
+            </DashStat>
+
+            <DashStat label="Pack" data-account-trial-status data-trial-tone="idle">
+              No server connected
+              <p class="dash-stat-meta" slot="meta">Time left&nbsp;&middot;&nbsp;<span data-account-trial-time>--</span></p>
+            </DashStat>
+          </div>
+
+          <div class="dash-tiles">
+            <DashTile label="Amount" data-account-payment-amount>--</DashTile>
+            <DashTile label="Expires" data-account-payment-expires>--</DashTile>
+            <DashTile label="Wallet" data-account-wallet-summary>--</DashTile>
+          </div>
+        </DashPanel>
+
+        <!-- Billing -->
+        <DashPanel data-account-tab="billing" hidden>
+          <DashPanelHead title="Billing" />
+
+          <DashCard eyebrow="Latest order">
+            <strong slot="title" data-account-payment-status data-payment-tone="idle">No payment yet</strong>
+            <dl class="dash-kv">
+              <DashKvRow term="Pack" data-account-payment-pack>--</DashKvRow>
+              <DashKvRow term="Amount" data-account-payment-amount>--</DashKvRow>
+              <DashKvRow term="Expires" data-account-payment-expires>--</DashKvRow>
+            </dl>
+          </DashCard>
+
+          <div class="dash-card-actions">
+            <p class="dash-card-note">Checkout is processed with your connected wallet. Packs are prepaid; buy another pack to add credits.</p>
+            <a class="app-primary dash-cta" href={siteMeta.billingUrl} data-account-billing-link>Open billing</a>
+          </div>
+        </DashPanel>
+
+        <!-- Usage -->
+        <DashPanel data-account-tab="usage" hidden>
+          <DashPanelHead title="Usage">
+            <DashPill slot="badge" data-account-overview-pill data-tone="idle">No server connected</DashPill>
+            <p class="dash-usage-time" slot="actions">Time left&nbsp;&middot;&nbsp;<span data-account-trial-time>--</span></p>
+          </DashPanelHead>
+
+          <div class="dash-meters">
+            <div class="dash-meter">
+              <div class="dash-meter-head">
+                <span>Credits</span>
+                <strong data-account-trial-credits>--</strong>
+              </div>
+              <div class="dash-meter-track">
+                <div class="dash-meter-fill" data-account-meter-fill="credits" data-level="idle"></div>
+              </div>
+              <small class="dash-meter-detail" data-account-meter-detail="credits">--</small>
             </div>
           </div>
-        </aside>
+        </DashPanel>
 
-        <div class="account-main">
-          <!-- Overview -->
-          <section class="account-panel" role="tabpanel" data-account-tab="overview">
-            <header class="account-panel-head2">
-              <div class="account-panel-title">
-                <h2>Overview</h2>
-                <span class="account-pill" data-account-overview-pill data-tone="idle">No server connected</span>
-              </div>
-            </header>
+        <!-- Settings -->
+        <DashPanel data-account-tab="settings" hidden>
+          <DashPanelHead title="Settings" />
 
-            <div class="account-overview">
-              <article class="account-stat-card">
-                <span class="account-stat-label">Payment status</span>
-                <div class="account-stat-value">
-                  <span class="account-stat-dot" aria-hidden="true"></span>
-                  <strong data-account-payment-status data-payment-tone="idle">No payment yet</strong>
-                </div>
-                <p class="account-stat-meta">Plan&nbsp;&middot;&nbsp;<span data-account-payment-plan>--</span></p>
-              </article>
+          <DashCard eyebrow="Wallet identity">
+            <strong slot="title" data-account-wallet-name>--</strong>
+            <dl class="dash-kv">
+              <DashKvRow term="Address" class="dash-kv-mono" data-account-wallet-address>--</DashKvRow>
+              <DashKvRow term="Connected" data-account-created>--</DashKvRow>
+            </dl>
+          </DashCard>
 
-              <article class="account-stat-card">
-                <span class="account-stat-label">Subscription</span>
-                <div class="account-stat-value">
-                  <span class="account-stat-dot" aria-hidden="true"></span>
-                  <strong data-account-trial-status data-trial-tone="idle">No server connected</strong>
-                </div>
-                <p class="account-stat-meta">Time left&nbsp;&middot;&nbsp;<span data-account-trial-time>--</span></p>
-              </article>
+          <div class="dash-danger">
+            <div class="dash-danger-copy">
+              <strong>Delete account</strong>
+              <small>Removes the saved wallet session and billing references from this browser.</small>
             </div>
-
-            <div class="account-tiles">
-              <div class="account-tile">
-                <span>Amount</span>
-                <strong data-account-payment-amount>--</strong>
-              </div>
-              <div class="account-tile">
-                <span>Renews</span>
-                <strong data-account-payment-expires>--</strong>
-              </div>
-              <div class="account-tile">
-                <span>Wallet</span>
-                <strong data-account-wallet-summary>--</strong>
-              </div>
-            </div>
-          </section>
-
-          <!-- Billing -->
-          <section class="account-panel" role="tabpanel" data-account-tab="billing" hidden>
-            <header class="account-panel-head2">
-              <div class="account-panel-title">
-                <h2>Billing</h2>
-              </div>
-            </header>
-
-            <article class="account-card">
-              <div class="account-card-head">
-                <span>Latest order</span>
-                <strong data-account-payment-status data-payment-tone="idle">No payment yet</strong>
-              </div>
-              <div class="account-card-body">
-                <dl class="account-kv">
-                  <div class="account-kv-row">
-                    <dt>Plan</dt>
-                    <dd data-account-payment-plan>--</dd>
-                  </div>
-                  <div class="account-kv-row">
-                    <dt>Amount</dt>
-                    <dd data-account-payment-amount>--</dd>
-                  </div>
-                  <div class="account-kv-row">
-                    <dt>Expires</dt>
-                    <dd data-account-payment-expires>--</dd>
-                  </div>
-                </dl>
-              </div>
-            </article>
-
-            <div class="account-card-actions">
-              <p class="account-card-note">Checkout and renewals are processed with your connected wallet.</p>
-              <a class="app-primary account-billing-cta" href={siteMeta.billingUrl} data-account-billing-link>Open billing</a>
-            </div>
-          </section>
-
-          <!-- Usage -->
-          <section class="account-panel" role="tabpanel" data-account-tab="usage" hidden>
-            <header class="account-panel-head2">
-              <div class="account-panel-title">
-                <h2>Usage</h2>
-                <span class="account-pill" data-account-overview-pill data-tone="idle">No server connected</span>
-              </div>
-              <p class="account-usage-time">Time left&nbsp;&middot;&nbsp;<span data-account-trial-time>--</span></p>
-            </header>
-
-            <div class="account-meters">
-              <div class="account-meter">
-                <div class="account-meter-head">
-                  <span>AI responses</span>
-                  <strong data-account-trial-ai>--</strong>
-                </div>
-                <div class="account-meter-track">
-                  <div class="account-meter-fill" data-account-meter-fill="ai" data-level="idle"></div>
-                </div>
-                <small class="account-meter-detail" data-account-meter-detail="ai">--</small>
-              </div>
-
-              <div class="account-meter">
-                <div class="account-meter-head">
-                  <span>Web searches</span>
-                  <strong data-account-trial-search>--</strong>
-                </div>
-                <div class="account-meter-track">
-                  <div class="account-meter-fill" data-account-meter-fill="search" data-level="idle"></div>
-                </div>
-                <small class="account-meter-detail" data-account-meter-detail="search">--</small>
-              </div>
-
-              <div class="account-meter">
-                <div class="account-meter-head">
-                  <span>Image generations</span>
-                  <strong data-account-trial-images>--</strong>
-                </div>
-                <div class="account-meter-track">
-                  <div class="account-meter-fill" data-account-meter-fill="images" data-level="idle"></div>
-                </div>
-                <small class="account-meter-detail" data-account-meter-detail="images">--</small>
-              </div>
-
-              <div class="account-meter">
-                <div class="account-meter-head">
-                  <span>Knowledge storage</span>
-                  <strong data-account-trial-storage>--</strong>
-                </div>
-                <div class="account-meter-track">
-                  <div class="account-meter-fill" data-account-meter-fill="storage" data-level="idle"></div>
-                </div>
-                <small class="account-meter-detail" data-account-meter-detail="storage">--</small>
-              </div>
-            </div>
-          </section>
-
-          <!-- Settings -->
-          <section class="account-panel" role="tabpanel" data-account-tab="settings" hidden>
-            <header class="account-panel-head2">
-              <div class="account-panel-title">
-                <h2>Settings</h2>
-              </div>
-            </header>
-
-            <article class="account-card">
-              <div class="account-card-head">
-                <span>Wallet identity</span>
-                <strong data-account-wallet-name>--</strong>
-              </div>
-              <div class="account-card-body">
-                <dl class="account-kv">
-                  <div class="account-kv-row">
-                    <dt>Address</dt>
-                    <dd class="account-kv-mono" data-account-wallet-address>--</dd>
-                  </div>
-                  <div class="account-kv-row">
-                    <dt>Connected</dt>
-                    <dd data-account-created>--</dd>
-                  </div>
-                </dl>
-              </div>
-            </article>
-
-            <div class="account-danger">
-              <div class="account-danger-copy">
-                <strong>Delete account</strong>
-                <small>Removes the saved wallet session and billing references from this browser.</small>
-              </div>
-              <button class="account-danger-button" type="button" data-account-delete>Delete account</button>
-            </div>
-          </section>
-        </div>
-      </div>
+            <button class="dash-danger-btn" type="button" data-account-delete>Delete account</button>
+          </div>
+        </DashPanel>
+      </DashConsole>
 
       <dialog class="wallet-dialog" data-account-wallet-dialog aria-labelledby="wallet-dialog-title">
         <div class="wallet-dialog-panel">
@@ -282,11 +181,11 @@ const billingApiBase = import.meta.env.PUBLIC_PANDA_API_BASE_URL || (import.meta
           </div>
 
           <div class="account-wallet-list" data-account-wallet-list aria-label="Detected wallets"></div>
-          <p class="account-login-note" data-account-wallet-dialog-note>Wallet extensions decide which account to approve.</p>
+          <p class="dash-note" data-account-wallet-dialog-note>Wallet extensions decide which account to approve.</p>
         </div>
       </dialog>
 
-      <p class="account-status-live" role="status" aria-live="polite" data-account-status></p>
+      <p class="dash-status-live" role="status" aria-live="polite" data-account-status></p>
     </section>
   </main>
 </BaseLayout>

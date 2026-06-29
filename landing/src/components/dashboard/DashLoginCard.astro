@@ -1,0 +1,21 @@
+---
+/**
+ * Sign-in card used on both gates: an eyebrow + title head and a body slot.
+ */
+interface Props {
+  eyebrow: string;
+  title: string;
+}
+
+const { eyebrow, title } = Astro.props;
+---
+
+<div class="dash-login-card">
+  <div class="dash-login-head">
+    <span>{eyebrow}</span>
+    <strong>{title}</strong>
+  </div>
+  <div class="dash-login-body">
+    <slot />
+  </div>
+</div>

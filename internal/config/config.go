@@ -50,7 +50,7 @@ const (
 	defaultSolanaActivationKeyTTL  = 48 * time.Hour
 )
 
-var paidPlanNames = []string{"starter", "plus", "pro", "business"}
+var paidPackNames = []string{"starter", "plus", "pro", "business"}
 
 func defaultYouTubeCaptionFontPath() string {
 	if runtime.GOOS == "darwin" {
@@ -117,6 +117,8 @@ type Config struct {
 	SolanaOrderExpiration                    time.Duration
 	SolanaActivationKeyTTL                   time.Duration
 	SolanaPlanLamports                       map[string]int64
+	SolanaPackLamports                       map[string]int64
+	SolanaUSDCentsPerSOL                     int64
 	MusicYTDLPPath                           string
 	MusicFFmpegPath                          string
 	MusicSidecarDir                          string
@@ -213,6 +215,8 @@ type fileBillingConfig struct {
 	SolanaOrderExpiration string           `json:"solana_order_expiration"`
 	SolanaActivationTTL   string           `json:"solana_activation_key_ttl"`
 	SolanaPlanLamports    map[string]int64 `json:"solana_plan_lamports"`
+	SolanaPackLamports    map[string]int64 `json:"solana_pack_lamports"`
+	SolanaUSDCentsPerSOL  int64            `json:"solana_usd_cents_per_sol"`
 }
 
 type fileMusicConfig struct {
@@ -251,6 +255,7 @@ func Load() (Config, []string, error) {
 	}
 	applyEnv(&cfg)
 	finalize(&cfg)
+	normalizeSolanaBillingConfig(&cfg)
 
 	warnings, err := cfg.Validate()
 	return cfg, warnings, err
@@ -336,9 +341,7 @@ func (c Config) Validate() ([]string, error) {
 	if strings.TrimSpace(c.YouTubeClipCaptionFontFamily) == "" {
 		return nil, errors.New("lemonfox.youtube_clip_caption_font_family (YOUTUBE_CLIP_CAPTION_FONT_FAMILY) must not be empty")
 	}
-	if c.SolanaPlanLamports == nil {
-		c.SolanaPlanLamports = map[string]int64{}
-	}
+	normalizeSolanaBillingConfig(&c)
 	if c.MusicSidecarDir == "" {
 		return nil, errors.New("music.sidecar_dir (MUSIC_SIDECAR_DIR) must not be empty")
 	}
@@ -374,8 +377,14 @@ func (c Config) Validate() ([]string, error) {
 	if c.SolanaActivationKeyTTL <= 0 {
 		return nil, errors.New("billing.solana_activation_key_ttl (SOLANA_ACTIVATION_KEY_TTL) must be greater than zero")
 	}
-	if err := validateSolanaPlanLamports(c.SolanaPlanLamports); err != nil {
+	if err := validateSolanaPackLamports(c.SolanaPackLamports, "billing.solana_pack_lamports"); err != nil {
 		return nil, err
+	}
+	if err := validateSolanaPackLamports(c.SolanaPlanLamports, "billing.solana_plan_lamports"); err != nil {
+		return nil, err
+	}
+	if c.SolanaUSDCentsPerSOL < 0 {
+		return nil, errors.New("billing.solana_usd_cents_per_sol (SOLANA_USD_CENTS_PER_SOL) must not be negative")
 	}
 
 	if !c.DiscordConfigured() {
@@ -437,8 +446,10 @@ func (c Config) Validate() ([]string, error) {
 		if c.SolanaTreasuryWallet == "" {
 			return warnings, errors.New("production SOL billing requires SOLANA_TREASURY_WALLET")
 		}
-		if missing := missingSolanaPaidPlans(c.SolanaPlanLamports); len(missing) > 0 {
-			return warnings, fmt.Errorf("production SOL billing requires lamports for paid plans: %s", strings.Join(missing, ", "))
+		if c.SolanaUSDCentsPerSOL <= 0 {
+			if missing := missingSolanaPaidPacks(c.SolanaPackLamports); len(missing) > 0 {
+				return warnings, fmt.Errorf("production SOL billing requires SOLANA_USD_CENTS_PER_SOL or lamports for paid packs: %s", strings.Join(missing, ", "))
+			}
 		}
 	}
 
@@ -536,9 +547,11 @@ func (c Config) R2Configured() bool {
 }
 
 func (c Config) SolanaPaymentsConfigured() bool {
-	return strings.TrimSpace(c.SolanaRPCURL) != "" &&
-		strings.TrimSpace(c.SolanaTreasuryWallet) != "" &&
-		len(missingSolanaPaidPlans(c.SolanaPlanLamports)) == 0
+	cfg := c
+	normalizeSolanaBillingConfig(&cfg)
+	return strings.TrimSpace(cfg.SolanaRPCURL) != "" &&
+		strings.TrimSpace(cfg.SolanaTreasuryWallet) != "" &&
+		(cfg.SolanaUSDCentsPerSOL > 0 || len(missingSolanaPaidPacks(cfg.SolanaPackLamports)) == 0)
 }
 
 func (c Config) PaymentAllowedOrigins() []string {
@@ -603,6 +616,7 @@ func defaultConfig() Config {
 		SolanaOrderExpiration:                    defaultSolanaOrderExpiration,
 		SolanaActivationKeyTTL:                   defaultSolanaActivationKeyTTL,
 		SolanaPlanLamports:                       map[string]int64{},
+		SolanaPackLamports:                       map[string]int64{},
 		Port:                                     "8080",
 		Environment:                              defaultEnvironment(),
 		LogLevel:                                 "info",
@@ -1014,6 +1028,12 @@ func applyFileConfig(cfg *Config, file fileConfig) error {
 	if file.Billing.SolanaPlanLamports != nil {
 		cfg.SolanaPlanLamports = normalizeLamportsMap(file.Billing.SolanaPlanLamports)
 	}
+	if file.Billing.SolanaPackLamports != nil {
+		cfg.SolanaPackLamports = normalizeLamportsMap(file.Billing.SolanaPackLamports)
+	}
+	if file.Billing.SolanaUSDCentsPerSOL > 0 {
+		cfg.SolanaUSDCentsPerSOL = file.Billing.SolanaUSDCentsPerSOL
+	}
 
 	if value := strings.TrimSpace(file.Music.YTDLPPath); value != "" {
 		cfg.MusicYTDLPPath = value
@@ -1138,10 +1158,18 @@ func applyEnvValues(cfg *Config, lookup func(string) (string, bool)) {
 	if value, ok := lamportsMapFromLookup(lookup, "SOLANA_PLAN_LAMPORTS"); ok {
 		cfg.SolanaPlanLamports = value
 	}
-	applyPlanLamportsEnv(cfg.SolanaPlanLamports, lookup, "SOLANA_STARTER_LAMPORTS", "starter")
-	applyPlanLamportsEnv(cfg.SolanaPlanLamports, lookup, "SOLANA_PLUS_LAMPORTS", "plus")
-	applyPlanLamportsEnv(cfg.SolanaPlanLamports, lookup, "SOLANA_PRO_LAMPORTS", "pro")
-	applyPlanLamportsEnv(cfg.SolanaPlanLamports, lookup, "SOLANA_BUSINESS_LAMPORTS", "business")
+	if value, ok := lamportsMapFromLookup(lookup, "SOLANA_PACK_LAMPORTS"); ok {
+		cfg.SolanaPackLamports = value
+	}
+	applyPackLamportsEnv(cfg.SolanaPlanLamports, lookup, "SOLANA_STARTER_LAMPORTS", "starter")
+	applyPackLamportsEnv(cfg.SolanaPlanLamports, lookup, "SOLANA_PLUS_LAMPORTS", "plus")
+	applyPackLamportsEnv(cfg.SolanaPlanLamports, lookup, "SOLANA_PRO_LAMPORTS", "pro")
+	applyPackLamportsEnv(cfg.SolanaPlanLamports, lookup, "SOLANA_BUSINESS_LAMPORTS", "business")
+	applyPackLamportsEnv(cfg.SolanaPackLamports, lookup, "SOLANA_PACK_STARTER_LAMPORTS", "starter")
+	applyPackLamportsEnv(cfg.SolanaPackLamports, lookup, "SOLANA_PACK_PLUS_LAMPORTS", "plus")
+	applyPackLamportsEnv(cfg.SolanaPackLamports, lookup, "SOLANA_PACK_PRO_LAMPORTS", "pro")
+	applyPackLamportsEnv(cfg.SolanaPackLamports, lookup, "SOLANA_PACK_BUSINESS_LAMPORTS", "business")
+	cfg.SolanaUSDCentsPerSOL = int64FromLookup(lookup, "SOLANA_USD_CENTS_PER_SOL", cfg.SolanaUSDCentsPerSOL)
 	cfg.MusicYTDLPPath = nonEmptyStringFromLookup(lookup, "YTDLP_PATH", cfg.MusicYTDLPPath)
 	cfg.MusicFFmpegPath = nonEmptyStringFromLookup(lookup, "FFMPEG_PATH", cfg.MusicFFmpegPath)
 	cfg.MusicSidecarDir = nonEmptyStringFromLookup(lookup, "MUSIC_SIDECAR_DIR", cfg.MusicSidecarDir)
@@ -1233,7 +1261,7 @@ func lamportsMapFromLookup(lookup func(string) (string, bool), name string) (map
 	return parseLamportsMap(value), true
 }
 
-func applyPlanLamportsEnv(target map[string]int64, lookup func(string) (string, bool), name string, plan string) {
+func applyPackLamportsEnv(target map[string]int64, lookup func(string) (string, bool), name string, pack string) {
 	if target == nil {
 		return
 	}
@@ -1249,7 +1277,7 @@ func applyPlanLamportsEnv(target map[string]int64, lookup func(string) (string, 
 	if err != nil {
 		return
 	}
-	target[strings.ToLower(strings.TrimSpace(plan))] = parsed
+	target[strings.ToLower(strings.TrimSpace(pack))] = parsed
 }
 
 func intFromLookup(lookup func(string) (string, bool), name string, fallback int) int {
@@ -1393,32 +1421,51 @@ func parseDuration(name, value string) (time.Duration, error) {
 	return parsed, nil
 }
 
-func validateSolanaPlanLamports(values map[string]int64) error {
-	for plan, lamports := range values {
-		if !isPaidPlanName(plan) {
-			return fmt.Errorf("billing.solana_plan_lamports includes unknown paid plan %q", plan)
+func normalizeSolanaBillingConfig(c *Config) {
+	if c.SolanaPlanLamports == nil {
+		c.SolanaPlanLamports = map[string]int64{}
+	} else {
+		c.SolanaPlanLamports = normalizeLamportsMap(c.SolanaPlanLamports)
+	}
+	if c.SolanaPackLamports == nil {
+		c.SolanaPackLamports = map[string]int64{}
+	} else {
+		c.SolanaPackLamports = normalizeLamportsMap(c.SolanaPackLamports)
+	}
+	if len(c.SolanaPackLamports) == 0 && len(c.SolanaPlanLamports) > 0 {
+		c.SolanaPackLamports = normalizeLamportsMap(c.SolanaPlanLamports)
+	}
+	if len(c.SolanaPlanLamports) == 0 && len(c.SolanaPackLamports) > 0 {
+		c.SolanaPlanLamports = normalizeLamportsMap(c.SolanaPackLamports)
+	}
+}
+
+func validateSolanaPackLamports(values map[string]int64, field string) error {
+	for pack, lamports := range values {
+		if !isPaidPackName(pack) {
+			return fmt.Errorf("%s includes unknown paid pack %q", field, pack)
 		}
 		if lamports <= 0 {
-			return fmt.Errorf("billing.solana_plan_lamports.%s must be greater than zero", plan)
+			return fmt.Errorf("%s.%s must be greater than zero", field, pack)
 		}
 	}
 	return nil
 }
 
-func missingSolanaPaidPlans(values map[string]int64) []string {
+func missingSolanaPaidPacks(values map[string]int64) []string {
 	var missing []string
-	for _, plan := range paidPlanNames {
-		if values == nil || values[plan] <= 0 {
-			missing = append(missing, plan)
+	for _, pack := range paidPackNames {
+		if values == nil || values[pack] <= 0 {
+			missing = append(missing, pack)
 		}
 	}
 	return missing
 }
 
-func isPaidPlanName(plan string) bool {
-	plan = strings.ToLower(strings.TrimSpace(plan))
-	for _, paidPlan := range paidPlanNames {
-		if plan == paidPlan {
+func isPaidPackName(pack string) bool {
+	pack = strings.ToLower(strings.TrimSpace(pack))
+	for _, paidPack := range paidPackNames {
+		if pack == paidPack {
 			return true
 		}
 	}

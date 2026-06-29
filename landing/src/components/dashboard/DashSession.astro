@@ -1,0 +1,50 @@
+---
+/**
+ * Redesigned sidebar footer — a compact "account chip" with an identity
+ * row (avatar + label + wallet) and a clean actions row (log out + refresh).
+ * Replaces the old bordered mono button stack.
+ */
+interface Props {
+  scope: 'account' | 'admin';
+  label: string;
+  logoutLabel?: string;
+}
+
+const { scope, label, logoutLabel = 'Log out' } = Astro.props;
+
+const summaryAttr = scope === 'admin' ? 'data-admin-wallet-summary' : 'data-account-wallet-summary';
+const refreshAttr = scope === 'admin' ? 'data-admin-refresh' : 'data-account-refresh';
+const logoutAttr = scope === 'admin' ? 'data-admin-lock' : 'data-account-logout';
+
+const summary = { [summaryAttr]: true };
+const refresh = { [refreshAttr]: true };
+const logout = { [logoutAttr]: true };
+---
+
+<div class="dash-account">
+  <div class="dash-account-id">
+    <span class="dash-account-avatar" aria-hidden="true">
+      <span class="dash-account-presence"></span>
+    </span>
+    <span class="dash-account-meta">
+      <small class="dash-account-label">{label}</small>
+      <strong class="dash-account-value" {...summary}>--</strong>
+    </span>
+  </div>
+
+  <div class="dash-account-actions">
+    <button type="button" class="dash-btn dash-btn-block" {...logout}>
+      <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+        <path d="M15 4h2.5A1.5 1.5 0 0 1 19 5.5v13a1.5 1.5 0 0 1-1.5 1.5H15" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" />
+        <path d="M10 8 6 12l4 4M6 12h9" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" />
+      </svg>
+      <span>{logoutLabel}</span>
+    </button>
+    <button type="button" class="dash-icon-btn" aria-label="Refresh" {...refresh}>
+      <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+        <path d="M19.5 12a7.5 7.5 0 1 1-2.2-5.3" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" />
+        <path d="M19.5 4.5V9H15" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" />
+      </svg>
+    </button>
+  </div>
+</div>

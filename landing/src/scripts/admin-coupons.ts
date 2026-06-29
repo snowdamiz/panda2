@@ -10,7 +10,7 @@ import {
 type AdminCoupon = {
   coupon_id: string;
   code_prefix: string;
-  plan: string;
+  pack: string;
   display_name: string;
   discount_lamports: number;
   max_redemptions: number;
@@ -28,7 +28,7 @@ type AdminCoupon = {
 
 type AdminCouponListResponse = {
   coupons: AdminCoupon[];
-  plan_lamports: Record<string, number>;
+  pack_lamports: Record<string, number>;
 };
 
 type AdminCouponCreateResponse = {
@@ -38,7 +38,7 @@ type AdminCouponCreateResponse = {
 
 type CouponNodes = {
   couponForm: HTMLFormElement;
-  planButtons: HTMLButtonElement[];
+  packButtons: HTMLButtonElement[];
   discountInput: HTMLInputElement;
   couponCodeInput: HTMLInputElement;
   maxRedemptionsInput: HTMLInputElement;
@@ -57,8 +57,8 @@ type CouponNodes = {
 export class CouponsPanel implements AdminPanel {
   private readonly nodes: CouponNodes;
   private readonly ctx: AdminPanelContext;
-  private planLamports: Record<string, number> = {};
-  private selectedPlan = 'plus';
+  private packLamports: Record<string, number> = {};
+  private selectedPack = 'plus';
 
   static fromRoot(root: HTMLElement, ctx: AdminPanelContext): CouponsPanel | null {
     const nodes = collectCouponNodes(root);
@@ -72,12 +72,12 @@ export class CouponsPanel implements AdminPanel {
   }
 
   init() {
-    this.selectedPlan = this.nodes.planButtons.find((button) => button.classList.contains('active'))?.dataset.adminPlan || this.selectedPlan;
+    this.selectedPack = this.nodes.packButtons.find((button) => button.classList.contains('active'))?.dataset.adminPack || this.selectedPack;
 
-    this.nodes.planButtons.forEach((button) => {
-      button.addEventListener('click', () => this.selectPlan(button.dataset.adminPlan || 'plus'));
+    this.nodes.packButtons.forEach((button) => {
+      button.addEventListener('click', () => this.selectPack(button.dataset.adminPack || 'plus'));
     });
-    this.nodes.fillDiscountButton.addEventListener('click', () => this.fillPlanDiscount());
+    this.nodes.fillDiscountButton.addEventListener('click', () => this.fillPackDiscount());
     this.nodes.copyCodeButton.addEventListener('click', () => void this.copyCreatedCode());
     this.nodes.couponForm.addEventListener('submit', (event) => {
       event.preventDefault();
@@ -96,9 +96,9 @@ export class CouponsPanel implements AdminPanel {
     this.ctx.setStatus('Loading coupons.');
     try {
       const response = await this.ctx.request<AdminCouponListResponse>('/admin/coupons');
-      this.planLamports = response.plan_lamports || {};
+      this.packLamports = response.pack_lamports || {};
       this.renderCoupons(response.coupons || []);
-      this.fillPlanDiscount(false);
+      this.fillPackDiscount(false);
       this.ctx.setStatus('Coupons loaded.');
     } catch (error) {
       this.handleError(error);
@@ -113,7 +113,7 @@ export class CouponsPanel implements AdminPanel {
     this.ctx.setStatus('Creating coupon.');
     try {
       const body = {
-        plan: this.selectedPlan,
+        pack: this.selectedPack,
         discount_lamports: integerValue(this.nodes.discountInput.value),
         coupon_code: this.nodes.couponCodeInput.value.trim(),
         max_redemptions: integerValue(this.nodes.maxRedemptionsInput.value),
@@ -126,7 +126,7 @@ export class CouponsPanel implements AdminPanel {
       });
       this.renderCreatedCode(response.code);
       this.nodes.couponForm.reset();
-      this.selectPlan(this.selectedPlan);
+      this.selectPack(this.selectedPack);
       await this.load();
       this.ctx.setStatus(`Coupon ${response.coupon.coupon_id} created.`);
     } catch (error) {
@@ -183,7 +183,7 @@ export class CouponsPanel implements AdminPanel {
       primary.append(note);
     }
 
-    const planCell = cell(coupon.display_name || formatStatus(coupon.plan));
+    const packCell = cell(coupon.display_name || formatStatus(coupon.pack));
     const discountCell = cell(formatLamports(coupon.discount_lamports));
     discountCell.className = 'admin-cell-mono';
     const limitCell = cell(coupon.max_redemptions > 0 ? String(coupon.max_redemptions) : 'Unlimited');
@@ -208,23 +208,23 @@ export class CouponsPanel implements AdminPanel {
     revoke.addEventListener('click', () => void this.revokeCoupon(coupon));
     actionCell.append(revoke);
 
-    row.append(primary, planCell, discountCell, limitCell, usedCell, expiresCell, statusCell, actionCell);
+    row.append(primary, packCell, discountCell, limitCell, usedCell, expiresCell, statusCell, actionCell);
     return row;
   }
 
-  private selectPlan(plan: string) {
-    this.selectedPlan = plan;
-    this.nodes.planButtons.forEach((button) => {
-      const active = button.dataset.adminPlan === plan;
+  private selectPack(pack: string) {
+    this.selectedPack = pack;
+    this.nodes.packButtons.forEach((button) => {
+      const active = button.dataset.adminPack === pack;
       button.classList.toggle('active', active);
       button.setAttribute('aria-pressed', String(active));
     });
   }
 
-  private fillPlanDiscount(overwrite = true) {
-    const lamports = this.planLamports[this.selectedPlan];
+  private fillPackDiscount(overwrite = true) {
+    const lamports = this.packLamports[this.selectedPack];
     if (!Number.isFinite(lamports) || lamports <= 0) {
-      if (overwrite) this.ctx.setStatus('Plan lamports are not available from the API.', 'error');
+      if (overwrite) this.ctx.setStatus('Pack lamports are not available from the API.', 'error');
       return;
     }
     if (!overwrite && this.nodes.discountInput.value.trim()) return;
@@ -254,7 +254,7 @@ export class CouponsPanel implements AdminPanel {
 
 const collectCouponNodes = (root: HTMLElement): CouponNodes | null => {
   const couponForm = root.querySelector<HTMLFormElement>('[data-admin-coupon-form]');
-  const planButtons = Array.from(root.querySelectorAll<HTMLButtonElement>('[data-admin-plan]'));
+  const packButtons = Array.from(root.querySelectorAll<HTMLButtonElement>('[data-admin-pack]'));
   const discountInput = root.querySelector<HTMLInputElement>('[data-admin-discount]');
   const couponCodeInput = root.querySelector<HTMLInputElement>('[data-admin-coupon-code]');
   const maxRedemptionsInput = root.querySelector<HTMLInputElement>('[data-admin-max-redemptions]');
@@ -268,7 +268,7 @@ const collectCouponNodes = (root: HTMLElement): CouponNodes | null => {
   const copyCodeButton = root.querySelector<HTMLButtonElement>('[data-admin-copy-code]');
   if (
     !couponForm ||
-    planButtons.length === 0 ||
+    packButtons.length === 0 ||
     !discountInput ||
     !couponCodeInput ||
     !maxRedemptionsInput ||
@@ -285,7 +285,7 @@ const collectCouponNodes = (root: HTMLElement): CouponNodes | null => {
   }
   return {
     couponForm,
-    planButtons,
+    packButtons,
     discountInput,
     couponCodeInput,
     maxRedemptionsInput,

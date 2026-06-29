@@ -178,6 +178,8 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 		SolanaTreasuryWallet:   cfg.SolanaTreasuryWallet,
 		SolanaConfirmation:     cfg.SolanaConfirmation,
 		SolanaPlanLamports:     cfg.SolanaPlanLamports,
+		SolanaPackLamports:     cfg.SolanaPackLamports,
+		SolanaUSDCentsPerSOL:   cfg.SolanaUSDCentsPerSOL,
 		SolanaOrderExpiration:  cfg.SolanaOrderExpiration,
 		SolanaActivationKeyTTL: cfg.SolanaActivationKeyTTL,
 	}).WithAuditRecorder(audit)

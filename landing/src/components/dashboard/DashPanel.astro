@@ -1,0 +1,22 @@
+---
+/**
+ * A tab panel. `scroll` lets the panel body scroll (account panels);
+ * leave it off when the panel hosts its own scroll region (admin tables).
+ * Pass-through attrs carry `data-account-tab` / `data-admin-tab` + `hidden`.
+ */
+interface Props {
+  scroll?: boolean;
+  class?: string;
+  [key: string]: unknown;
+}
+
+const { scroll = true, class: className, ...rest } = Astro.props;
+---
+
+<section
+  class:list={['dash-panel', { 'dash-panel--scroll': scroll }, className]}
+  role="tabpanel"
+  {...rest}
+>
+  <slot />
+</section>

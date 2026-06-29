@@ -8,6 +8,7 @@ import (
 	"github.com/sn0w/panda2/internal/billing"
 	"github.com/sn0w/panda2/internal/features"
 	"github.com/sn0w/panda2/internal/generated"
+	"github.com/sn0w/panda2/internal/llm"
 	"github.com/sn0w/panda2/internal/polls"
 )
 
@@ -46,6 +47,7 @@ type Response struct {
 	Feedback          *FeedbackControls
 	GeneratedFiles    []generated.File
 	UsageReservations []billing.Reservation
+	Usage             llm.Usage
 }
 
 type FeatureInstallIntentCreator interface {

@@ -1,6 +1,6 @@
 ---
 import LogoMark from './LogoMark.astro';
-import { heroMeta, marqueeItems, planOptions, siteMeta } from '../data/landing';
+import { heroMeta, marqueeItems, trialPack, siteMeta } from '../data/landing';
 import Button from './ui/Button.astro';
 ---
 
@@ -53,7 +53,7 @@ import Button from './ui/Button.astro';
           <span class="status-indicator"><i></i> Panda is online</span>
           <span class="trial-pill">
             <span class="trial-label">TRIAL</span>
-            <span>{planOptions[0].aiResponses}</span>
+            <span>{trialPack.credits}</span>
           </span>
         </div>
 
@@ -82,11 +82,11 @@ import Button from './ui/Button.astro';
                 <p>The launch is on track. Three decisions still need owners:</p>
                 <ol>
                   <li><span>Finalize onboarding copy</span><small>Owner needed · #launch</small></li>
-                  <li><span>Confirm plan limits</span><small>Assigned to Maya · #ops</small></li>
+                  <li><span>Confirm pack limits</span><small>Assigned to Maya · #ops</small></li>
                   <li><span>Schedule moderator walkthrough</span><small>Due Friday · #community</small></li>
                 </ol>
                 <div class="response-footer">
-                  <span>{planOptions[0].label} plan</span>
+                  <span>{trialPack.name}</span>
                   <span>3 sources</span>
                   <span>1.8s</span>
                 </div>

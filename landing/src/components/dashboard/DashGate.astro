@@ -1,0 +1,16 @@
+---
+/**
+ * Centered signed-out gate. Pass-through attrs carry the controller hook,
+ * e.g. `data-account-login-view` / `data-admin-login`.
+ */
+interface Props {
+  class?: string;
+  [key: string]: unknown;
+}
+
+const { class: className, ...rest } = Astro.props;
+---
+
+<div class:list={['dash-gate reveal', className]} {...rest}>
+  <slot />
+</div>
