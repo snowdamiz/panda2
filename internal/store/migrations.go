@@ -1911,6 +1911,23 @@ var migrations = []Migration{
 			`CREATE INDEX IF NOT EXISTS idx_youtube_clips_request_id ON youtube_clips(request_id)`,
 		},
 	},
+	{
+		Version: 40,
+		Name:    "youtube_clip_usages",
+		SQL: []string{
+			`CREATE TABLE IF NOT EXISTS youtube_clip_usages (
+				id TEXT PRIMARY KEY,
+				user_id TEXT NOT NULL,
+				guild_id TEXT NOT NULL DEFAULT '',
+				request_id TEXT NOT NULL DEFAULT '',
+				usage_date TEXT NOT NULL,
+				created_at DATETIME NOT NULL
+			)`,
+			`CREATE INDEX IF NOT EXISTS idx_youtube_clip_usages_user_date ON youtube_clip_usages(user_id, usage_date)`,
+			`CREATE INDEX IF NOT EXISTS idx_youtube_clip_usages_request_id ON youtube_clip_usages(request_id)`,
+			`CREATE UNIQUE INDEX IF NOT EXISTS idx_youtube_clip_usages_user_request ON youtube_clip_usages(user_id, request_id) WHERE request_id <> ''`,
+		},
+	},
 }
 
 func RunMigrations(db *gorm.DB) error {

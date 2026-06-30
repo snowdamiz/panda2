@@ -900,6 +900,26 @@ func (f *fakeYouTubeSummarizer) Clip(_ context.Context, request youtube.ClipRequ
 	return f.clipResult, f.clipErr
 }
 
+type fakeClipRepository struct {
+	clips        []store.YoutubeClip
+	usages       []store.YoutubeClipUsage
+	reservation  repository.ClipUsageReservation
+	reserveErr   error
+	createErr    error
+	reserveLimit int
+}
+
+func (f *fakeClipRepository) Create(_ context.Context, clip store.YoutubeClip) error {
+	f.clips = append(f.clips, clip)
+	return f.createErr
+}
+
+func (f *fakeClipRepository) ReserveDailyUsage(_ context.Context, usage store.YoutubeClipUsage, limit int) (repository.ClipUsageReservation, error) {
+	f.usages = append(f.usages, usage)
+	f.reserveLimit = limit
+	return f.reservation, f.reserveErr
+}
+
 func newToolAdminService(t *testing.T) *admin.Service {
 	t.Helper()
 	ctx := context.Background()
@@ -1505,6 +1525,55 @@ func TestExecutorRunsYouTubeClipper(t *testing.T) {
 	for _, leaked := range []string{"plain_text_transcript"} {
 		if strings.Contains(content, leaked) {
 			t.Fatalf("clip tool message leaked transcript detail %q: %s", leaked, content)
+		}
+	}
+}
+
+func TestExecutorBlocksYouTubeClipperAfterDailyBetaLimit(t *testing.T) {
+	registry, err := NewDefaultRegistry()
+	if err != nil {
+		t.Fatalf("NewDefaultRegistry: %v", err)
+	}
+	summarizer := &fakeYouTubeSummarizer{
+		configured:     true,
+		clipConfigured: true,
+	}
+	clips := &fakeClipRepository{
+		reservation: repository.ClipUsageReservation{Reserved: false, Used: 3, Limit: 3},
+	}
+	executor := NewExecutor(registry, nil, nil).
+		WithYouTubeSummarizer(summarizer).
+		WithClipRepository(clips)
+	result, err := executor.Execute(context.Background(), ExecutionRequest{
+		GuildID:   "guild-1",
+		ChannelID: "text-1",
+		ActorID:   "user-1",
+		RequestID: "request-limit",
+		Access:    testAccess(ToolPolicyAssistive, admin.PermissionAssistantYouTubeClipping),
+		Call: llm.ToolCall{
+			ID:   "call-youtube-clip",
+			Type: "function",
+			Function: llm.ToolCallFunction{
+				Name:      "panda_clip_youtube",
+				Arguments: `{"query":"https://www.youtube.com/watch?v=deep"}`,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if len(summarizer.clipRequests) != 0 {
+		t.Fatalf("clipper should not run after quota is exhausted, got %d request(s)", len(summarizer.clipRequests))
+	}
+	if len(clips.usages) != 1 || clips.usages[0].UserID != "user-1" || clips.usages[0].GuildID != "guild-1" || clips.usages[0].RequestID != "request-limit" || clips.reserveLimit != youtubeClipDailyBetaLimit {
+		t.Fatalf("unexpected quota reservation: usages=%+v limit=%d", clips.usages, clips.reserveLimit)
+	}
+	if !result.Terminal {
+		t.Fatalf("expected quota response to be terminal")
+	}
+	for _, want := range []string{`"title":"Daily clip limit reached"`, `"accent":"warning"`, `"clip_daily_limit":3`, `"clip_daily_used":3`, "Clip generation is in beta"} {
+		if !strings.Contains(result.Message.Content, want) {
+			t.Fatalf("expected quota content to contain %s, got %s", want, result.Message.Content)
 		}
 	}
 }

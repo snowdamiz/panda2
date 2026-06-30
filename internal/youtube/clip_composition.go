@@ -268,7 +268,7 @@ func clipCompositionUserPrompt(request ClipCompositionRequest, validationError s
 		"source_frame":              sourceFrame,
 		"coordinate_system":         "normalized 0..1000; output_rect maps to the final 16:9 or 9:16 canvas",
 		"response_guidance":         "Return the smallest complete JSON that renders. One render plan per clip segment is fine unless the visible focus changes during the clip.",
-		"caption_plan_guidance":     "For caption_mode auto/on, include caption_plan using the supplied transcript IDs and available_caption_fonts. For caption_mode off, caption_plan may be omitted.",
+		"caption_plan_guidance":     "For caption_mode auto/on, include caption_plan using the supplied transcript IDs and available_caption_fonts. For word-timed cues, word_ids should contain only the cue's start word ID and end word ID; repeat the same ID twice for a single-word cue. For caption_mode off, caption_plan may be omitted.",
 		"optional_switch_decisions": "switch_decisions may be omitted. If included, use same_region or switch_region.",
 	}
 	data, _ := json.Marshal(payload)
@@ -431,8 +431,9 @@ func clipCaptionPlanSchema(fontKeys []string) map[string]any {
 					"properties": map[string]any{
 						"caption_region_id": map[string]any{"type": "string"},
 						"word_ids": map[string]any{
-							"type":  "array",
-							"items": map[string]any{"type": "string"},
+							"type":        "array",
+							"description": "For word timing, use only [start_word_id, end_word_id]. Repeat the same ID twice for one-word cues.",
+							"items":       map[string]any{"type": "string"},
 						},
 						"source_segment_ids": map[string]any{
 							"type":  "array",

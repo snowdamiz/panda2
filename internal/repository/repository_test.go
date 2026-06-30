@@ -165,6 +165,56 @@ func TestUsageRecord(t *testing.T) {
 	}
 }
 
+func TestClipRepositoryReserveDailyUsageLimitsByUserAcrossGuilds(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(ctx, "file::memory:?cache=shared")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer db.Close()
+
+	repo := NewClipRepository(db.DB)
+	usageDate := "2026-06-30"
+	now := time.Date(2026, 6, 30, 12, 0, 0, 0, time.UTC)
+	reserve := func(id, userID, guildID, requestID, date string) ClipUsageReservation {
+		t.Helper()
+		reservation, err := repo.ReserveDailyUsage(ctx, store.YoutubeClipUsage{
+			ID:        id,
+			UserID:    userID,
+			GuildID:   guildID,
+			RequestID: requestID,
+			UsageDate: date,
+			CreatedAt: now,
+		}, 3)
+		if err != nil {
+			t.Fatalf("ReserveDailyUsage %s: %v", id, err)
+		}
+		return reservation
+	}
+
+	if got := reserve("usage-1", "user-1", "guild-1", "request-1", usageDate); !got.Reserved || got.Used != 1 {
+		t.Fatalf("expected first reservation to be accepted, got %+v", got)
+	}
+	if got := reserve("usage-1-retry", "user-1", "guild-2", "request-1", usageDate); !got.Reserved || got.Used != 1 {
+		t.Fatalf("expected duplicate request to be idempotent, got %+v", got)
+	}
+	if got := reserve("usage-2", "user-1", "guild-2", "request-2", usageDate); !got.Reserved || got.Used != 2 {
+		t.Fatalf("expected second guild to count against same user limit, got %+v", got)
+	}
+	if got := reserve("usage-3", "user-1", "guild-3", "request-3", usageDate); !got.Reserved || got.Used != 3 {
+		t.Fatalf("expected third reservation to be accepted, got %+v", got)
+	}
+	if got := reserve("usage-4", "user-1", "guild-4", "request-4", usageDate); got.Reserved || got.Used != 3 {
+		t.Fatalf("expected fourth same-day reservation to be blocked, got %+v", got)
+	}
+	if got := reserve("usage-other-user", "user-2", "guild-1", "request-5", usageDate); !got.Reserved || got.Used != 1 {
+		t.Fatalf("expected a different user to have an independent limit, got %+v", got)
+	}
+	if got := reserve("usage-next-day", "user-1", "guild-1", "request-6", "2026-07-01"); !got.Reserved || got.Used != 1 {
+		t.Fatalf("expected next day to reset the user limit, got %+v", got)
+	}
+}
+
 func TestUserSafetyStrikesTimeoutAndResetsAfterExpiry(t *testing.T) {
 	ctx := context.Background()
 	db, err := store.Open(ctx, "file::memory:?cache=shared")

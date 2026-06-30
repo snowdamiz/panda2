@@ -472,11 +472,16 @@ func captionCueText(cue ClipCaptionCue, timingQuality string, refs clipCaptionRe
 }
 
 func captionCueWords(cue ClipCaptionCue, refs clipCaptionReferences) ([]TranscriptWord, error) {
-	if len(cue.WordIDs) != 2 {
-		return nil, fmt.Errorf("word-timed cue requires word_ids with exactly two entries")
+	if len(cue.WordIDs) == 0 {
+		return nil, fmt.Errorf("word-timed cue requires word_ids")
 	}
 	startID := strings.TrimSpace(cue.WordIDs[0])
-	endID := strings.TrimSpace(cue.WordIDs[1])
+	endID := strings.TrimSpace(cue.WordIDs[len(cue.WordIDs)-1])
+	for _, wordID := range cue.WordIDs {
+		if strings.TrimSpace(wordID) == "" {
+			return nil, fmt.Errorf("word-timed cue requires non-empty word_ids")
+		}
+	}
 	if startID == "" || endID == "" {
 		return nil, fmt.Errorf("word-timed cue requires non-empty word_ids")
 	}
