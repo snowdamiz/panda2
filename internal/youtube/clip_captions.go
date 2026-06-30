@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
 )
@@ -72,6 +73,8 @@ const (
 	darwinDefaultCaptionFontPath   = "/System/Library/Fonts/Supplemental/Arial Bold.ttf"
 	darwinDefaultCaptionFontFamily = "Arial"
 )
+
+var captionRendererSupportCache sync.Map
 
 type clipCaptionResolvedFont struct {
 	Key    string
@@ -1841,6 +1844,9 @@ func validateCaptionRenderer(ctx context.Context, tools ToolPaths) error {
 	if path == "" {
 		return fmt.Errorf("youtube clip captions require ffmpeg with libass subtitles support")
 	}
+	if _, ok := captionRendererSupportCache.Load(path); ok {
+		return nil
+	}
 	checkCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	output, err := exec.CommandContext(checkCtx, path, "-hide_banner", "-filters").Output()
@@ -1853,6 +1859,7 @@ func validateCaptionRenderer(ctx context.Context, tools ToolPaths) error {
 	if !bytes.Contains(output, []byte(" subtitles ")) && !bytes.Contains(output, []byte(" ass ")) {
 		return fmt.Errorf("youtube clip captions require ffmpeg with libass subtitles support")
 	}
+	captionRendererSupportCache.Store(path, struct{}{})
 	return nil
 }
 

@@ -1,6 +1,77 @@
 package youtube
 
-import "testing"
+import (
+	"context"
+	"os"
+	"path/filepath"
+	"runtime"
+	"strings"
+	"testing"
+)
+
+func TestExtractClipThumbnailsBatchesSamples(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell executable fixtures are unix-only")
+	}
+	ffmpegPath := writeShellExecutable(t, "ffmpeg", `case " $* " in
+*" -frames:v 1 "*)
+  count_file="$0.count"
+  count=$(cat "$count_file" 2>/dev/null || printf 0)
+  count=$((count + 1))
+  printf '%s' "$count" > "$count_file"
+  for path in "$@"; do
+    case "$path" in
+    *.jpg)
+      if base64 --decode > "$path" 2>/dev/null <<'B64'
+iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=
+B64
+      then
+        :
+      else
+        base64 -D > "$path" <<'B64'
+iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=
+B64
+      fi
+      ;;
+    esac
+  done
+  ;;
+*)
+  echo "unexpected ffmpeg args: $*" >&2
+  exit 1
+  ;;
+esac`)
+	sourcePath := filepath.Join(t.TempDir(), "source.mp4")
+	if err := os.WriteFile(sourcePath, []byte("fake video"), 0o600); err != nil {
+		t.Fatalf("write source video: %v", err)
+	}
+	service := NewService(Config{APIKey: "key", FFmpegPath: ffmpegPath, ThumbnailMaxCount: 5})
+	decision := ClipDecision{Segments: []ClipDecisionSegment{{
+		StartSeconds: 10,
+		EndSeconds:   42,
+		Transcript:   "Left speaker makes a point. Right speaker responds. Left speaker reacts.",
+	}}}
+	timeline := []ClipCompositionTranscriptSegment{
+		{ClipSegmentIndex: 0, StartSeconds: 10, EndSeconds: 18, Text: "Left speaker makes a point."},
+		{ClipSegmentIndex: 0, StartSeconds: 18, EndSeconds: 30, Text: "Right speaker responds."},
+		{ClipSegmentIndex: 0, StartSeconds: 30, EndSeconds: 42, Text: "Left speaker reacts."},
+	}
+
+	thumbnails, err := service.extractClipThumbnails(context.Background(), ToolPaths{FFmpegPath: ffmpegPath}, sourcePath, decision, timeline, t.TempDir())
+	if err != nil {
+		t.Fatalf("extractClipThumbnails: %v", err)
+	}
+	if len(thumbnails) != 5 {
+		t.Fatalf("expected 5 thumbnails, got %d", len(thumbnails))
+	}
+	data, err := os.ReadFile(ffmpegPath + ".count")
+	if err != nil {
+		t.Fatalf("read ffmpeg count: %v", err)
+	}
+	if strings.TrimSpace(string(data)) != "1" {
+		t.Fatalf("expected one batched ffmpeg call, got %q", string(data))
+	}
+}
 
 func TestClipThumbnailSamplesIncludeSpeakerBoundaryFrames(t *testing.T) {
 	decision := ClipDecision{
