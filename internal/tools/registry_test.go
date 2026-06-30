@@ -1578,6 +1578,77 @@ func TestExecutorBlocksYouTubeClipperAfterDailyBetaLimit(t *testing.T) {
 	}
 }
 
+func TestExecutorSkipsYouTubeClipDailyBetaLimitForBotOwner(t *testing.T) {
+	registry, err := NewDefaultRegistry()
+	if err != nil {
+		t.Fatalf("NewDefaultRegistry: %v", err)
+	}
+	summarizer := &fakeYouTubeSummarizer{
+		configured:     true,
+		clipConfigured: true,
+		clipResult: youtube.ClipResult{
+			Title:    "Deep Dive",
+			URL:      "https://www.youtube.com/watch?v=deep",
+			Uploader: "Teacher",
+			Duration: time.Minute,
+			Clips: []youtube.RenderedClip{{
+				Rank:               1,
+				Title:              "Best Moment",
+				Type:               "continuous",
+				WatchURL:           "https://cdn.example.test/clips/guild-1/request-owner/01-best-moment.mp4",
+				ObjectKey:          "clips/guild-1/request-owner/01-best-moment.mp4",
+				Duration:           20 * time.Second,
+				SourceStartSeconds: 10,
+				SourceEndSeconds:   30,
+				Segments: []youtube.RenderedClipSegment{{
+					StartSeconds: 10,
+					EndSeconds:   30,
+					Duration:     20 * time.Second,
+					Transcript:   "This is the best moment.",
+				}},
+				Reason:         "Strong standalone hook.",
+				Confidence:     0.8,
+				ViralityScore:  82,
+				DurationPolicy: "short_exception",
+			}},
+		},
+	}
+	clips := &fakeClipRepository{
+		reservation: repository.ClipUsageReservation{Reserved: false, Used: 3, Limit: 3},
+	}
+	executor := NewExecutor(registry, nil, nil).
+		WithYouTubeSummarizer(summarizer).
+		WithClipRepository(clips)
+	result, err := executor.Execute(context.Background(), ExecutionRequest{
+		GuildID:   "guild-1",
+		ChannelID: "text-1",
+		ActorID:   "owner-1",
+		RequestID: "request-owner",
+		IsOwner:   true,
+		Access:    testAccess(ToolPolicyAssistive, admin.PermissionAssistantYouTubeClipping),
+		Call: llm.ToolCall{
+			ID:   "call-youtube-clip",
+			Type: "function",
+			Function: llm.ToolCallFunction{
+				Name:      "panda_clip_youtube",
+				Arguments: `{"query":"https://www.youtube.com/watch?v=deep"}`,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if len(clips.usages) != 0 {
+		t.Fatalf("bot owner should not reserve daily clip usage, got %+v", clips.usages)
+	}
+	if len(summarizer.clipRequests) != 1 {
+		t.Fatalf("expected owner clip request to run, got %d request(s)", len(summarizer.clipRequests))
+	}
+	if !result.Terminal || strings.Contains(result.Message.Content, "Daily clip limit reached") {
+		t.Fatalf("expected owner clip result instead of limit response, got terminal=%t content=%s", result.Terminal, result.Message.Content)
+	}
+}
+
 func TestExecutorRunsYouTubeClipperWithoutGuidance(t *testing.T) {
 	registry, err := NewDefaultRegistry()
 	if err != nil {
