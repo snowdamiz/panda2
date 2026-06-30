@@ -617,7 +617,7 @@ func (c Config) PortalClipsURL() string {
 	if base == "" {
 		return ""
 	}
-	return base + "/clips"
+	return base + "/clips/"
 }
 
 // PortalConfigured reports whether the Discord-login clips portal can operate:
