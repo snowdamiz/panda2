@@ -27,6 +27,12 @@ type clipThumbnailSwitchPair struct {
 	BoundarySeconds float64
 }
 
+type clipThumbnailOutput struct {
+	ID     string
+	Path   string
+	Sample clipThumbnailSample
+}
+
 func (s *Service) extractClipThumbnails(ctx context.Context, tools ToolPaths, sourcePath string, decision ClipDecision, transcriptTimeline []ClipCompositionTranscriptSegment, tempDir string) ([]ClipThumbnail, error) {
 	samples := clipThumbnailSamples(decision, transcriptTimeline, s.thumbnailMaxCount)
 	if len(samples) == 0 {
@@ -36,14 +42,21 @@ func (s *Service) extractClipThumbnails(ctx context.Context, tools ToolPaths, so
 	if err := os.MkdirAll(thumbDir, 0o700); err != nil {
 		return nil, fmt.Errorf("create clip thumbnail dir: %w", err)
 	}
-	thumbnails := make([]ClipThumbnail, 0, len(samples))
+	outputs := make([]clipThumbnailOutput, 0, len(samples))
 	for index, sample := range samples {
 		id := fmt.Sprintf("thumb_%02d", index+1)
-		path := filepath.Join(thumbDir, id+".jpg")
-		if err := s.extractClipThumbnail(ctx, tools, sourcePath, sample.SourceSeconds, path); err != nil {
-			return nil, err
-		}
-		data, err := os.ReadFile(path)
+		outputs = append(outputs, clipThumbnailOutput{
+			ID:     id,
+			Path:   filepath.Join(thumbDir, id+".jpg"),
+			Sample: sample,
+		})
+	}
+	if err := s.extractClipThumbnailBatch(ctx, tools, sourcePath, outputs); err != nil {
+		return nil, err
+	}
+	thumbnails := make([]ClipThumbnail, 0, len(outputs))
+	for _, output := range outputs {
+		data, err := os.ReadFile(output.Path)
 		if err != nil {
 			return nil, fmt.Errorf("read clip thumbnail: %w", err)
 		}
@@ -51,8 +64,9 @@ func (s *Service) extractClipThumbnails(ctx context.Context, tools ToolPaths, so
 		if err != nil {
 			return nil, err
 		}
+		sample := output.Sample
 		thumbnails = append(thumbnails, ClipThumbnail{
-			ID:                  id,
+			ID:                  output.ID,
 			SourceSeconds:       sample.SourceSeconds,
 			ClipSegmentIndex:    sample.SegmentIndex,
 			ClipOffsetSeconds:   sample.ClipOffsetSeconds,
@@ -325,6 +339,44 @@ func clampThumbnailTime(value float64, start float64, end float64) float64 {
 		return maximum
 	}
 	return value
+}
+
+func (s *Service) extractClipThumbnailBatch(ctx context.Context, tools ToolPaths, sourcePath string, outputs []clipThumbnailOutput) error {
+	if len(outputs) == 0 {
+		return nil
+	}
+	processCtx, cancel := context.WithTimeout(ctx, s.processTimeout)
+	defer cancel()
+	args := []string{
+		"-hide_banner",
+		"-loglevel", "error",
+		"-nostdin",
+	}
+	for _, output := range outputs {
+		args = append(args,
+			"-ss", formatClipSeconds(output.Sample.SourceSeconds),
+			"-i", sourcePath,
+		)
+	}
+	for index, output := range outputs {
+		args = append(args,
+			"-map", fmt.Sprintf("%d:v:0", index),
+			"-frames:v", "1",
+			"-vf", fmt.Sprintf("scale=%d:%d:force_original_aspect_ratio=decrease", s.thumbnailMaxEdge, s.thumbnailMaxEdge),
+			"-q:v", "4",
+			output.Path,
+		)
+	}
+	ffmpegCmd := exec.CommandContext(processCtx, tools.FFmpegPath, args...)
+	var ffmpegErr limitedBuffer
+	ffmpegCmd.Stderr = &ffmpegErr
+	if err := ffmpegCmd.Run(); err != nil {
+		if processCtx.Err() != nil {
+			return fmt.Errorf("youtube clip thumbnail extraction failed: %w", processCtx.Err())
+		}
+		return fmt.Errorf("youtube clip thumbnail extraction failed: ffmpeg: %v %s", err, strings.TrimSpace(ffmpegErr.String()))
+	}
+	return nil
 }
 
 func (s *Service) extractClipThumbnail(ctx context.Context, tools ToolPaths, sourcePath string, sourceSeconds float64, outputPath string) error {

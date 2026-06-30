@@ -175,7 +175,7 @@ func TestClipTranscribesDetectsRendersAndUploads(t *testing.T) {
 *" --dump-json "*)
   printf '%s\n' '{"id":"video-1","title":"Deep Dive","webpage_url":"https://www.youtube.com/watch?v=video-1","uploader":"Teacher","duration":420}'
   ;;
-*" --format best[ext=mp4]/best "*)
+*" --format bestvideo"*)
   out=""
   previous=""
   for arg in "$@"; do
@@ -227,16 +227,22 @@ case " $* " in
   printf 'spliced clip bytes' > "$last"
   ;;
 *" -frames:v 1 "*)
-  if base64 --decode > "$last" 2>/dev/null <<'B64'
+  for path in "$@"; do
+    case "$path" in
+    *.jpg)
+      if base64 --decode > "$path" 2>/dev/null <<'B64'
 iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=
 B64
-  then
-    :
-  else
-    base64 -D > "$last" <<'B64'
+      then
+        :
+      else
+        base64 -D > "$path" <<'B64'
 iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=
 B64
-  fi
+      fi
+      ;;
+    esac
+  done
   ;;
 *" +faststart "*)
   cat >/dev/null
@@ -446,7 +452,7 @@ func TestClipSkipsCandidateWhenCompositionPlanningFails(t *testing.T) {
 *" --dump-json "*)
   printf '%s\n' '{"id":"video-1","title":"Deep Dive","webpage_url":"https://www.youtube.com/watch?v=video-1","uploader":"Teacher","duration":420}'
   ;;
-*" --format best[ext=mp4]/best "*)
+*" --format bestvideo"*)
   out=""
   previous=""
   for arg in "$@"; do
@@ -487,16 +493,22 @@ case " $* " in
   printf 'audio two' > "$(printf "$last" 1)"
   ;;
 *" -frames:v 1 "*)
-  if base64 --decode > "$last" 2>/dev/null <<'B64'
+  for path in "$@"; do
+    case "$path" in
+    *.jpg)
+      if base64 --decode > "$path" 2>/dev/null <<'B64'
 iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=
 B64
-  then
-    :
-  else
-    base64 -D > "$last" <<'B64'
+      then
+        :
+      else
+        base64 -D > "$path" <<'B64'
 iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=
 B64
-  fi
+      fi
+      ;;
+    esac
+  done
   ;;
 *" +faststart "*)
   cat >/dev/null
@@ -933,6 +945,39 @@ esac`)
 	second := candidates[1]
 	if second.ThumbnailURL != "https://img.example.test/def.jpg" || second.Uploader != "Second Creator" || second.Duration != 42*time.Second {
 		t.Fatalf("unexpected second candidate: %+v", second)
+	}
+}
+
+func TestValidateCaptionRendererCachesSuccessfulProbe(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell executable fixtures are unix-only")
+	}
+	ffmpegPath := writeShellExecutable(t, "ffmpeg", `case " $* " in
+*" -filters "*)
+  count_file="$0.count"
+  count=$(cat "$count_file" 2>/dev/null || printf 0)
+  count=$((count + 1))
+  printf '%s' "$count" > "$count_file"
+  echo ' ... subtitles         V->V       Render text subtitles onto input video using the libass library.'
+  ;;
+*)
+  echo "unexpected ffmpeg args: $*" >&2
+  exit 1
+  ;;
+esac`)
+	captionRendererSupportCache.Delete(ffmpegPath)
+
+	for range 2 {
+		if err := validateCaptionRenderer(context.Background(), ToolPaths{FFmpegPath: ffmpegPath}); err != nil {
+			t.Fatalf("validateCaptionRenderer: %v", err)
+		}
+	}
+	data, err := os.ReadFile(ffmpegPath + ".count")
+	if err != nil {
+		t.Fatalf("read ffmpeg count: %v", err)
+	}
+	if strings.TrimSpace(string(data)) != "1" {
+		t.Fatalf("expected one caption renderer probe, got %q", string(data))
 	}
 }
 

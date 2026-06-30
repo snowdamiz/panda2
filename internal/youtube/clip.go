@@ -608,7 +608,7 @@ func (s *Service) downloadClipSourceVideo(ctx context.Context, tools ToolPaths, 
 	defer cancel()
 	outputTemplate := filepath.Join(tempDir, "source.%(ext)s")
 	args := youtubeYTDLPDownloadArgs(
-		"--format", "best[ext=mp4]/best",
+		"--format", youtubeClipSourceFormat,
 		"--merge-output-format", "mp4",
 		"--output", outputTemplate,
 		source,
