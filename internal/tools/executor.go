@@ -4186,6 +4186,9 @@ func (e *Executor) reserveYouTubeClipDailyUsage(ctx context.Context, request Exe
 	if e.clips == nil {
 		return nil, nil
 	}
+	if request.IsOwner {
+		return nil, nil
+	}
 	userID := strings.TrimSpace(request.ActorID)
 	if userID == "" {
 		return nil, nil
