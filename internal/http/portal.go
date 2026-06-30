@@ -189,7 +189,7 @@ func (s *Server) discordPortalCallback(c *fiber.Ctx) error {
 	return s.redirectPortal(c, "token="+token)
 }
 
-// redirectPortal sends the browser back to the portal /clips page with the given
+// redirectPortal sends the browser back to the portal /clips/ page with the given
 // URL fragment. Falls back to a JSON body when no portal base URL is set.
 func (s *Server) redirectPortal(c *fiber.Ctx, fragment string) error {
 	base := strings.TrimRight(strings.TrimSpace(s.cfg.PortalBaseURL), "/")
@@ -200,7 +200,7 @@ func (s *Server) redirectPortal(c *fiber.Ctx, fragment string) error {
 		status, value, _ := strings.Cut(fragment, "=")
 		return c.JSON(map[string]string{status: value})
 	}
-	return c.Redirect(base+"/clips#"+fragment, fiber.StatusFound)
+	return c.Redirect(base+"/clips/#"+fragment, fiber.StatusFound)
 }
 
 func (s *Server) portalMe(c *fiber.Ctx) error {

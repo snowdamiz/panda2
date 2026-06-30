@@ -28,6 +28,13 @@ func TestLoadDevelopmentAllowsMissingCredentials(t *testing.T) {
 	}
 }
 
+func TestPortalClipsURLUsesCanonicalTrailingSlash(t *testing.T) {
+	cfg := Config{PortalBaseURL: "https://panda.example/"}
+	if got := cfg.PortalClipsURL(); got != "https://panda.example/clips/" {
+		t.Fatalf("unexpected portal clips URL: %q", got)
+	}
+}
+
 func TestProductionRequiresCredentials(t *testing.T) {
 	clearConfigEnv(t)
 	t.Setenv("ENVIRONMENT", "production")

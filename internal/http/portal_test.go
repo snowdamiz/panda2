@@ -1,10 +1,12 @@
 package http
 
 import (
+	stdhttp "net/http"
 	"testing"
 	"time"
 
 	"github.com/sn0w/panda2/internal/config"
+	discordbot "github.com/sn0w/panda2/internal/discord"
 )
 
 func newPortalServer(secret string) *Server {
@@ -77,5 +79,35 @@ func TestPortalStateRoundTripAndExpiry(t *testing.T) {
 	}
 	if server.verifyPortalState(expired) {
 		t.Fatal("expired state must not verify")
+	}
+}
+
+func TestDiscordPortalCallbackRedirectsToCanonicalClipsURL(t *testing.T) {
+	server := New(config.Config{
+		DiscordApplicationID:     "app-id",
+		DiscordClientSecret:      "secret",
+		DiscordPortalRedirectURI: "https://api.example.test/auth/discord/callback",
+		PortalBaseURL:            "https://panda.example.test/",
+		PortalSessionSecret:      "portal-secret",
+		Environment:              "production",
+	}, nil).WithPortalOAuth(discordbot.NewPortalOAuthClient(
+		"app-id",
+		"secret",
+		"https://api.example.test/auth/discord/callback",
+	))
+
+	req, err := stdhttp.NewRequest(stdhttp.MethodGet, "/auth/discord/callback?state=bad", nil)
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+	resp, err := server.Test(req)
+	if err != nil {
+		t.Fatalf("callback request: %v", err)
+	}
+	if resp.StatusCode != stdhttp.StatusFound {
+		t.Fatalf("expected redirect, got status %d", resp.StatusCode)
+	}
+	if got := resp.Header.Get("Location"); got != "https://panda.example.test/clips/#error=invalid_state" {
+		t.Fatalf("unexpected redirect location: %q", got)
 	}
 }
