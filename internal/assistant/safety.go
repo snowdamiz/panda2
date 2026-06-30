@@ -216,7 +216,7 @@ func (s *Service) classifyUnsafeTopic(ctx context.Context, config store.GuildCon
 	if s == nil || s.llm == nil {
 		return unsafeTopicDecision{}, fmt.Errorf("llm client is required for unsafe-topic classification")
 	}
-	response, err := s.chatWithFallback(ctx, config, modelTaskSafety, llm.ChatRequest{
+	response, err := s.chatWithFallback(ctx, config, modelTaskSafety, "", llm.ChatRequest{
 		Messages: []llm.Message{
 			{Role: "system", Content: unsafeTopicClassifierPrompt},
 			{Role: "user", Content: safetyClassificationContent(input)},

@@ -1,0 +1,29 @@
+---
+/**
+ * A sidebar tab button. The controller scripts toggle `.active` and
+ * `aria-selected`, and locate buttons via the scoped data attribute.
+ */
+interface Props {
+  scope: 'account' | 'admin';
+  tab: string;
+  label: string;
+  active?: boolean;
+}
+
+const { scope, tab, label, active = false } = Astro.props;
+const tabAttr = scope === 'admin' ? 'data-admin-tab-button' : 'data-account-tab-button';
+const attrs = { [tabAttr]: tab };
+---
+
+<button
+  type="button"
+  class:list={['dash-nav-item', { active }]}
+  role="tab"
+  aria-selected={active ? 'true' : 'false'}
+  {...attrs}
+>
+  <span class="dash-nav-icon" aria-hidden="true">
+    <slot />
+  </span>
+  <span class="dash-nav-label">{label}</span>
+</button>

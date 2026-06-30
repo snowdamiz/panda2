@@ -1,10 +1,10 @@
 export const siteMeta = {
   title: 'Panda - Hosted Discord assistant for busy servers',
   description:
-    'Panda is a hosted Discord assistant with server plans, managed AI responses, knowledge, schedules, web search, and admin-controlled usage.',
+    'Panda is a hosted Discord assistant with prepaid credit packs, managed AI responses, knowledge, schedules, web search, and admin-controlled usage.',
   ogTitle: 'Panda - Hosted Discord assistant',
   ogDescription:
-    'Install Panda, start a server trial, and give your community a reliable assistant with predictable usage limits.',
+    'Install Panda, start a server trial, and give your community a reliable assistant with prepaid credits.',
   repositoryUrl: 'https://github.com/snowdamiz/panda2',
   installUrl: '/#install',
   accountUrl: '/account',
@@ -39,61 +39,71 @@ export const navLinks = [
   { href: '/#privacy', label: 'Privacy' },
 ] as const;
 
-export const heroMeta = ['14-day trial', 'Usage limits', 'Admin controls', 'Server knowledge'] as const;
+export const heroMeta = ['14-day trial', 'Prepaid credits', 'Admin controls', 'Server knowledge'] as const;
 
-export const planOptions = [
+// Prepaid credit packs. One pack = credits for one Discord server, activated with
+// a SOL payment. Credits never expire mid-pack; the pack itself sets the storage
+// and retention caps. Slugs match the backend pack IDs (starter/plus/pro/business).
+export const packOptions = [
   {
     slug: 'starter',
-    label: 'Starter',
+    name: 'Starter Pack',
     price: '$19',
-    cadence: '/server/mo',
-    aiResponses: '2,000 AI responses',
-    searches: '100 web searches',
-    images: '25 image generations',
+    credits: '10,000 credits',
     storage: '100 MB knowledge',
-    retention: '30 day retention',
+    retention: '30-day retention',
     badge: 'Small servers',
     featured: false,
   },
   {
     slug: 'plus',
-    label: 'Plus',
+    name: 'Plus Pack',
     price: '$49',
-    cadence: '/server/mo',
-    aiResponses: '5,000 AI responses',
-    searches: '400 web searches',
-    images: '100 image generations',
+    credits: '30,000 credits',
     storage: '500 MB knowledge',
-    retention: '90 day retention',
+    retention: '90-day retention',
     badge: 'Active communities',
     featured: true,
   },
   {
     slug: 'pro',
-    label: 'Pro',
+    name: 'Pro Pack',
     price: '$99',
-    cadence: '/server/mo',
-    aiResponses: '10,000 AI responses',
-    searches: '1,000 web searches',
-    images: '250 image generations',
+    credits: '75,000 credits',
     storage: '2 GB knowledge',
-    retention: '180 day retention',
+    retention: '180-day retention',
     badge: 'Large servers',
     featured: false,
   },
   {
     slug: 'business',
-    label: 'Business',
+    name: 'Business Pack',
     price: '$249',
-    cadence: '/server/mo',
-    aiResponses: '25,000 AI responses',
-    searches: '2,000 web searches',
-    images: '1,000 image generations',
+    credits: '220,000 credits',
     storage: '10 GB knowledge',
-    retention: '365 day retention',
+    retention: '365-day retention',
     badge: 'High-volume teams',
     featured: false,
   },
+] as const;
+
+export const trialPack = {
+  name: 'Trial Pack',
+  credits: '1,500 credits',
+  storage: '25 MB knowledge',
+  retention: '14-day retention',
+  duration: '14 days',
+} as const;
+
+// Representative credit costs per action. Action-oriented and provider-neutral so
+// buyers can estimate how far a pack goes. Expensive actions cost more credits.
+export const actionCosts = [
+  { action: 'AI reply', cost: '4 credits' },
+  { action: 'Web search', cost: '8 credits' },
+  { action: 'Image inspection', cost: '25 credits' },
+  { action: 'Image generation', cost: '150 credits' },
+  { action: 'YouTube summary', cost: '20 credits + 4 / min' },
+  { action: 'YouTube clip', cost: '250 credits + render' },
 ] as const;
 
 export const marqueeItems = [
@@ -101,7 +111,7 @@ export const marqueeItems = [
   'PAY WITH CONNECTED WALLET',
   'ASK NATURALLY',
   'CONTROL EVERY TOOL',
-  'SEE USAGE BEFORE CUTOFF',
+  'SEE CREDITS BEFORE CUTOFF',
 ] as const;
 
 export const featureCards = [
@@ -119,9 +129,9 @@ export const featureCards = [
   },
   {
     index: '03',
-    title: 'Knowledge with quotas',
+    title: 'Knowledge with clear limits',
     body:
-      'Add server knowledge deliberately, track storage by plan, and keep retention clear for admins and members.',
+      'Add server knowledge deliberately, track storage against the active pack, and keep retention clear for admins and members.',
   },
   {
     index: '04',
@@ -154,9 +164,9 @@ export const workflowSteps = [
   },
   {
     number: '3',
-    title: 'Answer with limits',
+    title: 'Answer with credits',
     body:
-      'Panda checks subscription state and quota before paid work, then replies in Discord with usage counted against the server plan.',
+      'Panda checks the server credit balance before paid work, then replies in Discord with credits counted against the active pack.',
     icon: 'check',
   },
 ] as const;
@@ -198,16 +208,16 @@ export const commandViews = [
     values: [
       ['ANSWER LENGTH', 'Standard'],
       ['TOOL POLICY', 'Confirm writes'],
-      ['WEB SEARCH', 'Allowed by plan'],
+      ['WEB SEARCH', 'Allowed by role'],
     ],
     status: 'Behavior is saved for this server',
   },
   {
     key: 'billing',
     values: [
-      ['PLAN', 'Starter'],
-      ['AI REMAINING', '1,842'],
-      ['RENEWAL', 'Monthly'],
+      ['PACK', 'Starter Pack'],
+      ['CREDITS', '8,450 left'],
+      ['STATUS', 'Active'],
     ],
     status: 'Activation key is ready for Discord',
   },
@@ -244,8 +254,8 @@ export const controlPoints = [
   },
   {
     number: '03',
-    lead: 'Usage-aware',
-    body: 'plan, renewal, quota, and degraded states are visible before spend runs away.',
+    lead: 'Credit-aware',
+    body: 'credit balance, reservations, and degraded states are visible before spend runs away.',
   },
 ] as const;
 
@@ -265,7 +275,7 @@ export const privacyItems = [
   {
     icon: 'R',
     title: 'Conversation content',
-    detail: 'Plan-based retention',
+    detail: 'Pack-based retention',
     state: 'EXPIRING',
   },
   {

@@ -20,6 +20,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/sn0w/panda2/internal/objectstore"
 )
 
 const (
@@ -28,6 +30,9 @@ const (
 	defaultChunkDuration    = 10 * time.Minute
 	defaultProcessTimeout   = 30 * time.Minute
 	defaultHTTPTimeout      = 2 * time.Minute
+	defaultClipMinDuration  = 5 * time.Second
+	defaultClipMaxDuration  = 90 * time.Second
+	defaultClipMaxBytes     = 100 << 20
 	lemonfoxUploadLimit     = 100 << 20
 	lemonfoxResponseMaxSize = 4 << 20
 	youtubePageMaxSize      = 4 << 20
@@ -44,15 +49,27 @@ var (
 )
 
 type Config struct {
-	APIKey         string
-	BaseURL        string
-	YTDLPPath      string
-	FFmpegPath     string
-	ToolProvider   ToolProvider
-	HTTPClient     *http.Client
-	LookupTimeout  time.Duration
-	ChunkDuration  time.Duration
-	ProcessTimeout time.Duration
+	APIKey              string
+	BaseURL             string
+	YTDLPPath           string
+	FFmpegPath          string
+	CaptionFontPath     string
+	CaptionFontFamily   string
+	ToolProvider        ToolProvider
+	ClipDetector        ClipDetector
+	ClipPlanner         ClipCompositionPlanner
+	ClipUploader        ObjectUploader
+	HTTPClient          *http.Client
+	LookupTimeout       time.Duration
+	ChunkDuration       time.Duration
+	ProcessTimeout      time.Duration
+	ClipMinDuration     time.Duration
+	ClipMaxDuration     time.Duration
+	ClipMaxBytes        int64
+	ThumbnailMaxCount   int
+	ThumbnailMaxEdge    int
+	VerticalResolution  ClipResolution
+	LandscapeResolution ClipResolution
 }
 
 type ToolPaths struct {
@@ -64,17 +81,44 @@ type ToolProvider interface {
 	Ensure(ctx context.Context) (ToolPaths, error)
 }
 
+type ClipDetector interface {
+	Configured() bool
+	Detect(ctx context.Context, request ClipDetectionRequest) (ClipDetectionResult, error)
+}
+
+type ClipCompositionPlanner interface {
+	Configured() bool
+	Plan(ctx context.Context, request ClipCompositionRequest) (ClipCompositionResult, error)
+}
+
+type ObjectUploader interface {
+	Configured() bool
+	Upload(ctx context.Context, request objectstore.UploadRequest) (objectstore.UploadResult, error)
+}
+
 type Service struct {
-	apiKey         string
-	baseURL        string
-	ytdlpPath      string
-	ffmpegPath     string
-	toolProvider   ToolProvider
-	client         *http.Client
-	lookupTimeout  time.Duration
-	chunkDuration  time.Duration
-	processTimeout time.Duration
-	toolsMu        sync.RWMutex
+	apiKey              string
+	baseURL             string
+	ytdlpPath           string
+	ffmpegPath          string
+	captionFontPath     string
+	captionFontFamily   string
+	toolProvider        ToolProvider
+	clipDetector        ClipDetector
+	clipPlanner         ClipCompositionPlanner
+	clipUploader        ObjectUploader
+	client              *http.Client
+	lookupTimeout       time.Duration
+	chunkDuration       time.Duration
+	processTimeout      time.Duration
+	clipMinDuration     time.Duration
+	clipMaxDuration     time.Duration
+	clipMaxBytes        int64
+	thumbnailMaxCount   int
+	thumbnailMaxEdge    int
+	verticalResolution  ClipResolution
+	landscapeResolution ClipResolution
+	toolsMu             sync.RWMutex
 }
 
 type SummaryRequest struct {
@@ -104,6 +148,254 @@ type SummaryResult struct {
 	Transcript          string
 	TranscriptChunkText []string
 	ChunkCount          int
+}
+
+type ClipRequest struct {
+	Query               string
+	Instructions        string
+	Language            string
+	AspectRatio         string
+	LayoutInstructions  string
+	Captions            string
+	CaptionInstructions string
+	GuildID             string
+	RequestID           string
+	Progress            func(ClipProgress)
+}
+
+type ClipProgress struct {
+	Status string
+}
+
+type ClipResult struct {
+	Title                  string
+	URL                    string
+	Uploader               string
+	Duration               time.Duration
+	TranscriptSegmentCount int
+	Clips                  []RenderedClip
+}
+
+type RenderedClip struct {
+	Rank                     int
+	Title                    string
+	Type                     string
+	WatchURL                 string
+	ObjectKey                string
+	ThumbnailURL             string
+	ThumbnailObjectKey       string
+	Duration                 time.Duration
+	SourceStartSeconds       float64
+	SourceEndSeconds         float64
+	Segments                 []RenderedClipSegment
+	Reason                   string
+	Confidence               float64
+	ViralityScore            int
+	HookScore                int
+	RetentionScore           int
+	ShareabilityScore        int
+	DurationPolicy           string
+	ExceptionReason          string
+	OutputSizeBytes          int64
+	AspectRatio              string
+	LayoutMode               string
+	CompositionReason        string
+	CompositionConfidence    float64
+	CaptionRendered          bool
+	CaptionMode              string
+	CaptionStylePreset       string
+	CaptionStyleSource       string
+	CaptionAnimation         string
+	CaptionTimingQuality     string
+	CaptionConfidence        float64
+	CaptionReason            string
+	CaptionFontFamily        string
+	CaptionFontColor         string
+	CaptionHighlightColor    string
+	CaptionBorderColor       string
+	CaptionBorderThickness   string
+	CaptionBackgroundColor   string
+	CaptionBackgroundOpacity float64
+}
+
+type RenderedClipSegment struct {
+	StartSeconds float64
+	EndSeconds   float64
+	Duration     time.Duration
+	Transcript   string
+}
+
+type TranscriptSegment struct {
+	StartSeconds float64          `json:"start_seconds"`
+	EndSeconds   float64          `json:"end_seconds"`
+	Text         string           `json:"text"`
+	ID           string           `json:"id,omitempty"`
+	Words        []TranscriptWord `json:"words,omitempty"`
+}
+
+type TranscriptWord struct {
+	ID           string  `json:"id"`
+	StartSeconds float64 `json:"start_seconds"`
+	EndSeconds   float64 `json:"end_seconds"`
+	Text         string  `json:"text"`
+}
+
+type ClipDetectionRequest struct {
+	Title              string
+	URL                string
+	Uploader           string
+	Duration           time.Duration
+	Instructions       string
+	MinDurationSeconds float64
+	MaxDurationSeconds float64
+	MaxClips           int
+	Segments           []TranscriptSegment
+}
+
+type ClipDetectionResult struct {
+	Clips []ClipDecision `json:"clips"`
+}
+
+type ClipDecision struct {
+	Rank              int                   `json:"rank"`
+	Title             string                `json:"title"`
+	Type              string                `json:"type"`
+	Segments          []ClipDecisionSegment `json:"segments"`
+	Reason            string                `json:"reason"`
+	Confidence        float64               `json:"confidence"`
+	ViralityScore     int                   `json:"virality_score"`
+	HookScore         int                   `json:"hook_score"`
+	RetentionScore    int                   `json:"retention_score"`
+	ShareabilityScore int                   `json:"shareability_score"`
+	DurationPolicy    string                `json:"duration_policy"`
+	ExceptionReason   string                `json:"exception_reason"`
+}
+
+type ClipDecisionSegment struct {
+	StartWordID        string  `json:"start_word_id,omitempty"`
+	EndWordID          string  `json:"end_word_id,omitempty"`
+	StartSeconds       float64 `json:"start_seconds"`
+	EndSeconds         float64 `json:"end_seconds"`
+	SpeechStartSeconds float64 `json:"speech_start_seconds,omitempty"`
+	SpeechEndSeconds   float64 `json:"speech_end_seconds,omitempty"`
+	Transcript         string  `json:"transcript"`
+	BoundaryReason     string  `json:"boundary_reason,omitempty"`
+}
+
+type ClipResolution struct {
+	Width  int
+	Height int
+}
+
+type ClipCompositionRequest struct {
+	Title                 string
+	URL                   string
+	Uploader              string
+	RequestedAspect       string
+	LayoutInstructions    string
+	CaptionMode           string
+	CaptionInstructions   string
+	AvailableCaptionFonts []string
+	Clip                  ClipDecision
+	TranscriptTimeline    []ClipCompositionTranscriptSegment
+	Thumbnails            []ClipThumbnail
+}
+
+type ClipThumbnail struct {
+	ID                  string
+	SourceSeconds       float64
+	ClipSegmentIndex    int
+	ClipOffsetSeconds   float64
+	SampleReason        string
+	Width               int
+	Height              int
+	MIMEType            string
+	Data                []byte
+	TranscriptNearFrame string
+}
+
+type ClipCompositionTranscriptSegment struct {
+	ClipSegmentIndex int              `json:"clip_segment_index"`
+	ID               string           `json:"id"`
+	StartSeconds     float64          `json:"start_seconds"`
+	EndSeconds       float64          `json:"end_seconds"`
+	Text             string           `json:"text"`
+	Words            []TranscriptWord `json:"words,omitempty"`
+}
+
+type ClipCompositionResult struct {
+	AspectRatio     string                `json:"aspect_ratio"`
+	LayoutMode      string                `json:"layout_mode"`
+	Plans           []ClipFrameRenderPlan `json:"plans"`
+	SwitchDecisions []ClipSwitchDecision  `json:"switch_decisions"`
+	CaptionPlan     *ClipCaptionPlan      `json:"caption_plan"`
+	Confidence      float64               `json:"confidence"`
+	Reason          string                `json:"reason"`
+}
+
+type ClipFrameRenderPlan struct {
+	AppliesToSegmentIndex int                `json:"applies_to_segment_index"`
+	SourceStartSeconds    float64            `json:"source_start_seconds"`
+	SourceEndSeconds      float64            `json:"source_end_seconds"`
+	Regions               []ClipRenderRegion `json:"regions"`
+}
+
+type ClipRenderRegion struct {
+	Role       string   `json:"role"`
+	SourceRect ClipRect `json:"source_rect"`
+	OutputRect ClipRect `json:"output_rect"`
+	Fit        string   `json:"fit"`
+	ZIndex     int      `json:"z_index"`
+}
+
+type ClipSwitchDecision struct {
+	BeforeThumbnailID string  `json:"before_thumbnail_id"`
+	AfterThumbnailID  string  `json:"after_thumbnail_id"`
+	VisualDecision    string  `json:"visual_decision"`
+	Confidence        float64 `json:"confidence"`
+	Reason            string  `json:"reason"`
+}
+
+type ClipCaptionPlan struct {
+	Mode              string              `json:"mode"`
+	StylePreset       string              `json:"style_preset"`
+	StyleSource       string              `json:"style_source"`
+	Animation         string              `json:"animation"`
+	TimingQuality     string              `json:"timing_quality"`
+	FontFamily        string              `json:"font_family"`
+	FontColor         string              `json:"font_color"`
+	HighlightColor    string              `json:"highlight_color"`
+	BorderColor       string              `json:"border_color"`
+	BorderThickness   string              `json:"border_thickness"`
+	BackgroundColor   string              `json:"background_color"`
+	BackgroundOpacity float64             `json:"background_opacity"`
+	Regions           []ClipCaptionRegion `json:"regions"`
+	Cues              []ClipCaptionCue    `json:"cues"`
+	Confidence        float64             `json:"confidence"`
+	Reason            string              `json:"reason"`
+}
+
+type ClipCaptionRegion struct {
+	ID              string   `json:"id"`
+	OutputRect      ClipRect `json:"output_rect"`
+	HorizontalAlign string   `json:"horizontal_align"`
+	VerticalAlign   string   `json:"vertical_align"`
+	MaxLines        int      `json:"max_lines"`
+	ZIndex          int      `json:"z_index"`
+}
+
+type ClipCaptionCue struct {
+	CaptionRegionID  string   `json:"caption_region_id"`
+	WordIDs          []string `json:"word_ids"`
+	SourceSegmentIDs []string `json:"source_segment_ids"`
+	EmphasisWordIDs  []string `json:"emphasis_word_ids"`
+}
+
+type ClipRect struct {
+	X int `json:"x"`
+	Y int `json:"y"`
+	W int `json:"w"`
+	H int `json:"h"`
 }
 
 type VideoCandidate struct {
@@ -152,10 +444,29 @@ type thumbnailInfo struct {
 type transcriptionResponse struct {
 	Text     string                 `json:"text"`
 	Segments []transcriptionSegment `json:"segments"`
+	Words    []transcriptionWord    `json:"words"`
 }
 
 type transcriptionSegment struct {
-	Text string `json:"text"`
+	Text                string              `json:"text"`
+	Start               float64             `json:"start"`
+	End                 float64             `json:"end"`
+	Words               []transcriptionWord `json:"words"`
+	WholeWordTimestamps []transcriptionWord `json:"whole_word_timestamps"`
+}
+
+type transcriptionWord struct {
+	Word           string  `json:"word"`
+	Text           string  `json:"text"`
+	PunctuatedWord string  `json:"punctuated_word"`
+	Start          float64 `json:"start"`
+	End            float64 `json:"end"`
+}
+
+type chunkTranscription struct {
+	Text     string
+	Segments []transcriptionSegment
+	Words    []transcriptionWord
 }
 
 type youtubeFeed struct {
@@ -199,6 +510,14 @@ func NewService(config Config) *Service {
 	if client == nil {
 		client = &http.Client{Timeout: defaultHTTPTimeout}
 	}
+	captionFontPath := strings.TrimSpace(config.CaptionFontPath)
+	if captionFontPath == "" {
+		captionFontPath = defaultCaptionFontPath()
+	}
+	captionFontFamily := strings.TrimSpace(config.CaptionFontFamily)
+	if captionFontFamily == "" {
+		captionFontFamily = defaultCaptionFontFamily()
+	}
 	lookupTimeout := config.LookupTimeout
 	if lookupTimeout <= 0 {
 		lookupTimeout = defaultLookupTimeout
@@ -211,21 +530,72 @@ func NewService(config Config) *Service {
 	if processTimeout <= 0 {
 		processTimeout = defaultProcessTimeout
 	}
+	clipMinDuration := config.ClipMinDuration
+	if clipMinDuration <= 0 {
+		clipMinDuration = defaultClipMinDuration
+	}
+	clipMaxDuration := config.ClipMaxDuration
+	if clipMaxDuration <= 0 {
+		clipMaxDuration = defaultClipMaxDuration
+	}
+	clipMaxBytes := config.ClipMaxBytes
+	if clipMaxBytes <= 0 {
+		clipMaxBytes = defaultClipMaxBytes
+	}
+	thumbnailMaxCount := config.ThumbnailMaxCount
+	if thumbnailMaxCount <= 0 {
+		thumbnailMaxCount = 12
+	}
+	thumbnailMaxEdge := config.ThumbnailMaxEdge
+	if thumbnailMaxEdge <= 0 {
+		thumbnailMaxEdge = 720
+	}
+	verticalResolution := config.VerticalResolution
+	if verticalResolution.Width <= 0 || verticalResolution.Height <= 0 {
+		verticalResolution = ClipResolution{Width: 1080, Height: 1920}
+	}
+	landscapeResolution := config.LandscapeResolution
+	if landscapeResolution.Width <= 0 || landscapeResolution.Height <= 0 {
+		landscapeResolution = ClipResolution{Width: 1920, Height: 1080}
+	}
 	return &Service{
-		apiKey:         strings.TrimSpace(config.APIKey),
-		baseURL:        baseURL,
-		ytdlpPath:      strings.TrimSpace(config.YTDLPPath),
-		ffmpegPath:     strings.TrimSpace(config.FFmpegPath),
-		toolProvider:   config.ToolProvider,
-		client:         client,
-		lookupTimeout:  lookupTimeout,
-		chunkDuration:  chunkDuration,
-		processTimeout: processTimeout,
+		apiKey:              strings.TrimSpace(config.APIKey),
+		baseURL:             baseURL,
+		ytdlpPath:           strings.TrimSpace(config.YTDLPPath),
+		ffmpegPath:          strings.TrimSpace(config.FFmpegPath),
+		captionFontPath:     captionFontPath,
+		captionFontFamily:   captionFontFamily,
+		toolProvider:        config.ToolProvider,
+		clipDetector:        config.ClipDetector,
+		clipPlanner:         config.ClipPlanner,
+		clipUploader:        config.ClipUploader,
+		client:              client,
+		lookupTimeout:       lookupTimeout,
+		chunkDuration:       chunkDuration,
+		processTimeout:      processTimeout,
+		clipMinDuration:     clipMinDuration,
+		clipMaxDuration:     clipMaxDuration,
+		clipMaxBytes:        clipMaxBytes,
+		thumbnailMaxCount:   thumbnailMaxCount,
+		thumbnailMaxEdge:    thumbnailMaxEdge,
+		verticalResolution:  verticalResolution,
+		landscapeResolution: landscapeResolution,
 	}
 }
 
 func (s *Service) Configured() bool {
 	return s != nil && strings.TrimSpace(s.apiKey) != ""
+}
+
+func (s *Service) ClipConfigured() bool {
+	return s != nil &&
+		s.Configured() &&
+		s.clipDetector != nil &&
+		s.clipDetector.Configured() &&
+		s.clipPlanner != nil &&
+		s.clipPlanner.Configured() &&
+		s.clipUploader != nil &&
+		s.clipUploader.Configured()
 }
 
 func (s *Service) Summarize(ctx context.Context, request SummaryRequest) (SummaryResult, error) {
@@ -318,13 +688,11 @@ func (s *Service) Search(ctx context.Context, request SearchRequest) ([]VideoCan
 		return nil, err
 	}
 	searchLimit := youtubeSearchFetchLimit(limit, request)
-	args := []string{
+	args := youtubeYTDLPBaseArgs(
 		"--dump-json",
 		"--flat-playlist",
-		"--no-warnings",
-		"--no-cache-dir",
 		"--skip-download",
-	}
+	)
 	if date := normalizedYTDLPDate(request.Date); date != "" {
 		args = append(args, "--date", date)
 	}
@@ -650,15 +1018,13 @@ func (s *Service) searchChannelUploadsWithYTDLP(ctx context.Context, tools ToolP
 }
 
 func (s *Service) channelUploadCandidates(ctx context.Context, tools ToolPaths, source string, limit int, request SearchRequest) ([]VideoCandidate, error) {
-	args := []string{
+	args := youtubeYTDLPBaseArgs(
 		"--dump-json",
 		"--flat-playlist",
 		"--extractor-args", "youtubetab:approximate_date",
 		"--playlist-end", strconv.Itoa(limit),
-		"--no-warnings",
-		"--no-cache-dir",
 		"--skip-download",
-	}
+	)
 	if date := normalizedYTDLPDate(request.Date); date != "" {
 		args = append(args, "--date", date)
 	}
@@ -773,15 +1139,14 @@ func (s *Service) resolveChannelUploadSources(ctx context.Context, tools ToolPat
 	if query == "" {
 		return nil, ErrMissingVideo
 	}
-	cmd := exec.CommandContext(ctx, tools.YTDLPPath,
+	args := youtubeYTDLPBaseArgs(
 		"--dump-json",
 		"--flat-playlist",
 		"--playlist-end", "5",
-		"--no-warnings",
-		"--no-cache-dir",
 		"--skip-download",
 		fmt.Sprintf("ytsearch%d:%s", 5, query),
 	)
+	cmd := exec.CommandContext(ctx, tools.YTDLPPath, args...)
 	var stderr limitedBuffer
 	cmd.Stderr = &stderr
 	output, err := cmd.Output()
@@ -956,16 +1321,15 @@ func uploadDateDay(value time.Time) time.Time {
 func (s *Service) resolve(ctx context.Context, tools ToolPaths, query string) (videoMetadata, error) {
 	lookupCtx, cancel := context.WithTimeout(ctx, s.lookupTimeout)
 	defer cancel()
-	cmd := exec.CommandContext(lookupCtx, tools.YTDLPPath,
+	args := youtubeYTDLPBaseArgs(
 		"--dump-json",
 		"--no-playlist",
 		"--default-search", "ytsearch1",
 		"--format", "bestaudio/best",
-		"--no-warnings",
-		"--no-cache-dir",
 		"--skip-download",
 		query,
 	)
+	cmd := exec.CommandContext(lookupCtx, tools.YTDLPPath, args...)
 	var stderr limitedBuffer
 	cmd.Stderr = &stderr
 	output, err := cmd.Output()
@@ -1109,14 +1473,13 @@ func (s *Service) lookupSearchCandidateMetadata(ctx context.Context, tools ToolP
 	if source == "" {
 		return videoMetadata{}, ErrMissingVideo
 	}
-	cmd := exec.CommandContext(ctx, tools.YTDLPPath,
+	args := youtubeYTDLPBaseArgs(
 		"--dump-json",
 		"--no-playlist",
-		"--no-warnings",
-		"--no-cache-dir",
 		"--skip-download",
 		source,
 	)
+	cmd := exec.CommandContext(ctx, tools.YTDLPPath, args...)
 	var stderr limitedBuffer
 	cmd.Stderr = &stderr
 	output, err := cmd.Output()
@@ -1208,28 +1571,54 @@ func bestThumbnailURL(primary string, thumbnails []thumbnailInfo) string {
 func (s *Service) extractAudioChunks(ctx context.Context, tools ToolPaths, source string, dir string) ([]string, error) {
 	processCtx, cancel := context.WithTimeout(ctx, s.processTimeout)
 	defer cancel()
-	ytdlpCmd := exec.CommandContext(processCtx, tools.YTDLPPath,
-		"--no-playlist",
-		"--no-warnings",
-		"--no-progress",
-		"--no-cache-dir",
-		"--format", "bestaudio/best",
-		"--output", "-",
+	audioPath, err := s.downloadAudioSource(processCtx, tools, source, dir)
+	if err != nil {
+		return nil, err
+	}
+	return s.segmentAudioSource(processCtx, tools, audioPath, dir)
+}
+
+func (s *Service) downloadAudioSource(ctx context.Context, tools ToolPaths, source string, dir string) (string, error) {
+	outputTemplate := filepath.Join(dir, "audio.%(ext)s")
+	args := youtubeYTDLPDownloadArgs(
+		"--format", "bestaudio[ext=m4a]/bestaudio/best",
+		"--output", outputTemplate,
 		source,
 	)
+	ytdlpCmd := exec.CommandContext(ctx, tools.YTDLPPath, args...)
 	var ytdlpErr limitedBuffer
 	ytdlpCmd.Stderr = &ytdlpErr
-	ytdlpStdout, err := ytdlpCmd.StdoutPipe()
-	if err != nil {
-		return nil, fmt.Errorf("youtube audio extraction failed: yt-dlp pipe: %w", err)
+	if err := ytdlpCmd.Run(); err != nil {
+		if ctx.Err() != nil {
+			return "", fmt.Errorf("youtube audio extraction failed: %w", ctx.Err())
+		}
+		return "", fmt.Errorf("youtube audio extraction failed: yt-dlp: %v %s", err, strings.TrimSpace(ytdlpErr.String()))
 	}
+	matches, err := filepath.Glob(filepath.Join(dir, "audio.*"))
+	if err != nil {
+		return "", err
+	}
+	sort.Strings(matches)
+	for _, path := range matches {
+		if strings.HasSuffix(path, ".part") || strings.HasSuffix(path, ".ytdl") {
+			continue
+		}
+		info, err := os.Stat(path)
+		if err != nil || !info.Mode().IsRegular() || info.Size() <= 0 {
+			continue
+		}
+		return path, nil
+	}
+	return "", fmt.Errorf("youtube audio extraction failed: yt-dlp produced no audio file")
+}
 
+func (s *Service) segmentAudioSource(ctx context.Context, tools ToolPaths, audioPath string, dir string) ([]string, error) {
 	pattern := filepath.Join(dir, "chunk-%05d.wav")
-	ffmpegCmd := exec.CommandContext(processCtx, tools.FFmpegPath,
+	ffmpegCmd := exec.CommandContext(ctx, tools.FFmpegPath,
 		"-hide_banner",
 		"-loglevel", "error",
 		"-nostdin",
-		"-i", "pipe:0",
+		"-i", audioPath,
 		"-vn",
 		"-sn",
 		"-dn",
@@ -1244,31 +1633,12 @@ func (s *Service) extractAudioChunks(ctx context.Context, tools ToolPaths, sourc
 		pattern,
 	)
 	var ffmpegErr limitedBuffer
-	ffmpegCmd.Stdin = ytdlpStdout
 	ffmpegCmd.Stderr = &ffmpegErr
-
-	if err := ytdlpCmd.Start(); err != nil {
-		return nil, fmt.Errorf("youtube audio extraction failed: start yt-dlp: %w", err)
-	}
-	if err := ffmpegCmd.Start(); err != nil {
-		_ = ytdlpCmd.Wait()
-		return nil, fmt.Errorf("youtube audio extraction failed: start ffmpeg: %w", err)
-	}
-
-	ffmpegWaitErr := ffmpegCmd.Wait()
-	ytdlpWaitErr := ytdlpCmd.Wait()
-	if processCtx.Err() != nil {
-		return nil, fmt.Errorf("youtube audio extraction failed: %w", processCtx.Err())
-	}
-	var failures []string
-	if ffmpegWaitErr != nil {
-		failures = append(failures, strings.TrimSpace(fmt.Sprintf("ffmpeg: %v %s", ffmpegWaitErr, ffmpegErr.String())))
-	}
-	if ytdlpWaitErr != nil {
-		failures = append(failures, strings.TrimSpace(fmt.Sprintf("yt-dlp: %v %s", ytdlpWaitErr, ytdlpErr.String())))
-	}
-	if len(failures) > 0 {
-		return nil, fmt.Errorf("youtube audio extraction failed: %s", strings.Join(failures, "; "))
+	if err := ffmpegCmd.Run(); err != nil {
+		if ctx.Err() != nil {
+			return nil, fmt.Errorf("youtube audio extraction failed: %w", ctx.Err())
+		}
+		return nil, fmt.Errorf("youtube audio extraction failed: ffmpeg: %v %s", err, strings.TrimSpace(ffmpegErr.String()))
 	}
 
 	chunks, err := filepath.Glob(filepath.Join(dir, "chunk-*.wav"))
@@ -1280,72 +1650,86 @@ func (s *Service) extractAudioChunks(ctx context.Context, tools ToolPaths, sourc
 }
 
 func (s *Service) transcribeChunk(ctx context.Context, path string, language string) (string, error) {
-	info, err := os.Stat(path)
+	result, err := s.transcribeChunkDetailed(ctx, path, language)
 	if err != nil {
 		return "", err
 	}
+	return result.Text, nil
+}
+
+func (s *Service) transcribeChunkDetailed(ctx context.Context, path string, language string) (chunkTranscription, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return chunkTranscription{}, err
+	}
 	if info.Size() <= 0 {
-		return "", fmt.Errorf("audio chunk %s is empty", filepath.Base(path))
+		return chunkTranscription{}, fmt.Errorf("audio chunk %s is empty", filepath.Base(path))
 	}
 	if info.Size() > lemonfoxUploadLimit {
-		return "", fmt.Errorf("audio chunk %s exceeds Lemonfox upload limit", filepath.Base(path))
+		return chunkTranscription{}, fmt.Errorf("audio chunk %s exceeds Lemonfox upload limit", filepath.Base(path))
 	}
 
 	var body bytes.Buffer
 	writer := multipart.NewWriter(&body)
 	file, err := os.Open(path)
 	if err != nil {
-		return "", err
+		return chunkTranscription{}, err
 	}
 	defer file.Close()
 	part, err := writer.CreateFormFile("file", filepath.Base(path))
 	if err != nil {
-		return "", err
+		return chunkTranscription{}, err
 	}
 	if _, err := io.Copy(part, file); err != nil {
-		return "", err
+		return chunkTranscription{}, err
 	}
 	if err := writer.WriteField("response_format", "verbose_json"); err != nil {
-		return "", err
+		return chunkTranscription{}, err
+	}
+	if err := writer.WriteField("timestamp_granularities[]", "segment"); err != nil {
+		return chunkTranscription{}, err
+	}
+	if err := writer.WriteField("timestamp_granularities[]", "word"); err != nil {
+		return chunkTranscription{}, err
 	}
 	if value := strings.TrimSpace(language); value != "" {
 		if err := writer.WriteField("language", value); err != nil {
-			return "", err
+			return chunkTranscription{}, err
 		}
 	}
 	if err := writer.Close(); err != nil {
-		return "", err
+		return chunkTranscription{}, err
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.baseURL+"/audio/transcriptions", &body)
 	if err != nil {
-		return "", err
+		return chunkTranscription{}, err
 	}
 	req.Header.Set("Authorization", "Bearer "+s.apiKey)
 	req.Header.Set("Content-Type", writer.FormDataContentType())
 
 	resp, err := s.client.Do(req)
 	if err != nil {
-		return "", err
+		return chunkTranscription{}, err
 	}
 	defer resp.Body.Close()
 	data, readErr := io.ReadAll(io.LimitReader(resp.Body, lemonfoxResponseMaxSize+1))
 	if readErr != nil {
-		return "", readErr
+		return chunkTranscription{}, readErr
 	}
 	if len(data) > lemonfoxResponseMaxSize {
-		return "", fmt.Errorf("lemonfox transcription response exceeded %d bytes", lemonfoxResponseMaxSize)
+		return chunkTranscription{}, fmt.Errorf("lemonfox transcription response exceeded %d bytes", lemonfoxResponseMaxSize)
 	}
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		return "", fmt.Errorf("lemonfox transcription failed with status %d: %s", resp.StatusCode, strings.TrimSpace(string(data)))
+		return chunkTranscription{}, fmt.Errorf("lemonfox transcription failed with status %d: %s", resp.StatusCode, strings.TrimSpace(string(data)))
 	}
 
 	var decoded transcriptionResponse
 	if err := json.Unmarshal(data, &decoded); err != nil {
-		return "", fmt.Errorf("parse lemonfox transcription response: %w", err)
+		return chunkTranscription{}, fmt.Errorf("parse lemonfox transcription response: %w", err)
 	}
 	if text := strings.TrimSpace(decoded.Text); text != "" {
-		return text, nil
+		return chunkTranscription{Text: text, Segments: decoded.Segments, Words: decoded.Words}, nil
 	}
 	segments := make([]string, 0, len(decoded.Segments))
 	for _, segment := range decoded.Segments {
@@ -1353,7 +1737,7 @@ func (s *Service) transcribeChunk(ctx context.Context, path string, language str
 			segments = append(segments, text)
 		}
 	}
-	return strings.Join(segments, " "), nil
+	return chunkTranscription{Text: strings.Join(segments, " "), Segments: decoded.Segments, Words: decoded.Words}, nil
 }
 
 func (s *Service) ensureTools(ctx context.Context) (ToolPaths, error) {

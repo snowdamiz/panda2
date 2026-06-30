@@ -21,12 +21,15 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gofiber/contrib/websocket"
 	"github.com/gofiber/fiber/v2"
 	"github.com/gofiber/fiber/v2/middleware/cors"
 	"github.com/sn0w/panda2/internal/billing"
+	"github.com/sn0w/panda2/internal/clipevents"
 	"github.com/sn0w/panda2/internal/config"
 	discordbot "github.com/sn0w/panda2/internal/discord"
 	"github.com/sn0w/panda2/internal/features"
+	"github.com/sn0w/panda2/internal/objectstore"
 	"github.com/sn0w/panda2/internal/ratelimit"
 	"github.com/sn0w/panda2/internal/repository"
 	"github.com/sn0w/panda2/internal/runtimecontrol"
@@ -42,6 +45,11 @@ type Server struct {
 	install        InstallHandler
 	billing        *billing.Service
 	guilds         *repository.GuildRepository
+	knowledge      *repository.KnowledgeRepository
+	clips          *repository.ClipRepository
+	clipStore      *objectstore.R2Client
+	clipEvents     *clipevents.Hub
+	portalOAuth    *discordbot.PortalOAuthClient
 	runtime        *runtimecontrol.Service
 	paymentLimiter *ratelimit.Limiter
 	adminAuth      adminAuthStore
@@ -104,6 +112,9 @@ func New(cfg config.Config, store *store.Store) *Server {
 			sessions:   make(map[string]adminSession),
 		},
 	}
+	if store != nil {
+		server.knowledge = repository.NewKnowledgeRepository(store.DB)
+	}
 	server.routes()
 	return server
 }
@@ -125,6 +136,26 @@ func (s *Server) WithBillingService(service *billing.Service) *Server {
 
 func (s *Server) WithGuildRepository(guilds *repository.GuildRepository) *Server {
 	s.guilds = guilds
+	return s
+}
+
+func (s *Server) WithClipRepository(clips *repository.ClipRepository) *Server {
+	s.clips = clips
+	return s
+}
+
+func (s *Server) WithClipObjectStore(store *objectstore.R2Client) *Server {
+	s.clipStore = store
+	return s
+}
+
+func (s *Server) WithClipEvents(hub *clipevents.Hub) *Server {
+	s.clipEvents = hub
+	return s
+}
+
+func (s *Server) WithPortalOAuth(client *discordbot.PortalOAuthClient) *Server {
+	s.portalOAuth = client
 	return s
 }
 
@@ -183,6 +214,21 @@ func (s *Server) routes() {
 			MaxAge:       300,
 		}))
 	}
+	if origins := s.cfg.PortalCORSOrigins(); len(origins) > 0 {
+		s.app.Use("/portal", cors.New(cors.Config{
+			AllowOrigins: strings.Join(origins, ","),
+			AllowMethods: strings.Join([]string{
+				fiber.MethodGet,
+				fiber.MethodDelete,
+				fiber.MethodOptions,
+			}, ","),
+			AllowHeaders: strings.Join([]string{
+				fiber.HeaderAuthorization,
+				fiber.HeaderContentType,
+			}, ","),
+			MaxAge: 300,
+		}))
+	}
 
 	s.app.Get("/healthz", s.health)
 	s.app.Get("/readyz", s.ready)
@@ -197,6 +243,17 @@ func (s *Server) routes() {
 	s.app.Get("/install/features", s.installFeatures)
 	s.app.Post("/install/intents", s.createInstallIntent)
 	s.app.Get("/discord/install/callback", s.discordInstallCallback)
+	s.app.Get("/auth/discord/login", s.discordPortalLogin)
+	s.app.Get("/auth/discord/callback", s.discordPortalCallback)
+	s.app.Get("/portal/me", s.portalMe)
+	s.app.Get("/portal/clips", s.portalListClips)
+	// Live updates: the browser can't set an Authorization header on a WebSocket,
+	// so the session token is passed as a query param and verified before the
+	// upgrade. Registered before the :id routes so "ws" is never read as an id.
+	s.app.Use("/portal/clips/ws", s.portalClipsWSUpgrade)
+	s.app.Get("/portal/clips/ws", websocket.New(s.portalClipsWS))
+	s.app.Get("/portal/clips/:id/url", s.portalClipURL)
+	s.app.Delete("/portal/clips/:id", s.portalDeleteClip)
 	s.app.Post("/admin/auth/challenge", s.createAdminAuthChallenge)
 	s.app.Post("/admin/auth/sessions", s.createAdminSession)
 	s.app.Get("/admin/runtime", s.getAdminRuntimeStatus)
@@ -205,7 +262,7 @@ func (s *Server) routes() {
 	s.app.Post("/admin/coupons", s.createAdminCoupon)
 	s.app.Post("/admin/coupons/:coupon/revoke", s.revokeAdminCoupon)
 	s.app.Get("/admin/guilds", s.listAdminGuilds)
-	s.app.Post("/admin/guilds/:guild_id/subscription", s.updateAdminGuildSubscription)
+	s.app.Post("/admin/guilds/:guild_id/credit-account", s.updateAdminGuildCreditAccount)
 	s.app.Get("/billing/entitlements/:guild_id", s.getBillingEntitlement)
 	s.app.Post("/billing/sol/orders", s.createSolPaymentOrder)
 	s.app.Get("/billing/sol/orders/:order_id", s.getSolPaymentOrder)
@@ -660,6 +717,7 @@ func (s *Server) discordWebhookEvents(c *fiber.Ctx) error {
 type createSolPaymentOrderRequest struct {
 	GuildID            string `json:"guild_id"`
 	BillingOwnerUserID string `json:"billing_owner_user_id"`
+	Pack               string `json:"pack"`
 	Plan               string `json:"plan"`
 	SupportEmail       string `json:"support_email"`
 	CouponCode         string `json:"coupon_code"`
@@ -716,6 +774,7 @@ type updateAdminRuntimeStatusRequest struct {
 }
 
 type createAdminCouponRequest struct {
+	Pack             string `json:"pack"`
 	Plan             string `json:"plan"`
 	DiscountLamports int64  `json:"discount_lamports"`
 	CouponCode       string `json:"coupon_code"`
@@ -726,7 +785,7 @@ type createAdminCouponRequest struct {
 
 type adminCouponListResponse struct {
 	Coupons      []billing.CouponView `json:"coupons"`
-	PlanLamports map[string]int64     `json:"plan_lamports"`
+	PackLamports map[string]int64     `json:"pack_lamports"`
 }
 
 type adminCouponCreateResponse struct {
@@ -912,9 +971,13 @@ func (s *Server) listAdminCoupons(c *fiber.Ctx) error {
 	if err != nil {
 		return writeAdminCouponError(c, err)
 	}
+	packLamports := s.cfg.SolanaPackLamports
+	if len(packLamports) == 0 {
+		packLamports = s.cfg.SolanaPlanLamports
+	}
 	return c.JSON(adminCouponListResponse{
 		Coupons:      coupons,
-		PlanLamports: cloneLamports(s.cfg.SolanaPlanLamports),
+		PackLamports: cloneLamports(packLamports),
 	})
 }
 
@@ -937,6 +1000,7 @@ func (s *Server) createAdminCoupon(c *fiber.Ctx) error {
 	result, err := s.billing.CreateCoupon(c.Context(), billing.CreateCouponRequest{
 		ActorUserID:      "treasury_wallet:" + session.Wallet,
 		ActorIsOwner:     true,
+		Pack:             request.Pack,
 		Plan:             request.Plan,
 		DiscountLamports: request.DiscountLamports,
 		Code:             request.CouponCode,
@@ -979,27 +1043,22 @@ func (s *Server) revokeAdminCoupon(c *fiber.Ctx) error {
 }
 
 type adminGuildLimitsView struct {
-	AIResponses           int   `json:"ai_responses"`
-	WebSearches           int   `json:"web_searches"`
-	ImageGenerations      int   `json:"image_generations"`
+	Credits               int64 `json:"credits"`
 	KnowledgeStorageBytes int64 `json:"knowledge_storage_bytes"`
-	Schedules             int   `json:"schedules"`
 	RetentionDays         int   `json:"retention_days"`
-	MusicEnabled          bool  `json:"music_enabled"`
-	PremiumToolsEnabled   bool  `json:"premium_tools_enabled"`
 }
 
 type adminGuildUsageView struct {
-	AIResponses           int64 `json:"ai_responses"`
-	WebSearches           int64 `json:"web_searches"`
-	ImageGenerations      int64 `json:"image_generations"`
+	AvailableCredits      int64 `json:"available_credits"`
+	ReservedCredits       int64 `json:"reserved_credits"`
+	Credits               int64 `json:"credits"`
 	KnowledgeStorageBytes int64 `json:"knowledge_storage_bytes"`
 }
 
 type adminGuildBillingView struct {
-	HasSubscription    bool                  `json:"has_subscription"`
-	Plan               string                `json:"plan"`
-	PlanDisplayName    string                `json:"plan_display_name"`
+	HasCreditAccount   bool                  `json:"has_credit_account"`
+	Pack               string                `json:"pack"`
+	PackDisplayName    string                `json:"pack_display_name"`
 	Status             string                `json:"status"`
 	StoredStatus       string                `json:"stored_status"`
 	GraceState         string                `json:"grace_state"`
@@ -1012,6 +1071,9 @@ type adminGuildBillingView struct {
 	ReadOnly           bool                  `json:"read_only"`
 	BillingOwnerUserID string                `json:"billing_owner_user_id"`
 	Email              string                `json:"email"`
+	AvailableCredits   int64                 `json:"available_credits"`
+	ReservedCredits    int64                 `json:"reserved_credits"`
+	Credits            int64                 `json:"credits"`
 	Limits             *adminGuildLimitsView `json:"limits,omitempty"`
 	Usage              adminGuildUsageView   `json:"usage"`
 }
@@ -1028,10 +1090,11 @@ type adminGuildView struct {
 	Billing           *adminGuildBillingView `json:"billing"`
 }
 
-type adminPlanView struct {
-	Plan        string `json:"plan"`
+type adminPackView struct {
+	Pack        string `json:"pack"`
 	DisplayName string `json:"display_name"`
 	PriceCents  int    `json:"price_cents"`
+	Credits     int64  `json:"credits"`
 }
 
 type adminGuildListResponse struct {
@@ -1039,11 +1102,12 @@ type adminGuildListResponse struct {
 	Total       int64            `json:"total"`
 	Limit       int              `json:"limit"`
 	Offset      int              `json:"offset"`
-	PlanCatalog []adminPlanView  `json:"plan_catalog"`
+	PackCatalog []adminPackView  `json:"pack_catalog"`
 	Statuses    []string         `json:"statuses"`
 }
 
-type updateAdminGuildSubscriptionRequest struct {
+type updateAdminGuildCreditAccountRequest struct {
+	Pack              string `json:"pack"`
 	Plan              string `json:"plan"`
 	Status            string `json:"status"`
 	PeriodEnd         string `json:"period_end"`
@@ -1052,14 +1116,15 @@ type updateAdminGuildSubscriptionRequest struct {
 	CancelAtPeriodEnd *bool  `json:"cancel_at_period_end"`
 }
 
-func adminPlanCatalog() []adminPlanView {
-	catalog := billing.PlanCatalog()
-	views := make([]adminPlanView, 0, len(catalog))
-	for _, plan := range catalog {
-		views = append(views, adminPlanView{
-			Plan:        plan.Plan,
-			DisplayName: plan.DisplayName,
-			PriceCents:  plan.PriceCents,
+func adminPackCatalog() []adminPackView {
+	catalog := billing.PackCatalog()
+	views := make([]adminPackView, 0, len(catalog))
+	for _, pack := range catalog {
+		views = append(views, adminPackView{
+			Pack:        pack.Pack,
+			DisplayName: pack.DisplayName,
+			PriceCents:  pack.PriceCents,
+			Credits:     pack.Credits,
 		})
 	}
 	return views
@@ -1067,9 +1132,9 @@ func adminPlanCatalog() []adminPlanView {
 
 func adminGuildBillingViewFrom(overview billing.AdminGuildBilling) *adminGuildBillingView {
 	view := &adminGuildBillingView{
-		HasSubscription:    overview.HasSubscription,
-		Plan:               overview.Plan,
-		PlanDisplayName:    overview.PlanDisplayName,
+		HasCreditAccount:   overview.HasCreditAccount,
+		Pack:               overview.Pack,
+		PackDisplayName:    overview.PackDisplayName,
 		Status:             overview.Status,
 		StoredStatus:       overview.StoredStatus,
 		GraceState:         overview.GraceState,
@@ -1080,34 +1145,40 @@ func adminGuildBillingViewFrom(overview billing.AdminGuildBilling) *adminGuildBi
 		ReadOnly:           overview.ReadOnly,
 		BillingOwnerUserID: overview.BillingOwnerUserID,
 		Email:              overview.Email,
+		AvailableCredits:   overview.AvailableCredits,
+		ReservedCredits:    overview.ReservedCredits,
+		Credits:            overview.Credits,
 		Usage: adminGuildUsageView{
-			AIResponses:           billableUsage(overview.Usage.AIResponsesConsumed, overview.Usage.AIResponsesReserved),
-			WebSearches:           billableUsage(overview.Usage.WebSearchesConsumed, overview.Usage.WebSearchesReserved),
-			ImageGenerations:      billableUsage(overview.Usage.ImageGenerationsConsumed, overview.Usage.ImageGenerationsReserved),
-			KnowledgeStorageBytes: billableUsage(overview.Usage.KnowledgeStorageBytesConsumed, overview.Usage.KnowledgeStorageBytesReserved),
+			AvailableCredits: overview.AvailableCredits,
+			ReservedCredits:  overview.ReservedCredits,
+			Credits:          overview.Credits,
 		},
 	}
-	if overview.HasSubscription {
+	if overview.HasCreditAccount {
 		periodStart := overview.PeriodStart
 		periodEnd := overview.PeriodEnd
 		view.PeriodStart = &periodStart
 		view.PeriodEnd = &periodEnd
 		view.Limits = &adminGuildLimitsView{
-			AIResponses:           overview.Limits.AIResponses,
-			WebSearches:           overview.Limits.WebSearches,
-			ImageGenerations:      overview.Limits.ImageGenerations,
+			Credits:               overview.Limits.Credits,
 			KnowledgeStorageBytes: overview.Limits.KnowledgeStorageBytes,
-			Schedules:             overview.Limits.Schedules,
 			RetentionDays:         overview.Limits.RetentionDays,
-			MusicEnabled:          overview.Limits.MusicEnabled,
-			PremiumToolsEnabled:   overview.Limits.PremiumToolsEnabled,
 		}
 	}
 	return view
 }
 
-func billableUsage(consumed, reserved int64) int64 {
-	return consumed + reserved
+func (s *Server) adminGuildBillingView(ctx context.Context, guildID string, overview billing.AdminGuildBilling) (*adminGuildBillingView, error) {
+	view := adminGuildBillingViewFrom(overview)
+	if view == nil || !view.HasCreditAccount || s.knowledge == nil {
+		return view, nil
+	}
+	storageBytes, err := s.knowledge.StorageBytes(ctx, guildID)
+	if err != nil {
+		return nil, err
+	}
+	view.Usage.KnowledgeStorageBytes = storageBytes
+	return view, nil
 }
 
 func (s *Server) listAdminGuilds(c *fiber.Ctx) error {
@@ -1146,6 +1217,10 @@ func (s *Server) listAdminGuilds(c *fiber.Ctx) error {
 		if err != nil {
 			return c.Status(fiber.StatusInternalServerError).JSON(map[string]string{"error": "guild_billing_failed"})
 		}
+		billingView, err := s.adminGuildBillingView(c.Context(), guild.GuildID, overview)
+		if err != nil {
+			return c.Status(fiber.StatusInternalServerError).JSON(map[string]string{"error": "guild_storage_failed"})
+		}
 		views = append(views, adminGuildView{
 			GuildID:           guild.GuildID,
 			Name:              guild.Name,
@@ -1155,7 +1230,7 @@ func (s *Server) listAdminGuilds(c *fiber.Ctx) error {
 			Locale:            guild.Locale,
 			JoinedAt:          guild.JoinedAt.UTC(),
 			LeftAt:            guild.LeftAt,
-			Billing:           adminGuildBillingViewFrom(overview),
+			Billing:           billingView,
 		})
 	}
 
@@ -1164,12 +1239,12 @@ func (s *Server) listAdminGuilds(c *fiber.Ctx) error {
 		Total:       total,
 		Limit:       limit,
 		Offset:      offset,
-		PlanCatalog: adminPlanCatalog(),
+		PackCatalog: adminPackCatalog(),
 		Statuses:    billing.AdminStatuses(),
 	})
 }
 
-func (s *Server) updateAdminGuildSubscription(c *fiber.Ctx) error {
+func (s *Server) updateAdminGuildCreditAccount(c *fiber.Ctx) error {
 	session, denied := s.requireAdmin(c)
 	if denied != nil {
 		return denied
@@ -1189,7 +1264,7 @@ func (s *Server) updateAdminGuildSubscription(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusNotFound).JSON(map[string]string{"error": "guild_not_found"})
 	}
 
-	var request updateAdminGuildSubscriptionRequest
+	var request updateAdminGuildCreditAccountRequest
 	if err := c.BodyParser(&request); err != nil {
 		return c.SendStatus(fiber.StatusBadRequest)
 	}
@@ -1203,10 +1278,14 @@ func (s *Server) updateAdminGuildSubscription(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusBadRequest).JSON(map[string]string{"error": "invalid_trial_ends_at"})
 	}
 
-	overview, err := s.billing.AdminSetSubscription(c.Context(), billing.AdminSetSubscriptionRequest{
+	pack := strings.TrimSpace(request.Pack)
+	if pack == "" {
+		pack = strings.TrimSpace(request.Plan)
+	}
+	overview, err := s.billing.AdminSetCreditAccount(c.Context(), billing.AdminSetCreditAccountRequest{
 		GuildID:           guildID,
 		ActorUserID:       "treasury_wallet:" + session.Wallet,
-		Plan:              request.Plan,
+		Pack:              pack,
 		Status:            request.Status,
 		PeriodEnd:         periodEnd,
 		TrialEndsAt:       trialEndsAt,
@@ -1214,7 +1293,11 @@ func (s *Server) updateAdminGuildSubscription(c *fiber.Ctx) error {
 		CancelAtPeriodEnd: request.CancelAtPeriodEnd,
 	})
 	if err != nil {
-		return c.Status(fiber.StatusBadRequest).JSON(map[string]string{"error": "subscription_update_failed"})
+		return c.Status(fiber.StatusBadRequest).JSON(map[string]string{"error": "credit_account_update_failed"})
+	}
+	billingView, err := s.adminGuildBillingView(c.Context(), guild.GuildID, overview)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(map[string]string{"error": "guild_storage_failed"})
 	}
 
 	return c.JSON(adminGuildView{
@@ -1226,7 +1309,7 @@ func (s *Server) updateAdminGuildSubscription(c *fiber.Ctx) error {
 		Locale:            guild.Locale,
 		JoinedAt:          guild.JoinedAt.UTC(),
 		LeftAt:            guild.LeftAt,
-		Billing:           adminGuildBillingViewFrom(overview),
+		Billing:           billingView,
 	})
 }
 
@@ -1365,8 +1448,9 @@ func cloneLamports(values map[string]int64) map[string]int64 {
 
 type billingEntitlementResponse struct {
 	GuildID            string                                   `json:"guild_id"`
-	Plan               string                                   `json:"plan"`
+	Pack               string                                   `json:"pack"`
 	DisplayName        string                                   `json:"display_name"`
+	PackDisplayName    string                                   `json:"pack_display_name"`
 	Status             string                                   `json:"status"`
 	GraceState         string                                   `json:"grace_state"`
 	PaymentProvider    string                                   `json:"payment_provider"`
@@ -1375,6 +1459,11 @@ type billingEntitlementResponse struct {
 	TrialEndsAt        *time.Time                               `json:"trial_ends_at,omitempty"`
 	CanUsePaidFeatures bool                                     `json:"can_use_paid_features"`
 	ReadOnly           bool                                     `json:"read_only"`
+	AvailableCredits   int64                                    `json:"available_credits"`
+	ReservedCredits    int64                                    `json:"reserved_credits"`
+	Credits            int64                                    `json:"credits"`
+	RetentionDays      int                                      `json:"retention_days"`
+	KnowledgeLimit     int64                                    `json:"knowledge_storage_bytes_limit"`
 	Usage              map[string]billingEntitlementUsageMetric `json:"usage"`
 }
 
@@ -1404,10 +1493,15 @@ func (s *Server) getBillingEntitlement(c *fiber.Ctx) error {
 }
 
 func entitlementResponse(entitlement billing.Entitlement) billingEntitlementResponse {
+	creditsUsed := entitlement.Pack.Credits - entitlement.AvailableCredits
+	if creditsUsed < 0 {
+		creditsUsed = 0
+	}
 	return billingEntitlementResponse{
 		GuildID:            entitlement.GuildID,
-		Plan:               entitlement.Plan.Plan,
-		DisplayName:        entitlement.Plan.DisplayName,
+		Pack:               entitlement.Pack.Pack,
+		DisplayName:        entitlement.Pack.DisplayName,
+		PackDisplayName:    entitlement.Pack.DisplayName,
 		Status:             entitlement.Status,
 		GraceState:         entitlement.GraceState,
 		PaymentProvider:    entitlement.PaymentProvider,
@@ -1416,30 +1510,17 @@ func entitlementResponse(entitlement billing.Entitlement) billingEntitlementResp
 		TrialEndsAt:        entitlement.TrialEndsAt,
 		CanUsePaidFeatures: entitlement.CanUsePaidFeatures,
 		ReadOnly:           entitlement.ReadOnly,
+		AvailableCredits:   entitlement.AvailableCredits,
+		ReservedCredits:    entitlement.ReservedCredits,
+		Credits:            entitlement.Pack.Credits,
+		RetentionDays:      entitlement.RetentionDays,
+		KnowledgeLimit:     entitlement.KnowledgeStorageBytesLimit,
 		Usage: map[string]billingEntitlementUsageMetric{
-			"ai_responses": billingUsageMetric(
-				billing.MetricAIResponse,
-				entitlement.Usage.AIResponsesConsumed,
-				entitlement.Usage.AIResponsesReserved,
-				billing.IncludedLimit(entitlement.Plan, billing.MetricAIResponse),
-			),
-			"web_searches": billingUsageMetric(
-				billing.MetricWebSearch,
-				entitlement.Usage.WebSearchesConsumed,
-				entitlement.Usage.WebSearchesReserved,
-				billing.IncludedLimit(entitlement.Plan, billing.MetricWebSearch),
-			),
-			"image_generations": billingUsageMetric(
-				billing.MetricImageGeneration,
-				entitlement.Usage.ImageGenerationsConsumed,
-				entitlement.Usage.ImageGenerationsReserved,
-				billing.IncludedLimit(entitlement.Plan, billing.MetricImageGeneration),
-			),
-			"knowledge_storage": billingUsageMetric(
-				billing.MetricKnowledgeStorageByte,
-				entitlement.Usage.KnowledgeStorageBytesConsumed,
-				entitlement.Usage.KnowledgeStorageBytesReserved,
-				billing.IncludedLimit(entitlement.Plan, billing.MetricKnowledgeStorageByte),
+			"credits": billingUsageMetric(
+				"credits",
+				creditsUsed,
+				entitlement.ReservedCredits,
+				entitlement.Pack.Credits,
 			),
 		},
 	}
@@ -1475,6 +1556,7 @@ func (s *Server) createSolPaymentOrder(c *fiber.Ctx) error {
 	order, err := s.billing.CreateSolPaymentOrder(c.Context(), billing.CreateSolPaymentOrderRequest{
 		GuildID:            request.GuildID,
 		BillingOwnerUserID: request.BillingOwnerUserID,
+		Pack:               request.Pack,
 		Plan:               request.Plan,
 		SupportEmail:       request.SupportEmail,
 		CouponCode:         request.CouponCode,
@@ -1611,12 +1693,12 @@ func writeSolBillingError(c *fiber.Ctx, err error) error {
 	switch {
 	case errors.Is(err, billing.ErrSolPaymentsNotConfigured):
 		return c.Status(fiber.StatusServiceUnavailable).JSON(map[string]string{"error": "sol_payments_not_configured"})
-	case errors.Is(err, billing.ErrUnknownPlan):
-		return c.Status(fiber.StatusBadRequest).JSON(map[string]string{"error": "unknown_plan"})
+	case errors.Is(err, billing.ErrUnknownPack):
+		return c.Status(fiber.StatusBadRequest).JSON(map[string]string{"error": "unknown_pack"})
 	case errors.Is(err, billing.ErrCouponInvalid):
 		return c.Status(fiber.StatusBadRequest).JSON(map[string]string{"error": "coupon_invalid"})
-	case errors.Is(err, billing.ErrCouponPlanMismatch):
-		return c.Status(fiber.StatusBadRequest).JSON(map[string]string{"error": "coupon_wrong_plan"})
+	case errors.Is(err, billing.ErrCouponPackMismatch):
+		return c.Status(fiber.StatusBadRequest).JSON(map[string]string{"error": "coupon_wrong_pack"})
 	case errors.Is(err, billing.ErrCouponRevoked):
 		return c.Status(fiber.StatusGone).JSON(map[string]string{"error": "coupon_revoked"})
 	case errors.Is(err, billing.ErrCouponExpired):
@@ -1642,10 +1724,10 @@ func writeSolBillingError(c *fiber.Ctx, err error) error {
 
 func writeBillingEntitlementError(c *fiber.Ctx, err error) error {
 	switch {
-	case errors.Is(err, billing.ErrNoSubscription):
-		return c.Status(fiber.StatusNotFound).JSON(map[string]string{"error": "subscription_not_found"})
-	case errors.Is(err, billing.ErrUnknownPlan):
-		return c.Status(fiber.StatusBadRequest).JSON(map[string]string{"error": "unknown_plan"})
+	case errors.Is(err, billing.ErrNoCreditAccount):
+		return c.Status(fiber.StatusNotFound).JSON(map[string]string{"error": "credit_account_not_found"})
+	case errors.Is(err, billing.ErrUnknownPack):
+		return c.Status(fiber.StatusBadRequest).JSON(map[string]string{"error": "unknown_pack"})
 	default:
 		return c.Status(fiber.StatusBadRequest).JSON(map[string]string{"error": "bad_request"})
 	}
@@ -1655,8 +1737,8 @@ func writeAdminCouponError(c *fiber.Ctx, err error) error {
 	switch {
 	case errors.Is(err, billing.ErrBillingAccess):
 		return c.Status(fiber.StatusUnauthorized).JSON(map[string]string{"error": "admin_unauthorized"})
-	case errors.Is(err, billing.ErrUnknownPlan):
-		return c.Status(fiber.StatusBadRequest).JSON(map[string]string{"error": "unknown_plan"})
+	case errors.Is(err, billing.ErrUnknownPack):
+		return c.Status(fiber.StatusBadRequest).JSON(map[string]string{"error": "unknown_pack"})
 	case errors.Is(err, billing.ErrCouponDuplicate):
 		return c.Status(fiber.StatusConflict).JSON(map[string]string{"error": "coupon_duplicate"})
 	case errors.Is(err, billing.ErrCouponExpired):

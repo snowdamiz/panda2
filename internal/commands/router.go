@@ -440,18 +440,30 @@ func (r *Router) HandleNaturalMessage(ctx context.Context, request Request) Resp
 }
 
 func (r *Router) HandleNaturalMessageStream(ctx context.Context, request Request, onRespond func()) Response {
-	response, err := r.handleNaturalMessageStream(ctx, request, onRespond, false)
+	response, err := r.handleNaturalMessageStream(ctx, request, onRespond, nil, nil)
 	if err != nil {
 		return assistantError(err)
 	}
 	return response
 }
 
-func (r *Router) HandleNaturalMessageStreamRetryable(ctx context.Context, request Request, onRespond func()) (Response, error) {
-	return r.handleNaturalMessageStream(ctx, request, onRespond, true)
+func (r *Router) HandleNaturalMessageStreamWithToolStart(ctx context.Context, request Request, onRespond func(), onToolStart func(string)) Response {
+	response, err := r.handleNaturalMessageStream(ctx, request, onRespond, onToolStart, nil)
+	if err != nil {
+		return assistantError(err)
+	}
+	return response
 }
 
-func (r *Router) handleNaturalMessageStream(ctx context.Context, request Request, onRespond func(), retryableAssistantErrorsAsError bool) (Response, error) {
+func (r *Router) HandleNaturalMessageStreamWithToolProgress(ctx context.Context, request Request, onRespond func(), onToolStart func(string), onToolProgress func(string, string)) Response {
+	response, err := r.handleNaturalMessageStream(ctx, request, onRespond, onToolStart, onToolProgress)
+	if err != nil {
+		return assistantError(err)
+	}
+	return response
+}
+
+func (r *Router) handleNaturalMessageStream(ctx context.Context, request Request, onRespond func(), onToolStart func(string), onToolProgress func(string, string)) (Response, error) {
 	message := strings.TrimSpace(firstNonEmpty(request.Options["message"], request.Options["question"]))
 	if message == "" {
 		return Response{}, nil
@@ -484,11 +496,12 @@ func (r *Router) handleNaturalMessageStream(ctx context.Context, request Request
 	}
 	request.Options["question"] = message
 	return r.handleChatModeWithOptionsResult(ctx, request, chatModeOptions{
-		threaded:                        false,
-		allowSoulWriter:                 true,
-		naturalMessage:                  true,
-		onRespond:                       onRespond,
-		retryableAssistantErrorsAsError: retryableAssistantErrorsAsError,
+		threaded:        false,
+		allowSoulWriter: true,
+		naturalMessage:  true,
+		onRespond:       onRespond,
+		onToolStart:     onToolStart,
+		onToolProgress:  onToolProgress,
 	})
 }
 
@@ -630,17 +643,15 @@ func (r *Router) handleSupport(ctx context.Context, request Request) Response {
 	if r.billing != nil {
 		if entitlement, err := r.billing.Resolve(ctx, request.GuildID); err == nil {
 			lines = append(lines,
-				fmt.Sprintf("- Plan: `%s`", entitlement.Plan.DisplayName),
-				fmt.Sprintf("- Subscription: `%s`", entitlement.Status),
-				fmt.Sprintf("- AI responses: `%s`", entitlement.UsageLine(billing.MetricAIResponse)),
-				fmt.Sprintf("- Web searches: `%s`", entitlement.UsageLine(billing.MetricWebSearch)),
-				fmt.Sprintf("- Image generations: `%s`", entitlement.UsageLine(billing.MetricImageGeneration)),
-				fmt.Sprintf("- Knowledge storage: `%s`", entitlement.UsageLine(billing.MetricKnowledgeStorageByte)),
+				fmt.Sprintf("- Pack: `%s`", entitlement.Pack.DisplayName),
+				fmt.Sprintf("- Credit account: `%s`", entitlement.Status),
+				fmt.Sprintf("- Credits: `%s`", billing.FormatCredits(entitlement.AvailableCredits, entitlement.ReservedCredits)),
+				fmt.Sprintf("- Retention: `%d day(s)`", entitlement.RetentionDays),
 			)
-		} else if errors.Is(err, billing.ErrNoSubscription) {
-			lines = append(lines, "- Subscription: `none`")
+		} else if errors.Is(err, billing.ErrNoCreditAccount) {
+			lines = append(lines, "- Credit account: `none`")
 		} else {
-			lines = append(lines, "- Subscription: `lookup failed`")
+			lines = append(lines, "- Credit account: `lookup failed`")
 		}
 	}
 	if r.data != nil {
@@ -649,7 +660,7 @@ func (r *Router) handleSupport(ctx context.Context, request Request) Response {
 				fmt.Sprintf("- Knowledge documents: `%d`", summary.KnowledgeDocuments),
 				fmt.Sprintf("- Conversation records: `%d conversations / %d messages`", summary.Conversations, summary.Messages),
 				fmt.Sprintf("- Memory consent records: `%d`", summary.MemoryConsentRecords),
-				fmt.Sprintf("- Billing records: `%d account(s) / %d subscription(s)`", summary.CustomerAccounts, summary.Subscriptions),
+				fmt.Sprintf("- Billing records: `%d account(s) / %d historical billing record(s)`", summary.CustomerAccounts, summary.Subscriptions),
 			)
 		}
 	}
@@ -760,17 +771,17 @@ func (r *Router) handleBilling(ctx context.Context, request Request) Response {
 	}
 
 	entitlement, err := r.billing.Resolve(ctx, request.GuildID)
-	if err != nil && !errors.Is(err, billing.ErrNoSubscription) {
+	if err != nil && !errors.Is(err, billing.ErrNoCreditAccount) {
 		return Response{Content: "Billing status could not be loaded.", Ephemeral: true, Presentation: Presentation{Title: "Billing lookup failed", Accent: AccentWarning}}
 	}
-	if errors.Is(err, billing.ErrNoSubscription) {
-		content := "No Panda subscription is active for this server."
-		content += "\nStart a SOL purchase from the Panda landing page, then run `/billing action:activate api_key:<key>`."
-		return Response{Content: content, Ephemeral: true, Presentation: Presentation{Title: "No active subscription", Accent: AccentWarning}}
+	if errors.Is(err, billing.ErrNoCreditAccount) {
+		content := "No Panda credit account is active for this server."
+		content += "\nBuy credits from the Panda landing page, then run `/billing action:activate api_key:<key>`."
+		return Response{Content: content, Ephemeral: true, Presentation: Presentation{Title: "No active credit account", Accent: AccentWarning}}
 	}
 	content := entitlement.SummaryText()
 	if entitlement.UpgradeURL != "" {
-		content += "\n\nPurchase or renew on the Panda landing page, then activate with `/billing action:activate api_key:<key>`."
+		content += "\n\nBuy credits on the Panda landing page, then activate with `/billing action:activate api_key:<key>`."
 		return Response{
 			Content:      content,
 			Ephemeral:    true,
@@ -778,7 +789,7 @@ func (r *Router) handleBilling(ctx context.Context, request Request) Response {
 			Actions:      []Action{{Label: "Open Panda pricing", URL: entitlement.UpgradeURL}},
 		}
 	}
-	content += "\n\nPurchase or renew on the Panda landing page, then activate with `/billing action:activate api_key:<key>`."
+	content += "\n\nBuy another pack on the Panda landing page, then activate it with `/billing action:activate api_key:<key>`."
 	return Response{Content: content, Ephemeral: true, Presentation: Presentation{Title: "Panda Billing", Accent: AccentInfo}}
 }
 
@@ -798,9 +809,9 @@ func (r *Router) handleBillingActivate(ctx context.Context, request Request) Res
 		return billingActivationErrorResponse(err)
 	}
 	return Response{
-		Content:      fmt.Sprintf("Panda %s is active for this server through %s.", result.Entitlement.Plan.DisplayName, result.Entitlement.PeriodEnd.Format("2006-01-02")),
+		Content:      fmt.Sprintf("Panda %s is active for this server through %s.", result.Entitlement.Pack.DisplayName, result.Entitlement.PeriodEnd.Format("2006-01-02")),
 		Ephemeral:    true,
-		Presentation: Presentation{Title: "Plan activated", Accent: AccentSuccess},
+		Presentation: Presentation{Title: "Pack activated", Accent: AccentSuccess},
 	}
 }
 
@@ -830,14 +841,14 @@ func renderDataSummary(summary repository.GuildDataSummary) string {
 		fmt.Sprintf("- Knowledge: `%d document(s), %d chunk(s), %s`", summary.KnowledgeDocuments, summary.KnowledgeChunks, formatDataBytes(summary.KnowledgeStorageBytes)),
 		fmt.Sprintf("- Conversations: `%d conversation(s), %d message metadata row(s), %d Discord event(s), %d attachment record(s)`", summary.Conversations, summary.Messages, summary.DiscordEvents, summary.Attachments),
 		fmt.Sprintf("- Memory consent records: `%d`", summary.MemoryConsentRecords),
-		fmt.Sprintf("- Billing: `%d account(s), %d subscription(s), %d invoice/payment event(s)`", summary.CustomerAccounts, summary.Subscriptions, summary.InvoicePaymentEvents),
-		fmt.Sprintf("- Usage and cost: `%d usage period(s), %d reservation(s), %d cost ledger event(s)`", summary.UsagePeriods, summary.UsageReservations, summary.CostLedgerEvents),
+		fmt.Sprintf("- Billing: `%d account(s), %d historical billing record(s), %d payment event(s)`", summary.CustomerAccounts, summary.Subscriptions, summary.InvoicePaymentEvents),
+		fmt.Sprintf("- Usage and cost: `%d historical usage period(s), %d historical reservation(s), %d cost ledger event(s)`", summary.UsagePeriods, summary.UsageReservations, summary.CostLedgerEvents),
 		fmt.Sprintf("- Automations: `%d schedule(s), %d alert rule(s), %d composed tool(s), %d composed run(s)`", summary.Schedules, summary.AlertRules, summary.ComposedTools, summary.ComposedToolRuns),
 		fmt.Sprintf("- Music: `%d queue item(s), %d playlist(s)`", summary.MusicQueueItems, summary.MusicPlaylists),
 		"- Raw prompts/messages and provider diagnostics are not included in this Discord export.",
 	}
 	if summary.CurrentSubscriptionPlan != "" || summary.CurrentSubscriptionState != "" {
-		lines = append(lines, fmt.Sprintf("- Current subscription: `%s / %s`", firstNonEmpty(summary.CurrentSubscriptionPlan, "none"), firstNonEmpty(summary.CurrentSubscriptionState, "none")))
+		lines = append(lines, fmt.Sprintf("- Historical account state: `%s / %s`", firstNonEmpty(summary.CurrentSubscriptionPlan, "none"), firstNonEmpty(summary.CurrentSubscriptionState, "none")))
 	}
 	return strings.Join(lines, "\n")
 }
@@ -1771,7 +1782,7 @@ func (r *Router) handleAsk(ctx context.Context, request Request, command string)
 		r.releaseAIUsage(ctx, reservation)
 		return Response{Content: "Panda returned an empty response. Please try again.", Ephemeral: true}
 	}
-	r.commitAIUsage(ctx, reservation)
+	r.commitAIUsage(ctx, reservation, answer.Usage)
 	return r.responseFromAssistantAnswer(ctx, request, answer, "", "")
 }
 
@@ -1784,11 +1795,12 @@ func (r *Router) handleChatMode(ctx context.Context, request Request, threaded b
 }
 
 type chatModeOptions struct {
-	threaded                        bool
-	allowSoulWriter                 bool
-	naturalMessage                  bool
-	onRespond                       func()
-	retryableAssistantErrorsAsError bool
+	threaded        bool
+	allowSoulWriter bool
+	naturalMessage  bool
+	onRespond       func()
+	onToolStart     func(string)
+	onToolProgress  func(string, string)
 }
 
 func (r *Router) handleChatModeWithAccess(ctx context.Context, request Request, threaded bool, allowSoulWriter bool) Response {
@@ -1903,26 +1915,27 @@ func (r *Router) handleChatModeWithOptionsResult(ctx context.Context, request Re
 	var answer assistant.AskResponse
 	var err error
 	if options.naturalMessage {
-		answer, err = r.assistant.ChatNaturalMessage(ctx, askRequest, options.onRespond)
+		answer, err = r.assistant.ChatNaturalMessageWithToolStart(ctx, askRequest, options.onRespond, options.onToolStart, options.onToolProgress)
 	} else {
 		answer, err = r.assistant.Chat(ctx, askRequest)
 	}
 	if err != nil {
 		r.releaseAIUsage(ctx, reservation)
-		if options.retryableAssistantErrorsAsError && assistant.RetryableFailure(err) {
-			return Response{}, err
-		}
 		return assistantError(err), nil
 	}
 	if answer.Silent {
-		r.releaseAIUsage(ctx, reservation)
+		if options.naturalMessage {
+			r.commitRoutingUsage(ctx, request, reservation)
+		} else {
+			r.releaseAIUsage(ctx, reservation)
+		}
 		return Response{}, nil
 	}
 	if !assistantAnswerHasPayload(answer) {
 		r.releaseAIUsage(ctx, reservation)
 		return Response{Content: "Panda returned an empty response. Please try again.", Ephemeral: true}, nil
 	}
-	r.commitAIUsage(ctx, reservation)
+	r.commitAIUsage(ctx, reservation, answer.Usage)
 	return r.responseFromAssistantAnswer(ctx, request, answer, threadID, threadName), nil
 }
 
@@ -2037,7 +2050,7 @@ func (r *Router) HandleBackgroundTask(ctx context.Context, task BackgroundTask) 
 		r.releaseAIUsage(ctx, reservation)
 		return Response{Content: "Panda returned an empty response. Please try again.", Ephemeral: true}
 	}
-	r.commitAIUsage(ctx, reservation)
+	r.commitAIUsage(ctx, reservation, answer.Usage)
 	return r.responseFromAssistantAnswer(ctx, Request{
 		RequestID: task.RequestID,
 		Command:   task.Command,
@@ -3352,6 +3365,9 @@ func (r *Router) allowedToolPermissions(ctx context.Context, request Request) ma
 	if featureEnabled(features.ImageGeneration) {
 		r.addPermissionIfAllowed(ctx, request, permissions, admin.PermissionAssistantImageGeneration, r.admin.CanUseImageGeneration)
 	}
+	if featureEnabled(features.YouTubeClipping) {
+		r.addPermissionIfAllowed(ctx, request, permissions, admin.PermissionAssistantYouTubeClipping, r.admin.CanUseYouTubeClipping)
+	}
 	if featureEnabled(features.Knowledge) {
 		r.addPermissionIfAllowed(ctx, request, permissions, admin.PermissionAssistantMemoryRead, r.admin.CanReadMemory)
 		r.addPermissionIfAllowed(ctx, request, permissions, admin.PermissionAdminMemoryManage, r.admin.CanManageMemory)
@@ -3464,7 +3480,27 @@ func (r *Router) checkAIUsageAvailable(ctx context.Context, request Request) Res
 	if r.billing == nil || request.GuildID == "" {
 		return Response{}
 	}
-	_, err := r.billing.Check(ctx, request.GuildID, billing.MetricAIResponse, 1)
+	quote, err := r.billing.QuoteAction(billing.ActionQuoteRequest{Action: billing.ActionAssistantModelRound, RequestID: request.RequestID})
+	if err != nil {
+		return billingErrorResponse(err)
+	}
+	entitlement, err := r.billing.Resolve(ctx, request.GuildID)
+	if err == nil {
+		if !entitlement.CanUsePaidFeatures || entitlement.ReadOnly {
+			err = billing.ErrReadOnly
+		} else if entitlement.AvailableCredits < quote.MaxCredits {
+			err = billing.CreditError{
+				Action:           quote.Action,
+				Used:             entitlement.Pack.Credits - entitlement.AvailableCredits,
+				Reserved:         entitlement.ReservedCredits,
+				Limit:            entitlement.Pack.Credits,
+				Pack:             entitlement.Pack.Pack,
+				RequiredCredits:  quote.MaxCredits,
+				AvailableCredits: entitlement.AvailableCredits,
+				UpgradeURL:       entitlement.UpgradeURL,
+			}
+		}
+	}
 	return billingErrorResponse(err)
 }
 
@@ -3472,13 +3508,36 @@ func (r *Router) beginAIUsage(ctx context.Context, request Request) (billing.Res
 	if r.billing == nil || request.GuildID == "" {
 		return billing.Reservation{}, Response{}
 	}
-	reservation, err := r.billing.BeginUsage(ctx, request.GuildID, billing.MetricAIResponse, 1)
+	quote, err := r.billing.QuoteAction(billing.ActionQuoteRequest{
+		Action:    billing.ActionAssistantModelRound,
+		RequestID: request.RequestID,
+	})
+	if err != nil {
+		return billing.Reservation{}, billingErrorResponse(err)
+	}
+	reservation, err := r.billing.BeginCreditUsage(ctx, request.GuildID, quote)
 	return reservation, billingErrorResponse(err)
 }
 
-func (r *Router) commitAIUsage(ctx context.Context, reservation billing.Reservation) {
+func (r *Router) commitAIUsage(ctx context.Context, reservation billing.Reservation, usage llm.Usage) {
 	if r.billing != nil && reservation.ID != "" {
-		_ = r.billing.CommitUsage(ctx, reservation)
+		final := billing.CreditUsageFinal{}
+		if usage.PromptTokens > 0 || usage.CompletionTokens > 0 {
+			if quote, err := r.billing.QuoteAction(billing.ActionQuoteRequest{
+				Action:       billing.ActionAssistantModelRound,
+				RequestID:    reservation.RequestID,
+				InputTokens:  usage.PromptTokens,
+				OutputTokens: usage.CompletionTokens,
+				Metadata: map[string]any{
+					"prompt_tokens":     usage.PromptTokens,
+					"completion_tokens": usage.CompletionTokens,
+					"total_tokens":      usage.TotalTokens,
+				},
+			}); err == nil {
+				final.Credits = quote.ExpectedCredits
+			}
+		}
+		_ = r.billing.CommitCreditUsage(ctx, reservation, final)
 	}
 }
 
@@ -3488,21 +3547,40 @@ func (r *Router) releaseAIUsage(ctx context.Context, reservation billing.Reserva
 	}
 }
 
+func (r *Router) commitRoutingUsage(ctx context.Context, request Request, assistantReservation billing.Reservation) {
+	if r.billing == nil || strings.TrimSpace(request.GuildID) == "" {
+		return
+	}
+	r.releaseAIUsage(ctx, assistantReservation)
+	quote, err := r.billing.QuoteAction(billing.ActionQuoteRequest{
+		Action:    billing.ActionRoutingCheck,
+		RequestID: request.RequestID,
+	})
+	if err != nil {
+		return
+	}
+	reservation, err := r.billing.BeginCreditUsage(ctx, request.GuildID, quote)
+	if err != nil {
+		return
+	}
+	_ = r.billing.CommitCreditUsage(ctx, reservation, billing.CreditUsageFinal{Credits: quote.ExpectedCredits})
+}
+
 func billingErrorResponse(err error) Response {
 	if err == nil {
 		return Response{}
 	}
-	var quotaErr billing.QuotaError
-	if errors.As(err, &quotaErr) {
-		content := fmt.Sprintf("This server has used its included %s for the current billing period.", billing.MetricLabel(quotaErr.Metric))
-		content += "\nThe billing owner can run `/billing` for the Panda pricing link, then activate a verified SOL purchase with `/billing action:activate api_key:<key>`."
-		return Response{Content: content, Ephemeral: true, Presentation: Presentation{Title: "Usage limit reached", Accent: AccentWarning}}
+	var creditErr billing.CreditError
+	if errors.As(err, &creditErr) {
+		content := fmt.Sprintf("This action needs %d credits for %s, but this server only has %d credits available.", creditErr.RequiredCredits, billing.ActionLabel(creditErr.Action), creditErr.AvailableCredits)
+		content += "\nThe billing owner can run `/billing` to buy credits, then activate a verified SOL payment with `/billing action:activate api_key:<key>`."
+		return Response{Content: content, Ephemeral: true, Presentation: Presentation{Title: "Credits depleted", Accent: AccentWarning}}
 	}
-	if errors.Is(err, billing.ErrNoSubscription) {
-		return Response{Content: "This server does not have an active Panda subscription. Use `/billing` for status and the SOL purchase link.", Ephemeral: true, Presentation: Presentation{Title: "Subscription required", Accent: AccentWarning}}
+	if errors.Is(err, billing.ErrNoCreditAccount) {
+		return Response{Content: "This server does not have an active Panda credit account. Use `/billing` for status and the SOL purchase link.", Ephemeral: true, Presentation: Presentation{Title: "Credits required", Accent: AccentWarning}}
 	}
 	if errors.Is(err, billing.ErrReadOnly) {
-		return Response{Content: "This server's Panda subscription is read-only. Billing, help, export/delete, and support access remain available.", Ephemeral: true, Presentation: Presentation{Title: "Subscription read-only", Accent: AccentWarning}}
+		return Response{Content: "This server's Panda credit account is read-only. Billing, help, export/delete, and support access remain available.", Ephemeral: true, Presentation: Presentation{Title: "Credit account read-only", Accent: AccentWarning}}
 	}
 	return Response{Content: "Billing status could not be checked. Please try again later.", Ephemeral: true, Presentation: Presentation{Title: "Billing check failed", Accent: AccentWarning}}
 }
@@ -3511,8 +3589,8 @@ func billingErrorResponseIfBilling(err error) (Response, bool) {
 	if err == nil {
 		return Response{}, false
 	}
-	var quotaErr billing.QuotaError
-	if errors.As(err, &quotaErr) || errors.Is(err, billing.ErrNoSubscription) || errors.Is(err, billing.ErrReadOnly) {
+	var creditErr billing.CreditError
+	if errors.As(err, &creditErr) || errors.Is(err, billing.ErrNoCreditAccount) || errors.Is(err, billing.ErrReadOnly) {
 		return billingErrorResponse(err), true
 	}
 	return Response{}, false
@@ -3548,6 +3626,7 @@ func (r *Router) responseFromAssistantAnswer(ctx context.Context, request Reques
 		ThreadName:        threadName,
 		GeneratedFiles:    generated.CloneFiles(answer.GeneratedFiles),
 		UsageReservations: append([]billing.Reservation(nil), answer.UsageReservations...),
+		Usage:             answer.Usage,
 	}
 	if answer.Card != nil {
 		cardResponse := responseFromAssistantCard(request.UserID, answer.Card)
@@ -3557,12 +3636,17 @@ func (r *Router) responseFromAssistantAnswer(ctx context.Context, request Reques
 			response.ThreadName = threadName
 			response.GeneratedFiles = generated.CloneFiles(answer.GeneratedFiles)
 			response.UsageReservations = append([]billing.Reservation(nil), answer.UsageReservations...)
-			if followupContent := standaloneCardFollowupContent(answer.Content); followupContent != "" {
+			if followupContent := standaloneCardFollowupContent(answer.Content); followupContent != "" && len(cardResponse.MediaItems) == 0 {
 				response.Followups = append(response.Followups, Response{Content: followupContent})
 			}
 		} else {
-			response.Content = firstNonEmpty(response.Content, answer.Card.Content)
+			if len(cardResponse.MediaItems) > 0 {
+				response.Content = cardResponse.Content
+			} else {
+				response.Content = firstNonEmpty(response.Content, answer.Card.Content)
+			}
 			response.Presentation = cardResponse.Presentation
+			response.MediaItems = cardResponse.MediaItems
 			response.Actions = cardResponse.Actions
 			response.Selection = cardResponse.Selection
 		}
@@ -3615,9 +3699,19 @@ func responseFromAssistantCard(userID string, card *assistant.ToolCard) Response
 	if card == nil {
 		return Response{}
 	}
+	content := card.Content
+	presentation := presentationFromAssistantCard(card)
+	mediaItems := mediaItemsFromAssistantCard(card.MediaItems)
+	if len(mediaItems) > 0 {
+		content = ""
+		presentation.Title = ""
+		presentation.URL = ""
+		presentation.Fields = nil
+	}
 	return Response{
-		Content:      card.Content,
-		Presentation: presentationFromAssistantCard(card),
+		Content:      content,
+		Presentation: presentation,
+		MediaItems:   mediaItems,
 		Actions:      actionsFromAssistantCard(card),
 		Selection:    selectionFromAssistantCard(userID, card.Selection),
 	}
@@ -3669,6 +3763,7 @@ func assistantAnswerHasPayload(answer assistant.AskResponse) bool {
 		strings.TrimSpace(card.Title) != "" ||
 		strings.TrimSpace(card.URL) != "" ||
 		len(card.Fields) > 0 ||
+		len(card.MediaItems) > 0 ||
 		len(card.Actions) > 0 ||
 		card.Selection != nil
 }
@@ -3749,6 +3844,19 @@ func fieldsFromAssistantCard(fields []assistant.ToolCardField) []Field {
 			Name:   field.Name,
 			Value:  field.Value,
 			Inline: field.Inline,
+		})
+	}
+	return result
+}
+
+func mediaItemsFromAssistantCard(items []assistant.ToolCardMediaItem) []MediaItem {
+	result := make([]MediaItem, 0, len(items))
+	for _, item := range items {
+		result = append(result, MediaItem{
+			Title:        item.Title,
+			Description:  item.Description,
+			URL:          item.URL,
+			ThumbnailURL: item.ThumbnailURL,
 		})
 	}
 	return result

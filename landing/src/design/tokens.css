@@ -66,6 +66,17 @@
   --shadow-account-login: 0 28px 78px rgba(0, 0, 0, .28);
   --shadow-account-panel: 0 28px 78px rgba(0, 0, 0, .24);
   --shadow-legal-brief: 0 34px 90px rgba(0, 0, 0, .34);
+
+  /* Dashboard (account + admin) surfaces */
+  --shadow-dash-card: 0 20px 46px rgba(0, 0, 0, .28);
+  --shadow-dash-card-hover: 0 30px 66px rgba(0, 0, 0, .42);
+  --shadow-dash-chip: 0 16px 40px rgba(0, 0, 0, .42), inset 0 1px rgba(255, 255, 255, .05);
+  --shadow-dash-nav-active: inset 0 0 0 1px rgba(255, 255, 255, .05), 0 10px 24px rgba(0, 0, 0, .34);
+  --shadow-dash-avatar: inset 0 0 0 1px rgba(255, 255, 255, .14), 0 8px 18px rgba(0, 0, 0, .45);
+  --shadow-dash-presence: 0 0 0 2px rgba(9, 9, 9, .92);
+  --shadow-dash-toast: 0 18px 50px rgba(0, 0, 0, .5);
+
+  --radius-dash-avatar: 10px;
 }
 
 :root {

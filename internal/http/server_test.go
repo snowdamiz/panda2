@@ -538,7 +538,7 @@ func TestSolPaymentOrderEndpointsCreateAndFetchOrders(t *testing.T) {
 	if err := json.NewDecoder(resp.Body).Decode(&fetched); err != nil {
 		t.Fatalf("decode get response: %v", err)
 	}
-	if fetched.OrderID != order.OrderID || fetched.Reference != order.Reference || fetched.Plan != billing.PlanPlus {
+	if fetched.OrderID != order.OrderID || fetched.Reference != order.Reference || fetched.Pack != billing.PackPlus {
 		t.Fatalf("unexpected fetched order: %+v", fetched)
 	}
 
@@ -572,17 +572,12 @@ func TestBillingEntitlementEndpointReportsTrialUsage(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("ensure trial: %v", err)
 	}
-	if err := service.SyncCurrentUsage(t.Context(), "guild-1", billing.MetricAIResponse, 42); err != nil {
-		t.Fatalf("sync AI usage: %v", err)
+	reservation, err := service.BeginUsage(t.Context(), "guild-1", billing.MetricAIResponse, 1)
+	if err != nil {
+		t.Fatalf("begin credit usage: %v", err)
 	}
-	if err := service.SyncCurrentUsage(t.Context(), "guild-1", billing.MetricWebSearch, 3); err != nil {
-		t.Fatalf("sync search usage: %v", err)
-	}
-	if err := service.SyncCurrentUsage(t.Context(), "guild-1", billing.MetricImageGeneration, 2); err != nil {
-		t.Fatalf("sync image usage: %v", err)
-	}
-	if err := service.SyncCurrentUsage(t.Context(), "guild-1", billing.MetricKnowledgeStorageByte, 1024); err != nil {
-		t.Fatalf("sync storage usage: %v", err)
+	if err := service.CommitUsage(t.Context(), reservation); err != nil {
+		t.Fatalf("commit credit usage: %v", err)
 	}
 
 	server := New(config.Config{
@@ -623,23 +618,17 @@ func TestBillingEntitlementEndpointReportsTrialUsage(t *testing.T) {
 	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
-	if body.GuildID != "guild-1" || body.Plan != billing.PlanTrial || body.DisplayName != "Trial" || body.Status != billing.StatusTrialing {
+	if body.GuildID != "guild-1" || body.Pack != billing.PackTrial || body.DisplayName != "Trial Pack" || body.Status != billing.StatusTrialing {
 		t.Fatalf("unexpected entitlement response: %+v", body)
 	}
 	if body.TrialEndsAt == nil || !body.TrialEndsAt.Equal(now.Add(billing.TrialDuration)) {
 		t.Fatalf("unexpected trial end: %+v", body.TrialEndsAt)
 	}
-	if got := body.Usage["ai_responses"]; got.Used != 42 || got.Limit != 250 || got.Remaining != 208 {
-		t.Fatalf("unexpected AI usage: %+v", got)
+	if got := body.Usage["credits"]; got.Used != 4 || got.Limit != 1500 || got.Remaining != 1496 {
+		t.Fatalf("unexpected credit usage: %+v", got)
 	}
-	if got := body.Usage["web_searches"]; got.Used != 3 || got.Limit != 20 || got.Remaining != 17 {
-		t.Fatalf("unexpected search usage: %+v", got)
-	}
-	if got := body.Usage["image_generations"]; got.Used != 2 || got.Limit != 5 || got.Remaining != 3 {
-		t.Fatalf("unexpected image generation usage: %+v", got)
-	}
-	if got := body.Usage["knowledge_storage"]; got.Used != 1024 || got.Limit != 25*1024*1024 || got.Remaining != 25*1024*1024-1024 {
-		t.Fatalf("unexpected storage usage: %+v", got)
+	if body.KnowledgeLimit != 25*1024*1024 {
+		t.Fatalf("unexpected knowledge storage cap: %d", body.KnowledgeLimit)
 	}
 }
 
@@ -703,7 +692,7 @@ func TestAdminCouponEndpointsManageCoupons(t *testing.T) {
 	if err := json.NewDecoder(resp.Body).Decode(&created); err != nil {
 		t.Fatalf("decode create response: %v", err)
 	}
-	if created.Code != "PLUS-FREE" || created.Coupon.Plan != billing.PlanPlus || created.Coupon.DiscountLamports != 49_000_000 || created.Coupon.MaxRedemptions != 2 {
+	if created.Code != "PLUS-FREE" || created.Coupon.Pack != billing.PackPlus || created.Coupon.DiscountLamports != 49_000_000 || created.Coupon.MaxRedemptions != 2 {
 		t.Fatalf("unexpected created coupon: %+v", created)
 	}
 
@@ -740,8 +729,8 @@ func TestAdminCouponEndpointsManageCoupons(t *testing.T) {
 	if len(list.Coupons) != 1 || list.Coupons[0].CouponID != created.Coupon.CouponID || list.Coupons[0].CodePrefix != "PLUS-FREE" {
 		t.Fatalf("unexpected coupon list: %+v", list)
 	}
-	if list.PlanLamports[billing.PlanPlus] != 49_000_000 {
-		t.Fatalf("expected plan lamports in response, got %+v", list.PlanLamports)
+	if list.PackLamports[billing.PackPlus] != 49_000_000 {
+		t.Fatalf("expected pack lamports in response, got %+v", list.PackLamports)
 	}
 
 	req, _ = stdhttp.NewRequest(stdhttp.MethodPost, "/admin/coupons/"+created.Coupon.CouponID+"/revoke", nil)
@@ -1003,7 +992,7 @@ func solHTTPConfig(t *testing.T) config.Config {
 		SolanaConfirmation:     "finalized",
 		SolanaOrderExpiration:  time.Hour,
 		SolanaActivationKeyTTL: time.Hour,
-		SolanaPlanLamports:     map[string]int64{billing.PlanStarter: 19_000_000, billing.PlanPlus: 49_000_000, billing.PlanPro: 99_000_000, billing.PlanBusiness: 249_000_000},
+		SolanaPlanLamports:     map[string]int64{billing.PackStarter: 19_000_000, billing.PackPlus: 49_000_000, billing.PackPro: 99_000_000, billing.PackBusiness: 249_000_000},
 	}
 }
 
@@ -1017,10 +1006,10 @@ func solBillingService(db *store.Store) *billing.Service {
 		SolanaOrderExpiration:  time.Hour,
 		SolanaActivationKeyTTL: time.Hour,
 		SolanaPlanLamports: map[string]int64{
-			billing.PlanStarter:  19_000_000,
-			billing.PlanPlus:     49_000_000,
-			billing.PlanPro:      99_000_000,
-			billing.PlanBusiness: 249_000_000,
+			billing.PackStarter:  19_000_000,
+			billing.PackPlus:     49_000_000,
+			billing.PackPro:      99_000_000,
+			billing.PackBusiness: 249_000_000,
 		},
 	})
 }
@@ -1041,7 +1030,7 @@ func signedDiscordWebhookRequest(t *testing.T, body string, privateKey ed25519.P
 	return req
 }
 
-func TestAdminGuildEndpointsListAndUpdateSubscription(t *testing.T) {
+func TestAdminGuildEndpointsListAndUpdateCreditAccount(t *testing.T) {
 	db, err := store.Open(t.Context(), "file::memory:?cache=shared")
 	if err != nil {
 		t.Fatalf("open store: %v", err)
@@ -1064,6 +1053,14 @@ func TestAdminGuildEndpointsListAndUpdateSubscription(t *testing.T) {
 	}
 	if _, err := billingService.BeginUsage(t.Context(), "guild-1", billing.MetricImageGeneration, 1); err != nil {
 		t.Fatalf("BeginUsage image generation: %v", err)
+	}
+	knowledgeContent := "alpha beta gamma"
+	if _, err := repository.NewKnowledgeRepository(db.DB).AddDocument(t.Context(), store.KnowledgeDocument{
+		GuildID:   "guild-1",
+		Title:     "Storage note",
+		CreatedBy: "owner-1",
+	}, knowledgeContent); err != nil {
+		t.Fatalf("AddDocument: %v", err)
 	}
 
 	cfg := solHTTPConfig(t)
@@ -1103,24 +1100,27 @@ func TestAdminGuildEndpointsListAndUpdateSubscription(t *testing.T) {
 	if guild.GuildID != "guild-1" || guild.Name != "Test Guild" {
 		t.Fatalf("unexpected guild metadata: %+v", guild)
 	}
-	if guild.Billing == nil || !guild.Billing.HasSubscription || guild.Billing.Plan != billing.PlanTrial {
+	if guild.Billing == nil || !guild.Billing.HasCreditAccount || guild.Billing.Pack != billing.PackTrial {
 		t.Fatalf("expected trial billing, got %+v", guild.Billing)
 	}
 	if guild.Billing.Email != "owner@example.com" {
 		t.Fatalf("expected billing email, got %q", guild.Billing.Email)
 	}
-	if guild.Billing.Limits == nil || guild.Billing.Limits.ImageGenerations != 5 {
-		t.Fatalf("expected image generation limit in admin guild view, got %+v", guild.Billing.Limits)
+	if guild.Billing.Limits == nil || guild.Billing.Limits.Credits != 1500 {
+		t.Fatalf("expected credit pack limits in admin guild view, got %+v", guild.Billing.Limits)
 	}
-	if guild.Billing.Usage.ImageGenerations != 1 {
-		t.Fatalf("expected image generation usage in admin guild view, got %+v", guild.Billing.Usage)
+	if guild.Billing.Usage.ReservedCredits != 150 {
+		t.Fatalf("expected reserved image generation credits in admin guild view, got %+v", guild.Billing.Usage)
 	}
-	if len(list.PlanCatalog) == 0 || len(list.Statuses) == 0 {
-		t.Fatalf("expected plan catalog and statuses, got %+v", list)
+	if guild.Billing.Usage.KnowledgeStorageBytes != int64(len([]byte(knowledgeContent))) {
+		t.Fatalf("expected measured knowledge bytes in admin guild view, got %+v", guild.Billing.Usage)
+	}
+	if len(list.PackCatalog) == 0 || len(list.Statuses) == 0 {
+		t.Fatalf("expected pack catalog and statuses, got %+v", list)
 	}
 
-	req, _ = stdhttp.NewRequest(stdhttp.MethodPost, "/admin/guilds/guild-1/subscription", strings.NewReader(`{
-		"plan": "pro",
+	req, _ = stdhttp.NewRequest(stdhttp.MethodPost, "/admin/guilds/guild-1/credit-account", strings.NewReader(`{
+		"pack": "pro",
 		"status": "active",
 		"period_end": "2026-12-31",
 		"cancel_at_period_end": true
@@ -1129,7 +1129,7 @@ func TestAdminGuildEndpointsListAndUpdateSubscription(t *testing.T) {
 	req.Header.Set("Authorization", "Bearer "+sessionToken)
 	resp, err = server.Test(req)
 	if err != nil {
-		t.Fatalf("update subscription request failed: %v", err)
+		t.Fatalf("update credit account request failed: %v", err)
 	}
 	if resp.StatusCode != stdhttp.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
@@ -1139,14 +1139,17 @@ func TestAdminGuildEndpointsListAndUpdateSubscription(t *testing.T) {
 	if err := json.NewDecoder(resp.Body).Decode(&updated); err != nil {
 		t.Fatalf("decode update response: %v", err)
 	}
-	if updated.Billing == nil || updated.Billing.Plan != billing.PlanPro || updated.Billing.StoredStatus != billing.StatusActive {
-		t.Fatalf("expected pro/active subscription, got %+v", updated.Billing)
+	if updated.Billing == nil || updated.Billing.Pack != billing.PackPro || updated.Billing.StoredStatus != billing.StatusActive {
+		t.Fatalf("expected pro/active credit account, got %+v", updated.Billing)
 	}
-	if !updated.Billing.CancelAtPeriodEnd {
-		t.Fatalf("expected cancel-at-period-end, got %+v", updated.Billing)
+	if updated.Billing.Credits != 75000 || updated.Billing.AvailableCredits < 75000 {
+		t.Fatalf("expected pro credit grant, got %+v", updated.Billing)
+	}
+	if updated.Billing.Usage.KnowledgeStorageBytes != int64(len([]byte(knowledgeContent))) {
+		t.Fatalf("expected measured knowledge bytes after credit update, got %+v", updated.Billing.Usage)
 	}
 
-	req, _ = stdhttp.NewRequest(stdhttp.MethodPost, "/admin/guilds/missing/subscription", strings.NewReader(`{"plan":"pro"}`))
+	req, _ = stdhttp.NewRequest(stdhttp.MethodPost, "/admin/guilds/missing/credit-account", strings.NewReader(`{"pack":"pro"}`))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+sessionToken)
 	resp, err = server.Test(req)

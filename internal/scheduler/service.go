@@ -277,20 +277,6 @@ func (s *Service) ensureScheduleCapacity(ctx context.Context, guildID string) er
 	if !entitlement.CanUsePaidFeatures || entitlement.ReadOnly {
 		return billing.ErrReadOnly
 	}
-	stats, err := s.schedules.Stats(ctx, guildID)
-	if err != nil {
-		return err
-	}
-	limit := int64(entitlement.Plan.Schedules)
-	if limit >= 0 && stats.Active >= limit {
-		return billing.QuotaError{
-			Metric:     billing.MetricScheduledRun,
-			Used:       stats.Active,
-			Limit:      limit,
-			Plan:       entitlement.Plan.Plan,
-			UpgradeURL: entitlement.UpgradeURL,
-		}
-	}
 	return nil
 }
 
@@ -427,7 +413,7 @@ func (s *Service) executeSchedule(ctx context.Context, schedule store.Schedule, 
 		} else if !enabled {
 			return repository.ScheduleLastSkipped, "reminders feature is disabled", nil
 		}
-		return s.withScheduledRunQuota(ctx, schedule, func() (string, error) {
+		return s.withScheduledRunCredits(ctx, schedule, func() (string, error) {
 			return repository.ScheduleLastSucceeded, s.deliverReminder(ctx, schedule)
 		})
 	case KindFollowUp:
@@ -443,7 +429,7 @@ func (s *Service) executeSchedule(ctx context.Context, schedule store.Schedule, 
 		if resolved {
 			return repository.ScheduleLastSkipped, "skipped because follow-up activity resolved the reminder", nil
 		}
-		return s.withScheduledRunQuota(ctx, schedule, func() (string, error) {
+		return s.withScheduledRunCredits(ctx, schedule, func() (string, error) {
 			return repository.ScheduleLastSucceeded, s.deliverReminder(ctx, schedule)
 		})
 	case KindComposed:
@@ -476,7 +462,7 @@ func (s *Service) featureEnabled(ctx context.Context, guildID, featureID string)
 	return s.features.Enabled(ctx, guildID, featureID)
 }
 
-func (s *Service) withScheduledRunQuota(ctx context.Context, schedule store.Schedule, run func() (string, error)) (string, string, error) {
+func (s *Service) withScheduledRunCredits(ctx context.Context, schedule store.Schedule, run func() (string, error)) (string, string, error) {
 	if s.billing == nil {
 		status, err := run()
 		if err != nil {

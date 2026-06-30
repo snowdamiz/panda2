@@ -156,7 +156,7 @@ func TestInstallServiceRecordsGatewayGuildAndStartsTrial(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Resolve gateway trial: %v", err)
 	}
-	if entitlement.Plan.Plan != billing.PlanTrial || entitlement.Status != billing.StatusTrialing || !entitlement.CanUsePaidFeatures {
+	if entitlement.Pack.Pack != billing.PackTrial || entitlement.Status != billing.StatusTrialing || !entitlement.CanUsePaidFeatures {
 		t.Fatalf("unexpected gateway trial entitlement: %+v", entitlement)
 	}
 }

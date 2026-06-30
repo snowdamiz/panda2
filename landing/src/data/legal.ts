@@ -41,13 +41,13 @@ export const legalDocuments: LegalDocument[] = [
     description: 'How Panda handles Discord server data, user memory, billing data, and support records.',
     summary: [
       'Panda processes only the server, billing, support, and security data needed to run the Discord assistant.',
-      'Server owners control knowledge sources, memory settings, channel access, role access, and plan-level retention.',
+      'Server owners control knowledge sources, memory settings, channel access, role access, and pack-level retention.',
       'Privacy, export, deletion, and DPA requests start through support so they can be tied to the right server owner.',
     ],
     facts: [
       { label: 'Scope', value: 'Discord servers, wallet billing, support, and security events' },
       { label: 'Memory', value: 'Controlled by server settings and consent state' },
-      { label: 'Retention', value: 'Plan based unless a shorter setting is configured' },
+      { label: 'Retention', value: 'Pack based unless a shorter setting is configured' },
       { label: 'Sale of data', value: 'Panda does not sell personal data' },
     ],
     primaryAction: { label: 'Request privacy help', href: '/support' },
@@ -64,8 +64,8 @@ export const legalDocuments: LegalDocument[] = [
       {
         heading: 'How Panda uses data',
         body: [
-          'We use data to deliver assistant responses, enforce server permissions, meter plan usage, prevent abuse, process billing, provide support, maintain security, and improve reliability.',
-          'Server admins control knowledge sources, channel access, role access, memory settings, response behavior, and plan-level retention from Discord or account surfaces.',
+          'We use data to deliver assistant responses, enforce server permissions, meter credit usage, prevent abuse, process billing, provide support, maintain security, and improve reliability.',
+          'Server admins control knowledge sources, channel access, role access, memory settings, response behavior, and pack-level retention from Discord or account surfaces.',
         ],
       },
       {
@@ -78,7 +78,7 @@ export const legalDocuments: LegalDocument[] = [
       {
         heading: 'Retention and deletion',
         body: [
-          'Conversation metadata and knowledge retention follow the active server plan unless a shorter retention setting is configured.',
+          'Conversation metadata and knowledge retention follow the active server pack unless a shorter retention setting is configured.',
           'Server owners can request export or deletion of server knowledge, user memory consent records, conversation metadata, and billing account data where deletion is legally allowed.',
         ],
       },
@@ -93,7 +93,7 @@ export const legalDocuments: LegalDocument[] = [
         heading: 'Privacy requests',
         body: [
           'Privacy requests should include the relevant Discord server ID, Discord user ID, wallet address, or billing reference when available so support can verify ownership before acting.',
-          'Business customers may request a signed data processing addendum and subprocessors list before production rollout or renewal.',
+          'Business customers may request a signed data processing addendum and subprocessors list before production rollout.',
         ],
       },
     ],
@@ -112,7 +112,7 @@ export const legalDocuments: LegalDocument[] = [
     ],
     facts: [
       { label: 'Customer', value: 'Discord server owner or authorized installer' },
-      { label: 'Billing unit', value: 'One subscription per Discord server' },
+      { label: 'Billing unit', value: 'Prepaid credit packs per Discord server' },
       { label: 'Trial conversion', value: 'No automatic paid conversion' },
       { label: 'Activation', value: 'Verified order plus Discord activation key' },
     ],
@@ -130,15 +130,15 @@ export const legalDocuments: LegalDocument[] = [
       {
         heading: 'Trials and activation',
         body: [
-          'Trial access is limited by plan credits and does not automatically convert to paid access without payment approval.',
+          'Trial access is limited by trial credits and does not automatically convert to paid access without payment approval.',
           'Paid access is applied only after Panda verifies a server-created billing order, including a native SOL payment or a coupon-covered zero-due order, and the billing owner activates the one-time key in Discord.',
         ],
       },
       {
-        heading: 'Subscriptions and billing',
+        heading: 'Packs and billing',
         body: [
-          'Paid plans are billed per server and include defined limits for AI responses, web searches, knowledge storage, schedules, retention, music, and premium tools.',
-          'The billing owner is responsible for renewal, cancellation, payment disputes, taxes or fees controlled by payment channels, and keeping wallet or account access available.',
+          'Paid packs are prepaid per server. Each pack grants a fixed number of credits plus knowledge storage and retention limits. Credits are consumed by actions, and more expensive actions cost more credits.',
+          'Packs do not renew automatically. The billing owner is responsible for buying additional packs, payment disputes, taxes or fees controlled by payment channels, and keeping wallet or account access available.',
         ],
       },
       {
@@ -181,13 +181,13 @@ export const legalDocuments: LegalDocument[] = [
     summary: [
       'For server content, the customer is generally the controller and Panda acts as a processor under documented instructions.',
       'Panda uses tenant-scoped access controls, audited privileged changes, entitlement checks, backup practices, and deployment secret management.',
-      'Business customers can request a signed DPA and current subprocessors list before rollout or renewal.',
+      'Business customers can request a signed DPA and current subprocessors list before rollout.',
     ],
     facts: [
       { label: 'Available to', value: 'Business customers and production evaluators' },
       { label: 'Role', value: 'Processor for server content' },
       { label: 'Subprocessors', value: 'Available on request' },
-      { label: 'Term', value: 'Subscription term plus retention and backup windows' },
+      { label: 'Term', value: 'Pack term plus retention and backup windows' },
     ],
     primaryAction: { label: 'Request signed DPA', href: '/support' },
     secondaryAction: { label: 'Privacy policy', href: '/privacy' },
@@ -197,13 +197,13 @@ export const legalDocuments: LegalDocument[] = [
         heading: 'Roles',
         body: [
           'For server content, the customer is the controller and Panda acts as a processor. For account administration, billing, fraud prevention, and service security, Panda may act as an independent controller.',
-          'Business customers can request a signed DPA before production rollout or renewal.',
+          'Business customers can request a signed DPA before production rollout.',
         ],
       },
       {
         heading: 'Processing details',
         body: [
-          'Subject matter: hosted Discord assistant services. Duration: subscription term plus retention and backup windows. Categories: Discord users, server admins, billing owners, support contacts, and invited members.',
+          'Subject matter: hosted Discord assistant services. Duration: pack term plus retention and backup windows. Categories: Discord users, server admins, billing owners, support contacts, and invited members.',
           'Personal data may include Discord IDs, names visible to the bot, role and channel metadata, command content, server knowledge, memory preferences, billing metadata, audit events, and support correspondence.',
         ],
       },
@@ -243,15 +243,15 @@ export const legalDocuments: LegalDocument[] = [
     title: 'Refund and Cancellation Policy',
     eyebrow: 'Billing',
     updated,
-    description: 'How trials, cancellations, renewals, failed payments, and refund requests work.',
+    description: 'How trials, prepaid packs, credit expiry, failed payments, and refund requests work.',
     summary: [
       'Trials include limited credits and never auto-convert into paid access without payment approval.',
-      'Canceling stops renewal at the end of the current paid period unless the billing channel requires a different effective date.',
-      'Refund requests are reviewed case by case, with prompt accidental renewals, duplicate charges, and unresolved outages eligible for review.',
+      'Packs are prepaid and do not auto-renew; credits stay usable until they are spent or the pack expires.',
+      'Refund requests are reviewed case by case, with prompt accidental purchases, duplicate charges, and unresolved outages eligible for review.',
     ],
     facts: [
       { label: 'Trial billing', value: 'No automatic conversion' },
-      { label: 'Cancellation', value: 'Stops renewal for the next paid period' },
+      { label: 'Packs', value: 'Prepaid; credits expire at the end of the pack window' },
       { label: 'Review basis', value: 'Case by case with usage and payment context' },
       { label: 'Support data', value: 'Guild ID, wallet, order, or activation key helps review' },
     ],
@@ -263,34 +263,34 @@ export const legalDocuments: LegalDocument[] = [
         heading: 'Trials',
         body: [
           'Trials include limited credits and never auto-convert without payment approval. Trial abuse may result in suspension across related guilds, installers, accounts, or payment methods.',
-          'Trial limits may include AI responses, web searches, schedules, knowledge storage, retention windows, music access, and premium tools.',
+          'Trial access includes a fixed number of credits, a knowledge storage cap, and a retention window.',
         ],
       },
       {
-        heading: 'Cancellations',
+        heading: 'Stopping and expiry',
         body: [
-          'Canceling a subscription stops renewal at the end of the current paid period unless the billing channel requires a different effective date.',
-          'Canceled servers keep export, delete, billing, and support access while paid AI, search, schedule, and premium tool access may become unavailable.',
+          'Packs are prepaid and do not renew automatically. Credits stay usable until they are spent or the pack expires, so you can simply choose not to buy another pack.',
+          'When a server runs out of credits or its pack expires, it keeps export, delete, billing, and support access while paid actions pause until another pack is activated.',
         ],
       },
       {
-        heading: 'Renewals and failed payments',
+        heading: 'Activation and failed payments',
         body: [
-          'Renewal access depends on successful payment verification, coupon coverage, or another supported billing path. Failed payments may place a server into grace, read-only, or suspended states.',
-          'During billing issues, Panda may keep administrative, billing, export, deletion, and support paths available while limiting paid provider-spend features.',
+          'Paid access depends on successful payment verification, coupon coverage, or another supported billing path before credits are granted. Failed or unverified payments grant no credits.',
+          'During billing issues, Panda may keep administrative, billing, export, deletion, and support paths available while pausing paid provider-spend features.',
         ],
       },
       {
         heading: 'Refunds',
         body: [
-          'Refund requests are reviewed case by case. Accidental renewals, duplicate charges, and unresolved service outages are eligible for review when requested promptly.',
-          'Refunds may be unavailable for excessive usage, abuse, chargebacks, violations of acceptable use, or fees controlled by the payment channel.',
+          'Refund requests are reviewed case by case. Accidental purchases, duplicate charges, and unresolved service outages are eligible for review when requested promptly.',
+          'Refunds may be unavailable for packs whose credits have been substantially consumed, abuse, chargebacks, violations of acceptable use, or fees controlled by the payment channel.',
         ],
       },
       {
         heading: 'How to request',
         body: [
-          'Contact support with the Discord server ID, wallet address, order reference, activation key, renewal date, and a short description of the issue.',
+          'Contact support with the Discord server ID, wallet address, order reference, activation key, and a short description of the issue.',
           'Do not post private keys, seed phrases, API keys, billing secrets, or raw server content in a refund request.',
         ],
       },
@@ -322,7 +322,7 @@ export const legalDocuments: LegalDocument[] = [
         heading: 'Not allowed',
         body: [
           'Do not use Panda for spam, harassment, hate, illegal content, credential theft, malware, privacy invasion, unauthorized surveillance, or automated mass messaging.',
-          'Do not attempt to bypass quotas, billing, entitlement checks, role restrictions, tool confirmations, rate limits, or Discord platform rules.',
+          'Do not attempt to bypass credit checks, billing, entitlement checks, role restrictions, tool confirmations, rate limits, or Discord platform rules.',
         ],
       },
       {
@@ -363,7 +363,7 @@ export const legalDocuments: LegalDocument[] = [
     updated,
     description: 'How to get help with billing, setup, permissions, usage, export, deletion, and incidents.',
     summary: [
-      'Start in Discord: use /billing for plan and activation details, and ask Panda for setup and permission checks.',
+      'Start in Discord: use /billing for pack and activation details, and ask Panda for setup and permission checks.',
       'Support can help with billing, permissions, export, deletion, security, outage, and installation blockers.',
       'Support bundles should include operational identifiers and error states, not raw prompts, raw messages, secrets, or billing credentials.',
     ],
@@ -380,7 +380,7 @@ export const legalDocuments: LegalDocument[] = [
       {
         heading: 'Where to start',
         body: [
-          'Use /billing in Discord for plan, renewal, quota, and activation status. Ask Panda for server setup, permissions, usage, web search, memory, and degraded-state checks.',
+          'Use /billing in Discord for pack, credit balance, and activation status. Ask Panda for server setup, permissions, usage, web search, memory, and degraded-state checks.',
           'Paid customers can contact support for billing, permissions, export, deletion, security, and outage questions.',
         ],
       },
@@ -394,7 +394,7 @@ export const legalDocuments: LegalDocument[] = [
       {
         heading: 'Support bundles',
         body: [
-          'Support may request a bundle with guild ID, plan, subscription state, quota usage, command failure counts, recent error codes, queue depth, and Discord permission gaps.',
+          'Support may request a bundle with guild ID, pack, account status, credit usage, command failure counts, recent error codes, queue depth, and Discord permission gaps.',
           'Support bundles do not include raw prompts, raw Discord messages, hidden internal tools, provider model names, API keys, or billing secrets by default.',
         ],
       },
@@ -408,7 +408,7 @@ export const legalDocuments: LegalDocument[] = [
       {
         heading: 'Response expectations',
         body: [
-          'Business customers receive priority handling. Other paid plans are handled in order of severity and receipt. Trial support focuses on installation, billing, and basic setup blockers.',
+          'Business customers receive priority handling. Other paid packs are handled in order of severity and receipt. Trial support focuses on installation, billing, and basic setup blockers.',
           'During incidents, support may direct customers to the status page while keeping billing, export, deletion, and security channels available.',
         ],
       },
@@ -423,7 +423,7 @@ export const legalDocuments: LegalDocument[] = [
     description: 'The public entry point for Panda incident and availability updates.',
     summary: [
       'All production components are expected to be operational unless an incident is posted or announced through support.',
-      'Panda monitors Discord connectivity, HTTP readiness, data storage, queue health, payment verification, quota checks, managed AI, search, and music sidecars.',
+      'Panda monitors Discord connectivity, HTTP readiness, data storage, queue health, payment verification, credit checks, managed AI, search, and music sidecars.',
       'During incidents, Panda may degrade paid features while preserving help, billing, export, delete, and support paths.',
     ],
     facts: [
@@ -440,7 +440,7 @@ export const legalDocuments: LegalDocument[] = [
         heading: 'Current status',
         body: [
           'All production components are expected to be operational unless an incident is posted here or announced through support.',
-          'Panda monitors Discord gateway health, HTTP readiness, SQLite readiness, queue depth, SOL payment verification, quota checks, managed AI availability, web search availability, and music sidecars.',
+          'Panda monitors Discord gateway health, HTTP readiness, SQLite readiness, queue depth, SOL payment verification, credit checks, managed AI availability, web search availability, and music sidecars.',
         ],
       },
       {
@@ -461,7 +461,7 @@ export const legalDocuments: LegalDocument[] = [
         heading: 'Degraded states',
         body: [
           'When an upstream provider is unavailable, Panda may return a degraded response, queue work for later, pause spend-heavy features, or ask admins to retry after service health improves.',
-          'Billing and entitlement checks remain conservative during degraded states so server owners can see plan state before paid work resumes.',
+          'Billing and entitlement checks remain conservative during degraded states so server owners can see credit state before paid work resumes.',
         ],
       },
     ],

@@ -1,0 +1,11 @@
+---
+interface Props {
+  label?: string;
+}
+
+const { label = 'Sections' } = Astro.props;
+---
+
+<nav class="dash-nav" role="tablist" aria-label={label}>
+  <slot />
+</nav>

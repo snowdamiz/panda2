@@ -21,6 +21,7 @@ const (
 	Attachments           = "attachments"
 	WebSearch             = "web_search"
 	ImageGeneration       = "image_generation"
+	YouTubeClipping       = "youtube_clipping"
 	AdminSetup            = "admin_setup"
 	AdminAccessControl    = "admin_access_control"
 	AdminAudit            = "admin_audit"
@@ -39,7 +40,7 @@ var (
 	ErrUnknownFeature       = errors.New("unknown feature")
 	ErrInternalFeature      = errors.New("feature is not selectable in public install")
 	ErrUnknownPermission    = errors.New("unknown Discord permission")
-	defaultInstallPresetIDs = []string{AssistantChat, Threads, Polls, Reminders, WebSearch, ImageGeneration, Knowledge, Attachments, Music, AdminSetup, AdminAccessControl, AdminAudit, ComposedTools, DiscordMessages}
+	defaultInstallPresetIDs = []string{AssistantChat, Threads, Polls, Reminders, WebSearch, ImageGeneration, YouTubeClipping, Knowledge, Attachments, Music, AdminSetup, AdminAccessControl, AdminAudit, ComposedTools, DiscordMessages}
 	defaultInstallScopes    = []string{"bot", "applications.commands", "identify", "guilds"}
 )
 
@@ -51,7 +52,7 @@ type Feature struct {
 	PandaPermissions      []string `json:"panda_permissions"`
 	ToolNames             []string `json:"tool_names,omitempty"`
 	RequiresGatewayIntent bool     `json:"requires_gateway_intent"`
-	ConsumesPlanQuota     bool     `json:"consumes_plan_quota"`
+	ConsumesCredits       bool     `json:"consumes_credits"`
 	RequiresConfirmation  bool     `json:"requires_confirmation"`
 	Public                bool     `json:"public"`
 	Dependencies          []string `json:"dependencies,omitempty"`
@@ -305,7 +306,7 @@ var catalog = []Feature{
 		DiscordPermissions: []string{"VIEW_CHANNEL", "SEND_MESSAGES", "READ_MESSAGE_HISTORY", "EMBED_LINKS"},
 		PandaPermissions:   []string{admin.PermissionAssistantUse},
 		ToolNames:          []string{"panda.summarize_youtube"},
-		ConsumesPlanQuota:  true,
+		ConsumesCredits:    true,
 		Public:             true,
 	},
 	{
@@ -335,7 +336,7 @@ var catalog = []Feature{
 		DiscordPermissions: []string{"VIEW_CHANNEL", "SEND_MESSAGES"},
 		PandaPermissions:   []string{admin.PermissionAssistantUse},
 		ToolNames:          []string{"panda.manage_reminder"},
-		ConsumesPlanQuota:  true,
+		ConsumesCredits:    true,
 		Public:             true,
 		Dependencies:       []string{AssistantChat},
 	},
@@ -346,19 +347,19 @@ var catalog = []Feature{
 		DiscordPermissions: []string{"VIEW_CHANNEL", "SEND_MESSAGES", "CONNECT", "SPEAK", "USE_VAD"},
 		PandaPermissions:   []string{admin.PermissionAssistantUse},
 		ToolNames:          []string{"panda.manage_music"},
-		ConsumesPlanQuota:  true,
+		ConsumesCredits:    true,
 		Public:             true,
 		Dependencies:       []string{AssistantChat},
 	},
 	{
-		ID:                Knowledge,
-		Label:             "Knowledge",
-		Description:       "Server knowledge search, citations, and admin-managed memory.",
-		PandaPermissions:  []string{admin.PermissionAssistantMemoryRead, admin.PermissionAdminMemoryManage},
-		ToolNames:         []string{"search_knowledge", "panda.manage_knowledge"},
-		ConsumesPlanQuota: true,
-		Public:            true,
-		Dependencies:      []string{AssistantChat},
+		ID:               Knowledge,
+		Label:            "Knowledge",
+		Description:      "Server knowledge search, citations, and admin-managed memory.",
+		PandaPermissions: []string{admin.PermissionAssistantMemoryRead, admin.PermissionAdminMemoryManage},
+		ToolNames:        []string{"search_knowledge", "panda.manage_knowledge"},
+		ConsumesCredits:  true,
+		Public:           true,
+		Dependencies:     []string{AssistantChat},
 	},
 	{
 		ID:                 Attachments,
@@ -371,14 +372,14 @@ var catalog = []Feature{
 		Dependencies:       []string{AssistantChat},
 	},
 	{
-		ID:                WebSearch,
-		Label:             "Web search",
-		Description:       "Current public web answers with source links.",
-		PandaPermissions:  []string{admin.PermissionAssistantWebSearch},
-		ToolNames:         []string{"web.search"},
-		ConsumesPlanQuota: true,
-		Public:            true,
-		Dependencies:      []string{AssistantChat},
+		ID:               WebSearch,
+		Label:            "Web search",
+		Description:      "Current public web answers with source links.",
+		PandaPermissions: []string{admin.PermissionAssistantWebSearch},
+		ToolNames:        []string{"web.search"},
+		ConsumesCredits:  true,
+		Public:           true,
+		Dependencies:     []string{AssistantChat},
 	},
 	{
 		ID:                 ImageGeneration,
@@ -387,9 +388,19 @@ var catalog = []Feature{
 		DiscordPermissions: []string{"VIEW_CHANNEL", "SEND_MESSAGES", "ATTACH_FILES"},
 		PandaPermissions:   []string{admin.PermissionAssistantImageGeneration},
 		ToolNames:          []string{"panda.generate_image", "panda.inspect_image"},
-		ConsumesPlanQuota:  true,
+		ConsumesCredits:    true,
 		Public:             true,
 		Dependencies:       []string{AssistantChat},
+	},
+	{
+		ID:               YouTubeClipping,
+		Label:            "YouTube clipping",
+		Description:      "Create short YouTube video clips from transcript-guided model decisions and publish durable watch links.",
+		PandaPermissions: []string{admin.PermissionAssistantYouTubeClipping},
+		ToolNames:        []string{"panda.clip_youtube"},
+		ConsumesCredits:  true,
+		Public:           true,
+		Dependencies:     []string{AssistantChat},
 	},
 	{
 		ID:               AdminSetup,
@@ -423,7 +434,7 @@ var catalog = []Feature{
 		Description:          "Draft, approve, run, schedule, and audit server automations.",
 		PandaPermissions:     []string{admin.PermissionToolComposeDraft, admin.PermissionToolComposeApprove, admin.PermissionToolComposeInvoke, admin.PermissionToolComposeAudit},
 		ToolNames:            []string{"generate_workflow_json", "panda.manage_composed_tool", "panda.manage_schedule"},
-		ConsumesPlanQuota:    true,
+		ConsumesCredits:      true,
 		RequiresConfirmation: true,
 		Public:               true,
 		Dependencies:         []string{AdminSetup},

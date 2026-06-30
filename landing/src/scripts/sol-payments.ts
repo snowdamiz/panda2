@@ -2,11 +2,11 @@ import { getWallets } from '@wallet-standard/app';
 import type { IdentifierString, Wallet, WalletAccount } from '@wallet-standard/base';
 import { StandardConnect } from '@wallet-standard/features';
 import { SolanaSignTransaction } from '@solana/wallet-standard-features';
-import { accountURLForPlan, readStoredWalletAccount, rememberBillingOrder, shortWalletAddress } from './account';
+import { accountURLForPack, readStoredWalletAccount, rememberBillingOrder, shortWalletAddress } from './account';
 
 type PaymentOrder = {
   order_id: string;
-  plan: string;
+  pack: string;
   display_name: string;
   due_lamports: number;
   amount_sol: string;
@@ -63,7 +63,7 @@ type PaymentNodes = {
   keyBox: HTMLElement;
   key: HTMLElement;
   copyButton: HTMLButtonElement;
-  planButtons: HTMLButtonElement[];
+  packButtons: HTMLButtonElement[];
 };
 
 export const initSolPayments = () => {
@@ -77,16 +77,17 @@ export const initSolPayments = () => {
 class SolPaymentController {
   private readonly nodes: PaymentNodes;
   private readonly walletRegistry = getWallets();
-  private selectedPlan = 'plus';
+  private selectedPack = 'plus';
   private wallets: readonly Wallet[] = [];
   private order: PaymentOrder | null = null;
 
   constructor(nodes: PaymentNodes) {
     this.nodes = nodes;
-    const requestedPlan = new URLSearchParams(window.location.search).get('plan');
-    const activePlan = nodes.planButtons.find((button) => button.dataset.solPlan === requestedPlan) ||
-      nodes.planButtons.find((button) => button.getAttribute('aria-pressed') === 'true');
-    if (activePlan) this.selectPlan(activePlan, false);
+    const params = new URLSearchParams(window.location.search);
+    const requestedPack = params.get('pack') || params.get('plan');
+    const activePack = nodes.packButtons.find((button) => button.dataset.solPack === requestedPack) ||
+      nodes.packButtons.find((button) => button.getAttribute('aria-pressed') === 'true');
+    if (activePack) this.selectPack(activePack, false);
   }
 
   init() {
@@ -96,26 +97,27 @@ class SolPaymentController {
     this.walletRegistry.on('unregister', () => this.renderWallets());
     this.nodes.form.addEventListener('submit', (event) => {
       event.preventDefault();
-      void this.buySelectedPlan();
+      void this.buySelectedPack();
     });
     this.nodes.copyButton.addEventListener('click', () => void this.copyActivationKey());
-    this.nodes.planButtons.forEach((button) => {
-      button.addEventListener('click', () => this.selectPlan(button));
+    this.nodes.packButtons.forEach((button) => {
+      button.addEventListener('click', () => this.selectPack(button));
     });
   }
 
-  private selectPlan(button: HTMLButtonElement, updateURL = true) {
-    this.selectedPlan = button.dataset.solPlan || this.selectedPlan;
-    this.nodes.planButtons.forEach((item) => {
+  private selectPack(button: HTMLButtonElement, updateURL = true) {
+    this.selectedPack = button.dataset.solPack || this.selectedPack;
+    this.nodes.packButtons.forEach((item) => {
       const active = item === button;
       item.classList.toggle('active', active);
       item.setAttribute('aria-pressed', String(active));
     });
-    const label = button.dataset.solPlanLabel || button.querySelector<HTMLElement>('.checkout-plan-name')?.textContent?.trim() || this.selectedPlan;
+    const label = button.dataset.solPackLabel || button.querySelector<HTMLElement>('.checkout-plan-name')?.textContent?.trim() || this.selectedPack;
     this.renderBuyButtonLabel(label);
     if (updateURL) {
       const url = new URL(window.location.href);
-      url.searchParams.set('plan', this.selectedPlan);
+      url.searchParams.set('pack', this.selectedPack);
+      url.searchParams.delete('plan');
       window.history.replaceState({}, '', url);
     }
   }
@@ -131,11 +133,11 @@ class SolPaymentController {
     this.setStatus('');
   }
 
-  private async buySelectedPlan() {
+  private async buySelectedPack() {
     const account = readStoredWalletAccount();
     if (!account) {
       this.setStatus('Opening wallet account login.');
-      window.location.assign(accountURLForPlan(this.selectedPlan));
+      window.location.assign(accountURLForPack(this.selectedPack));
       return;
     }
     this.setBusy(true);
@@ -145,7 +147,7 @@ class SolPaymentController {
       const order = await requestJSON<PaymentOrder>(this.apiURL('/billing/sol/orders'), {
         method: 'POST',
         body: JSON.stringify({
-          plan: this.selectedPlan,
+          pack: this.selectedPack,
           coupon_code: this.nodes.couponInput.value.trim(),
         }),
       });
@@ -262,7 +264,7 @@ class SolPaymentController {
     this.nodes.root.classList.toggle('busy', busy);
     this.nodes.buyButton.disabled = busy;
     this.nodes.couponInput.disabled = busy;
-    this.nodes.planButtons.forEach((button) => {
+    this.nodes.packButtons.forEach((button) => {
       button.disabled = busy;
     });
   }
@@ -280,10 +282,10 @@ class SolPaymentController {
   }
 
   private renderBuyButtonLabel(label?: string) {
-    const activeButton = this.nodes.planButtons.find((button) => button.getAttribute('aria-pressed') === 'true');
-    const planLabel = label || activeButton?.dataset.solPlanLabel || activeButton?.querySelector<HTMLElement>('.checkout-plan-name')?.textContent?.trim() || this.selectedPlan;
+    const activeButton = this.nodes.packButtons.find((button) => button.getAttribute('aria-pressed') === 'true');
+    const packLabel = label || activeButton?.dataset.solPackLabel || activeButton?.querySelector<HTMLElement>('.checkout-plan-name')?.textContent?.trim() || this.selectedPack;
     const account = readStoredWalletAccount();
-    this.nodes.buyButton.textContent = account ? `Buy ${planLabel}` : 'Log in to buy';
+    this.nodes.buyButton.textContent = account ? `Buy ${packLabel}` : 'Log in to buy';
   }
 
   private apiURL(path: string): string {
@@ -305,8 +307,8 @@ const collectNodes = (root: HTMLElement): PaymentNodes | null => {
   const keyBox = root.querySelector<HTMLElement>('[data-sol-key-box]');
   const key = root.querySelector<HTMLElement>('[data-sol-key]');
   const copyButton = root.querySelector<HTMLButtonElement>('[data-sol-copy]');
-  const planButtons = Array.from(root.querySelectorAll<HTMLButtonElement>('[data-sol-plan]'));
-  if (!form || !buyButton || !couponInput || !result || !status || !keyBox || !key || !copyButton || planButtons.length === 0) {
+  const packButtons = Array.from(root.querySelectorAll<HTMLButtonElement>('[data-sol-pack]'));
+  if (!form || !buyButton || !couponInput || !result || !status || !keyBox || !key || !copyButton || packButtons.length === 0) {
     return null;
   }
   return {
@@ -319,7 +321,7 @@ const collectNodes = (root: HTMLElement): PaymentNodes | null => {
     keyBox,
     key,
     copyButton,
-    planButtons,
+    packButtons,
   };
 };
 

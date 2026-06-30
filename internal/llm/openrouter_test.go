@@ -54,7 +54,8 @@ func TestOpenRouterChatSendsExpectedRequest(t *testing.T) {
 			"id":    "gen-1",
 			"model": "provider/model",
 			"choices": []map[string]any{{
-				"message": map[string]string{"role": "assistant", "content": "hello from fixture"},
+				"message":       map[string]string{"role": "assistant", "content": "hello from fixture"},
+				"finish_reason": "stop",
 			}},
 			"usage": map[string]int{"prompt_tokens": 3, "completion_tokens": 4, "total_tokens": 7},
 		})
@@ -87,6 +88,9 @@ func TestOpenRouterChatSendsExpectedRequest(t *testing.T) {
 	}
 	if response.Usage.TotalTokens != 7 {
 		t.Fatalf("unexpected total tokens %d", response.Usage.TotalTokens)
+	}
+	if response.FinishReason != "stop" {
+		t.Fatalf("unexpected finish reason %q", response.FinishReason)
 	}
 }
 
@@ -290,6 +294,9 @@ func TestOpenRouterChatSendsStructuredResponseFormat(t *testing.T) {
 		if payload.Provider == nil || !payload.Provider.RequireParameters || payload.Provider.AllowFallbacks == nil || *payload.Provider.AllowFallbacks {
 			t.Fatalf("structured response requests should require provider parameter support and disable provider fallback: %+v", payload.Provider)
 		}
+		if len(payload.Provider.Order) != 0 {
+			t.Fatalf("structured response requests without configured routing should not force provider order: %+v", payload.Provider)
+		}
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"id":    "gen-schema",
 			"model": "provider/model",
@@ -318,6 +325,64 @@ func TestOpenRouterChatSendsStructuredResponseFormat(t *testing.T) {
 	}
 	if response.Content != `{"respond":true,"prompt":"play music"}` {
 		t.Fatalf("unexpected content %q", response.Content)
+	}
+}
+
+func TestOpenRouterChatSerializesMultimodalContentParts(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var rawPayload map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&rawPayload); err != nil {
+			t.Fatalf("decode raw request: %v", err)
+		}
+		messages := rawPayload["messages"].([]any)
+		user := messages[0].(map[string]any)
+		content, ok := user["content"].([]any)
+		if !ok || len(content) != 2 {
+			t.Fatalf("expected multimodal content array, got %#v", user["content"])
+		}
+		text := content[0].(map[string]any)
+		image := content[1].(map[string]any)
+		if text["type"] != "text" || text["text"] != "inspect this frame" {
+			t.Fatalf("unexpected text part: %#v", text)
+		}
+		imageURL := image["image_url"].(map[string]any)
+		if image["type"] != "image_url" || imageURL["url"] != "data:image/jpeg;base64,abc123" {
+			t.Fatalf("unexpected image part: %#v", image)
+		}
+		if rawPayload["structured_outputs"] != true {
+			t.Fatalf("expected structured_outputs true, got %#v", rawPayload["structured_outputs"])
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id":    "gen-multi",
+			"model": "provider/model",
+			"choices": []map[string]any{{
+				"message": map[string]string{"role": "assistant", "content": `{"ok":true}`},
+			}},
+		})
+	}))
+	defer server.Close()
+
+	client := NewOpenRouterClient(OpenRouterConfig{APIKey: "key", BaseURL: server.URL})
+	_, err := client.Chat(context.Background(), ChatRequest{
+		Model: "provider/model",
+		Messages: []Message{{
+			Role: "user",
+			ContentParts: []ContentPart{
+				{Type: "text", Text: "inspect this frame"},
+				{Type: "image_url", ImageURL: &ImageURLPart{URL: "data:image/jpeg;base64,abc123"}},
+			},
+		}},
+		ResponseFormat: &ResponseFormat{
+			Type: "json_schema",
+			JSONSchema: &ResponseFormatSchema{
+				Name:   "fixture",
+				Strict: true,
+				Schema: json.RawMessage(`{"type":"object","properties":{"ok":{"type":"boolean"}},"required":["ok"],"additionalProperties":false}`),
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Chat returned error: %v", err)
 	}
 }
 

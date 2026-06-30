@@ -18,6 +18,7 @@ import (
 
 const (
 	defaultSidecarDownloadTimeout = 3 * time.Minute
+	defaultYTDLPSidecarMaxAge     = 24 * time.Hour
 	maxSidecarDownloadBytes       = 220 << 20
 	ffmpegStaticReleaseTag        = "b6.1.1"
 )
@@ -67,7 +68,7 @@ func NewSidecarManager(config SidecarConfig) *SidecarManager {
 func (m *SidecarManager) Ensure(ctx context.Context) (ToolPaths, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if toolsAvailable(m.tools) {
+	if m.toolsAvailable(time.Now()) {
 		return m.tools, nil
 	}
 	dir := strings.TrimSpace(m.dir)
@@ -120,13 +121,17 @@ func (m *SidecarManager) ensureTool(ctx context.Context, spec sidecarToolSpec, c
 	}
 	target := filepath.Join(m.dir, sidecarExecutableName(spec.name))
 	if path, ok := executablePath(target); ok {
-		return path, nil
+		if !sidecarToolNeedsRefresh(path, spec.refreshAfter, time.Now()) {
+			return path, nil
+		}
+		m.logger.Info("refreshing music sidecar", slog.String("tool", spec.name), slog.String("target", target))
+	} else {
+		m.logger.Info("provisioning music sidecar", slog.String("tool", spec.name), slog.String("target", target))
 	}
 	assetURL, err := spec.assetURL()
 	if err != nil {
 		return "", err
 	}
-	m.logger.Info("provisioning music sidecar", slog.String("tool", spec.name), slog.String("target", target))
 	if err := m.downloadExecutable(ctx, assetURL, target); err != nil {
 		return "", fmt.Errorf("provision %s sidecar: %w", spec.name, err)
 	}
@@ -174,12 +179,13 @@ func (m *SidecarManager) downloadExecutable(ctx context.Context, assetURL string
 }
 
 type sidecarToolSpec struct {
-	name     string
-	assetURL func() (string, error)
+	name         string
+	refreshAfter time.Duration
+	assetURL     func() (string, error)
 }
 
 func toolSpecYTDLP() sidecarToolSpec {
-	return sidecarToolSpec{name: "yt-dlp", assetURL: ytdlpSidecarURL}
+	return sidecarToolSpec{name: "yt-dlp", refreshAfter: defaultYTDLPSidecarMaxAge, assetURL: ytdlpSidecarURL}
 }
 
 func toolSpecFFmpeg() sidecarToolSpec {
@@ -267,6 +273,35 @@ func executablePath(path string) (string, bool) {
 		return "", false
 	}
 	return resolved, true
+}
+
+func (m *SidecarManager) toolsAvailable(now time.Time) bool {
+	if !toolsAvailable(m.tools) {
+		return false
+	}
+	return !m.managedToolNeedsRefresh(toolSpecYTDLP(), m.tools.YTDLPPath, now)
+}
+
+func (m *SidecarManager) managedToolNeedsRefresh(spec sidecarToolSpec, path string, now time.Time) bool {
+	if spec.refreshAfter <= 0 {
+		return false
+	}
+	target := filepath.Join(strings.TrimSpace(m.dir), sidecarExecutableName(spec.name))
+	if strings.TrimSpace(path) != target {
+		return false
+	}
+	return sidecarToolNeedsRefresh(path, spec.refreshAfter, now)
+}
+
+func sidecarToolNeedsRefresh(path string, refreshAfter time.Duration, now time.Time) bool {
+	if refreshAfter <= 0 {
+		return false
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return true
+	}
+	return !info.ModTime().After(now.Add(-refreshAfter))
 }
 
 func toolsAvailable(paths ToolPaths) bool {

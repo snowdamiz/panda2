@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -12,6 +13,7 @@ import (
 	"github.com/sn0w/panda2/internal/alerts"
 	"github.com/sn0w/panda2/internal/assistant"
 	"github.com/sn0w/panda2/internal/billing"
+	"github.com/sn0w/panda2/internal/clipevents"
 	"github.com/sn0w/panda2/internal/commands"
 	"github.com/sn0w/panda2/internal/composed"
 	"github.com/sn0w/panda2/internal/config"
@@ -24,6 +26,7 @@ import (
 	"github.com/sn0w/panda2/internal/maintenance"
 	"github.com/sn0w/panda2/internal/memory"
 	"github.com/sn0w/panda2/internal/music"
+	"github.com/sn0w/panda2/internal/objectstore"
 	"github.com/sn0w/panda2/internal/ops"
 	"github.com/sn0w/panda2/internal/queue"
 	"github.com/sn0w/panda2/internal/ratelimit"
@@ -106,19 +109,11 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 	composedRepo := repository.NewComposedToolRepository(dataStore.DB)
 	runtimeStatuses := repository.NewRuntimeStatusRepository(dataStore.DB)
 	userSafety := repository.NewUserSafetyRepository(dataStore.DB)
+	clips := repository.NewClipRepository(dataStore.DB)
+	clipEvents := clipevents.NewHub()
 	runtimeService := runtimecontrol.NewService(runtimeStatuses)
 	featureService := features.NewService(featureRepo)
-	openRouter := llm.NewOpenRouterClient(llm.OpenRouterConfig{
-		APIKey:                         cfg.OpenRouterAPIKey,
-		BaseURL:                        cfg.OpenRouterBaseURL,
-		AppURL:                         cfg.OpenRouterAppURL,
-		AppTitle:                       cfg.OpenRouterAppTitle,
-		ProviderOrder:                  cfg.OpenRouterProviderOrder,
-		AllowProviderFallbacks:         cfg.OpenRouterAllowProviderFallbacks,
-		MaxRetries:                     2,
-		CircuitBreakerFailureThreshold: cfg.OpenRouterCircuitBreakerFailureThreshold,
-		CircuitBreakerCooldown:         cfg.OpenRouterCircuitBreakerCooldown,
-	})
+	openRouter := llm.NewOpenRouterClient(openRouterChatConfig(cfg))
 	openRouterImages := llm.NewOpenRouterImageClient(llm.OpenRouterImageConfig{
 		APIKey:                         cfg.OpenRouterAPIKey,
 		BaseURL:                        cfg.OpenRouterImageBaseURL,
@@ -137,13 +132,46 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 		FFmpegPath: cfg.MusicFFmpegPath,
 		Logger:     logger,
 	})
+	clipDetector := youtube.NewOpenRouterClipDetector(youtube.ClipDetectorConfig{
+		Client:    llm.NewOpenRouterClient(openRouterClipDetectionConfig(cfg)),
+		Model:     cfg.OpenRouterClipDetectionModel,
+		MaxTokens: cfg.OpenRouterClipDetectionMaxTokens,
+		Timeout:   cfg.OpenRouterClipDetectionTimeout,
+	})
+	clipPlanner := youtube.NewOpenRouterClipCompositionPlanner(youtube.ClipCompositionPlannerConfig{
+		Client:    llm.NewOpenRouterClient(openRouterClipCompositionConfig(cfg)),
+		Model:     cfg.OpenRouterClipCompositionModel,
+		MaxTokens: cfg.OpenRouterClipCompositionMaxTokens,
+		Timeout:   cfg.OpenRouterClipCompositionTimeout,
+	})
+	clipUploader := objectstore.NewR2Client(objectstore.R2Config{
+		AccountID:       cfg.R2AccountID,
+		Endpoint:        cfg.R2Endpoint,
+		AccessKeyID:     cfg.R2AccessKeyID,
+		SecretAccessKey: cfg.R2SecretAccessKey,
+		Bucket:          cfg.R2Bucket,
+		PublicBaseURL:   cfg.R2PublicBaseURL,
+		Prefix:          cfg.R2ClipPrefix,
+	})
 	youtubeSummarizer := youtube.NewService(youtube.Config{
-		APIKey:        cfg.LemonfoxAPIKey,
-		BaseURL:       cfg.LemonfoxBaseURL,
-		YTDLPPath:     cfg.MusicYTDLPPath,
-		FFmpegPath:    cfg.MusicFFmpegPath,
-		ToolProvider:  youtubeToolProvider{sidecars: musicSidecars},
-		ChunkDuration: cfg.YouTubeAudioChunkDuration,
+		APIKey:              cfg.LemonfoxAPIKey,
+		BaseURL:             cfg.LemonfoxBaseURL,
+		YTDLPPath:           cfg.MusicYTDLPPath,
+		FFmpegPath:          cfg.MusicFFmpegPath,
+		ToolProvider:        youtubeToolProvider{sidecars: musicSidecars},
+		ClipDetector:        clipDetector,
+		ClipPlanner:         clipPlanner,
+		ClipUploader:        clipUploader,
+		ChunkDuration:       cfg.YouTubeAudioChunkDuration,
+		ClipMinDuration:     cfg.YouTubeClipMinDuration,
+		ClipMaxDuration:     cfg.YouTubeClipMaxDuration,
+		ClipMaxBytes:        cfg.YouTubeClipMaxBytes,
+		ThumbnailMaxCount:   cfg.YouTubeClipThumbnailMaxCount,
+		ThumbnailMaxEdge:    cfg.YouTubeClipThumbnailMaxEdge,
+		VerticalResolution:  parseClipResolution(cfg.YouTubeClipVerticalResolution),
+		LandscapeResolution: parseClipResolution(cfg.YouTubeClipLandscapeResolution),
+		CaptionFontPath:     cfg.YouTubeClipCaptionFontPath,
+		CaptionFontFamily:   cfg.YouTubeClipCaptionFontFamily,
 	})
 	memoryService := memory.NewServiceWithEmbeddings(knowledge, openRouter, cfg.OpenRouterEmbeddingModel)
 	billingService := billing.NewService(billingRepo, billing.Config{
@@ -153,6 +181,8 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 		SolanaTreasuryWallet:   cfg.SolanaTreasuryWallet,
 		SolanaConfirmation:     cfg.SolanaConfirmation,
 		SolanaPlanLamports:     cfg.SolanaPlanLamports,
+		SolanaPackLamports:     cfg.SolanaPackLamports,
+		SolanaUSDCentsPerSOL:   cfg.SolanaUSDCentsPerSOL,
 		SolanaOrderExpiration:  cfg.SolanaOrderExpiration,
 		SolanaActivationKeyTTL: cfg.SolanaActivationKeyTTL,
 	}).WithAuditRecorder(audit)
@@ -187,6 +217,11 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 		WithGIFFrameExtractor(tools.NewFFmpegGIFFrameExtractor(musicSidecars)).
 		WithUserSafetyRepository(userSafety).
 		WithYouTubeSummarizer(youtubeSummarizer).
+		WithClipRepository(clips).
+		WithClipObjectStore(clipUploader).
+		WithClipEvents(clipEvents).
+		WithClipURLTTL(cfg.R2ClipURLTTL).
+		WithPortalClipsURL(cfg.PortalClipsURL()).
 		WithBilling(billingService).
 		WithOpsManager(opsService)
 	composedService := composed.NewService(composedRepo, toolRegistry, toolExecutor, openRouter, cfg.OpenRouterModel).
@@ -227,6 +262,7 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 			SuccessRedirect: installResultURL(cfg.PublicAppURL, "/install/success/"),
 			FailureRedirect: installResultURL(cfg.PublicAppURL, "/install/failed/"),
 		})
+	portalOAuth := discordbot.NewPortalOAuthClient(cfg.DiscordApplicationID, cfg.DiscordClientSecret, cfg.DiscordPortalRedirectURI)
 	router := commands.NewRouter(adminService, assistantService, opsService, ratelimit.New(cfg.UserRateLimit, cfg.UserRateLimitWindow)).
 		WithRuntimeStatus(runtimeService).
 		WithComposedService(composedService).
@@ -276,7 +312,11 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 			WithDiscordWebhookHandler(installService).
 			WithInstallHandler(installService).
 			WithBillingService(billingService).
-			WithGuildRepository(guilds),
+			WithGuildRepository(guilds).
+			WithClipRepository(clips).
+			WithClipObjectStore(clipUploader).
+			WithClipEvents(clipEvents).
+			WithPortalOAuth(portalOAuth),
 		discord:   discord,
 		worker:    worker,
 		scheduler: schedulerService,
@@ -292,6 +332,52 @@ func installResultURL(publicURL, path string) string {
 		path = "/" + path
 	}
 	return publicURL + path
+}
+
+func openRouterChatConfig(cfg config.Config) llm.OpenRouterConfig {
+	return llm.OpenRouterConfig{
+		APIKey:                         cfg.OpenRouterAPIKey,
+		BaseURL:                        cfg.OpenRouterBaseURL,
+		AppURL:                         cfg.OpenRouterAppURL,
+		AppTitle:                       cfg.OpenRouterAppTitle,
+		ProviderOrder:                  cfg.OpenRouterProviderOrder,
+		AllowProviderFallbacks:         cfg.OpenRouterAllowProviderFallbacks,
+		MaxRetries:                     2,
+		CircuitBreakerFailureThreshold: cfg.OpenRouterCircuitBreakerFailureThreshold,
+		CircuitBreakerCooldown:         cfg.OpenRouterCircuitBreakerCooldown,
+	}
+}
+
+func openRouterClipDetectionConfig(cfg config.Config) llm.OpenRouterConfig {
+	clipConfig := openRouterChatConfig(cfg)
+	clipConfig.Timeout = cfg.OpenRouterClipDetectionTimeout
+	clipConfig.ProviderOrder = nil
+	clipConfig.AllowProviderFallbacks = true
+	return clipConfig
+}
+
+func openRouterClipCompositionConfig(cfg config.Config) llm.OpenRouterConfig {
+	clipConfig := openRouterChatConfig(cfg)
+	clipConfig.Timeout = cfg.OpenRouterClipCompositionTimeout
+	clipConfig.ProviderOrder = nil
+	clipConfig.AllowProviderFallbacks = true
+	return clipConfig
+}
+
+func parseClipResolution(value string) youtube.ClipResolution {
+	parts := strings.Split(strings.ToLower(strings.TrimSpace(value)), "x")
+	if len(parts) != 2 {
+		return youtube.ClipResolution{}
+	}
+	width, err := strconv.Atoi(strings.TrimSpace(parts[0]))
+	if err != nil {
+		return youtube.ClipResolution{}
+	}
+	height, err := strconv.Atoi(strings.TrimSpace(parts[1]))
+	if err != nil {
+		return youtube.ClipResolution{}
+	}
+	return youtube.ClipResolution{Width: width, Height: height}
 }
 
 func (a *App) Run(ctx context.Context) error {

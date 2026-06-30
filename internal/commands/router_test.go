@@ -2918,7 +2918,7 @@ func TestChatEmptyAssistantResponseReleasesBillingReservation(t *testing.T) {
 	if !response.Ephemeral || !strings.Contains(response.Content, "empty response") {
 		t.Fatalf("expected empty response guard, got %+v", response)
 	}
-	reservation, err := billingService.BeginUsage(ctx, "guild-1", billing.MetricAIResponse, int64(entitlement.Plan.AIResponses))
+	reservation, err := billingService.BeginUsage(ctx, "guild-1", billing.MetricAIResponse, entitlement.Pack.Credits/4-1)
 	if err != nil {
 		t.Fatalf("empty chat response should release billing reservation: %v", err)
 	}
@@ -2943,7 +2943,7 @@ func TestBackgroundTaskEmptyAssistantResponseReleasesBillingReservation(t *testi
 	if !response.Ephemeral || !strings.Contains(response.Content, "empty response") {
 		t.Fatalf("expected empty response guard, got %+v", response)
 	}
-	reservation, err := billingService.BeginUsage(ctx, "guild-1", billing.MetricAIResponse, int64(entitlement.Plan.AIResponses))
+	reservation, err := billingService.BeginUsage(ctx, "guild-1", billing.MetricAIResponse, entitlement.Pack.Credits/4-1)
 	if err != nil {
 		t.Fatalf("empty background response should release billing reservation: %v", err)
 	}
@@ -3067,6 +3067,63 @@ func TestAssistantStandaloneCardWithCardMarkupDoesNotCreateFollowup(t *testing.T
 	}
 }
 
+func TestResponseFromAssistantCardPreservesMediaItems(t *testing.T) {
+	response := responseFromAssistantCard("user-1", &assistant.ToolCard{
+		Title:  "YouTube clips ready",
+		Accent: "info",
+		MediaItems: []assistant.ToolCardMediaItem{{
+			Title:        "1. Best Moment",
+			Description:  "Strong standalone hook. - 20s",
+			URL:          "https://cdn.example.test/clips/01-best-moment.mp4",
+			ThumbnailURL: "https://cdn.example.test/clips/01-best-moment.jpg",
+		}},
+	})
+
+	if response.Content != "" {
+		t.Fatalf("media card response should not duplicate clip content, got %q", response.Content)
+	}
+	if response.Presentation.Title != "" || len(response.Presentation.Fields) != 0 || response.Presentation.Accent != AccentInfo {
+		t.Fatalf("unexpected presentation: %+v", response.Presentation)
+	}
+	if len(response.MediaItems) != 1 {
+		t.Fatalf("expected one media item, got %+v", response.MediaItems)
+	}
+	item := response.MediaItems[0]
+	if item.Title != "1. Best Moment" || item.Description != "Strong standalone hook. - 20s" || item.URL != "https://cdn.example.test/clips/01-best-moment.mp4" || item.ThumbnailURL != "https://cdn.example.test/clips/01-best-moment.jpg" {
+		t.Fatalf("unexpected media item: %+v", item)
+	}
+}
+
+func TestAssistantResponseWithCardPreservesMediaItems(t *testing.T) {
+	router := &Router{}
+	response := router.responseFromAssistantAnswer(context.Background(), Request{UserID: "user-1"}, assistant.AskResponse{
+		Content: "YouTube clips ready",
+		Card: &assistant.ToolCard{
+			Title:  "YouTube clips ready",
+			Accent: "info",
+			MediaItems: []assistant.ToolCardMediaItem{{
+				Title:        "1. Best Moment",
+				URL:          "https://cdn.example.test/clips/01-best-moment.mp4",
+				ThumbnailURL: "https://cdn.example.test/clips/01-best-moment.jpg",
+			}},
+			Actions: []assistant.ToolCardAction{{Label: "1. Best Moment", URL: "https://cdn.example.test/clips/01-best-moment.mp4"}},
+		},
+	}, "", "")
+
+	if response.Content != "" {
+		t.Fatalf("media assistant response should not duplicate clip content, got %q", response.Content)
+	}
+	if response.Presentation.Title != "" || len(response.Presentation.Fields) != 0 || response.Presentation.Accent != AccentInfo {
+		t.Fatalf("expected card presentation, got %+v", response.Presentation)
+	}
+	if len(response.MediaItems) != 1 || response.MediaItems[0].ThumbnailURL != "https://cdn.example.test/clips/01-best-moment.jpg" {
+		t.Fatalf("expected clip media item to reach command response, got %+v", response.MediaItems)
+	}
+	if len(response.Actions) != 1 {
+		t.Fatalf("expected clip action to remain attached, got %+v", response.Actions)
+	}
+}
+
 func TestAssistantResponseWithGeneratedFileIsPayload(t *testing.T) {
 	router := &Router{}
 	answer := assistant.AskResponse{
@@ -3097,7 +3154,7 @@ func TestAssistantResponseWithGeneratedFileIsPayload(t *testing.T) {
 func TestRouterFinalizesImageUsageReservations(t *testing.T) {
 	ctx := context.Background()
 	router := newTestRouter(t, &fakeLLM{response: llm.ChatResponse{Content: "fixture"}}, 20)
-	billingService, _ := attachTestBilling(t, router, "guild-1")
+	billingService, entitlement := attachTestBilling(t, router, "guild-1")
 
 	commitReservation, err := billingService.BeginUsage(ctx, "guild-1", billing.MetricImageGeneration, 1)
 	if err != nil {
@@ -3106,12 +3163,12 @@ func TestRouterFinalizesImageUsageReservations(t *testing.T) {
 	if err := router.CommitResponseUsage(ctx, Response{UsageReservations: []billing.Reservation{commitReservation}}); err != nil {
 		t.Fatalf("CommitResponseUsage: %v", err)
 	}
-	entitlement, err := billingService.Resolve(ctx, "guild-1")
+	entitlement, err = billingService.Resolve(ctx, "guild-1")
 	if err != nil {
 		t.Fatalf("Resolve committed usage: %v", err)
 	}
-	if entitlement.Usage.ImageGenerationsConsumed != 1 || entitlement.Usage.ImageGenerationsReserved != 0 {
-		t.Fatalf("expected one committed image generation, got %+v", entitlement.Usage)
+	if entitlement.AvailableCredits != entitlement.Pack.Credits-commitReservation.Credits || entitlement.ReservedCredits != 0 {
+		t.Fatalf("expected one committed image generation reservation, got %+v", entitlement)
 	}
 
 	releaseReservation, err := billingService.BeginUsage(ctx, "guild-1", billing.MetricImageGeneration, 1)
@@ -3125,8 +3182,8 @@ func TestRouterFinalizesImageUsageReservations(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Resolve released usage: %v", err)
 	}
-	if entitlement.Usage.ImageGenerationsConsumed != 1 || entitlement.Usage.ImageGenerationsReserved != 0 {
-		t.Fatalf("expected released reservation to leave usage unchanged, got %+v", entitlement.Usage)
+	if entitlement.AvailableCredits != entitlement.Pack.Credits-commitReservation.Credits || entitlement.ReservedCredits != 0 {
+		t.Fatalf("expected released reservation to leave credit balance unchanged, got %+v", entitlement)
 	}
 }
 
@@ -4812,6 +4869,54 @@ func TestRegularUserGetsWebSearchPermissionWhenFeatureGateOmitsWebSearch(t *test
 	}
 }
 
+func TestRegularUserGetsYouTubeClippingPermissionByDefaultUntilAdminDisables(t *testing.T) {
+	ctx := context.Background()
+	router := newTestRouter(t, &fakeLLM{}, 5)
+	repo := attachFeatureService(t, router)
+	if err := repo.SetGuildFeatures(ctx, "guild-1", []string{features.AssistantChat}, "test", "admin", time.Now().UTC()); err != nil {
+		t.Fatalf("SetGuildFeatures: %v", err)
+	}
+
+	permissions := router.allowedToolPermissions(ctx, Request{
+		UserID:    "user-1",
+		GuildID:   "guild-1",
+		ChannelID: "channel-1",
+		RoleIDs:   []string{"member"},
+	})
+	if _, ok := permissions[admin.PermissionAssistantYouTubeClipping]; !ok {
+		t.Fatalf("youtube clipping should be available by default even when guild features omit it: %+v", permissions)
+	}
+	enabled, active := router.featureSetForAccess(ctx, "guild-1")
+	if !active || !features.Has(enabled, features.YouTubeClipping) {
+		t.Fatalf("youtube clipping should be injected into access feature set, active=%t enabled=%+v", active, enabled)
+	}
+
+	response := router.Handle(ctx, Request{
+		Command:      "admin",
+		Subcommand:   "feature",
+		GuildID:      "guild-1",
+		UserID:       "admin",
+		IsGuildAdmin: true,
+		Options:      map[string]string{"action": "disable", "feature_id": features.YouTubeClipping},
+	})
+	if !strings.Contains(response.Content, "Disabled") {
+		t.Fatalf("expected admin disable to succeed, got %+v", response)
+	}
+	permissions = router.allowedToolPermissions(ctx, Request{
+		UserID:    "user-1",
+		GuildID:   "guild-1",
+		ChannelID: "channel-1",
+		RoleIDs:   []string{"member"},
+	})
+	if _, ok := permissions[admin.PermissionAssistantYouTubeClipping]; ok {
+		t.Fatalf("youtube clipping should not be available after explicit disable: %+v", permissions)
+	}
+	enabled, active = router.featureSetForAccess(ctx, "guild-1")
+	if !active || features.Has(enabled, features.YouTubeClipping) {
+		t.Fatalf("youtube clipping should be absent after explicit disable, active=%t enabled=%+v", active, enabled)
+	}
+}
+
 func TestRegularUserGetsImageGenerationPermissionWhenFeatureEnabled(t *testing.T) {
 	ctx := context.Background()
 	router := newTestRouter(t, &fakeLLM{}, 5)
@@ -5132,7 +5237,7 @@ func TestNaturalMessageAboutPandaDeclineDoesNotStartResponse(t *testing.T) {
 	}
 }
 
-func TestNaturalMessageRetryableHandlerReturnsAssistantError(t *testing.T) {
+func TestNaturalMessageRendersRetryableAssistantErrorOnce(t *testing.T) {
 	retryErr := llm.Error{StatusCode: http.StatusTooManyRequests, Code: "rate_limit", Message: "slow down"}
 	request := Request{
 		UserID:    "user-1",
@@ -5145,21 +5250,9 @@ func TestNaturalMessageRetryableHandlerReturnsAssistantError(t *testing.T) {
 	}
 	router := newTestRouter(t, &fakeLLM{err: retryErr}, 5)
 
-	response, err := router.HandleNaturalMessageStreamRetryable(context.Background(), request, nil)
-	if err == nil {
-		t.Fatal("expected retryable assistant error")
-	}
-	if !assistant.RetryableFailure(err) {
-		t.Fatalf("expected retryable assistant failure, got %v", err)
-	}
-	if response.Content != "" {
-		t.Fatalf("retryable handler should not render a response before queue retry, got %+v", response)
-	}
-
-	visibleRouter := newTestRouter(t, &fakeLLM{err: retryErr}, 5)
-	visible := visibleRouter.HandleNaturalMessage(context.Background(), request)
-	if visible.Presentation.Title != "AI response failed" || !strings.Contains(visible.Content, "try again later") {
-		t.Fatalf("regular natural handler should still render visible error card, got %+v", visible)
+	response := router.HandleNaturalMessage(context.Background(), request)
+	if response.Presentation.Title != "AI response failed" || !strings.Contains(response.Content, "try again later") {
+		t.Fatalf("natural handler should render one visible error card, got %+v", response)
 	}
 }
 

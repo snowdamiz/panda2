@@ -11,6 +11,7 @@ import (
 
 	"github.com/sn0w/panda2/internal/admin"
 	"github.com/sn0w/panda2/internal/alerts"
+	"github.com/sn0w/panda2/internal/billing"
 	"github.com/sn0w/panda2/internal/composed"
 	"github.com/sn0w/panda2/internal/features"
 	"github.com/sn0w/panda2/internal/music"
@@ -298,17 +299,13 @@ func (r *Router) handleAdminStatus(ctx context.Context, request Request) Respons
 		}
 	}
 	billingStatus := "not configured"
-	aiUsage := "not available"
-	webUsage := "not available"
-	imageUsage := "not available"
+	creditBalance := "not available"
 	retention := 0
 	if r.billing != nil {
 		if entitlement, err := r.billing.Resolve(ctx, request.GuildID); err == nil {
-			billingStatus = fmt.Sprintf("%s (%s)", entitlement.Plan.DisplayName, entitlement.Status)
-			aiUsage = entitlement.UsageLine("ai_response")
-			webUsage = entitlement.UsageLine("web_search")
-			imageUsage = entitlement.UsageLine("image_generation")
-			retention = entitlement.Plan.RetentionDays
+			billingStatus = fmt.Sprintf("%s (%s)", entitlement.Pack.DisplayName, entitlement.Status)
+			creditBalance = billing.FormatCredits(entitlement.AvailableCredits, entitlement.ReservedCredits)
+			retention = entitlement.RetentionDays
 		}
 	}
 	var scheduleStats repository.ScheduleStats
@@ -340,10 +337,8 @@ func (r *Router) handleAdminStatus(ctx context.Context, request Request) Respons
 	}
 	lines := []string{
 		"Admin status:",
-		fmt.Sprintf("- subscription: `%s`", billingStatus),
-		fmt.Sprintf("- AI responses: `%s`", aiUsage),
-		fmt.Sprintf("- web searches: `%s`", webUsage),
-		fmt.Sprintf("- image generations: `%s`", imageUsage),
+		fmt.Sprintf("- pack: `%s`", billingStatus),
+		fmt.Sprintf("- credits: `%s`", creditBalance),
 		fmt.Sprintf("- retention: `%d days`", retention),
 		fmt.Sprintf("- assistant: `%t`", config.AssistantEnabled),
 		fmt.Sprintf("- memory: `%t`", config.MemoryEnabled),

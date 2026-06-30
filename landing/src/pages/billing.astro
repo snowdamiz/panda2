@@ -2,16 +2,16 @@
 import Footer from '../components/Footer.astro';
 import Header from '../components/Header.astro';
 import Kicker from '../components/ui/Kicker.astro';
-import { planOptions } from '../data/landing';
+import { packOptions } from '../data/landing';
 import BaseLayout from '../layouts/BaseLayout.astro';
 
 const billingApiBase = import.meta.env.PUBLIC_PANDA_API_BASE_URL || (import.meta.env.DEV ? 'http://localhost:8080' : 'https://panda-assistant.fly.dev');
-const defaultPlan = planOptions.find((plan) => plan.featured) ?? planOptions[0];
+const defaultPack = packOptions.find((pack) => pack.featured) ?? packOptions[0];
 ---
 
 <BaseLayout
-  title="Panda billing - Buy server access"
-  description="Buy a Panda server plan with a connected wallet and optional coupon code."
+  title="Panda billing - Buy a credit pack"
+  description="Activate a prepaid Panda credit pack for one Discord server with a connected wallet and optional coupon code."
 >
   <Header />
   <main id="main" class="app-page billing-page">
@@ -19,36 +19,35 @@ const defaultPlan = planOptions.find((plan) => plan.featured) ?? planOptions[0];
       <div class="app-page-heading billing-heading reveal">
         <div>
           <Kicker tone="paper">Billing</Kicker>
-          <h1>Buy the plan. Get the key.</h1>
+          <h1>Buy the pack. Get the key.</h1>
         </div>
         <p>
-          Pick a tier, add a coupon if you have one, and approve the wallet prompt.
-          Panda verifies the payment and reveals one activation key for Discord.
+          Pick a credit pack, add a coupon if you have one, and approve the wallet
+          prompt. Panda verifies the payment and reveals one activation key for Discord.
         </p>
       </div>
 
       <div class="checkout-card reveal" data-sol-pay data-api-base={billingApiBase}>
         <form class="checkout-form" data-sol-form>
           <fieldset>
-            <legend>Plan</legend>
-            <div class="checkout-plans" role="group" aria-label="Plan">
+            <legend>Pack</legend>
+            <div class="checkout-plans" role="group" aria-label="Pack">
               {
-                planOptions.map((plan) => (
+                packOptions.map((pack) => (
                   <button
                     type="button"
-                    class:list={['checkout-plan', plan.slug === defaultPlan.slug && 'active']}
-                    data-sol-plan={plan.slug}
-                    data-sol-plan-label={plan.label}
-                    aria-pressed={plan.slug === defaultPlan.slug ? 'true' : 'false'}
+                    class:list={['checkout-plan', pack.slug === defaultPack.slug && 'active']}
+                    data-sol-pack={pack.slug}
+                    data-sol-pack-label={pack.name}
+                    aria-pressed={pack.slug === defaultPack.slug ? 'true' : 'false'}
                   >
-                    <span class="checkout-plan-badge">{plan.badge}</span>
-                    <strong class="checkout-plan-name">{plan.label}</strong>
-                    <em class="checkout-plan-rate">{plan.price} {plan.cadence}</em>
+                    <span class="checkout-plan-badge">{pack.badge}</span>
+                    <strong class="checkout-plan-name">{pack.name}</strong>
+                    <em class="checkout-plan-rate">{pack.price} once</em>
                     <span class="checkout-plan-limits">
-                      <span>{plan.aiResponses}</span>
-                      <span>{plan.searches}</span>
-                      <span>{plan.storage}</span>
-                      <span>{plan.retention}</span>
+                      <span>{pack.credits}</span>
+                      <span>{pack.storage}</span>
+                      <span>{pack.retention}</span>
                     </span>
                   </button>
                 ))
@@ -61,7 +60,7 @@ const defaultPlan = planOptions.find((plan) => plan.featured) ?? planOptions[0];
             <input data-sol-coupon name="coupon_code" autocomplete="off" spellcheck="false" />
           </label>
 
-          <button class="checkout-buy" type="submit" data-sol-buy>Buy Plus</button>
+          <button class="checkout-buy" type="submit" data-sol-buy>Buy Plus Pack</button>
         </form>
 
         <div class="checkout-result" data-sol-result hidden>

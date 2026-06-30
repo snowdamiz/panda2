@@ -103,8 +103,55 @@ func TestAdminSetupToolSchemasExposeNaturalLanguageFields(t *testing.T) {
 	assertToolSchemaContains("panda.manage_soul", "soul", "enum", "status", "set", "update")
 	assertToolSchemaContains("panda.manage_music", "search", "voice_channel_id", "voice_channel_name", "voice_channel", "vc")
 	assertToolSchemaContains("panda.summarize_youtube", "query", "url", "title", "detail", "language")
-	assertToolSchemaContains("panda.search_youtube", "query", "title", "video", "limit", "source", "channel_uploads", "channel_url", "handle", "sort_by", "upload_date", "date_after", "date_before", "uploaded_after")
+	assertToolSchemaContains("panda.clip_youtube", "query", "url", "instructions", "aspect_ratio", "9:16", "layout_instructions", "captions", "caption_instructions", "language")
+	assertToolSchemaContains("panda.search_youtube", "query", "title", "video", "limit", "purpose", "clip", "instructions", "source", "channel_uploads", "channel_url", "handle", "sort_by", "upload_date", "date_after", "date_before", "uploaded_after")
 	assertToolSchemaContains("panda.manage_composed_tool", "voice_channel_id", "voice_channel_name", "voice_channel")
+}
+
+func TestYouTubeClipCaptionInstructionsMentionRandomStyledCaptions(t *testing.T) {
+	registry, err := NewDefaultRegistry()
+	if err != nil {
+		t.Fatalf("NewDefaultRegistry: %v", err)
+	}
+	definition, ok := registry.Get("panda.clip_youtube")
+	if !ok {
+		t.Fatal("panda.clip_youtube not registered")
+	}
+	schema := string(definition.InputSchema)
+	for _, want := range []string{"random styled captions", "randomized caption style"} {
+		if !strings.Contains(schema, want) || !strings.Contains(definition.Description, want) {
+			t.Fatalf("expected clip tool schema and description to mention %q, schema=%s description=%s", want, schema, definition.Description)
+		}
+	}
+}
+
+func TestYouTubeClipInstructionsAreOptional(t *testing.T) {
+	registry, err := NewDefaultRegistry()
+	if err != nil {
+		t.Fatalf("NewDefaultRegistry: %v", err)
+	}
+	definition, ok := registry.Get("panda.clip_youtube")
+	if !ok {
+		t.Fatal("panda.clip_youtube not registered")
+	}
+	var schema struct {
+		Required   []string                   `json:"required"`
+		Properties map[string]json.RawMessage `json:"properties"`
+	}
+	if err := json.Unmarshal(definition.InputSchema, &schema); err != nil {
+		t.Fatalf("decode clip schema: %v", err)
+	}
+	for _, field := range schema.Required {
+		if field == "instructions" {
+			t.Fatalf("clip instructions should be optional, required=%+v schema=%s", schema.Required, string(definition.InputSchema))
+		}
+	}
+	if _, ok := schema.Properties["instructions"]; !ok {
+		t.Fatalf("clip instructions should remain available as optional guidance: %s", string(definition.InputSchema))
+	}
+	if !strings.Contains(definition.Description, "default viral clip preset") {
+		t.Fatalf("clip tool description should tell the model to use the default viral preset without guidance: %q", definition.Description)
+	}
 }
 
 func TestImageGenerationSchemaMatchesOpenRouterImageModelSettings(t *testing.T) {
@@ -817,13 +864,17 @@ func (f *fakeMusicManager) ManageMusic(_ context.Context, request MusicManagemen
 }
 
 type fakeYouTubeSummarizer struct {
-	configured bool
-	requests   []youtube.SummaryRequest
-	searches   []youtube.SearchRequest
-	candidates []youtube.VideoCandidate
-	result     youtube.SummaryResult
-	err        error
-	searchErr  error
+	configured     bool
+	clipConfigured bool
+	requests       []youtube.SummaryRequest
+	searches       []youtube.SearchRequest
+	clipRequests   []youtube.ClipRequest
+	candidates     []youtube.VideoCandidate
+	result         youtube.SummaryResult
+	clipResult     youtube.ClipResult
+	err            error
+	searchErr      error
+	clipErr        error
 }
 
 func (f *fakeYouTubeSummarizer) Configured() bool {
@@ -838,6 +889,15 @@ func (f *fakeYouTubeSummarizer) Summarize(_ context.Context, request youtube.Sum
 func (f *fakeYouTubeSummarizer) Search(_ context.Context, request youtube.SearchRequest) ([]youtube.VideoCandidate, error) {
 	f.searches = append(f.searches, request)
 	return f.candidates, f.searchErr
+}
+
+func (f *fakeYouTubeSummarizer) ClipConfigured() bool {
+	return f.configured && f.clipConfigured
+}
+
+func (f *fakeYouTubeSummarizer) Clip(_ context.Context, request youtube.ClipRequest) (youtube.ClipResult, error) {
+	f.clipRequests = append(f.clipRequests, request)
+	return f.clipResult, f.clipErr
 }
 
 func newToolAdminService(t *testing.T) *admin.Service {
@@ -1306,6 +1366,247 @@ func TestExecutorRunsYouTubeSummarizer(t *testing.T) {
 	}
 }
 
+func TestExecutorRunsYouTubeClipper(t *testing.T) {
+	registry, err := NewDefaultRegistry()
+	if err != nil {
+		t.Fatalf("NewDefaultRegistry: %v", err)
+	}
+	summarizer := &fakeYouTubeSummarizer{
+		configured:     true,
+		clipConfigured: true,
+		clipResult: youtube.ClipResult{
+			Title:                  "Deep Dive",
+			URL:                    "https://www.youtube.com/watch?v=deep",
+			Uploader:               "Teacher",
+			Duration:               12 * time.Minute,
+			TranscriptSegmentCount: 4,
+			Clips: []youtube.RenderedClip{
+				{
+					Rank:               1,
+					Title:              "Best explanation",
+					Type:               "spliced",
+					WatchURL:           "https://cdn.example.test/clips/guild-1/request-1/01-best-explanation.mp4",
+					ObjectKey:          "clips/guild-1/request-1/01-best-explanation.mp4",
+					ThumbnailURL:       "https://cdn.example.test/clips/guild-1/request-1/01-best-explanation.jpg",
+					ThumbnailObjectKey: "clips/guild-1/request-1/01-best-explanation.jpg",
+					Duration:           33 * time.Second,
+					SourceStartSeconds: 42,
+					SourceEndSeconds:   90,
+					Segments: []youtube.RenderedClipSegment{
+						{StartSeconds: 42, EndSeconds: 58, Duration: 16 * time.Second, Transcript: "First point."},
+						{StartSeconds: 73, EndSeconds: 90, Duration: 17 * time.Second, Transcript: "Second point."},
+					},
+					Reason:                   "This segment answers the requested question.",
+					Confidence:               0.91,
+					ViralityScore:            82,
+					HookScore:                80,
+					RetentionScore:           83,
+					ShareabilityScore:        81,
+					DurationPolicy:           "target_30_45",
+					ExceptionReason:          "",
+					OutputSizeBytes:          12345,
+					AspectRatio:              "9:16",
+					LayoutMode:               "stacked_regions",
+					CompositionReason:        "Main content and facecam are stacked for vertical viewing.",
+					CompositionConfidence:    0.87,
+					CaptionRendered:          true,
+					CaptionMode:              "burned_in",
+					CaptionStylePreset:       "opus_bold",
+					CaptionStyleSource:       "user_specified",
+					CaptionAnimation:         "slide_up",
+					CaptionTimingQuality:     "word",
+					CaptionConfidence:        0.88,
+					CaptionReason:            "Bottom captions avoid the webcam.",
+					CaptionFontFamily:        "inter",
+					CaptionFontColor:         "white",
+					CaptionHighlightColor:    "yellow",
+					CaptionBorderColor:       "green",
+					CaptionBorderThickness:   "medium",
+					CaptionBackgroundColor:   "transparent",
+					CaptionBackgroundOpacity: 0,
+				},
+				{
+					Rank:               2,
+					Title:              "Short answer",
+					Type:               "continuous",
+					WatchURL:           "https://cdn.example.test/clips/guild-1/request-1/02-short-answer.mp4",
+					ObjectKey:          "clips/guild-1/request-1/02-short-answer.mp4",
+					ThumbnailURL:       "https://cdn.example.test/clips/guild-1/request-1/02-short-answer.jpg",
+					ThumbnailObjectKey: "clips/guild-1/request-1/02-short-answer.jpg",
+					Duration:           15 * time.Second,
+					SourceStartSeconds: 50,
+					SourceEndSeconds:   65,
+					Segments: []youtube.RenderedClipSegment{
+						{StartSeconds: 50, EndSeconds: 65, Duration: 15 * time.Second, Transcript: "Short answer."},
+					},
+					Reason:                   "This is a tighter soundbite.",
+					Confidence:               0.82,
+					ViralityScore:            76,
+					HookScore:                78,
+					RetentionScore:           75,
+					ShareabilityScore:        77,
+					DurationPolicy:           "short_exception",
+					ExceptionReason:          "Standalone answer works as a quick clip.",
+					OutputSizeBytes:          6789,
+					CaptionRendered:          true,
+					CaptionMode:              "burned_in",
+					CaptionStylePreset:       "opus_bold",
+					CaptionStyleSource:       "user_specified",
+					CaptionAnimation:         "pop",
+					CaptionTimingQuality:     "word",
+					CaptionConfidence:        0.83,
+					CaptionReason:            "Captions stay in a safe lower band.",
+					CaptionFontFamily:        "inter",
+					CaptionFontColor:         "white",
+					CaptionHighlightColor:    "yellow",
+					CaptionBorderColor:       "green",
+					CaptionBorderThickness:   "medium",
+					CaptionBackgroundColor:   "transparent",
+					CaptionBackgroundOpacity: 0,
+				},
+			},
+		},
+	}
+	executor := NewExecutor(registry, nil, nil).WithYouTubeSummarizer(summarizer)
+	result, err := executor.Execute(context.Background(), ExecutionRequest{
+		GuildID:   "guild-1",
+		ChannelID: "text-1",
+		ActorID:   "user-1",
+		RequestID: "request-1",
+		Access:    testAccess(ToolPolicyAssistive, admin.PermissionAssistantYouTubeClipping),
+		Call: llm.ToolCall{
+			ID:   "call-youtube-clip",
+			Type: "function",
+			Function: llm.ToolCallFunction{
+				Name:      "panda_clip_youtube",
+				Arguments: `{"query":"https://www.youtube.com/watch?v=deep","instructions":"clip the best explanation","aspect_ratio":"9:16","layout_instructions":"keep the webcam visible","captions":"on","caption_instructions":"big captions at the top; do not cover the webcam","language":"en"}`,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if len(summarizer.clipRequests) != 1 {
+		t.Fatalf("expected one YouTube clip request, got %d", len(summarizer.clipRequests))
+	}
+	request := summarizer.clipRequests[0]
+	if request.Query != "https://www.youtube.com/watch?v=deep" || request.Instructions != "clip the best explanation" || request.AspectRatio != "9:16" || request.LayoutInstructions != "keep the webcam visible" || request.Captions != "on" || request.CaptionInstructions != "big captions at the top; do not cover the webcam" || request.Language != "en" || request.GuildID != "guild-1" || request.RequestID != "request-1" {
+		t.Fatalf("unexpected YouTube clip request: %+v", request)
+	}
+	if !result.Terminal {
+		t.Fatalf("expected YouTube clip result to be terminal")
+	}
+	content := result.Message.Content
+	for _, want := range []string{`"terminal":true`, `"content":"1. [Best explanation]`, `"media":[`, `"thumbnail_url":"https://cdn.example.test/clips/guild-1/request-1/01-best-explanation.jpg"`, `"thumbnail_object_key":"[redacted]"`, `"actions":[`, `"label":"1. Best explanation"`, `"clip_count":2`, `"clips":[`, `"type":"spliced"`, `"watch_url":"https://cdn.example.test/clips/guild-1/request-1/01-best-explanation.mp4"`, `"source_start_seconds":42`, `"source_end_seconds":90`, `"segments":[`, `"start_seconds":42`, `"end_seconds":58`, `"transcript_segment_count":4`, `"virality_score":82`, `"aspect_ratio":"9:16"`, `"layout_mode":"stacked_regions"`, `"caption_rendered":true`, `"caption_mode":"burned_in"`, `"caption_style_source":"user_specified"`, `"caption_animation":"slide_up"`, `"caption_timing_quality":"word"`, `"caption_reason":"Bottom captions avoid the webcam."`, `"caption_font_family":"inter"`, `"caption_font_color":"white"`, `"caption_border_color":"green"`, `"caption_border_thickness":"medium"`} {
+		if !strings.Contains(content, want) {
+			t.Fatalf("expected clip result content to contain %s, got %s", want, content)
+		}
+	}
+	for _, leaked := range []string{"plain_text_transcript"} {
+		if strings.Contains(content, leaked) {
+			t.Fatalf("clip tool message leaked transcript detail %q: %s", leaked, content)
+		}
+	}
+}
+
+func TestExecutorRunsYouTubeClipperWithoutGuidance(t *testing.T) {
+	registry, err := NewDefaultRegistry()
+	if err != nil {
+		t.Fatalf("NewDefaultRegistry: %v", err)
+	}
+	summarizer := &fakeYouTubeSummarizer{
+		configured:     true,
+		clipConfigured: true,
+		clipResult: youtube.ClipResult{
+			Title:    "Deep Dive",
+			URL:      "https://www.youtube.com/watch?v=deep",
+			Uploader: "Teacher",
+			Duration: time.Minute,
+			Clips: []youtube.RenderedClip{
+				{
+					Rank:               1,
+					Title:              "Best Moment",
+					Type:               "continuous",
+					WatchURL:           "https://cdn.example.test/clips/guild-1/request-1/01-best-moment.mp4",
+					ObjectKey:          "clips/guild-1/request-1/01-best-moment.mp4",
+					ThumbnailURL:       "https://cdn.example.test/clips/guild-1/request-1/01-best-moment.jpg",
+					Duration:           20 * time.Second,
+					SourceStartSeconds: 10,
+					SourceEndSeconds:   30,
+					Segments: []youtube.RenderedClipSegment{{
+						StartSeconds: 10,
+						EndSeconds:   30,
+						Duration:     20 * time.Second,
+						Transcript:   "This is the best moment.",
+					}},
+					Reason:            "Strong standalone hook.",
+					Confidence:        0.8,
+					ViralityScore:     82,
+					HookScore:         85,
+					RetentionScore:    80,
+					ShareabilityScore: 81,
+					DurationPolicy:    "short_exception",
+				},
+				{
+					Rank:               2,
+					Title:              "Second Moment",
+					Type:               "continuous",
+					WatchURL:           "https://cdn.example.test/clips/guild-1/request-1/02-second-moment.mp4",
+					ObjectKey:          "clips/guild-1/request-1/02-second-moment.mp4",
+					Duration:           15 * time.Second,
+					SourceStartSeconds: 35,
+					SourceEndSeconds:   50,
+					Segments: []youtube.RenderedClipSegment{{
+						StartSeconds: 35,
+						EndSeconds:   50,
+						Duration:     15 * time.Second,
+						Transcript:   "Another strong moment.",
+					}},
+					Reason:            "Second standalone hook.",
+					Confidence:        0.76,
+					ViralityScore:     78,
+					HookScore:         80,
+					RetentionScore:    76,
+					ShareabilityScore: 77,
+					DurationPolicy:    "short_exception",
+				},
+			},
+		},
+	}
+	executor := NewExecutor(registry, nil, nil).WithYouTubeSummarizer(summarizer)
+	result, err := executor.Execute(context.Background(), ExecutionRequest{
+		GuildID:   "guild-1",
+		ChannelID: "text-1",
+		ActorID:   "user-1",
+		RequestID: "request-1",
+		Access:    testAccess(ToolPolicyAssistive, admin.PermissionAssistantYouTubeClipping),
+		Call: llm.ToolCall{
+			ID:   "call-youtube-clip",
+			Type: "function",
+			Function: llm.ToolCallFunction{
+				Name:      "panda_clip_youtube",
+				Arguments: `{"query":"https://www.youtube.com/watch?v=deep"}`,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if len(summarizer.clipRequests) != 1 {
+		t.Fatalf("expected one YouTube clip request, got %d", len(summarizer.clipRequests))
+	}
+	request := summarizer.clipRequests[0]
+	if request.Query != "https://www.youtube.com/watch?v=deep" || request.Instructions != "" || request.GuildID != "guild-1" || request.RequestID != "request-1" {
+		t.Fatalf("unexpected YouTube clip request: %+v", request)
+	}
+	if !result.Terminal {
+		t.Fatalf("expected YouTube clip result without guidance to be terminal")
+	}
+	if !strings.Contains(result.Message.Content, `"clip_count":2`) || !strings.Contains(result.Message.Content, `"terminal":true`) || !strings.Contains(result.Message.Content, `"watch_url":"https://cdn.example.test/clips/guild-1/request-1/01-best-moment.mp4"`) || !strings.Contains(result.Message.Content, `"watch_url":"https://cdn.example.test/clips/guild-1/request-1/02-second-moment.mp4"`) {
+		t.Fatalf("expected clip result content, got %s", result.Message.Content)
+	}
+}
+
 func TestExecutorSearchesYouTubeForSelection(t *testing.T) {
 	registry, err := NewDefaultRegistry()
 	if err != nil {
@@ -1391,6 +1692,57 @@ func TestExecutorSearchesYouTubeForSelection(t *testing.T) {
 	}
 }
 
+func TestExecutorSearchesYouTubeForClipSelection(t *testing.T) {
+	registry, err := NewDefaultRegistry()
+	if err != nil {
+		t.Fatalf("NewDefaultRegistry: %v", err)
+	}
+	summarizer := &fakeYouTubeSummarizer{
+		configured: true,
+		candidates: []youtube.VideoCandidate{{
+			Title: "First Result",
+			URL:   "https://www.youtube.com/watch?v=one",
+		}},
+	}
+	executor := NewExecutor(registry, nil, nil).WithYouTubeSummarizer(summarizer)
+	result, err := executor.Execute(context.Background(), ExecutionRequest{
+		GuildID:   "guild-1",
+		ChannelID: "text-1",
+		ActorID:   "user-1",
+		Access:    testAccess(ToolPolicyAssistive, admin.PermissionAssistantUse),
+		Call: llm.ToolCall{
+			ID:   "call-youtube-clip-search",
+			Type: "function",
+			Function: llm.ToolCallFunction{
+				Name:      "panda_search_youtube",
+				Arguments: `{"query":"deep dive","purpose":"clip","instructions":"clip the part about structured outputs"}`,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	var payload struct {
+		Result struct {
+			Content   string `json:"content"`
+			Selection struct {
+				Options []struct {
+					Prompt string `json:"prompt"`
+				} `json:"options"`
+			} `json:"selection"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal([]byte(result.Message.Content), &payload); err != nil {
+		t.Fatalf("unmarshal payload: %v\n%s", err, result.Message.Content)
+	}
+	if !strings.Contains(payload.Result.Content, "clip") {
+		t.Fatalf("expected clip selection content, got %q", payload.Result.Content)
+	}
+	if len(payload.Result.Selection.Options) != 1 || !strings.Contains(payload.Result.Selection.Options[0].Prompt, "Clip this exact YouTube video") || !strings.Contains(payload.Result.Selection.Options[0].Prompt, "structured outputs") {
+		t.Fatalf("unexpected clip selection prompt: %+v", payload.Result.Selection.Options)
+	}
+}
+
 func TestExecutorExposesYouTubeSummarizerOnlyWhenConfigured(t *testing.T) {
 	registry, err := NewDefaultRegistry()
 	if err != nil {
@@ -1409,6 +1761,25 @@ func TestExecutorExposesYouTubeSummarizerOnlyWhenConfigured(t *testing.T) {
 	names := toolNames(withSummarizer.OpenRouterTools(access))
 	if !names["panda_summarize_youtube"] || !names["panda_search_youtube"] {
 		t.Fatalf("youtube summary/search tools should be available to assistant users, got %+v", names)
+	}
+}
+
+func TestExecutorExposesYouTubeClipperOnlyWhenConfigured(t *testing.T) {
+	registry, err := NewDefaultRegistry()
+	if err != nil {
+		t.Fatalf("NewDefaultRegistry: %v", err)
+	}
+	access := testAccess(ToolPolicyAssistive, admin.PermissionAssistantYouTubeClipping)
+	access.FeatureGateActive = true
+	access.EnabledFeatures = map[string]struct{}{features.YouTubeClipping: {}}
+
+	withoutClipper := NewExecutor(registry, nil, nil).WithYouTubeSummarizer(&fakeYouTubeSummarizer{configured: true})
+	if names := toolNames(withoutClipper.OpenRouterTools(access)); names["panda_clip_youtube"] {
+		t.Fatalf("youtube clip tool should be hidden when clip runtime is unconfigured")
+	}
+	withClipper := NewExecutor(registry, nil, nil).WithYouTubeSummarizer(&fakeYouTubeSummarizer{configured: true, clipConfigured: true})
+	if names := toolNames(withClipper.OpenRouterTools(access)); !names["panda_clip_youtube"] {
+		t.Fatalf("youtube clip tool should be available with feature, permission, and runtime configured, got %+v", names)
 	}
 }
 

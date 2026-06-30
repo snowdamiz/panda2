@@ -1,0 +1,1213 @@
+/* =====================================================================
+   Dashboard design system (dash-*)
+   Shared by the account dashboard and the admin operator console so both
+   surfaces read as one product. Admin-specific content (tables, runtime,
+   coupons) lives in global.css and reuses these tokens + button styles.
+   ===================================================================== */
+
+/* --- Page + shell ---------------------------------------------------- */
+.dash-page {
+  height: 100dvh;
+  display: flex;
+  overflow: hidden;
+  color: var(--color-paper-bright);
+  background: var(--color-ink);
+}
+
+.dash-shell {
+  position: relative;
+  z-index: 1;
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* --- Signed-out gate ------------------------------------------------- */
+.dash-gate {
+  display: grid;
+  gap: 30px;
+  width: min(540px, 100%);
+  margin: auto;
+  padding: 24px;
+  justify-items: center;
+  text-align: center;
+}
+
+.dash-gate[hidden] {
+  display: none;
+}
+
+.dash-gate-brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 12px;
+  color: var(--color-paper-bright);
+  font-size: .82rem;
+  font-weight: 800;
+  letter-spacing: .24em;
+}
+
+.dash-gate-brand .brand-mark {
+  width: 34px;
+  height: 34px;
+  display: block;
+  flex: 0 0 auto;
+  object-fit: contain;
+}
+
+.dash-gate-intro {
+  display: grid;
+  gap: 16px;
+  justify-items: center;
+}
+
+.dash-gate-intro h1 {
+  margin: 0;
+  font-size: clamp(2.7rem, 5vw, 3.7rem);
+  font-weight: 580;
+  letter-spacing: -.05em;
+  line-height: .98;
+}
+
+.dash-gate-intro > p {
+  max-width: 460px;
+  margin: 0;
+  color: color-mix(in oklab, var(--color-paper-bright) 56%, transparent);
+  line-height: 1.7;
+}
+
+/* --- Sign-in card ---------------------------------------------------- */
+.dash-login-card {
+  width: min(440px, 100%);
+  overflow: hidden;
+  text-align: left;
+  border: 1px solid var(--line-dark);
+  border-radius: var(--radius-md-panel);
+  background:
+    linear-gradient(
+      155deg,
+      color-mix(in oklab, var(--color-white) 6%, transparent),
+      color-mix(in oklab, var(--color-white) 1.5%, transparent)
+    );
+  box-shadow: var(--shadow-account-login);
+}
+
+.dash-login-card[hidden] {
+  display: none;
+}
+
+.dash-login-head {
+  padding: 22px 24px;
+  border-bottom: 1px solid color-mix(in oklab, var(--color-white) 8%, transparent);
+}
+
+.dash-login-head span {
+  font-family: var(--font-mono);
+  font-size: .56rem;
+  font-weight: 760;
+  letter-spacing: .16em;
+  text-transform: uppercase;
+  color: color-mix(in oklab, var(--color-white) 44%, transparent);
+}
+
+.dash-login-head strong {
+  display: block;
+  margin-top: 9px;
+  font-size: 1.32rem;
+  font-weight: 560;
+  letter-spacing: -.01em;
+  line-height: 1.1;
+  color: var(--color-paper-bright);
+}
+
+.dash-login-body {
+  display: grid;
+  gap: 14px;
+  padding: 22px 24px 24px;
+}
+
+.dash-login-button {
+  width: 100%;
+  min-height: 56px;
+}
+
+.dash-note {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: .62rem;
+  line-height: 1.6;
+  color: color-mix(in oklab, var(--color-white) 42%, transparent);
+}
+
+.dash-note[data-tone="error"] {
+  color: color-mix(in oklab, var(--color-status-error) 80%, var(--color-paper-bright));
+}
+
+/* --- Console frame --------------------------------------------------- */
+.dash-console {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: 272px minmax(0, 1fr);
+  align-items: stretch;
+  overflow: hidden;
+}
+
+.dash-console[hidden] {
+  display: none;
+}
+
+/* --- Sidebar --------------------------------------------------------- */
+.dash-sidebar {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 20px 16px 18px;
+  border-right: 1px solid color-mix(in oklab, var(--color-white) 7%, transparent);
+  background:
+    linear-gradient(
+      180deg,
+      color-mix(in oklab, var(--color-white) 2.4%, transparent),
+      color-mix(in oklab, var(--color-ink) 30%, transparent)
+    );
+}
+
+.dash-brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 11px;
+  padding: 6px 10px 18px;
+  margin-bottom: 8px;
+  border-bottom: 1px solid color-mix(in oklab, var(--color-white) 7%, transparent);
+  color: var(--color-paper-bright);
+  font-size: .82rem;
+  font-weight: 800;
+  letter-spacing: .24em;
+}
+
+.dash-brand .brand-mark {
+  width: 30px;
+  height: 30px;
+  display: block;
+  flex: 0 0 auto;
+  object-fit: contain;
+}
+
+.dash-nav {
+  display: grid;
+  gap: 3px;
+}
+
+.dash-nav-item {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  min-height: 46px;
+  padding: 0 13px;
+  border: 0;
+  border-radius: var(--radius-tile);
+  color: color-mix(in oklab, var(--color-paper-bright) 62%, transparent);
+  background: transparent;
+  font-family: var(--font-sans);
+  font-size: .85rem;
+  font-weight: 500;
+  letter-spacing: -.005em;
+  text-align: left;
+  cursor: pointer;
+  transition: color .2s ease, background .2s ease;
+}
+
+.dash-nav-icon {
+  display: inline-flex;
+}
+
+.dash-nav-item svg {
+  width: 18px;
+  height: 18px;
+  flex-shrink: 0;
+  opacity: .75;
+  transition: opacity .2s ease;
+}
+
+.dash-nav-item:hover,
+.dash-nav-item:focus-visible {
+  color: var(--color-paper-bright);
+  background: color-mix(in oklab, var(--color-white) 5%, transparent);
+}
+
+.dash-nav-item.active {
+  color: var(--color-paper-bright);
+  background: color-mix(in oklab, var(--color-white) 7%, transparent);
+  box-shadow: var(--shadow-dash-nav-active);
+}
+
+.dash-nav-item.active::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 50%;
+  width: 3px;
+  height: 18px;
+  border-radius: var(--radius-pill);
+  background: var(--color-paper-bright);
+  transform: translateY(-50%);
+}
+
+.dash-nav-item.active svg {
+  opacity: 1;
+}
+
+/* --- Sidebar footer / account chip ---------------------------------- */
+.dash-sidebar-foot {
+  margin-top: auto;
+  padding-top: 14px;
+  border-top: 1px solid color-mix(in oklab, var(--color-white) 8%, transparent);
+}
+
+/* Flat account region — sits in the sidebar rather than floating as a
+   bordered card, so the nested controls no longer read as boxes-in-a-box. */
+.dash-account {
+  display: grid;
+  gap: 12px;
+  padding: 4px 2px 0;
+}
+
+.dash-account .dash-btn,
+.dash-account .dash-icon-btn {
+  border-color: transparent;
+  background: color-mix(in oklab, var(--color-white) 4%, transparent);
+}
+
+.dash-account .dash-btn:hover,
+.dash-account .dash-btn:focus-visible,
+.dash-account .dash-icon-btn:hover,
+.dash-account .dash-icon-btn:focus-visible {
+  border-color: transparent;
+  background: color-mix(in oklab, var(--color-white) 9%, transparent);
+}
+
+.dash-account-id {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+
+.dash-account-avatar {
+  position: relative;
+  width: 38px;
+  height: 38px;
+  flex: 0 0 auto;
+  border-radius: var(--radius-dash-avatar);
+  background:
+    linear-gradient(
+      150deg,
+      color-mix(in oklab, var(--color-white) 90%, transparent),
+      color-mix(in oklab, var(--color-white) 24%, transparent)
+    );
+  box-shadow: var(--shadow-dash-avatar);
+}
+
+.dash-account-presence {
+  position: absolute;
+  right: -2px;
+  bottom: -2px;
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+  background: color-mix(in oklab, var(--color-status-good) 82%, var(--color-paper-bright));
+  box-shadow: var(--shadow-dash-presence);
+}
+
+.dash-account-meta {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.dash-account-label {
+  font-family: var(--font-mono);
+  font-size: .5rem;
+  font-weight: 760;
+  letter-spacing: .14em;
+  text-transform: uppercase;
+  color: color-mix(in oklab, var(--color-white) 42%, transparent);
+}
+
+.dash-account-value {
+  font-family: var(--font-mono);
+  font-size: .72rem;
+  font-weight: 560;
+  color: var(--color-paper-bright);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.dash-account-actions {
+  display: flex;
+  gap: 8px;
+}
+
+/* --- Buttons --------------------------------------------------------- */
+.app-primary {
+  min-height: 46px;
+  padding: 0 16px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  border: 1px solid var(--color-paper-bright);
+  border-radius: var(--radius-control);
+  color: var(--color-ink);
+  background: var(--color-paper-bright);
+  font-family: var(--font-mono);
+  font-size: .64rem;
+  font-weight: 760;
+  letter-spacing: .1em;
+  text-transform: uppercase;
+  cursor: pointer;
+  transition: transform .2s ease, box-shadow .2s ease, opacity .2s ease;
+}
+
+.app-primary:hover,
+.app-primary:focus-visible {
+  transform: translateY(-2px);
+  box-shadow: var(--shadow-dash-card);
+}
+
+.app-primary:disabled {
+  cursor: not-allowed;
+  opacity: .46;
+  transform: none;
+  box-shadow: none;
+}
+
+.dash-btn {
+  min-height: 42px;
+  padding: 0 14px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 9px;
+  border: 1px solid color-mix(in oklab, var(--color-white) 12%, transparent);
+  border-radius: var(--radius-control);
+  color: color-mix(in oklab, var(--color-paper-bright) 78%, transparent);
+  background: color-mix(in oklab, var(--color-white) 4%, transparent);
+  font-family: var(--font-mono);
+  font-size: .58rem;
+  font-weight: 760;
+  letter-spacing: .1em;
+  text-transform: uppercase;
+  cursor: pointer;
+  transition: color .2s ease, border-color .2s ease, background .2s ease, transform .2s ease;
+}
+
+.dash-btn svg {
+  width: 15px;
+  height: 15px;
+  flex-shrink: 0;
+}
+
+.dash-btn:hover,
+.dash-btn:focus-visible {
+  color: var(--color-paper-bright);
+  border-color: color-mix(in oklab, var(--color-white) 28%, transparent);
+  background: color-mix(in oklab, var(--color-white) 8%, transparent);
+  transform: translateY(-1px);
+}
+
+.dash-btn:disabled {
+  cursor: not-allowed;
+  opacity: .46;
+  transform: none;
+}
+
+.dash-btn-block {
+  flex: 1;
+}
+
+.dash-icon-btn {
+  width: 42px;
+  height: 42px;
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid color-mix(in oklab, var(--color-white) 12%, transparent);
+  border-radius: var(--radius-control);
+  color: color-mix(in oklab, var(--color-paper-bright) 74%, transparent);
+  background: color-mix(in oklab, var(--color-white) 4%, transparent);
+  cursor: pointer;
+  transition: color .2s ease, border-color .2s ease, background .2s ease, transform .2s ease;
+}
+
+.dash-icon-btn svg {
+  width: 17px;
+  height: 17px;
+}
+
+.dash-icon-btn:hover,
+.dash-icon-btn:focus-visible {
+  color: var(--color-paper-bright);
+  border-color: color-mix(in oklab, var(--color-white) 28%, transparent);
+  background: color-mix(in oklab, var(--color-white) 8%, transparent);
+  transform: translateY(-1px);
+}
+
+.dash-icon-btn:disabled {
+  cursor: not-allowed;
+  opacity: .46;
+  transform: none;
+}
+
+/* --- Main + panels --------------------------------------------------- */
+.dash-main {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  padding: 26px clamp(20px, 2.6vw, 38px) 24px;
+}
+
+.dash-panel {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  min-height: 0;
+}
+
+.dash-panel--scroll {
+  overflow: auto;
+}
+
+.dash-panel[hidden] {
+  display: none;
+}
+
+.dash-panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  flex-wrap: wrap;
+  padding-bottom: 16px;
+  border-bottom: 1px solid color-mix(in oklab, var(--color-white) 7%, transparent);
+}
+
+.dash-panel-title {
+  display: flex;
+  align-items: center;
+  gap: 13px;
+}
+
+.dash-panel-title h2 {
+  margin: 0;
+  font-size: 1.6rem;
+  font-weight: 560;
+  letter-spacing: -.025em;
+}
+
+.dash-pill {
+  padding: 5px 12px;
+  border-radius: var(--radius-pill);
+  border: 1px solid color-mix(in oklab, var(--color-white) 14%, transparent);
+  color: color-mix(in oklab, var(--color-paper-bright) 78%, transparent);
+  background: color-mix(in oklab, var(--color-white) 4%, transparent);
+  font-family: var(--font-mono);
+  font-size: .56rem;
+  font-weight: 760;
+  letter-spacing: .1em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.dash-pill[data-tone="good"] {
+  color: color-mix(in oklab, var(--color-status-good) 88%, var(--color-paper-bright));
+  border-color: color-mix(in oklab, var(--color-status-good) 38%, transparent);
+  background: color-mix(in oklab, var(--color-status-good) 13%, transparent);
+}
+
+.dash-pill[data-tone="bad"] {
+  color: color-mix(in oklab, var(--color-status-error) 88%, var(--color-paper-bright));
+  border-color: color-mix(in oklab, var(--color-status-error) 38%, transparent);
+  background: color-mix(in oklab, var(--color-status-error) 13%, transparent);
+}
+
+.dash-usage-time {
+  margin: 0;
+  color: color-mix(in oklab, var(--color-paper-bright) 60%, transparent);
+  font-family: var(--font-mono);
+  font-size: .68rem;
+}
+
+.dash-usage-time span {
+  color: var(--color-paper-bright);
+}
+
+/* --- Overview: stat cards + tiles ----------------------------------- */
+.dash-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+  align-content: start;
+}
+
+.dash-stat {
+  display: grid;
+  gap: 16px;
+  padding: 22px;
+  border: 1px solid color-mix(in oklab, var(--color-white) 9%, transparent);
+  border-radius: var(--radius-content);
+  background:
+    linear-gradient(
+      160deg,
+      color-mix(in oklab, var(--color-white) 5%, transparent),
+      color-mix(in oklab, var(--color-white) 1.5%, transparent)
+    );
+  transition: border-color .2s ease, transform .2s ease, box-shadow .2s ease;
+}
+
+.dash-stat:hover {
+  border-color: color-mix(in oklab, var(--color-white) 16%, transparent);
+  transform: translateY(-2px);
+  box-shadow: var(--shadow-dash-card);
+}
+
+.dash-stat-label {
+  font-family: var(--font-mono);
+  font-size: .54rem;
+  font-weight: 760;
+  letter-spacing: .14em;
+  text-transform: uppercase;
+  color: color-mix(in oklab, var(--color-white) 44%, transparent);
+}
+
+.dash-stat-value {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.dash-stat-value strong {
+  font-size: 1.5rem;
+  font-weight: 560;
+  letter-spacing: -.015em;
+  color: var(--color-paper-bright);
+  overflow-wrap: anywhere;
+}
+
+.dash-stat-dot {
+  width: 10px;
+  height: 10px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: color-mix(in oklab, var(--color-white) 38%, transparent);
+}
+
+.dash-stat-value:has([data-payment-tone="good"]) .dash-stat-dot,
+.dash-stat-value:has([data-trial-tone="good"]) .dash-stat-dot {
+  background: color-mix(in oklab, var(--color-status-good) 78%, var(--color-paper-bright));
+  box-shadow: var(--shadow-live-dot);
+}
+
+.dash-stat-value:has([data-payment-tone="bad"]) .dash-stat-dot,
+.dash-stat-value:has([data-trial-tone="bad"]) .dash-stat-dot {
+  background: color-mix(in oklab, var(--color-status-error) 80%, var(--color-paper-bright));
+  box-shadow: var(--shadow-live-dot);
+}
+
+.dash-stat-meta {
+  margin: 0;
+  color: color-mix(in oklab, var(--color-paper-bright) 58%, transparent);
+  font-family: var(--font-mono);
+  font-size: .68rem;
+}
+
+.dash-stat-meta span {
+  color: color-mix(in oklab, var(--color-paper-bright) 84%, transparent);
+}
+
+.dash-tiles {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.dash-tile {
+  display: grid;
+  gap: 9px;
+  padding: 17px 18px;
+  border: 1px solid color-mix(in oklab, var(--color-white) 8%, transparent);
+  border-radius: var(--radius-tile);
+  background: color-mix(in oklab, var(--color-ink) 28%, transparent);
+}
+
+.dash-tile span {
+  font-family: var(--font-mono);
+  font-size: .52rem;
+  font-weight: 760;
+  letter-spacing: .13em;
+  text-transform: uppercase;
+  color: color-mix(in oklab, var(--color-white) 42%, transparent);
+}
+
+.dash-tile strong {
+  color: var(--color-paper-bright);
+  font-family: var(--font-mono);
+  font-size: .82rem;
+  font-weight: 560;
+  overflow-wrap: anywhere;
+}
+
+/* status tones shared across overview + billing (attribute driven) */
+[data-account-payment-status][data-payment-tone="good"],
+[data-account-trial-status][data-trial-tone="good"] {
+  color: color-mix(in oklab, var(--color-status-good) 82%, var(--color-paper-bright));
+}
+
+[data-account-payment-status][data-payment-tone="bad"],
+[data-account-trial-status][data-trial-tone="bad"] {
+  color: color-mix(in oklab, var(--color-status-error) 82%, var(--color-paper-bright));
+}
+
+/* --- Detail card + key/value --------------------------------------- */
+.dash-card {
+  overflow: hidden;
+  border: 1px solid color-mix(in oklab, var(--color-white) 9%, transparent);
+  border-radius: var(--radius-content);
+  background:
+    linear-gradient(
+      160deg,
+      color-mix(in oklab, var(--color-white) 5%, transparent),
+      color-mix(in oklab, var(--color-white) 1.5%, transparent)
+    );
+}
+
+.dash-card-head {
+  display: grid;
+  gap: 8px;
+  align-content: center;
+  min-height: 84px;
+  padding: 20px 22px;
+  border-bottom: 1px solid color-mix(in oklab, var(--color-white) 8%, transparent);
+}
+
+.dash-card-head span {
+  font-family: var(--font-mono);
+  font-size: .54rem;
+  font-weight: 760;
+  letter-spacing: .14em;
+  text-transform: uppercase;
+  color: color-mix(in oklab, var(--color-white) 42%, transparent);
+}
+
+.dash-card-head strong {
+  font-size: 1.22rem;
+  font-weight: 560;
+  line-height: 1.15;
+  color: var(--color-paper-bright);
+  overflow-wrap: anywhere;
+}
+
+.dash-card-body {
+  padding: 8px 22px 16px;
+}
+
+.dash-kv {
+  margin: 0;
+  display: grid;
+}
+
+.dash-kv-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 18px;
+  padding: 13px 0;
+  border-bottom: 1px solid color-mix(in oklab, var(--color-white) 6%, transparent);
+}
+
+.dash-kv-row:last-child {
+  border-bottom: 0;
+}
+
+.dash-kv-row dt {
+  flex-shrink: 0;
+  color: color-mix(in oklab, var(--color-white) 44%, transparent);
+  font-family: var(--font-mono);
+  font-size: .54rem;
+  font-weight: 760;
+  letter-spacing: .12em;
+  text-transform: uppercase;
+}
+
+.dash-kv-row dd {
+  margin: 0;
+  text-align: right;
+  color: color-mix(in oklab, var(--color-paper-bright) 84%, transparent);
+  font-size: .84rem;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.dash-kv-mono {
+  font-family: var(--font-mono);
+  font-size: .72rem;
+}
+
+.dash-card-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+  padding: 4px 2px 0;
+}
+
+.dash-card-note {
+  margin: 0;
+  max-width: 400px;
+  color: color-mix(in oklab, var(--color-paper-bright) 58%, transparent);
+  font-size: .84rem;
+  line-height: 1.6;
+}
+
+.dash-cta {
+  min-height: 50px;
+  min-width: 190px;
+}
+
+/* --- Usage meters ---------------------------------------------------- */
+.dash-meters {
+  display: grid;
+  gap: 20px;
+  align-content: start;
+}
+
+.dash-meter {
+  display: grid;
+  gap: 10px;
+  padding: 20px 22px;
+  border: 1px solid color-mix(in oklab, var(--color-white) 9%, transparent);
+  border-radius: var(--radius-content);
+  background: color-mix(in oklab, var(--color-white) 3%, transparent);
+}
+
+.dash-meter-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.dash-meter-head span {
+  font-family: var(--font-mono);
+  font-size: .56rem;
+  font-weight: 760;
+  letter-spacing: .12em;
+  text-transform: uppercase;
+  color: color-mix(in oklab, var(--color-white) 46%, transparent);
+}
+
+.dash-meter-head strong {
+  color: var(--color-paper-bright);
+  font-family: var(--font-mono);
+  font-size: .78rem;
+  font-weight: 560;
+}
+
+.dash-meter-track {
+  height: 8px;
+  border-radius: var(--radius-pill);
+  background: color-mix(in oklab, var(--color-white) 10%, transparent);
+  overflow: hidden;
+}
+
+.dash-meter-fill {
+  width: 0;
+  height: 100%;
+  border-radius: var(--radius-pill);
+  background: color-mix(in oklab, var(--color-status-good) 70%, var(--color-paper-bright));
+  transition: width .4s var(--ease-fluid);
+}
+
+.dash-meter-fill[data-level="high"] {
+  background: color-mix(in oklab, var(--color-status-error) 72%, var(--color-paper-bright));
+}
+
+.dash-meter-fill[data-level="idle"] {
+  background: color-mix(in oklab, var(--color-white) 26%, transparent);
+}
+
+.dash-meter-detail {
+  font-family: var(--font-mono);
+  font-size: .64rem;
+  color: color-mix(in oklab, var(--color-white) 46%, transparent);
+}
+
+/* --- Danger zone ----------------------------------------------------- */
+.dash-danger {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  flex-wrap: wrap;
+  padding: 18px 22px;
+  border: 1px solid color-mix(in oklab, var(--color-status-error) 26%, transparent);
+  border-radius: var(--radius-content);
+  background: color-mix(in oklab, var(--color-status-error) 6%, transparent);
+}
+
+.dash-danger-copy {
+  display: grid;
+  gap: 5px;
+}
+
+.dash-danger-copy strong {
+  color: var(--color-paper-bright);
+  font-size: .94rem;
+  font-weight: 560;
+}
+
+.dash-danger-copy small {
+  color: color-mix(in oklab, var(--color-paper-bright) 58%, transparent);
+  font-size: .78rem;
+  line-height: 1.5;
+}
+
+.dash-danger-btn {
+  min-height: 44px;
+  padding: 0 18px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid color-mix(in oklab, var(--color-status-error) 40%, transparent);
+  border-radius: var(--radius-control);
+  color: color-mix(in oklab, var(--color-status-error) 86%, var(--color-paper-bright));
+  background: color-mix(in oklab, var(--color-status-error) 10%, transparent);
+  font-family: var(--font-mono);
+  font-size: .6rem;
+  font-weight: 760;
+  letter-spacing: .1em;
+  text-transform: uppercase;
+  cursor: pointer;
+  transition: color .2s ease, border-color .2s ease, background .2s ease, transform .2s ease;
+}
+
+.dash-danger-btn:hover,
+.dash-danger-btn:focus-visible {
+  color: var(--color-paper-bright);
+  border-color: color-mix(in oklab, var(--color-status-error) 64%, transparent);
+  background: color-mix(in oklab, var(--color-status-error) 22%, transparent);
+  transform: translateY(-1px);
+}
+
+.dash-danger-btn:disabled {
+  cursor: not-allowed;
+  opacity: .48;
+  transform: none;
+}
+
+/* --- Wallet picker dialog (shared) ---------------------------------- */
+.wallet-dialog {
+  width: min(460px, calc(100vw - 36px));
+  margin: auto;
+  padding: 0;
+  overflow: hidden;
+  border: 1px solid color-mix(in oklab, var(--color-white) 16%, transparent);
+  border-radius: var(--radius-md-panel);
+  color: var(--color-paper-bright);
+  background: var(--color-panel-900);
+  box-shadow: var(--shadow-menu);
+}
+
+.wallet-dialog::backdrop {
+  background: color-mix(in oklab, var(--color-ink) 62%, transparent);
+  backdrop-filter: blur(6px);
+}
+
+.wallet-dialog-panel {
+  display: grid;
+}
+
+.wallet-dialog-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  padding: 20px 22px;
+  border-bottom: 1px solid color-mix(in oklab, var(--color-white) 9%, transparent);
+}
+
+.wallet-dialog-head span {
+  font-family: var(--font-mono);
+  font-size: .56rem;
+  font-weight: 760;
+  letter-spacing: .14em;
+  text-transform: uppercase;
+  color: color-mix(in oklab, var(--color-white) 42%, transparent);
+}
+
+.wallet-dialog-head strong {
+  display: block;
+  margin-top: 7px;
+  font-size: 1.16rem;
+  font-weight: 560;
+}
+
+.wallet-dialog-head button {
+  min-height: 36px;
+  padding: 0 13px;
+  border: 1px solid color-mix(in oklab, var(--color-white) 12%, transparent);
+  border-radius: var(--radius-control);
+  color: color-mix(in oklab, var(--color-paper-bright) 72%, transparent);
+  background: color-mix(in oklab, var(--color-white) 4%, transparent);
+  font-family: var(--font-mono);
+  font-size: .56rem;
+  font-weight: 760;
+  letter-spacing: .1em;
+  text-transform: uppercase;
+  cursor: pointer;
+  transition: color .2s ease, border-color .2s ease, background .2s ease;
+}
+
+.wallet-dialog-head button:hover,
+.wallet-dialog-head button:focus-visible {
+  color: var(--color-paper-bright);
+  border-color: color-mix(in oklab, var(--color-white) 28%, transparent);
+}
+
+.account-wallet-list {
+  display: grid;
+  gap: 8px;
+  padding: 18px 22px 8px;
+}
+
+.admin-wallet-dialog .account-wallet-list {
+  padding-bottom: 22px;
+}
+
+.account-wallet-option {
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr);
+  align-items: center;
+  gap: 12px;
+  min-height: 48px;
+  padding: 0 14px;
+  border: 1px solid color-mix(in oklab, var(--color-white) 12%, transparent);
+  border-radius: var(--radius-control);
+  color: color-mix(in oklab, var(--color-paper-bright) 70%, transparent);
+  background: color-mix(in oklab, var(--color-white) 4%, transparent);
+  font-family: var(--font-mono);
+  font-size: .64rem;
+  font-weight: 760;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+  text-align: left;
+  cursor: pointer;
+  transition: color .2s ease, border-color .2s ease, background .2s ease, transform .2s ease;
+}
+
+.account-wallet-option-icon {
+  width: 24px;
+  height: 24px;
+  border-radius: var(--radius-xs);
+  object-fit: contain;
+}
+
+.account-wallet-option span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.account-wallet-option:hover,
+.account-wallet-option:focus-visible {
+  color: var(--color-paper-bright);
+  border-color: color-mix(in oklab, var(--color-white) 32%, transparent);
+  background: color-mix(in oklab, var(--color-white) 9%, transparent);
+  transform: translateY(-1px);
+}
+
+.account-wallet-option:disabled {
+  cursor: not-allowed;
+  opacity: .48;
+  transform: none;
+}
+
+.account-wallet-empty {
+  margin: 4px 0 10px;
+  color: color-mix(in oklab, var(--color-paper-bright) 58%, transparent);
+  font-size: .86rem;
+}
+
+.wallet-dialog-panel > .dash-note {
+  padding: 0 22px 18px;
+}
+
+/* --- Status toast + live region ------------------------------------- */
+.dash-status {
+  position: absolute;
+  right: clamp(16px, 2.4vw, 26px);
+  bottom: 18px;
+  z-index: 5;
+  margin: 0;
+  padding: 10px 16px;
+  border: 1px solid color-mix(in oklab, var(--color-white) 12%, transparent);
+  border-radius: var(--radius-pill);
+  background: color-mix(in oklab, var(--color-ink) 88%, transparent);
+  box-shadow: var(--shadow-dash-toast);
+  color: color-mix(in oklab, var(--color-paper-bright) 74%, transparent);
+  font-family: var(--font-mono);
+  font-size: .62rem;
+  letter-spacing: .04em;
+  pointer-events: none;
+}
+
+.dash-status:empty {
+  display: none;
+}
+
+.dash-status[data-tone="error"] {
+  color: color-mix(in oklab, var(--color-status-error) 82%, var(--color-paper-bright));
+}
+
+.dash-status-live {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* --- Responsive ------------------------------------------------------ */
+@media (max-width: 920px) {
+  .dash-console {
+    grid-template-columns: 1fr;
+    grid-template-rows: auto minmax(0, 1fr);
+    min-height: 0;
+  }
+
+  .dash-sidebar {
+    flex-direction: row;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 12px 16px;
+    padding: 14px 18px;
+    border-right: 0;
+    border-bottom: 1px solid color-mix(in oklab, var(--color-white) 8%, transparent);
+  }
+
+  .dash-brand {
+    padding: 0;
+    margin: 0;
+    border-bottom: 0;
+  }
+
+  .dash-nav {
+    grid-auto-flow: column;
+    gap: 6px;
+  }
+
+  .dash-nav-item {
+    min-height: 40px;
+  }
+
+  .dash-nav-item.active::before {
+    display: none;
+  }
+
+  .dash-sidebar-foot {
+    width: 100%;
+    margin: 0;
+    padding-top: 0;
+  }
+
+  .dash-account {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 14px;
+  }
+
+  .dash-account-id {
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+
+  .dash-account-actions {
+    flex: 0 0 auto;
+  }
+
+  .dash-btn-block {
+    flex: 0 0 auto;
+  }
+
+  .dash-grid,
+  .dash-tiles {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 720px) {
+  .dash-main {
+    padding: 20px 16px;
+  }
+
+  .dash-nav {
+    width: 100%;
+    grid-auto-flow: column;
+    grid-auto-columns: 1fr;
+  }
+
+  .dash-nav-item {
+    justify-content: center;
+    padding: 0 8px;
+  }
+
+  .dash-nav-label {
+    display: none;
+  }
+
+  .dash-account {
+    flex-wrap: wrap;
+  }
+
+  .dash-account-id {
+    flex: 1 1 auto;
+  }
+
+  .dash-panel-head {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .dash-card-actions {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .dash-cta {
+    width: 100%;
+  }
+
+  .dash-danger {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .dash-danger-btn {
+    width: 100%;
+  }
+}

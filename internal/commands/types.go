@@ -8,6 +8,7 @@ import (
 	"github.com/sn0w/panda2/internal/billing"
 	"github.com/sn0w/panda2/internal/features"
 	"github.com/sn0w/panda2/internal/generated"
+	"github.com/sn0w/panda2/internal/llm"
 	"github.com/sn0w/panda2/internal/polls"
 )
 
@@ -34,6 +35,7 @@ type Response struct {
 	ThreadID          string
 	ThreadName        string
 	Presentation      Presentation
+	MediaItems        []MediaItem
 	Actions           []Action
 	Followups         []Response
 	Confirmation      *Confirmation
@@ -45,6 +47,7 @@ type Response struct {
 	Feedback          *FeedbackControls
 	GeneratedFiles    []generated.File
 	UsageReservations []billing.Reservation
+	Usage             llm.Usage
 }
 
 type FeatureInstallIntentCreator interface {
@@ -91,6 +94,13 @@ type Field struct {
 type Action struct {
 	Label string
 	URL   string
+}
+
+type MediaItem struct {
+	Title        string
+	Description  string
+	URL          string
+	ThumbnailURL string
 }
 
 type FeedbackControls struct {

@@ -1,0 +1,118 @@
+---
+import DashConsole from '../components/dashboard/DashConsole.astro';
+import DashGate from '../components/dashboard/DashGate.astro';
+import DashLoginCard from '../components/dashboard/DashLoginCard.astro';
+import DashNav from '../components/dashboard/DashNav.astro';
+import DashPanel from '../components/dashboard/DashPanel.astro';
+import DashPanelHead from '../components/dashboard/DashPanelHead.astro';
+import DashSidebar from '../components/dashboard/DashSidebar.astro';
+import Kicker from '../components/ui/Kicker.astro';
+import BaseLayout from '../layouts/BaseLayout.astro';
+
+const apiBase = import.meta.env.PUBLIC_PANDA_API_BASE_URL || (import.meta.env.DEV ? 'http://localhost:8080' : 'https://panda-assistant.fly.dev');
+---
+
+<BaseLayout
+  title="Panda clips - Your library"
+  description="Sign in with Discord to review, download, and remove the YouTube clips you generated with Panda."
+>
+  <main id="main" class="dash-page">
+    <section class="dash-shell" data-clips-root data-api-base={apiBase}>
+      <!-- Signed-out gate -->
+      <DashGate data-clips-login>
+        <div class="dash-gate-intro">
+          <Kicker tone="paper">Clips</Kicker>
+          <h1>Your clip library.</h1>
+          <p>
+            Sign in with the Discord account you used to make clips. Review every clip you
+            generated, download the ones you want to keep, and delete the rest.
+          </p>
+        </div>
+
+        <DashLoginCard eyebrow="Library access" title="Discord account">
+          <a class="app-primary dash-login-button clips-login-button" href={`${apiBase}/auth/discord/login`} data-clips-login-button>
+            Sign in with Discord
+          </a>
+        </DashLoginCard>
+      </DashGate>
+
+      <!-- Signed-in console -->
+      <DashConsole data-clips-dashboard hidden>
+        <DashSidebar slot="sidebar">
+          <DashNav slot="nav" label="Clip sections">
+            <button type="button" class="dash-nav-item active" role="tab" aria-selected="true" data-clips-tab-button="library">
+              <span class="dash-nav-icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                  <rect x="3" y="5" width="18" height="14" rx="2" stroke="currentColor" stroke-width="1.6" />
+                  <path d="m10 9 5 3-5 3V9Z" fill="currentColor" />
+                </svg>
+              </span>
+              <span class="dash-nav-label">Library</span>
+            </button>
+          </DashNav>
+
+          <div class="clips-foot" slot="foot">
+            <span class="clips-foot-user" data-clips-user>--</span>
+            <button type="button" class="clips-foot-logout" aria-label="Sign out" data-clips-logout>
+              <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                <path d="M15 4h2.5A1.5 1.5 0 0 1 19 5.5v13a1.5 1.5 0 0 1-1.5 1.5H15" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" />
+                <path d="M10 8 6 12l4 4M6 12h9" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" />
+              </svg>
+            </button>
+          </div>
+        </DashSidebar>
+
+        <DashPanel data-clips-tab="library">
+          <DashPanelHead title="Your clips">
+            <span class="admin-count" slot="badge" data-clips-count>--</span>
+          </DashPanelHead>
+
+          <div class="clips-empty" data-clips-empty hidden>
+            <strong>No clips yet.</strong>
+            <span>Clips you generate with Panda will show up here.</span>
+          </div>
+
+          <div class="clips-grid" data-clips-list></div>
+        </DashPanel>
+      </DashConsole>
+
+      <!-- Clip player overlay -->
+      <dialog class="clip-modal" data-clip-modal aria-label="Clip player">
+        <div class="clip-modal-inner">
+          <button type="button" class="clip-modal-close" data-clip-modal-close aria-label="Close">
+            <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+              <path d="M6 6 18 18M18 6 6 18" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" />
+            </svg>
+          </button>
+
+          <div class="clip-modal-stage">
+            <video class="clip-modal-video" data-clip-modal-video controls playsinline preload="metadata"></video>
+          </div>
+
+          <div class="clip-modal-aside">
+            <h2 class="clip-modal-title" data-clip-modal-title></h2>
+            <div class="clip-modal-scores" data-clip-modal-scores></div>
+            <div class="clip-modal-meta" data-clip-modal-meta></div>
+            <div class="clip-modal-actions">
+              <button type="button" class="clip-modal-dl" data-clip-modal-download>
+                <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                  <path d="M12 3v11m0 0 4-4m-4 4-4-4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" />
+                  <path d="M5 16v2.5A1.5 1.5 0 0 0 6.5 20h11a1.5 1.5 0 0 0 1.5-1.5V16" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" />
+                </svg>
+                <span>Download</span>
+              </button>
+              <button type="button" class="clip-modal-del" data-clip-modal-delete>
+                <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                  <path d="M4 7h16M9 7V5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2m1 0-.7 11.1a2 2 0 0 1-2 1.9H8.7a2 2 0 0 1-2-1.9L6 7" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" />
+                </svg>
+                <span>Delete</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      </dialog>
+
+      <p class="dash-status-live" role="status" aria-live="polite" data-clips-status></p>
+    </section>
+  </main>
+</BaseLayout>

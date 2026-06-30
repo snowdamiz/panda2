@@ -1,0 +1,21 @@
+---
+/**
+ * Detail card with an eyebrow + title head and a body (default slot).
+ * The `title` slot holds the heading element so it can carry data hooks.
+ */
+interface Props {
+  eyebrow: string;
+}
+
+const { eyebrow } = Astro.props;
+---
+
+<article class="dash-card">
+  <div class="dash-card-head">
+    <span>{eyebrow}</span>
+    <slot name="title" />
+  </div>
+  <div class="dash-card-body">
+    <slot />
+  </div>
+</article>

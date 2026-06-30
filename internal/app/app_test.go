@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"testing"
+	"time"
 
 	"github.com/sn0w/panda2/internal/composed"
 	"github.com/sn0w/panda2/internal/config"
@@ -14,6 +15,56 @@ import (
 func TestInstallResultURLBuildsLandingRoute(t *testing.T) {
 	if got := installResultURL("https://pandaclanker.xyz/", "install/success/"); got != "https://pandaclanker.xyz/install/success/" {
 		t.Fatalf("unexpected install result URL: %q", got)
+	}
+}
+
+func TestOpenRouterClipDetectionConfigUsesDefaultProviderRouting(t *testing.T) {
+	cfg := config.Config{
+		OpenRouterAPIKey:                         "key",
+		OpenRouterBaseURL:                        "https://openrouter.example/api/v1",
+		OpenRouterAppURL:                         "https://panda.example",
+		OpenRouterAppTitle:                       "Panda Test",
+		OpenRouterProviderOrder:                  []string{"cerebras"},
+		OpenRouterAllowProviderFallbacks:         false,
+		OpenRouterClipDetectionTimeout:           2 * time.Minute,
+		OpenRouterClipCompositionTimeout:         3 * time.Minute,
+		OpenRouterCircuitBreakerFailureThreshold: 3,
+		OpenRouterCircuitBreakerCooldown:         45 * time.Second,
+	}
+	chatConfig := openRouterChatConfig(cfg)
+	if len(chatConfig.ProviderOrder) != 1 || chatConfig.ProviderOrder[0] != "cerebras" {
+		t.Fatalf("chat config should keep configured provider routing: %+v", chatConfig.ProviderOrder)
+	}
+	if chatConfig.AllowProviderFallbacks {
+		t.Fatal("chat config should keep configured provider fallback setting")
+	}
+
+	clipConfig := openRouterClipDetectionConfig(cfg)
+	if len(clipConfig.ProviderOrder) != 0 {
+		t.Fatalf("clip detection should use default provider routing, got %+v", clipConfig.ProviderOrder)
+	}
+	if !clipConfig.AllowProviderFallbacks {
+		t.Fatal("clip detection should allow default provider fallback routing")
+	}
+	if clipConfig.Timeout != cfg.OpenRouterClipDetectionTimeout {
+		t.Fatalf("clip detection should use configured timeout, got %s", clipConfig.Timeout)
+	}
+	if clipConfig.APIKey != cfg.OpenRouterAPIKey || clipConfig.BaseURL != cfg.OpenRouterBaseURL || clipConfig.AppURL != cfg.OpenRouterAppURL || clipConfig.AppTitle != cfg.OpenRouterAppTitle {
+		t.Fatalf("clip detection should preserve OpenRouter connection metadata: %+v", clipConfig)
+	}
+
+	compositionConfig := openRouterClipCompositionConfig(cfg)
+	if len(compositionConfig.ProviderOrder) != 0 {
+		t.Fatalf("clip composition should use default provider routing, got %+v", compositionConfig.ProviderOrder)
+	}
+	if !compositionConfig.AllowProviderFallbacks {
+		t.Fatal("clip composition should allow default provider fallback routing")
+	}
+	if compositionConfig.Timeout != cfg.OpenRouterClipCompositionTimeout {
+		t.Fatalf("clip composition should use configured timeout, got %s", compositionConfig.Timeout)
+	}
+	if compositionConfig.APIKey != cfg.OpenRouterAPIKey || compositionConfig.BaseURL != cfg.OpenRouterBaseURL || compositionConfig.AppURL != cfg.OpenRouterAppURL || compositionConfig.AppTitle != cfg.OpenRouterAppTitle {
+		t.Fatalf("clip composition should preserve OpenRouter connection metadata: %+v", compositionConfig)
 	}
 }
 

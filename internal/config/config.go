@@ -8,32 +8,65 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
 )
 
 const (
-	configPathEnv                 = "PANDA_CONFIG"
-	envFilePathEnv                = "PANDA_ENV_FILE"
-	defaultConfigPath             = "panda.config.json"
-	defaultEnvFilePath            = ".env"
-	defaultDevDataDir             = "data"
-	defaultProdDataDir            = "/data"
-	defaultOpenRouterModel        = "openai/gpt-oss-120b"
-	defaultOpenRouterImageModel   = "google/gemini-3.1-flash-image"
-	defaultOpenRouterProvider     = "cerebras"
-	defaultLemonfoxBaseURL        = "https://api.lemonfox.ai/v1"
-	defaultYouTubeChunkDuration   = 10 * time.Minute
-	defaultSolanaCluster          = "devnet"
-	defaultSolanaConfirmation     = "finalized"
-	defaultImageTimeout           = 90 * time.Second
-	defaultImageMaxBytes          = 8 * 1024 * 1024
-	defaultSolanaOrderExpiration  = 30 * time.Minute
-	defaultSolanaActivationKeyTTL = 48 * time.Hour
+	configPathEnv                  = "PANDA_CONFIG"
+	envFilePathEnv                 = "PANDA_ENV_FILE"
+	defaultConfigPath              = "panda.config.json"
+	defaultEnvFilePath             = ".env"
+	defaultDevDataDir              = "data"
+	defaultProdDataDir             = "/data"
+	defaultOpenRouterModel         = "openai/gpt-oss-120b"
+	defaultOpenRouterImageModel    = "google/gemini-3.1-flash-image"
+	defaultOpenRouterProvider      = "cerebras"
+	defaultClipDetectionTimeout    = 2 * time.Minute
+	defaultClipDetectionTokens     = 8192
+	defaultClipCompositionModel    = "google/gemini-3.5-flash"
+	defaultClipCompositionTimeout  = 2 * time.Minute
+	defaultClipCompositionTokens   = 12288
+	defaultLemonfoxBaseURL         = "https://api.lemonfox.ai/v1"
+	defaultYouTubeChunkDuration    = 10 * time.Minute
+	defaultYouTubeClipMinDuration  = 5 * time.Second
+	defaultYouTubeClipMaxDuration  = 90 * time.Second
+	defaultYouTubeClipMaxBytes     = 100 * 1024 * 1024
+	defaultYouTubeThumbnailCount   = 12
+	defaultYouTubeThumbnailEdge    = 720
+	defaultYouTubeVerticalRes      = "1080x1920"
+	defaultYouTubeLandscapeRes     = "1920x1080"
+	linuxYouTubeCaptionFontPath    = "/usr/share/fonts/truetype/dejavu/DejaVuSansCondensed-Bold.ttf"
+	linuxYouTubeCaptionFontFamily  = "DejaVu Sans Condensed"
+	darwinYouTubeCaptionFontPath   = "/System/Library/Fonts/Supplemental/Arial Bold.ttf"
+	darwinYouTubeCaptionFontFamily = "Arial"
+	defaultSolanaCluster           = "devnet"
+	defaultSolanaConfirmation      = "finalized"
+	defaultImageTimeout            = 90 * time.Second
+	defaultImageMaxBytes           = 8 * 1024 * 1024
+	defaultSolanaOrderExpiration   = 30 * time.Minute
+	defaultSolanaActivationKeyTTL  = 48 * time.Hour
+	defaultR2ClipURLTTL            = 7 * 24 * time.Hour
+	defaultR2DownloadURLTTL        = 5 * time.Minute
 )
 
-var paidPlanNames = []string{"starter", "plus", "pro", "business"}
+var paidPackNames = []string{"starter", "plus", "pro", "business"}
+
+func defaultYouTubeCaptionFontPath() string {
+	if runtime.GOOS == "darwin" {
+		return darwinYouTubeCaptionFontPath
+	}
+	return linuxYouTubeCaptionFontPath
+}
+
+func defaultYouTubeCaptionFontFamily() string {
+	if runtime.GOOS == "darwin" {
+		return darwinYouTubeCaptionFontFamily
+	}
+	return linuxYouTubeCaptionFontFamily
+}
 
 type Config struct {
 	DiscordBotToken                          string
@@ -47,6 +80,12 @@ type Config struct {
 	OpenRouterModel                          string
 	OpenRouterImageBaseURL                   string
 	OpenRouterImageModel                     string
+	OpenRouterClipDetectionModel             string
+	OpenRouterClipDetectionTimeout           time.Duration
+	OpenRouterClipDetectionMaxTokens         int
+	OpenRouterClipCompositionModel           string
+	OpenRouterClipCompositionTimeout         time.Duration
+	OpenRouterClipCompositionMaxTokens       int
 	OpenRouterImageTimeout                   time.Duration
 	OpenRouterImageMaxBytes                  int64
 	OpenRouterFallbackModels                 []string
@@ -62,6 +101,15 @@ type Config struct {
 	LemonfoxAPIKey                           string
 	LemonfoxBaseURL                          string
 	YouTubeAudioChunkDuration                time.Duration
+	YouTubeClipMinDuration                   time.Duration
+	YouTubeClipMaxDuration                   time.Duration
+	YouTubeClipMaxBytes                      int64
+	YouTubeClipThumbnailMaxCount             int
+	YouTubeClipThumbnailMaxEdge              int
+	YouTubeClipVerticalResolution            string
+	YouTubeClipLandscapeResolution           string
+	YouTubeClipCaptionFontPath               string
+	YouTubeClipCaptionFontFamily             string
 	PublicAppURL                             string
 	BillingAllowedOrigins                    []string
 	SolanaRPCURL                             string
@@ -71,9 +119,24 @@ type Config struct {
 	SolanaOrderExpiration                    time.Duration
 	SolanaActivationKeyTTL                   time.Duration
 	SolanaPlanLamports                       map[string]int64
+	SolanaPackLamports                       map[string]int64
+	SolanaUSDCentsPerSOL                     int64
 	MusicYTDLPPath                           string
 	MusicFFmpegPath                          string
 	MusicSidecarDir                          string
+	R2AccountID                              string
+	R2Endpoint                               string
+	R2AccessKeyID                            string
+	R2SecretAccessKey                        string
+	R2Bucket                                 string
+	R2PublicBaseURL                          string
+	R2ClipPrefix                             string
+	R2ClipURLTTL                             time.Duration
+	R2DownloadURLTTL                         time.Duration
+	PortalBaseURL                            string
+	DiscordPortalRedirectURI                 string
+	PortalSessionSecret                      string
+	PortalAllowedOrigins                     []string
 	SQLitePath                               string
 	DataDir                                  string
 	Port                                     string
@@ -93,6 +156,14 @@ type fileConfig struct {
 	Music       fileMusicConfig       `json:"music"`
 	Runtime     fileRuntimeConfig     `json:"runtime"`
 	Storage     fileStorageConfig     `json:"storage"`
+	Portal      filePortalConfig      `json:"portal"`
+}
+
+type filePortalConfig struct {
+	BaseURL            string   `json:"base_url"`
+	SessionSecret      string   `json:"session_secret"`
+	AllowedOrigins     []string `json:"allowed_origins"`
+	DiscordRedirectURI string   `json:"discord_redirect_uri"`
 }
 
 type fileDiscordConfig struct {
@@ -109,6 +180,12 @@ type fileOpenRouterConfig struct {
 	DefaultModel   string                   `json:"default_model"`
 	ImageBaseURL   string                   `json:"image_base_url"`
 	ImageModel     string                   `json:"image_model"`
+	ClipModel      string                   `json:"clip_detection_model"`
+	ClipTimeout    string                   `json:"clip_detection_timeout"`
+	ClipTokens     *int                     `json:"clip_detection_max_tokens"`
+	ComposeModel   string                   `json:"clip_composition_model"`
+	ComposeTimeout string                   `json:"clip_composition_timeout"`
+	ComposeTokens  *int                     `json:"clip_composition_max_tokens"`
 	ImageTimeout   string                   `json:"image_timeout"`
 	ImageMaxBytes  *int64                   `json:"image_max_bytes"`
 	FallbackModels []string                 `json:"fallback_models"`
@@ -130,9 +207,18 @@ type fileBraveSearchConfig struct {
 }
 
 type fileLemonfoxConfig struct {
-	APIKey                    string `json:"api_key"`
-	BaseURL                   string `json:"base_url"`
-	YouTubeAudioChunkDuration string `json:"youtube_audio_chunk_duration"`
+	APIKey                     string `json:"api_key"`
+	BaseURL                    string `json:"base_url"`
+	YouTubeAudioChunkDuration  string `json:"youtube_audio_chunk_duration"`
+	YouTubeClipMinDuration     string `json:"youtube_clip_min_duration"`
+	YouTubeClipMaxDuration     string `json:"youtube_clip_max_duration"`
+	YouTubeClipMaxBytes        *int64 `json:"youtube_clip_max_bytes"`
+	YouTubeThumbnailMaxCount   *int   `json:"youtube_clip_thumbnail_max_count"`
+	YouTubeThumbnailMaxEdge    *int   `json:"youtube_clip_thumbnail_max_edge"`
+	YouTubeVerticalResolution  string `json:"youtube_clip_vertical_resolution"`
+	YouTubeLandscapeResolution string `json:"youtube_clip_landscape_resolution"`
+	YouTubeCaptionFontPath     string `json:"youtube_clip_caption_font_path"`
+	YouTubeCaptionFontFamily   string `json:"youtube_clip_caption_font_family"`
 }
 
 type fileBillingConfig struct {
@@ -145,6 +231,8 @@ type fileBillingConfig struct {
 	SolanaOrderExpiration string           `json:"solana_order_expiration"`
 	SolanaActivationTTL   string           `json:"solana_activation_key_ttl"`
 	SolanaPlanLamports    map[string]int64 `json:"solana_plan_lamports"`
+	SolanaPackLamports    map[string]int64 `json:"solana_pack_lamports"`
+	SolanaUSDCentsPerSOL  int64            `json:"solana_usd_cents_per_sol"`
 }
 
 type fileMusicConfig struct {
@@ -162,8 +250,17 @@ type fileRuntimeConfig struct {
 }
 
 type fileStorageConfig struct {
-	DataDir    string `json:"data_dir"`
-	SQLitePath string `json:"sqlite_path"`
+	DataDir           string `json:"data_dir"`
+	SQLitePath        string `json:"sqlite_path"`
+	R2AccountID       string `json:"r2_account_id"`
+	R2Endpoint        string `json:"r2_endpoint"`
+	R2AccessKeyID     string `json:"r2_access_key_id"`
+	R2SecretAccessKey string `json:"r2_secret_access_key"`
+	R2Bucket          string `json:"r2_bucket"`
+	R2PublicBaseURL   string `json:"r2_public_base_url"`
+	R2ClipPrefix      string `json:"r2_clip_prefix"`
+	R2ClipURLTTL      string `json:"r2_clip_url_ttl"`
+	R2DownloadURLTTL  string `json:"r2_download_url_ttl"`
 }
 
 func Load() (Config, []string, error) {
@@ -176,6 +273,7 @@ func Load() (Config, []string, error) {
 	}
 	applyEnv(&cfg)
 	finalize(&cfg)
+	normalizeSolanaBillingConfig(&cfg)
 
 	warnings, err := cfg.Validate()
 	return cfg, warnings, err
@@ -204,6 +302,18 @@ func (c Config) Validate() ([]string, error) {
 	if c.OpenRouterImageModel == "" {
 		return nil, errors.New("openrouter.image_model (OPENROUTER_IMAGE_MODEL) must not be empty")
 	}
+	if c.OpenRouterClipDetectionTimeout <= 0 {
+		return nil, errors.New("openrouter.clip_detection_timeout (OPENROUTER_CLIP_DETECTION_TIMEOUT) must be greater than zero")
+	}
+	if c.OpenRouterClipDetectionMaxTokens <= 0 {
+		return nil, errors.New("openrouter.clip_detection_max_tokens (OPENROUTER_CLIP_DETECTION_MAX_TOKENS) must be greater than zero")
+	}
+	if c.OpenRouterClipCompositionTimeout <= 0 {
+		return nil, errors.New("openrouter.clip_composition_timeout (OPENROUTER_CLIP_COMPOSITION_TIMEOUT) must be greater than zero")
+	}
+	if c.OpenRouterClipCompositionMaxTokens <= 0 {
+		return nil, errors.New("openrouter.clip_composition_max_tokens (OPENROUTER_CLIP_COMPOSITION_MAX_TOKENS) must be greater than zero")
+	}
 	if c.OpenRouterImageTimeout <= 0 {
 		return nil, errors.New("openrouter.image_timeout (OPENROUTER_IMAGE_TIMEOUT) must be greater than zero")
 	}
@@ -219,9 +329,37 @@ func (c Config) Validate() ([]string, error) {
 	if c.YouTubeAudioChunkDuration <= 0 {
 		return nil, errors.New("lemonfox.youtube_audio_chunk_duration (YOUTUBE_AUDIO_CHUNK_DURATION) must be greater than zero")
 	}
-	if c.SolanaPlanLamports == nil {
-		c.SolanaPlanLamports = map[string]int64{}
+	if c.YouTubeClipMinDuration <= 0 {
+		return nil, errors.New("lemonfox.youtube_clip_min_duration (YOUTUBE_CLIP_MIN_DURATION) must be greater than zero")
 	}
+	if c.YouTubeClipMaxDuration <= 0 {
+		return nil, errors.New("lemonfox.youtube_clip_max_duration (YOUTUBE_CLIP_MAX_DURATION) must be greater than zero")
+	}
+	if c.YouTubeClipMaxDuration < c.YouTubeClipMinDuration {
+		return nil, errors.New("lemonfox.youtube_clip_max_duration (YOUTUBE_CLIP_MAX_DURATION) must be at least youtube_clip_min_duration")
+	}
+	if c.YouTubeClipMaxBytes <= 0 {
+		return nil, errors.New("lemonfox.youtube_clip_max_bytes (YOUTUBE_CLIP_MAX_BYTES) must be greater than zero")
+	}
+	if c.YouTubeClipThumbnailMaxCount <= 0 {
+		return nil, errors.New("lemonfox.youtube_clip_thumbnail_max_count (YOUTUBE_CLIP_THUMBNAIL_MAX_COUNT) must be greater than zero")
+	}
+	if c.YouTubeClipThumbnailMaxEdge <= 0 {
+		return nil, errors.New("lemonfox.youtube_clip_thumbnail_max_edge (YOUTUBE_CLIP_THUMBNAIL_MAX_EDGE) must be greater than zero")
+	}
+	if err := validateResolution("lemonfox.youtube_clip_vertical_resolution", c.YouTubeClipVerticalResolution); err != nil {
+		return nil, err
+	}
+	if err := validateResolution("lemonfox.youtube_clip_landscape_resolution", c.YouTubeClipLandscapeResolution); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(c.YouTubeClipCaptionFontPath) == "" {
+		return nil, errors.New("lemonfox.youtube_clip_caption_font_path (YOUTUBE_CLIP_CAPTION_FONT_PATH) must not be empty")
+	}
+	if strings.TrimSpace(c.YouTubeClipCaptionFontFamily) == "" {
+		return nil, errors.New("lemonfox.youtube_clip_caption_font_family (YOUTUBE_CLIP_CAPTION_FONT_FAMILY) must not be empty")
+	}
+	normalizeSolanaBillingConfig(&c)
 	if c.MusicSidecarDir == "" {
 		return nil, errors.New("music.sidecar_dir (MUSIC_SIDECAR_DIR) must not be empty")
 	}
@@ -257,8 +395,14 @@ func (c Config) Validate() ([]string, error) {
 	if c.SolanaActivationKeyTTL <= 0 {
 		return nil, errors.New("billing.solana_activation_key_ttl (SOLANA_ACTIVATION_KEY_TTL) must be greater than zero")
 	}
-	if err := validateSolanaPlanLamports(c.SolanaPlanLamports); err != nil {
+	if err := validateSolanaPackLamports(c.SolanaPackLamports, "billing.solana_pack_lamports"); err != nil {
 		return nil, err
+	}
+	if err := validateSolanaPackLamports(c.SolanaPlanLamports, "billing.solana_plan_lamports"); err != nil {
+		return nil, err
+	}
+	if c.SolanaUSDCentsPerSOL < 0 {
+		return nil, errors.New("billing.solana_usd_cents_per_sol (SOLANA_USD_CENTS_PER_SOL) must not be negative")
 	}
 
 	if !c.DiscordConfigured() {
@@ -281,6 +425,9 @@ func (c Config) Validate() ([]string, error) {
 	}
 	if !c.LemonfoxConfigured() {
 		warnings = append(warnings, "LEMONFOX_API_KEY is not configured; YouTube video summarization is disabled")
+	}
+	if !c.OpenRouterClipDetectionConfigured() || !c.OpenRouterClipCompositionConfigured() || !c.R2Configured() {
+		warnings = append(warnings, "YouTube clipping is not fully configured; set OPENROUTER_CLIP_DETECTION_MODEL, OPENROUTER_CLIP_COMPOSITION_MODEL, and R2 storage settings to enable clip links")
 	}
 	if c.PublicAppURL == "" {
 		warnings = append(warnings, "PUBLIC_APP_URL is not configured; billing and support links will be limited")
@@ -317,8 +464,10 @@ func (c Config) Validate() ([]string, error) {
 		if c.SolanaTreasuryWallet == "" {
 			return warnings, errors.New("production SOL billing requires SOLANA_TREASURY_WALLET")
 		}
-		if missing := missingSolanaPaidPlans(c.SolanaPlanLamports); len(missing) > 0 {
-			return warnings, fmt.Errorf("production SOL billing requires lamports for paid plans: %s", strings.Join(missing, ", "))
+		if c.SolanaUSDCentsPerSOL <= 0 {
+			if missing := missingSolanaPaidPacks(c.SolanaPackLamports); len(missing) > 0 {
+				return warnings, fmt.Errorf("production SOL billing requires SOLANA_USD_CENTS_PER_SOL or lamports for paid packs: %s", strings.Join(missing, ", "))
+			}
 		}
 	}
 
@@ -344,6 +493,33 @@ func validateProductionPublicAppURL(publicURL, runtimePort string) error {
 	return nil
 }
 
+func validateResolution(name string, value string) error {
+	width, height, ok := parseResolution(value)
+	if !ok || width <= 0 || height <= 0 {
+		return fmt.Errorf("%s must be a resolution like 1080x1920", name)
+	}
+	if width%2 != 0 || height%2 != 0 {
+		return fmt.Errorf("%s must use even width and height for H.264 output", name)
+	}
+	return nil
+}
+
+func parseResolution(value string) (int, int, bool) {
+	parts := strings.Split(strings.ToLower(strings.TrimSpace(value)), "x")
+	if len(parts) != 2 {
+		return 0, 0, false
+	}
+	width, err := strconv.Atoi(strings.TrimSpace(parts[0]))
+	if err != nil {
+		return 0, 0, false
+	}
+	height, err := strconv.Atoi(strings.TrimSpace(parts[1]))
+	if err != nil {
+		return 0, 0, false
+	}
+	return width, height, true
+}
+
 func (c Config) DiscordConfigured() bool {
 	return c.DiscordBotToken != "" && c.DiscordApplicationID != ""
 }
@@ -362,6 +538,16 @@ func (c Config) OpenRouterImagesConfigured() bool {
 		strings.TrimSpace(c.OpenRouterImageModel) != ""
 }
 
+func (c Config) OpenRouterClipDetectionConfigured() bool {
+	return strings.TrimSpace(c.OpenRouterAPIKey) != "" &&
+		strings.TrimSpace(c.OpenRouterClipDetectionModel) != ""
+}
+
+func (c Config) OpenRouterClipCompositionConfigured() bool {
+	return strings.TrimSpace(c.OpenRouterAPIKey) != "" &&
+		strings.TrimSpace(c.OpenRouterClipCompositionModel) != ""
+}
+
 func (c Config) BraveSearchConfigured() bool {
 	return c.BraveSearchAPIKey != ""
 }
@@ -370,10 +556,20 @@ func (c Config) LemonfoxConfigured() bool {
 	return strings.TrimSpace(c.LemonfoxAPIKey) != ""
 }
 
+func (c Config) R2Configured() bool {
+	return strings.TrimSpace(c.R2AccessKeyID) != "" &&
+		strings.TrimSpace(c.R2SecretAccessKey) != "" &&
+		strings.TrimSpace(c.R2Bucket) != "" &&
+		strings.TrimSpace(c.R2PublicBaseURL) != "" &&
+		(strings.TrimSpace(c.R2Endpoint) != "" || strings.TrimSpace(c.R2AccountID) != "")
+}
+
 func (c Config) SolanaPaymentsConfigured() bool {
-	return strings.TrimSpace(c.SolanaRPCURL) != "" &&
-		strings.TrimSpace(c.SolanaTreasuryWallet) != "" &&
-		len(missingSolanaPaidPlans(c.SolanaPlanLamports)) == 0
+	cfg := c
+	normalizeSolanaBillingConfig(&cfg)
+	return strings.TrimSpace(cfg.SolanaRPCURL) != "" &&
+		strings.TrimSpace(cfg.SolanaTreasuryWallet) != "" &&
+		(cfg.SolanaUSDCentsPerSOL > 0 || len(missingSolanaPaidPacks(cfg.SolanaPackLamports)) == 0)
 }
 
 func (c Config) PaymentAllowedOrigins() []string {
@@ -397,6 +593,42 @@ func localLandingOrigins() []string {
 	return []string{"http://localhost:4321", "http://127.0.0.1:4321"}
 }
 
+// PortalCORSOrigins returns the CORS origins permitted to call the clips portal
+// API: any explicitly configured origins, the portal base URL, the public app
+// URL, and the landing origins (plus dev localhost outside production).
+func (c Config) PortalCORSOrigins() []string {
+	origins := append([]string(nil), c.PortalAllowedOrigins...)
+	if strings.TrimSpace(c.PortalBaseURL) != "" {
+		origins = append(origins, c.PortalBaseURL)
+	}
+	if strings.TrimSpace(c.PublicAppURL) != "" {
+		origins = append(origins, c.PublicAppURL)
+	}
+	if !strings.EqualFold(strings.TrimSpace(c.Environment), "production") {
+		origins = append(origins, localLandingOrigins()...)
+	}
+	return normalizeList(origins)
+}
+
+// PortalClipsURL returns the durable portal URL the bot links users to. Empty
+// when no portal base URL is configured.
+func (c Config) PortalClipsURL() string {
+	base := strings.TrimRight(strings.TrimSpace(c.PortalBaseURL), "/")
+	if base == "" {
+		return ""
+	}
+	return base + "/clips"
+}
+
+// PortalConfigured reports whether the Discord-login clips portal can operate:
+// it needs an OAuth app, client secret, redirect URI, and a session secret.
+func (c Config) PortalConfigured() bool {
+	return strings.TrimSpace(c.DiscordApplicationID) != "" &&
+		strings.TrimSpace(c.DiscordClientSecret) != "" &&
+		strings.TrimSpace(c.DiscordPortalRedirectURI) != "" &&
+		strings.TrimSpace(c.PortalSessionSecret) != ""
+}
+
 func (c Config) IsOwner(userID string) bool {
 	_, ok := c.OwnerUserIDs[userID]
 	return ok
@@ -408,6 +640,11 @@ func defaultConfig() Config {
 		OpenRouterModel:                          defaultOpenRouterModel,
 		OpenRouterImageBaseURL:                   "https://openrouter.ai/api/v1",
 		OpenRouterImageModel:                     defaultOpenRouterImageModel,
+		OpenRouterClipDetectionTimeout:           defaultClipDetectionTimeout,
+		OpenRouterClipDetectionMaxTokens:         defaultClipDetectionTokens,
+		OpenRouterClipCompositionModel:           defaultClipCompositionModel,
+		OpenRouterClipCompositionTimeout:         defaultClipCompositionTimeout,
+		OpenRouterClipCompositionMaxTokens:       defaultClipCompositionTokens,
 		OpenRouterImageTimeout:                   defaultImageTimeout,
 		OpenRouterImageMaxBytes:                  defaultImageMaxBytes,
 		OpenRouterProviderOrder:                  []string{defaultOpenRouterProvider},
@@ -418,11 +655,24 @@ func defaultConfig() Config {
 		BraveSearchBaseURL:                       "https://api.search.brave.com/res/v1",
 		LemonfoxBaseURL:                          defaultLemonfoxBaseURL,
 		YouTubeAudioChunkDuration:                defaultYouTubeChunkDuration,
+		YouTubeClipMinDuration:                   defaultYouTubeClipMinDuration,
+		YouTubeClipMaxDuration:                   defaultYouTubeClipMaxDuration,
+		YouTubeClipMaxBytes:                      defaultYouTubeClipMaxBytes,
+		YouTubeClipThumbnailMaxCount:             defaultYouTubeThumbnailCount,
+		YouTubeClipThumbnailMaxEdge:              defaultYouTubeThumbnailEdge,
+		YouTubeClipVerticalResolution:            defaultYouTubeVerticalRes,
+		YouTubeClipLandscapeResolution:           defaultYouTubeLandscapeRes,
+		YouTubeClipCaptionFontPath:               defaultYouTubeCaptionFontPath(),
+		YouTubeClipCaptionFontFamily:             defaultYouTubeCaptionFontFamily(),
+		R2ClipPrefix:                             "clips",
+		R2ClipURLTTL:                             defaultR2ClipURLTTL,
+		R2DownloadURLTTL:                         defaultR2DownloadURLTTL,
 		SolanaCluster:                            defaultSolanaCluster,
 		SolanaConfirmation:                       defaultSolanaConfirmation,
 		SolanaOrderExpiration:                    defaultSolanaOrderExpiration,
 		SolanaActivationKeyTTL:                   defaultSolanaActivationKeyTTL,
 		SolanaPlanLamports:                       map[string]int64{},
+		SolanaPackLamports:                       map[string]int64{},
 		Port:                                     "8080",
 		Environment:                              defaultEnvironment(),
 		LogLevel:                                 "info",
@@ -683,6 +933,32 @@ func applyFileConfig(cfg *Config, file fileConfig) error {
 	if value := strings.TrimSpace(file.OpenRouter.ImageModel); value != "" {
 		cfg.OpenRouterImageModel = value
 	}
+	if value := strings.TrimSpace(file.OpenRouter.ClipModel); value != "" {
+		cfg.OpenRouterClipDetectionModel = value
+	}
+	if value := strings.TrimSpace(file.OpenRouter.ClipTimeout); value != "" {
+		parsed, err := parseDuration("openrouter.clip_detection_timeout", value)
+		if err != nil {
+			return err
+		}
+		cfg.OpenRouterClipDetectionTimeout = parsed
+	}
+	if file.OpenRouter.ClipTokens != nil {
+		cfg.OpenRouterClipDetectionMaxTokens = *file.OpenRouter.ClipTokens
+	}
+	if value := strings.TrimSpace(file.OpenRouter.ComposeModel); value != "" {
+		cfg.OpenRouterClipCompositionModel = value
+	}
+	if value := strings.TrimSpace(file.OpenRouter.ComposeTimeout); value != "" {
+		parsed, err := parseDuration("openrouter.clip_composition_timeout", value)
+		if err != nil {
+			return err
+		}
+		cfg.OpenRouterClipCompositionTimeout = parsed
+	}
+	if file.OpenRouter.ComposeTokens != nil {
+		cfg.OpenRouterClipCompositionMaxTokens = *file.OpenRouter.ComposeTokens
+	}
 	if value := strings.TrimSpace(file.OpenRouter.ImageTimeout); value != "" {
 		parsed, err := parseDuration("openrouter.image_timeout", value)
 		if err != nil {
@@ -738,6 +1014,41 @@ func applyFileConfig(cfg *Config, file fileConfig) error {
 		}
 		cfg.YouTubeAudioChunkDuration = parsed
 	}
+	if value := strings.TrimSpace(file.Lemonfox.YouTubeClipMinDuration); value != "" {
+		parsed, err := parseDuration("lemonfox.youtube_clip_min_duration", value)
+		if err != nil {
+			return err
+		}
+		cfg.YouTubeClipMinDuration = parsed
+	}
+	if value := strings.TrimSpace(file.Lemonfox.YouTubeClipMaxDuration); value != "" {
+		parsed, err := parseDuration("lemonfox.youtube_clip_max_duration", value)
+		if err != nil {
+			return err
+		}
+		cfg.YouTubeClipMaxDuration = parsed
+	}
+	if file.Lemonfox.YouTubeClipMaxBytes != nil {
+		cfg.YouTubeClipMaxBytes = *file.Lemonfox.YouTubeClipMaxBytes
+	}
+	if file.Lemonfox.YouTubeThumbnailMaxCount != nil {
+		cfg.YouTubeClipThumbnailMaxCount = *file.Lemonfox.YouTubeThumbnailMaxCount
+	}
+	if file.Lemonfox.YouTubeThumbnailMaxEdge != nil {
+		cfg.YouTubeClipThumbnailMaxEdge = *file.Lemonfox.YouTubeThumbnailMaxEdge
+	}
+	if value := strings.TrimSpace(file.Lemonfox.YouTubeVerticalResolution); value != "" {
+		cfg.YouTubeClipVerticalResolution = value
+	}
+	if value := strings.TrimSpace(file.Lemonfox.YouTubeLandscapeResolution); value != "" {
+		cfg.YouTubeClipLandscapeResolution = value
+	}
+	if value := strings.TrimSpace(file.Lemonfox.YouTubeCaptionFontPath); value != "" {
+		cfg.YouTubeClipCaptionFontPath = value
+	}
+	if value := strings.TrimSpace(file.Lemonfox.YouTubeCaptionFontFamily); value != "" {
+		cfg.YouTubeClipCaptionFontFamily = value
+	}
 	if value := strings.TrimSpace(file.Billing.PublicURL); value != "" {
 		cfg.PublicAppURL = value
 	}
@@ -772,6 +1083,12 @@ func applyFileConfig(cfg *Config, file fileConfig) error {
 	}
 	if file.Billing.SolanaPlanLamports != nil {
 		cfg.SolanaPlanLamports = normalizeLamportsMap(file.Billing.SolanaPlanLamports)
+	}
+	if file.Billing.SolanaPackLamports != nil {
+		cfg.SolanaPackLamports = normalizeLamportsMap(file.Billing.SolanaPackLamports)
+	}
+	if file.Billing.SolanaUSDCentsPerSOL > 0 {
+		cfg.SolanaUSDCentsPerSOL = file.Billing.SolanaUSDCentsPerSOL
 	}
 
 	if value := strings.TrimSpace(file.Music.YTDLPPath); value != "" {
@@ -810,6 +1127,53 @@ func applyFileConfig(cfg *Config, file fileConfig) error {
 	if value := strings.TrimSpace(file.Storage.SQLitePath); value != "" {
 		cfg.SQLitePath = value
 	}
+	if value := strings.TrimSpace(file.Storage.R2AccountID); value != "" {
+		cfg.R2AccountID = value
+	}
+	if value := strings.TrimSpace(file.Storage.R2Endpoint); value != "" {
+		cfg.R2Endpoint = value
+	}
+	if value := strings.TrimSpace(file.Storage.R2AccessKeyID); value != "" {
+		cfg.R2AccessKeyID = value
+	}
+	if value := strings.TrimSpace(file.Storage.R2SecretAccessKey); value != "" {
+		cfg.R2SecretAccessKey = value
+	}
+	if value := strings.TrimSpace(file.Storage.R2Bucket); value != "" {
+		cfg.R2Bucket = value
+	}
+	if value := strings.TrimSpace(file.Storage.R2PublicBaseURL); value != "" {
+		cfg.R2PublicBaseURL = value
+	}
+	if value := strings.TrimSpace(file.Storage.R2ClipPrefix); value != "" {
+		cfg.R2ClipPrefix = value
+	}
+	if value := strings.TrimSpace(file.Storage.R2ClipURLTTL); value != "" {
+		parsed, err := parseDuration("storage.r2_clip_url_ttl", value)
+		if err != nil {
+			return err
+		}
+		cfg.R2ClipURLTTL = parsed
+	}
+	if value := strings.TrimSpace(file.Storage.R2DownloadURLTTL); value != "" {
+		parsed, err := parseDuration("storage.r2_download_url_ttl", value)
+		if err != nil {
+			return err
+		}
+		cfg.R2DownloadURLTTL = parsed
+	}
+	if value := strings.TrimSpace(file.Portal.BaseURL); value != "" {
+		cfg.PortalBaseURL = value
+	}
+	if value := strings.TrimSpace(file.Portal.SessionSecret); value != "" {
+		cfg.PortalSessionSecret = value
+	}
+	if value := strings.TrimSpace(file.Portal.DiscordRedirectURI); value != "" {
+		cfg.DiscordPortalRedirectURI = value
+	}
+	if file.Portal.AllowedOrigins != nil {
+		cfg.PortalAllowedOrigins = normalizeList(file.Portal.AllowedOrigins)
+	}
 	return nil
 }
 
@@ -829,6 +1193,12 @@ func applyEnvValues(cfg *Config, lookup func(string) (string, bool)) {
 	cfg.OpenRouterModel = nonEmptyStringFromLookup(lookup, "OPENROUTER_DEFAULT_MODEL", cfg.OpenRouterModel)
 	cfg.OpenRouterImageBaseURL = nonEmptyStringFromLookup(lookup, "OPENROUTER_IMAGE_BASE_URL", cfg.OpenRouterImageBaseURL)
 	cfg.OpenRouterImageModel = nonEmptyStringFromLookup(lookup, "OPENROUTER_IMAGE_MODEL", cfg.OpenRouterImageModel)
+	cfg.OpenRouterClipDetectionModel = nonEmptyStringFromLookup(lookup, "OPENROUTER_CLIP_DETECTION_MODEL", cfg.OpenRouterClipDetectionModel)
+	cfg.OpenRouterClipDetectionTimeout = durationFromLookup(lookup, "OPENROUTER_CLIP_DETECTION_TIMEOUT", cfg.OpenRouterClipDetectionTimeout)
+	cfg.OpenRouterClipDetectionMaxTokens = intFromLookup(lookup, "OPENROUTER_CLIP_DETECTION_MAX_TOKENS", cfg.OpenRouterClipDetectionMaxTokens)
+	cfg.OpenRouterClipCompositionModel = nonEmptyStringFromLookup(lookup, "OPENROUTER_CLIP_COMPOSITION_MODEL", cfg.OpenRouterClipCompositionModel)
+	cfg.OpenRouterClipCompositionTimeout = durationFromLookup(lookup, "OPENROUTER_CLIP_COMPOSITION_TIMEOUT", cfg.OpenRouterClipCompositionTimeout)
+	cfg.OpenRouterClipCompositionMaxTokens = intFromLookup(lookup, "OPENROUTER_CLIP_COMPOSITION_MAX_TOKENS", cfg.OpenRouterClipCompositionMaxTokens)
 	cfg.OpenRouterImageTimeout = durationFromLookup(lookup, "OPENROUTER_IMAGE_TIMEOUT", cfg.OpenRouterImageTimeout)
 	cfg.OpenRouterImageMaxBytes = int64FromLookup(lookup, "OPENROUTER_IMAGE_MAX_BYTES", cfg.OpenRouterImageMaxBytes)
 	if value, ok := csvListFromLookup(lookup, "OPENROUTER_FALLBACK_MODELS"); ok {
@@ -848,6 +1218,15 @@ func applyEnvValues(cfg *Config, lookup func(string) (string, bool)) {
 	cfg.LemonfoxAPIKey = stringFromLookup(lookup, "LEMONFOX_API_KEY", cfg.LemonfoxAPIKey)
 	cfg.LemonfoxBaseURL = nonEmptyStringFromLookup(lookup, "LEMONFOX_BASE_URL", cfg.LemonfoxBaseURL)
 	cfg.YouTubeAudioChunkDuration = durationFromLookup(lookup, "YOUTUBE_AUDIO_CHUNK_DURATION", cfg.YouTubeAudioChunkDuration)
+	cfg.YouTubeClipMinDuration = durationFromLookup(lookup, "YOUTUBE_CLIP_MIN_DURATION", cfg.YouTubeClipMinDuration)
+	cfg.YouTubeClipMaxDuration = durationFromLookup(lookup, "YOUTUBE_CLIP_MAX_DURATION", cfg.YouTubeClipMaxDuration)
+	cfg.YouTubeClipMaxBytes = int64FromLookup(lookup, "YOUTUBE_CLIP_MAX_BYTES", cfg.YouTubeClipMaxBytes)
+	cfg.YouTubeClipThumbnailMaxCount = intFromLookup(lookup, "YOUTUBE_CLIP_THUMBNAIL_MAX_COUNT", cfg.YouTubeClipThumbnailMaxCount)
+	cfg.YouTubeClipThumbnailMaxEdge = intFromLookup(lookup, "YOUTUBE_CLIP_THUMBNAIL_MAX_EDGE", cfg.YouTubeClipThumbnailMaxEdge)
+	cfg.YouTubeClipVerticalResolution = nonEmptyStringFromLookup(lookup, "YOUTUBE_CLIP_VERTICAL_RESOLUTION", cfg.YouTubeClipVerticalResolution)
+	cfg.YouTubeClipLandscapeResolution = nonEmptyStringFromLookup(lookup, "YOUTUBE_CLIP_LANDSCAPE_RESOLUTION", cfg.YouTubeClipLandscapeResolution)
+	cfg.YouTubeClipCaptionFontPath = nonEmptyStringFromLookup(lookup, "YOUTUBE_CLIP_CAPTION_FONT_PATH", cfg.YouTubeClipCaptionFontPath)
+	cfg.YouTubeClipCaptionFontFamily = nonEmptyStringFromLookup(lookup, "YOUTUBE_CLIP_CAPTION_FONT_FAMILY", cfg.YouTubeClipCaptionFontFamily)
 	cfg.PublicAppURL = nonEmptyStringFromLookup(lookup, "PUBLIC_APP_URL", cfg.PublicAppURL)
 	if value, ok := csvListFromLookup(lookup, "BILLING_ALLOWED_ORIGINS"); ok {
 		cfg.BillingAllowedOrigins = value
@@ -861,13 +1240,36 @@ func applyEnvValues(cfg *Config, lookup func(string) (string, bool)) {
 	if value, ok := lamportsMapFromLookup(lookup, "SOLANA_PLAN_LAMPORTS"); ok {
 		cfg.SolanaPlanLamports = value
 	}
-	applyPlanLamportsEnv(cfg.SolanaPlanLamports, lookup, "SOLANA_STARTER_LAMPORTS", "starter")
-	applyPlanLamportsEnv(cfg.SolanaPlanLamports, lookup, "SOLANA_PLUS_LAMPORTS", "plus")
-	applyPlanLamportsEnv(cfg.SolanaPlanLamports, lookup, "SOLANA_PRO_LAMPORTS", "pro")
-	applyPlanLamportsEnv(cfg.SolanaPlanLamports, lookup, "SOLANA_BUSINESS_LAMPORTS", "business")
+	if value, ok := lamportsMapFromLookup(lookup, "SOLANA_PACK_LAMPORTS"); ok {
+		cfg.SolanaPackLamports = value
+	}
+	applyPackLamportsEnv(cfg.SolanaPlanLamports, lookup, "SOLANA_STARTER_LAMPORTS", "starter")
+	applyPackLamportsEnv(cfg.SolanaPlanLamports, lookup, "SOLANA_PLUS_LAMPORTS", "plus")
+	applyPackLamportsEnv(cfg.SolanaPlanLamports, lookup, "SOLANA_PRO_LAMPORTS", "pro")
+	applyPackLamportsEnv(cfg.SolanaPlanLamports, lookup, "SOLANA_BUSINESS_LAMPORTS", "business")
+	applyPackLamportsEnv(cfg.SolanaPackLamports, lookup, "SOLANA_PACK_STARTER_LAMPORTS", "starter")
+	applyPackLamportsEnv(cfg.SolanaPackLamports, lookup, "SOLANA_PACK_PLUS_LAMPORTS", "plus")
+	applyPackLamportsEnv(cfg.SolanaPackLamports, lookup, "SOLANA_PACK_PRO_LAMPORTS", "pro")
+	applyPackLamportsEnv(cfg.SolanaPackLamports, lookup, "SOLANA_PACK_BUSINESS_LAMPORTS", "business")
+	cfg.SolanaUSDCentsPerSOL = int64FromLookup(lookup, "SOLANA_USD_CENTS_PER_SOL", cfg.SolanaUSDCentsPerSOL)
 	cfg.MusicYTDLPPath = nonEmptyStringFromLookup(lookup, "YTDLP_PATH", cfg.MusicYTDLPPath)
 	cfg.MusicFFmpegPath = nonEmptyStringFromLookup(lookup, "FFMPEG_PATH", cfg.MusicFFmpegPath)
 	cfg.MusicSidecarDir = nonEmptyStringFromLookup(lookup, "MUSIC_SIDECAR_DIR", cfg.MusicSidecarDir)
+	cfg.R2AccountID = nonEmptyStringFromLookup(lookup, "R2_ACCOUNT_ID", cfg.R2AccountID)
+	cfg.R2Endpoint = nonEmptyStringFromLookup(lookup, "R2_ENDPOINT", cfg.R2Endpoint)
+	cfg.R2AccessKeyID = nonEmptyStringFromLookup(lookup, "R2_ACCESS_KEY_ID", cfg.R2AccessKeyID)
+	cfg.R2SecretAccessKey = stringFromLookup(lookup, "R2_SECRET_ACCESS_KEY", cfg.R2SecretAccessKey)
+	cfg.R2Bucket = nonEmptyStringFromLookup(lookup, "R2_BUCKET", cfg.R2Bucket)
+	cfg.R2PublicBaseURL = nonEmptyStringFromLookup(lookup, "R2_PUBLIC_BASE_URL", cfg.R2PublicBaseURL)
+	cfg.R2ClipPrefix = nonEmptyStringFromLookup(lookup, "R2_CLIP_PREFIX", cfg.R2ClipPrefix)
+	cfg.R2ClipURLTTL = durationFromLookup(lookup, "R2_CLIP_URL_TTL", cfg.R2ClipURLTTL)
+	cfg.R2DownloadURLTTL = durationFromLookup(lookup, "R2_DOWNLOAD_URL_TTL", cfg.R2DownloadURLTTL)
+	cfg.PortalBaseURL = nonEmptyStringFromLookup(lookup, "PORTAL_BASE_URL", cfg.PortalBaseURL)
+	cfg.DiscordPortalRedirectURI = nonEmptyStringFromLookup(lookup, "DISCORD_PORTAL_REDIRECT_URI", cfg.DiscordPortalRedirectURI)
+	cfg.PortalSessionSecret = stringFromLookup(lookup, "PORTAL_SESSION_SECRET", cfg.PortalSessionSecret)
+	if value, ok := csvListFromLookup(lookup, "PORTAL_ALLOWED_ORIGINS"); ok {
+		cfg.PortalAllowedOrigins = value
+	}
 	cfg.Port = nonEmptyStringFromLookup(lookup, "PORT", cfg.Port)
 	cfg.Environment = nonEmptyStringFromLookup(lookup, "ENVIRONMENT", cfg.Environment)
 	cfg.LogLevel = nonEmptyStringFromLookup(lookup, "LOG_LEVEL", cfg.LogLevel)
@@ -949,7 +1351,7 @@ func lamportsMapFromLookup(lookup func(string) (string, bool), name string) (map
 	return parseLamportsMap(value), true
 }
 
-func applyPlanLamportsEnv(target map[string]int64, lookup func(string) (string, bool), name string, plan string) {
+func applyPackLamportsEnv(target map[string]int64, lookup func(string) (string, bool), name string, pack string) {
 	if target == nil {
 		return
 	}
@@ -965,7 +1367,7 @@ func applyPlanLamportsEnv(target map[string]int64, lookup func(string) (string, 
 	if err != nil {
 		return
 	}
-	target[strings.ToLower(strings.TrimSpace(plan))] = parsed
+	target[strings.ToLower(strings.TrimSpace(pack))] = parsed
 }
 
 func intFromLookup(lookup func(string) (string, bool), name string, fallback int) int {
@@ -1109,32 +1511,51 @@ func parseDuration(name, value string) (time.Duration, error) {
 	return parsed, nil
 }
 
-func validateSolanaPlanLamports(values map[string]int64) error {
-	for plan, lamports := range values {
-		if !isPaidPlanName(plan) {
-			return fmt.Errorf("billing.solana_plan_lamports includes unknown paid plan %q", plan)
+func normalizeSolanaBillingConfig(c *Config) {
+	if c.SolanaPlanLamports == nil {
+		c.SolanaPlanLamports = map[string]int64{}
+	} else {
+		c.SolanaPlanLamports = normalizeLamportsMap(c.SolanaPlanLamports)
+	}
+	if c.SolanaPackLamports == nil {
+		c.SolanaPackLamports = map[string]int64{}
+	} else {
+		c.SolanaPackLamports = normalizeLamportsMap(c.SolanaPackLamports)
+	}
+	if len(c.SolanaPackLamports) == 0 && len(c.SolanaPlanLamports) > 0 {
+		c.SolanaPackLamports = normalizeLamportsMap(c.SolanaPlanLamports)
+	}
+	if len(c.SolanaPlanLamports) == 0 && len(c.SolanaPackLamports) > 0 {
+		c.SolanaPlanLamports = normalizeLamportsMap(c.SolanaPackLamports)
+	}
+}
+
+func validateSolanaPackLamports(values map[string]int64, field string) error {
+	for pack, lamports := range values {
+		if !isPaidPackName(pack) {
+			return fmt.Errorf("%s includes unknown paid pack %q", field, pack)
 		}
 		if lamports <= 0 {
-			return fmt.Errorf("billing.solana_plan_lamports.%s must be greater than zero", plan)
+			return fmt.Errorf("%s.%s must be greater than zero", field, pack)
 		}
 	}
 	return nil
 }
 
-func missingSolanaPaidPlans(values map[string]int64) []string {
+func missingSolanaPaidPacks(values map[string]int64) []string {
 	var missing []string
-	for _, plan := range paidPlanNames {
-		if values == nil || values[plan] <= 0 {
-			missing = append(missing, plan)
+	for _, pack := range paidPackNames {
+		if values == nil || values[pack] <= 0 {
+			missing = append(missing, pack)
 		}
 	}
 	return missing
 }
 
-func isPaidPlanName(plan string) bool {
-	plan = strings.ToLower(strings.TrimSpace(plan))
-	for _, paidPlan := range paidPlanNames {
-		if plan == paidPlan {
+func isPaidPackName(pack string) bool {
+	pack = strings.ToLower(strings.TrimSpace(pack))
+	for _, paidPack := range paidPackNames {
+		if pack == paidPack {
 			return true
 		}
 	}

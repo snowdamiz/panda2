@@ -1,0 +1,14 @@
+---
+/**
+ * Status pill. Pass-through attrs carry the controller hooks + tone, e.g.
+ * `data-account-overview-pill data-tone="idle"`.
+ */
+interface Props {
+  class?: string;
+  [key: string]: unknown;
+}
+
+const { class: className, ...rest } = Astro.props;
+---
+
+<span class:list={['dash-pill', className]} {...rest}><slot /></span>

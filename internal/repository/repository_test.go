@@ -361,94 +361,137 @@ func TestUserSafetySetTimeoutUsesRequestedDuration(t *testing.T) {
 	}
 }
 
-func TestBillingUsageTotalsMissingPeriodDoesNotLogRecordNotFound(t *testing.T) {
-	ctx := context.Background()
-	repo, logs, cleanup := newBillingRepositoryWithLogBuffer(t)
-	defer cleanup()
-
-	start := time.Date(2026, 6, 22, 21, 9, 13, 498000000, time.UTC)
-	end := start.Add(14 * 24 * time.Hour)
-	totals, err := repo.UsageTotals(ctx, "guild-1", start, end)
-	if err != nil {
-		t.Fatalf("UsageTotals: %v", err)
-	}
-	if totals != (BillingUsageTotals{}) {
-		t.Fatalf("expected zero totals for missing period, got %+v", totals)
-	}
-	if strings.Contains(logs.String(), "record not found") {
-		t.Fatalf("missing usage period should not be logged as record not found:\n%s", logs.String())
-	}
-}
-
-func TestBillingUsageReservationCreatesInitialPeriodWithoutRecordNotFoundLog(t *testing.T) {
-	ctx := context.Background()
-	repo, logs, cleanup := newBillingRepositoryWithLogBuffer(t)
-	defer cleanup()
-
-	now := time.Date(2026, 6, 22, 22, 43, 8, 0, time.UTC)
-	subscription := store.GuildSubscription{
-		ID:                 1,
-		GuildID:            "guild-1",
-		Plan:               "starter",
-		CurrentPeriodStart: now.Add(-time.Hour),
-		CurrentPeriodEnd:   now.Add(14 * 24 * time.Hour),
-	}
-	reservation, totals, denied, err := repo.BeginUsageReservation(ctx, subscription, "ai_response", 1, 10, now)
-	if err != nil {
-		t.Fatalf("BeginUsageReservation: %v", err)
-	}
-	if denied {
-		t.Fatal("expected initial reservation to be allowed")
-	}
-	if reservation.UsagePeriodID == 0 || totals.AIResponsesReserved != 1 {
-		t.Fatalf("expected reservation to create and reserve initial period, reservation=%+v totals=%+v", reservation, totals)
-	}
-	if strings.Contains(logs.String(), "record not found") {
-		t.Fatalf("initial usage period creation should not be logged as record not found:\n%s", logs.String())
-	}
-}
-
-func TestBillingUsageReservationReleasesExpiredPendingBeforeQuota(t *testing.T) {
+func TestCreditReservationCommitSettlesAboveInitialHold(t *testing.T) {
 	ctx := context.Background()
 	repo, _, cleanup := newBillingRepositoryWithLogBuffer(t)
 	defer cleanup()
 
-	now := time.Now().UTC().Add(-time.Hour)
-	subscription := store.GuildSubscription{
-		ID:                 1,
-		GuildID:            "guild-1",
-		Plan:               "trial",
-		CurrentPeriodStart: now.Add(-time.Hour),
-		CurrentPeriodEnd:   now.Add(24 * time.Hour),
-	}
-	expired, totals, denied, err := repo.BeginUsageReservation(ctx, subscription, "image_generation", 1, 1, now)
-	if err != nil {
-		t.Fatalf("BeginUsageReservation expired seed: %v", err)
-	}
-	if denied || totals.ImageGenerationsReserved != 1 {
-		t.Fatalf("expected initial pending reservation at limit, denied=%t totals=%+v", denied, totals)
-	}
+	now := time.Date(2026, 6, 22, 22, 43, 8, 0, time.UTC)
+	seedCreditAccountAndGrant(t, ctx, repo, "guild-1", "grant-1", 20, now)
 
-	fresh, totals, denied, err := repo.BeginUsageReservation(ctx, subscription, "image_generation", 1, 1, now.Add(31*time.Minute))
+	reservation, account, denied, err := repo.BeginCreditReservation(ctx, CreditReservationRequest{
+		ReservationID:   "reservation-1",
+		GuildID:         "guild-1",
+		Action:          "assistant_model_round",
+		RequestID:       "request-1",
+		ExpectedCredits: 4,
+		MaxCredits:      4,
+	}, now)
 	if err != nil {
-		t.Fatalf("BeginUsageReservation after expiry: %v", err)
+		t.Fatalf("BeginCreditReservation: %v", err)
 	}
 	if denied {
-		t.Fatal("expired pending reservation should not block a fresh reservation")
+		t.Fatal("expected credit reservation to be allowed")
 	}
-	if fresh.ReservationID == "" || fresh.ReservationID == expired.ReservationID {
-		t.Fatalf("expected fresh reservation, expired=%+v fresh=%+v", expired, fresh)
-	}
-	if totals.ImageGenerationsReserved != 1 || totals.ImageGenerationsConsumed != 0 {
-		t.Fatalf("expected exactly one active reserved image after cleanup, got %+v", totals)
+	if reservation.ReservationID == "" || account.AvailableCredits != 16 || account.ReservedCredits != 4 {
+		t.Fatalf("expected 4-credit hold, reservation=%+v account=%+v", reservation, account)
 	}
 
-	var expiredRow store.UsageReservation
-	if err := repo.db.Where("reservation_id = ?", expired.ReservationID).First(&expiredRow).Error; err != nil {
-		t.Fatalf("load expired reservation: %v", err)
+	if err := repo.CommitCreditReservation(ctx, CreditCommitRequest{
+		ReservationID: reservation.ReservationID,
+		FinalCredits:  7,
+		MetadataJSON:  `{"prompt_tokens":8000}`,
+	}, now.Add(time.Minute)); err != nil {
+		t.Fatalf("CommitCreditReservation: %v", err)
 	}
-	if expiredRow.Status != "released" {
-		t.Fatalf("expected expired reservation released, got %+v", expiredRow)
+
+	account, ok, err := repo.GetCreditAccountByGuild(ctx, "guild-1")
+	if err != nil || !ok {
+		t.Fatalf("GetCreditAccountByGuild: ok=%t err=%v", ok, err)
+	}
+	if account.AvailableCredits != 13 || account.ReservedCredits != 0 {
+		t.Fatalf("expected final 7-credit debit, got account=%+v", account)
+	}
+	var grant store.CreditGrant
+	if err := repo.db.Where("grant_id = ?", "grant-1").First(&grant).Error; err != nil {
+		t.Fatalf("load credit grant: %v", err)
+	}
+	if grant.CreditsRemaining != 13 {
+		t.Fatalf("expected grant remaining to track final debit, got %+v", grant)
+	}
+	var committed store.CreditReservation
+	if err := repo.db.Where("reservation_id = ?", reservation.ReservationID).First(&committed).Error; err != nil {
+		t.Fatalf("load credit reservation: %v", err)
+	}
+	if committed.Status != "committed" || committed.CommittedCredits != 7 {
+		t.Fatalf("expected committed reservation for final credits, got %+v", committed)
+	}
+}
+
+func TestCreditReservationReleaseRestoresHeldCredits(t *testing.T) {
+	ctx := context.Background()
+	repo, _, cleanup := newBillingRepositoryWithLogBuffer(t)
+	defer cleanup()
+
+	now := time.Date(2026, 6, 23, 12, 0, 0, 0, time.UTC)
+	seedCreditAccountAndGrant(t, ctx, repo, "guild-1", "grant-1", 10, now)
+
+	reservation, _, denied, err := repo.BeginCreditReservation(ctx, CreditReservationRequest{
+		ReservationID:   "reservation-1",
+		GuildID:         "guild-1",
+		Action:          "web_search",
+		RequestID:       "request-1",
+		ExpectedCredits: 6,
+		MaxCredits:      6,
+	}, now)
+	if err != nil {
+		t.Fatalf("BeginCreditReservation: %v", err)
+	}
+	if denied {
+		t.Fatal("expected credit reservation to be allowed")
+	}
+
+	if err := repo.ReleaseCreditReservation(ctx, reservation.ReservationID, "provider_error", now.Add(time.Minute)); err != nil {
+		t.Fatalf("ReleaseCreditReservation: %v", err)
+	}
+
+	account, ok, err := repo.GetCreditAccountByGuild(ctx, "guild-1")
+	if err != nil || !ok {
+		t.Fatalf("GetCreditAccountByGuild: ok=%t err=%v", ok, err)
+	}
+	if account.AvailableCredits != 10 || account.ReservedCredits != 0 {
+		t.Fatalf("expected released credits restored, got account=%+v", account)
+	}
+	var grant store.CreditGrant
+	if err := repo.db.Where("grant_id = ?", "grant-1").First(&grant).Error; err != nil {
+		t.Fatalf("load credit grant: %v", err)
+	}
+	if grant.CreditsRemaining != 10 {
+		t.Fatalf("expected released grant allocation restored, got %+v", grant)
+	}
+}
+
+func TestCreditReservationDenialDoesNotDrainGrantRows(t *testing.T) {
+	ctx := context.Background()
+	repo, _, cleanup := newBillingRepositoryWithLogBuffer(t)
+	defer cleanup()
+
+	now := time.Date(2026, 6, 24, 12, 0, 0, 0, time.UTC)
+	seedCreditAccountAndGrant(t, ctx, repo, "guild-1", "grant-1", 5, now)
+
+	_, account, denied, err := repo.BeginCreditReservation(ctx, CreditReservationRequest{
+		ReservationID:   "reservation-1",
+		GuildID:         "guild-1",
+		Action:          "image_generation",
+		RequestID:       "request-1",
+		ExpectedCredits: 6,
+		MaxCredits:      6,
+	}, now)
+	if err != nil {
+		t.Fatalf("BeginCreditReservation: %v", err)
+	}
+	if !denied {
+		t.Fatal("expected reservation to be denied")
+	}
+	if account.AvailableCredits != 5 || account.ReservedCredits != 0 {
+		t.Fatalf("denied reservation should not update account, got %+v", account)
+	}
+	var grant store.CreditGrant
+	if err := repo.db.Where("grant_id = ?", "grant-1").First(&grant).Error; err != nil {
+		t.Fatalf("load credit grant: %v", err)
+	}
+	if grant.CreditsRemaining != 5 {
+		t.Fatalf("denied reservation should not drain grants, got %+v", grant)
 	}
 }
 
@@ -474,6 +517,34 @@ func newBillingRepositoryWithLogBuffer(t *testing.T) (*BillingRepository, *bytes
 	t.Helper()
 	db, logs, cleanup := newRepositoryGormWithLogBuffer(t)
 	return NewBillingRepository(db), logs, cleanup
+}
+
+func seedCreditAccountAndGrant(t *testing.T, ctx context.Context, repo *BillingRepository, guildID, grantID string, credits int64, now time.Time) {
+	t.Helper()
+	if _, err := repo.EnsureCreditAccount(ctx, store.CreditAccount{
+		GuildID:                    guildID,
+		Status:                     "active",
+		ActivePack:                 "starter",
+		RetentionDays:              30,
+		KnowledgeStorageBytesLimit: 100 * 1024 * 1024,
+		CreatedAt:                  now,
+	}); err != nil {
+		t.Fatalf("EnsureCreditAccount: %v", err)
+	}
+	expiresAt := now.Add(30 * 24 * time.Hour)
+	if _, _, inserted, err := repo.GrantCredits(ctx, CreditGrantRequest{
+		GrantID:   grantID,
+		GuildID:   guildID,
+		Source:    "test",
+		SourceID:  grantID,
+		Pack:      "starter",
+		Credits:   credits,
+		ExpiresAt: &expiresAt,
+	}); err != nil {
+		t.Fatalf("GrantCredits: %v", err)
+	} else if !inserted {
+		t.Fatalf("expected test grant %q to be inserted", grantID)
+	}
 }
 
 func newRepositoryGormWithLogBuffer(t *testing.T) (*gorm.DB, *bytes.Buffer, func()) {

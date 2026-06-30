@@ -13,12 +13,11 @@ import (
 )
 
 // AdminGuildBilling is the operator-facing billing snapshot for a single guild.
-// It exposes both the raw stored status (for editing) and the effective status
-// after grace/expiry rules are applied.
+// It exposes both the raw stored status (for editing) and the effective status.
 type AdminGuildBilling struct {
-	HasSubscription    bool
-	Plan               string
-	PlanDisplayName    string
+	HasCreditAccount   bool
+	Pack               string
+	PackDisplayName    string
 	Status             string
 	StoredStatus       string
 	GraceState         string
@@ -31,16 +30,18 @@ type AdminGuildBilling struct {
 	ReadOnly           bool
 	BillingOwnerUserID string
 	Email              string
-	Limits             PlanLimits
-	Usage              repository.BillingUsageTotals
+	Limits             PackDefinition
+	AvailableCredits   int64
+	ReservedCredits    int64
+	Credits            int64
 }
 
-// AdminSetSubscriptionRequest captures an operator override of a guild
-// subscription. Empty/nil fields leave the existing value untouched.
-type AdminSetSubscriptionRequest struct {
+// AdminSetCreditAccountRequest captures an operator override of a guild credit
+// account. Empty/nil fields leave the existing value untouched.
+type AdminSetCreditAccountRequest struct {
 	GuildID           string
 	ActorUserID       string
-	Plan              string
+	Pack              string
 	Status            string
 	PeriodEnd         *time.Time
 	TrialEndsAt       *time.Time
@@ -48,9 +49,9 @@ type AdminSetSubscriptionRequest struct {
 	CancelAtPeriodEnd *bool
 }
 
-// AdminStatuses lists the subscription statuses an operator may assign.
+// AdminStatuses lists the credit account statuses an operator may assign.
 func AdminStatuses() []string {
-	return []string{StatusActive, StatusTrialing, StatusPastDue, StatusGrace, StatusReadOnly, StatusSuspended, StatusCanceled}
+	return []string{StatusActive, StatusTrialing, StatusPastDue, StatusGrace, StatusReadOnly, StatusSuspended, StatusCanceled, StatusDepleted}
 }
 
 func isAdminStatus(status string) bool {
@@ -78,18 +79,19 @@ func graceForStatus(status string) string {
 		return GraceSuspended
 	case StatusCanceled:
 		return GraceCanceled
+	case StatusDepleted:
+		return GraceDepleted
 	default:
 		return GraceReadOnly
 	}
 }
 
-// AdminOverview composes the operator billing view for a guild. It never
-// returns ErrNoSubscription; a guild without a subscription yields
-// HasSubscription=false so the caller can still render the row.
+// AdminOverview composes the operator billing view for a guild. A guild without
+// a credit account yields HasCreditAccount=false so the caller can render it.
 func (s *Service) AdminOverview(ctx context.Context, guildID string) (AdminGuildBilling, error) {
 	guildID = strings.TrimSpace(guildID)
 	if s == nil || s.repo == nil {
-		return AdminGuildBilling{}, ErrNoSubscription
+		return AdminGuildBilling{}, ErrNoCreditAccount
 	}
 	if guildID == "" {
 		return AdminGuildBilling{}, fmt.Errorf("guild id is required")
@@ -103,7 +105,7 @@ func (s *Service) AdminOverview(ctx context.Context, guildID string) (AdminGuild
 		overview.BillingOwnerUserID = strings.TrimSpace(account.BillingOwnerUserID)
 	}
 
-	subscription, ok, err := s.repo.GetSubscriptionByGuild(ctx, guildID)
+	account, ok, err := s.repo.GetCreditAccountByGuild(ctx, guildID)
 	if err != nil {
 		return AdminGuildBilling{}, err
 	}
@@ -111,79 +113,72 @@ func (s *Service) AdminOverview(ctx context.Context, guildID string) (AdminGuild
 		return overview, nil
 	}
 
-	limits, ok := LimitsForPlan(subscription.Plan)
+	pack, ok := PackForID(firstNonEmpty(account.ActivePack, PackTrial))
 	if !ok {
-		return AdminGuildBilling{}, ErrUnknownPlan
+		return AdminGuildBilling{}, ErrUnknownPack
 	}
-	now := s.currentTime()
-	status, grace, canUse, readOnly := effectiveState(subscription, now)
-	totals, err := s.repo.UsageTotals(ctx, subscription.GuildID, subscription.CurrentPeriodStart.UTC(), subscription.CurrentPeriodEnd.UTC())
-	if err != nil {
-		return AdminGuildBilling{}, err
-	}
+	entitlement := s.entitlementFromCreditAccount(account)
 
-	overview.HasSubscription = true
-	overview.Plan = subscription.Plan
-	overview.PlanDisplayName = limits.DisplayName
-	overview.Status = status
-	overview.StoredStatus = strings.TrimSpace(subscription.Status)
-	overview.GraceState = grace
-	overview.PaymentProvider = subscription.PaymentProvider
-	overview.PeriodStart = subscription.CurrentPeriodStart.UTC()
-	overview.PeriodEnd = subscription.CurrentPeriodEnd.UTC()
-	overview.TrialEndsAt = subscription.TrialEndsAt
-	overview.CancelAtPeriodEnd = subscription.CancelAtPeriodEnd
-	overview.CanUsePaidFeatures = canUse
-	overview.ReadOnly = readOnly
-	overview.Limits = limits
-	overview.Usage = totals
-	if owner := strings.TrimSpace(subscription.BillingOwnerUserID); owner != "" {
+	overview.HasCreditAccount = true
+	overview.Pack = pack.Pack
+	overview.PackDisplayName = pack.DisplayName
+	overview.Status = entitlement.Status
+	overview.StoredStatus = strings.TrimSpace(account.Status)
+	overview.GraceState = entitlement.GraceState
+	overview.PaymentProvider = account.PaymentProvider
+	overview.PeriodStart = entitlement.PeriodStart
+	overview.PeriodEnd = entitlement.PeriodEnd
+	overview.CanUsePaidFeatures = entitlement.CanUsePaidFeatures
+	overview.ReadOnly = entitlement.ReadOnly
+	overview.Limits = pack
+	overview.AvailableCredits = account.AvailableCredits
+	overview.ReservedCredits = account.ReservedCredits
+	overview.Credits = pack.Credits
+	if owner := strings.TrimSpace(account.BillingOwnerUserID); owner != "" {
 		overview.BillingOwnerUserID = owner
 	}
 	return overview, nil
 }
 
-// AdminSetSubscription applies an operator override to a guild subscription,
-// writing a fresh entitlement snapshot and recording an audit event. It creates
-// a subscription if the guild does not yet have one.
-func (s *Service) AdminSetSubscription(ctx context.Context, request AdminSetSubscriptionRequest) (AdminGuildBilling, error) {
+// AdminSetCreditAccount applies an operator override to a guild credit account.
+func (s *Service) AdminSetCreditAccount(ctx context.Context, request AdminSetCreditAccountRequest) (AdminGuildBilling, error) {
 	guildID := strings.TrimSpace(request.GuildID)
 	if s == nil || s.repo == nil {
-		return AdminGuildBilling{}, ErrNoSubscription
+		return AdminGuildBilling{}, ErrNoCreditAccount
 	}
 	if guildID == "" {
 		return AdminGuildBilling{}, fmt.Errorf("guild id is required")
 	}
 
 	now := s.currentTime()
-	existing, hasExisting, err := s.repo.GetSubscriptionByGuild(ctx, guildID)
+	existing, hasExisting, err := s.repo.GetCreditAccountByGuild(ctx, guildID)
 	if err != nil {
 		return AdminGuildBilling{}, err
 	}
 
-	plan := ""
+	packID := ""
 	if hasExisting {
-		plan = existing.Plan
+		packID = existing.ActivePack
 	}
-	if requested := strings.TrimSpace(request.Plan); requested != "" {
-		normalized, ok := NormalizePlan(requested)
+	if requested := strings.TrimSpace(request.Pack); requested != "" {
+		normalized, ok := NormalizePack(requested)
 		if !ok {
-			return AdminGuildBilling{}, ErrUnknownPlan
+			return AdminGuildBilling{}, ErrUnknownPack
 		}
-		plan = normalized
+		packID = normalized
 	}
-	if plan == "" {
-		plan = PlanTrial
+	if packID == "" {
+		packID = PackTrial
 	}
-	limits, ok := LimitsForPlan(plan)
+	pack, ok := PackForID(packID)
 	if !ok {
-		return AdminGuildBilling{}, ErrUnknownPlan
+		return AdminGuildBilling{}, ErrUnknownPack
 	}
 
 	status := StatusActive
 	if hasExisting && strings.TrimSpace(existing.Status) != "" {
 		status = strings.TrimSpace(existing.Status)
-	} else if plan == PlanTrial {
+	} else if packID == PackTrial {
 		status = StatusTrialing
 	}
 	if requested := strings.ToLower(strings.TrimSpace(request.Status)); requested != "" {
@@ -194,96 +189,59 @@ func (s *Service) AdminSetSubscription(ctx context.Context, request AdminSetSubs
 	}
 	grace := graceForStatus(status)
 
-	periodStart := now
-	if hasExisting && !existing.CurrentPeriodStart.IsZero() {
-		periodStart = existing.CurrentPeriodStart
-	}
-	periodEnd := time.Time{}
-	if hasExisting {
-		periodEnd = existing.CurrentPeriodEnd
-	}
-	if request.PeriodEnd != nil {
-		periodEnd = request.PeriodEnd.UTC()
-	}
-	if periodEnd.IsZero() {
-		if plan == PlanTrial {
-			periodEnd = now.Add(TrialDuration)
-		} else {
-			periodEnd = now.AddDate(0, 1, 0)
-		}
-	}
-
-	var trialEndsAt *time.Time
-	if hasExisting {
-		trialEndsAt = existing.TrialEndsAt
-	}
-	if request.ClearTrialEndsAt {
-		trialEndsAt = nil
-	} else if request.TrialEndsAt != nil {
-		value := request.TrialEndsAt.UTC()
-		trialEndsAt = &value
-	}
-
-	cancelAtPeriodEnd := false
-	if hasExisting {
-		cancelAtPeriodEnd = existing.CancelAtPeriodEnd
-	}
-	if request.CancelAtPeriodEnd != nil {
-		cancelAtPeriodEnd = *request.CancelAtPeriodEnd
-	}
-
-	customerAccountID := uint(0)
 	billingOwner := ""
 	if hasExisting {
-		customerAccountID = existing.CustomerAccountID
 		billingOwner = existing.BillingOwnerUserID
 	}
-	if customerAccountID == 0 {
-		account, err := s.repo.EnsureCustomerAccount(ctx, store.CustomerAccount{
-			GuildID:            guildID,
-			BillingOwnerUserID: billingOwner,
+	customer, err := s.repo.EnsureCustomerAccount(ctx, store.CustomerAccount{
+		GuildID:            guildID,
+		BillingOwnerUserID: billingOwner,
+	})
+	if err != nil {
+		return AdminGuildBilling{}, err
+	}
+	if billingOwner == "" {
+		billingOwner = strings.TrimSpace(customer.BillingOwnerUserID)
+	}
+	readOnlyAt := timePtrIf(status == StatusReadOnly || status == StatusCanceled, now)
+	suspendedAt := timePtrIf(status == StatusSuspended, now)
+	account, err := s.repo.EnsureCreditAccount(ctx, store.CreditAccount{
+		GuildID:                    guildID,
+		BillingOwnerUserID:         billingOwner,
+		Status:                     status,
+		PaymentProvider:            ProviderManual,
+		ActivePack:                 pack.Pack,
+		RetentionDays:              pack.RetentionDays,
+		KnowledgeStorageBytesLimit: pack.KnowledgeStorageBytes,
+		ReadOnlyAt:                 readOnlyAt,
+		SuspendedAt:                suspendedAt,
+	})
+	if err != nil {
+		return AdminGuildBilling{}, err
+	}
+	if !hasExisting || existing.ActivePack != pack.Pack {
+		sourceID := fmt.Sprintf("admin:%s:%d", strings.TrimSpace(request.ActorUserID), now.UnixNano())
+		_, account, _, err = s.repo.GrantCredits(ctx, repository.CreditGrantRequest{
+			GrantID:      "grant_admin_" + safeLedgerID(guildID) + "_" + strconv.FormatInt(now.UnixNano(), 10),
+			GuildID:      guildID,
+			Source:       ProviderManual,
+			SourceID:     sourceID,
+			Pack:         pack.Pack,
+			Credits:      pack.Credits,
+			ExpiresAt:    timePtr(now.Add(pack.ExpiresAfter)),
+			MetadataJSON: MarshalRaw(map[string]any{"pack": pack.Pack, "source": ProviderManual, "actor_user_id": request.ActorUserID}),
 		})
 		if err != nil {
 			return AdminGuildBilling{}, err
 		}
-		customerAccountID = account.ID
-		if billingOwner == "" {
-			billingOwner = strings.TrimSpace(account.BillingOwnerUserID)
-		}
 	}
-
-	externalSubscriptionID := ""
-	externalEntitlementID := ""
-	if hasExisting {
-		externalSubscriptionID = existing.ExternalSubscriptionID
-		externalEntitlementID = existing.ExternalEntitlementID
-	}
-
-	subscription := store.GuildSubscription{
-		GuildID:                guildID,
-		CustomerAccountID:      customerAccountID,
-		Plan:                   plan,
-		Status:                 status,
-		GraceState:             grace,
-		PaymentProvider:        ProviderManual,
-		ExternalSubscriptionID: externalSubscriptionID,
-		ExternalEntitlementID:  externalEntitlementID,
-		BillingOwnerUserID:     billingOwner,
-		CurrentPeriodStart:     periodStart,
-		CurrentPeriodEnd:       periodEnd,
-		TrialEndsAt:            trialEndsAt,
-		CancelAtPeriodEnd:      cancelAtPeriodEnd,
-	}
-	if _, err := s.repo.UpsertSubscriptionWithSnapshot(ctx, subscription, snapshotForLimits(guildID, 0, limits, status, grace, now)); err != nil {
-		return AdminGuildBilling{}, err
-	}
+	_ = account
 
 	if s.audit != nil {
 		metadata, err := json.Marshal(map[string]string{
-			"plan":                 plan,
-			"status":               status,
-			"period_end":           periodEnd.Format(time.RFC3339),
-			"cancel_at_period_end": strconv.FormatBool(cancelAtPeriodEnd),
+			"pack":        pack.Pack,
+			"status":      status,
+			"grace_state": grace,
 		})
 		if err != nil {
 			metadata = []byte("{}")
@@ -291,8 +249,8 @@ func (s *Service) AdminSetSubscription(ctx context.Context, request AdminSetSubs
 		_ = s.audit.Record(ctx, store.AuditEvent{
 			GuildID:    guildID,
 			ActorID:    strings.TrimSpace(request.ActorUserID),
-			Action:     "admin.subscription.set",
-			TargetType: "guild_subscription",
+			Action:     "admin.credit_account.set",
+			TargetType: "credit_account",
 			TargetID:   guildID,
 			Metadata:   string(metadata),
 			CreatedAt:  now,
@@ -300,4 +258,16 @@ func (s *Service) AdminSetSubscription(ctx context.Context, request AdminSetSubs
 	}
 
 	return s.AdminOverview(ctx, guildID)
+}
+
+func timePtr(value time.Time) *time.Time {
+	value = value.UTC()
+	return &value
+}
+
+func timePtrIf(ok bool, value time.Time) *time.Time {
+	if !ok {
+		return nil
+	}
+	return timePtr(value)
 }

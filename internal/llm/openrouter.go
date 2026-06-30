@@ -108,6 +108,7 @@ func (c *OpenRouterClient) Chat(ctx context.Context, request ChatRequest) (ChatR
 		slog.Bool("provider_require_parameters", payload.Provider != nil && payload.Provider.RequireParameters),
 		slog.Bool("structured_outputs", payload.StructuredOutputs != nil && *payload.StructuredOutputs),
 		slog.Bool("tool_choice_present", request.ToolChoice != nil),
+		slog.Int("max_tokens", request.MaxTokens),
 	)
 
 	data, err := c.post(ctx, "/chat/completions", body)
@@ -123,10 +124,11 @@ func (c *OpenRouterClient) Chat(ctx context.Context, request ChatRequest) (ChatR
 		return ChatResponse{}, fmt.Errorf("openrouter response did not include choices")
 	}
 	return ChatResponse{
-		ID:        decoded.ID,
-		Model:     firstNonEmpty(decoded.Model, request.Model),
-		Content:   decoded.Choices[0].Message.Content,
-		ToolCalls: decoded.Choices[0].Message.ToolCalls,
+		ID:           decoded.ID,
+		Model:        firstNonEmpty(decoded.Model, request.Model),
+		Content:      decoded.Choices[0].Message.Content,
+		ToolCalls:    decoded.Choices[0].Message.ToolCalls,
+		FinishReason: decoded.Choices[0].FinishReason,
 		Usage: Usage{
 			PromptTokens:     decoded.Usage.PromptTokens,
 			CompletionTokens: decoded.Usage.CompletionTokens,
@@ -159,6 +161,7 @@ func (c *OpenRouterClient) StreamChat(ctx context.Context, request ChatRequest, 
 		slog.Bool("provider_require_parameters", payload.Provider != nil && payload.Provider.RequireParameters),
 		slog.Bool("structured_outputs", payload.StructuredOutputs != nil && *payload.StructuredOutputs),
 		slog.Bool("tool_choice_present", request.ToolChoice != nil),
+		slog.Int("max_tokens", request.MaxTokens),
 	)
 
 	builder := chatStreamBuilder{fallbackModel: request.Model}
@@ -649,7 +652,8 @@ type chatCompletionResponse struct {
 	ID      string `json:"id"`
 	Model   string `json:"model"`
 	Choices []struct {
-		Message Message `json:"message"`
+		Message      Message `json:"message"`
+		FinishReason string  `json:"finish_reason"`
 	} `json:"choices"`
 	Usage struct {
 		PromptTokens     int `json:"prompt_tokens"`
@@ -666,6 +670,7 @@ type chatCompletionStreamChunk struct {
 			Content   string                `json:"content"`
 			ToolCalls []streamToolCallDelta `json:"tool_calls"`
 		} `json:"delta"`
+		FinishReason string `json:"finish_reason"`
 	} `json:"choices"`
 	Usage *struct {
 		PromptTokens     int `json:"prompt_tokens"`
@@ -690,6 +695,7 @@ type chatStreamBuilder struct {
 	fallbackModel string
 	content       strings.Builder
 	toolCalls     map[int]*streamToolCallBuilder
+	finishReason  string
 	usage         Usage
 }
 
@@ -721,6 +727,9 @@ func (b *chatStreamBuilder) Append(data []byte) (ChatStreamDelta, error) {
 
 	var delta ChatStreamDelta
 	for _, choice := range chunk.Choices {
+		if choice.FinishReason != "" {
+			b.finishReason = choice.FinishReason
+		}
 		if choice.Delta.Content != "" {
 			b.content.WriteString(choice.Delta.Content)
 			delta.Content += choice.Delta.Content
@@ -757,11 +766,12 @@ func (b *chatStreamBuilder) Append(data []byte) (ChatStreamDelta, error) {
 
 func (b *chatStreamBuilder) Response() ChatResponse {
 	return ChatResponse{
-		ID:        b.id,
-		Model:     firstNonEmpty(b.model, b.fallbackModel),
-		Content:   b.content.String(),
-		ToolCalls: b.completeToolCalls(),
-		Usage:     b.usage,
+		ID:           b.id,
+		Model:        firstNonEmpty(b.model, b.fallbackModel),
+		Content:      b.content.String(),
+		ToolCalls:    b.completeToolCalls(),
+		FinishReason: b.finishReason,
+		Usage:        b.usage,
 	}
 }
 

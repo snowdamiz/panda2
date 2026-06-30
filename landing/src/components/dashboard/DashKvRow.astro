@@ -1,0 +1,18 @@
+---
+/**
+ * A definition row inside a `dash-kv` list. The default slot is the `dd`,
+ * which receives pass-through attributes (e.g. data hooks, `class="dash-kv-mono"`).
+ */
+interface Props {
+  term: string;
+  class?: string;
+  [key: string]: unknown;
+}
+
+const { term, class: className, ...rest } = Astro.props;
+---
+
+<div class="dash-kv-row">
+  <dt>{term}</dt>
+  <dd class:list={[className]} {...rest}><slot /></dd>
+</div>

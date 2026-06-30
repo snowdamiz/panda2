@@ -33,10 +33,42 @@ type ModelLister interface {
 }
 
 type Message struct {
-	Role       string     `json:"role"`
-	Content    string     `json:"content,omitempty"`
-	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`
-	ToolCallID string     `json:"tool_call_id,omitempty"`
+	Role         string        `json:"role"`
+	Content      string        `json:"content,omitempty"`
+	ContentParts []ContentPart `json:"-"`
+	ToolCalls    []ToolCall    `json:"tool_calls,omitempty"`
+	ToolCallID   string        `json:"tool_call_id,omitempty"`
+}
+
+type ContentPart struct {
+	Type     string        `json:"type"`
+	Text     string        `json:"text,omitempty"`
+	ImageURL *ImageURLPart `json:"image_url,omitempty"`
+}
+
+type ImageURLPart struct {
+	URL string `json:"url"`
+}
+
+func (m Message) MarshalJSON() ([]byte, error) {
+	type messageAlias struct {
+		Role       string     `json:"role"`
+		Content    any        `json:"content,omitempty"`
+		ToolCalls  []ToolCall `json:"tool_calls,omitempty"`
+		ToolCallID string     `json:"tool_call_id,omitempty"`
+	}
+	var content any
+	if len(m.ContentParts) > 0 {
+		content = m.ContentParts
+	} else if m.Content != "" {
+		content = m.Content
+	}
+	return json.Marshal(messageAlias{
+		Role:       m.Role,
+		Content:    content,
+		ToolCalls:  m.ToolCalls,
+		ToolCallID: m.ToolCallID,
+	})
 }
 
 type ChatRequest struct {
@@ -92,11 +124,12 @@ type ToolCallFunction struct {
 }
 
 type ChatResponse struct {
-	ID        string
-	Model     string
-	Content   string
-	ToolCalls []ToolCall
-	Usage     Usage
+	ID           string
+	Model        string
+	Content      string
+	ToolCalls    []ToolCall
+	FinishReason string
+	Usage        Usage
 }
 
 type EmbeddingRequest struct {

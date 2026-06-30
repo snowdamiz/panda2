@@ -1,28 +1,28 @@
 # Panda Discord Assistant
 
-Panda is a hosted Discord assistant sold per server. Server admins install Panda, start a trial, configure behavior and permissions in Discord, and upgrade when the server needs more included usage.
+Panda is a hosted Discord assistant sold per server. Server admins install Panda, start a trial, configure behavior and permissions in Discord, and buy credit packs when the server needs more paid usage.
 
-Customers do not need provider, search, hosting, or database accounts. Panda operates those services and enforces plan limits before paid work begins.
+Customers do not need provider, search, hosting, or database accounts. Panda operates those services and reserves server credits before paid work begins.
 
 ## What Panda Does
 
 - Answers natural Discord messages when members mention Panda.
 - Summarizes, explains, rewrites, and translates messages through natural chat or context menu actions.
-- Uses server knowledge, memory consent, web search, schedules, reminders, composed tools, and music within the server's plan.
+- Uses server knowledge, memory consent, web search, schedules, reminders, composed tools, and music within the server's credit balance.
 - Lets admins control channels, roles, tool access, response length, memory, billing, and audit history.
-- Shows plan, renewal, AI response usage, web search usage, storage, and quota state through `/billing` and natural admin chat.
+- Shows pack, credits, storage, retention, and billing state through `/billing` and natural admin chat.
 
-## Plans
+## Credit Packs
 
-| Plan | Price | AI responses | Web searches | Knowledge storage | Retention |
+| Pack | Price | Credits | Knowledge storage | Retention | Credit expiry |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| Trial | $0 for 14 days | 250 total | 20 total | 25 MB | 14 days |
-| Starter | $19/server/month | 2,000/month | 100/month | 100 MB | 30 days |
-| Plus | $49/server/month | 5,000/month | 400/month | 500 MB | 90 days |
-| Pro | $99/server/month | 10,000/month | 1,000/month | 2 GB | 180 days |
-| Business | $249/server/month | 25,000/month | 2,000/month | 10 GB | 365 days |
+| Trial | $0 | 1,500 | 25 MB | 14 days | 14 days |
+| Starter | $19 | 10,000 | 100 MB | 30 days | 30 days |
+| Plus | $49 | 30,000 | 500 MB | 90 days | 90 days |
+| Pro | $99 | 75,000 | 2 GB | 180 days | 180 days |
+| Business | $249 | 220,000 | 10 GB | 365 days | 365 days |
 
-Trials do not auto-convert without payment approval. Servers use the included limits for their active subscription tier; when a limit is exhausted, paid usage pauses until renewal or a plan upgrade.
+Trials do not auto-convert without payment approval. Servers spend prepaid credits for paid actions; when credits are exhausted, paid usage pauses until the billing owner activates another verified SOL payment.
 
 ## Install Panda
 
@@ -36,16 +36,16 @@ The installer becomes the billing owner for that server. The Discord server owne
 
 Implementation planning for feature-based pre-install customization lives in [Feature-Based Discord Install Customization Plan](FEATURE_INSTALL_CUSTOMIZATION_PLAN.md).
 
-## Buy A Plan
+## Buy A Pack
 
 The billing owner purchases from the Panda landing page:
 
 - Connect a Solana wallet from a browser extension, or open the Solana Pay link in a mobile wallet.
-- Panda creates a server-side payment order with the exact plan, treasury wallet, native SOL amount, memo, reference, and expiration.
+- Panda creates a server-side payment order with the exact pack, credits, treasury wallet, native SOL amount, memo, reference, and expiration.
 - After the transaction is verified, the landing page reveals a one-time activation key.
-- Run `/billing action:activate api_key:<key>` in the Discord server to apply the plan.
+- Run `/billing action:activate api_key:<key>` in the Discord server to grant the pack credits.
 
-Panda grants plans only after the backend verifies the native SOL transaction against Solana RPC. Wallet connection, client-side UI state, redirects, and copied signatures never grant access by themselves.
+Panda grants pack credits only after the backend verifies the native SOL transaction against Solana RPC. Wallet connection, client-side UI state, redirects, and copied signatures never grant access by themselves.
 
 ## End-To-End Flow
 
@@ -53,15 +53,15 @@ The production path has three separate identities: the wallet payer, the Discord
 
 1. A server admin installs Panda from the landing page or Discord app directory.
 2. Panda creates a trial for the Discord server. Members can use Panda within trial limits after admins finish setup.
-3. When the server needs a paid plan, the billing owner opens the landing page and chooses a plan.
-4. The landing page calls the Panda API to create a SOL payment order. The API returns the exact plan, lamports, treasury wallet, memo/reference, cluster, and expiration.
+3. When the server needs more paid usage, the billing owner opens the landing page and chooses a pack.
+4. The landing page calls the Panda API to create a SOL payment order. The API returns the exact pack, credits, lamports, treasury wallet, memo/reference, cluster, and expiration.
 5. The payer connects a Solana wallet through Wallet Standard-compatible extension discovery, or opens the Solana Pay/mobile wallet link.
 6. The wallet signs and sends the exact native SOL transfer. The landing page submits the resulting transaction signature to Panda.
-7. Panda verifies the transaction server-side against Solana RPC. It must match the treasury wallet, native SOL amount, memo/reference, order, guild, plan, expiration, and confirmation threshold.
+7. Panda verifies the transaction server-side against Solana RPC. It must match the treasury wallet, native SOL amount, memo/reference, order, guild, pack, expiration, and confirmation threshold.
 8. After verification, the landing page reveals a one-time activation key. The key is displayed once, stored only as a hash, scoped to the payment order, and can be revoked before use.
 9. The billing owner, a guild admin claiming an unclaimed server, or a Panda operator runs `/billing action:activate api_key:<key>` in Discord.
-10. Panda consumes the key atomically, records the SOL payment event, upserts the server subscription, writes a fresh entitlement snapshot, and marks the order activated.
-11. End users keep using Panda in Discord. Every paid AI, web search, schedule, composed tool, storage, and music path checks the active entitlement and quota before provider spend.
+10. Panda consumes the key atomically, records the SOL payment event, grants the pack credits once, and marks the order activated.
+11. End users keep using Panda in Discord. Every paid AI, web search, schedule, composed tool, storage, and music path reserves credits before provider spend.
 
 The wallet proves payment only. Discord permissions decide who can activate the payment for a server, and entitlement checks decide what end users can do after activation.
 
@@ -70,7 +70,7 @@ The wallet proves payment only. Discord permissions decide who can activate the 
 Setup and administration are handled through natural Discord messages. Ask Panda what you want changed, review the prepared action, then use the confirmation button for sensitive writes.
 
 - Ask Panda to set answer length, tool policy, channel rules, role profiles, tool access, server prompt, or personality.
-- Ask Panda for billing status, usage, quota, audit history, setup warnings, support context, or safe data summaries.
+- Ask Panda for billing status, credit usage, audit history, setup warnings, support context, or safe data summaries.
 - Use `/billing action:activate api_key:<key>` only for one-time activation keys, so secrets stay out of normal chat.
 - Destructive or privileged changes use confirmation buttons before Panda acts.
 
@@ -81,8 +81,8 @@ Panda does not expose model names, provider names, fallback routing, token price
 ## Data And Safety
 
 - User memory is off by default and requires consent.
-- Server knowledge is admin-managed and counted against the active plan.
-- Conversation retention follows the active plan unless a shorter policy is configured.
+- Server knowledge is admin-managed and bounded by the active pack.
+- Conversation retention follows the active pack unless a shorter policy is configured.
 - Suspended or canceled servers keep help, billing, export, delete, and support access while paid AI/search features are disabled.
 - Support bundles avoid raw prompts, raw Discord messages, provider model names, API keys, and billing secrets by default.
 

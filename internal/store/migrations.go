@@ -1518,6 +1518,399 @@ var migrations = []Migration{
 			`CREATE INDEX IF NOT EXISTS idx_guild_configs_assistant_timeout_until ON guild_configs(assistant_timeout_until)`,
 		},
 	},
+	{
+		Version: 38,
+		Name:    "credit_accounts_and_pack_grants",
+		SQL: []string{
+			`ALTER TABLE billing_orders ADD COLUMN pack TEXT NOT NULL DEFAULT ''`,
+			`ALTER TABLE billing_orders ADD COLUMN credits INTEGER NOT NULL DEFAULT 0`,
+			`ALTER TABLE billing_orders ADD COLUMN usd_target_cents INTEGER NOT NULL DEFAULT 0`,
+			`ALTER TABLE billing_orders ADD COLUMN sol_usd_cents INTEGER NOT NULL DEFAULT 0`,
+			`UPDATE billing_orders SET pack = plan WHERE pack = ''`,
+			`CREATE INDEX IF NOT EXISTS idx_billing_orders_pack ON billing_orders(pack)`,
+			`ALTER TABLE billing_coupons ADD COLUMN pack TEXT NOT NULL DEFAULT ''`,
+			`UPDATE billing_coupons SET pack = plan WHERE pack = ''`,
+			`CREATE INDEX IF NOT EXISTS idx_billing_coupons_pack ON billing_coupons(pack)`,
+			`ALTER TABLE billing_coupon_redemptions ADD COLUMN pack TEXT NOT NULL DEFAULT ''`,
+			`ALTER TABLE billing_coupon_redemptions ADD COLUMN credits INTEGER NOT NULL DEFAULT 0`,
+			`UPDATE billing_coupon_redemptions SET pack = plan WHERE pack = ''`,
+			`CREATE INDEX IF NOT EXISTS idx_billing_coupon_redemptions_pack ON billing_coupon_redemptions(pack)`,
+			`ALTER TABLE activation_api_keys ADD COLUMN pack TEXT NOT NULL DEFAULT ''`,
+			`ALTER TABLE activation_api_keys ADD COLUMN credits INTEGER NOT NULL DEFAULT 0`,
+			`UPDATE activation_api_keys SET pack = plan WHERE pack = ''`,
+			`CREATE INDEX IF NOT EXISTS idx_activation_api_keys_pack ON activation_api_keys(pack)`,
+			`ALTER TABLE cost_ledger_events ADD COLUMN reservation_id TEXT NOT NULL DEFAULT ''`,
+			`ALTER TABLE cost_ledger_events ADD COLUMN action TEXT NOT NULL DEFAULT ''`,
+			`CREATE INDEX IF NOT EXISTS idx_cost_ledger_events_reservation_id ON cost_ledger_events(reservation_id)`,
+			`CREATE INDEX IF NOT EXISTS idx_cost_ledger_events_action ON cost_ledger_events(action)`,
+			`CREATE TABLE IF NOT EXISTS credit_accounts (
+				id INTEGER PRIMARY KEY AUTOINCREMENT,
+				guild_id TEXT NOT NULL,
+				billing_owner_user_id TEXT NOT NULL DEFAULT '',
+				status TEXT NOT NULL,
+				payment_provider TEXT NOT NULL DEFAULT '',
+				active_pack TEXT NOT NULL DEFAULT '',
+				available_credits INTEGER NOT NULL DEFAULT 0,
+				reserved_credits INTEGER NOT NULL DEFAULT 0,
+				retention_days INTEGER NOT NULL DEFAULT 0,
+				knowledge_storage_bytes_limit INTEGER NOT NULL DEFAULT 0,
+				storage_rent_grace_until DATETIME,
+				support_state TEXT NOT NULL DEFAULT '',
+				export_state TEXT NOT NULL DEFAULT '',
+				depleted_at DATETIME,
+				read_only_at DATETIME,
+				suspended_at DATETIME,
+				created_at DATETIME NOT NULL,
+				updated_at DATETIME NOT NULL,
+				UNIQUE(guild_id)
+			)`,
+			`CREATE INDEX IF NOT EXISTS idx_credit_accounts_billing_owner_user_id ON credit_accounts(billing_owner_user_id)`,
+			`CREATE INDEX IF NOT EXISTS idx_credit_accounts_status ON credit_accounts(status)`,
+			`CREATE INDEX IF NOT EXISTS idx_credit_accounts_payment_provider ON credit_accounts(payment_provider)`,
+			`CREATE INDEX IF NOT EXISTS idx_credit_accounts_active_pack ON credit_accounts(active_pack)`,
+			`CREATE INDEX IF NOT EXISTS idx_credit_accounts_storage_rent_grace_until ON credit_accounts(storage_rent_grace_until)`,
+			`CREATE INDEX IF NOT EXISTS idx_credit_accounts_support_state ON credit_accounts(support_state)`,
+			`CREATE INDEX IF NOT EXISTS idx_credit_accounts_export_state ON credit_accounts(export_state)`,
+			`CREATE INDEX IF NOT EXISTS idx_credit_accounts_depleted_at ON credit_accounts(depleted_at)`,
+			`CREATE INDEX IF NOT EXISTS idx_credit_accounts_read_only_at ON credit_accounts(read_only_at)`,
+			`CREATE INDEX IF NOT EXISTS idx_credit_accounts_suspended_at ON credit_accounts(suspended_at)`,
+			`CREATE TABLE IF NOT EXISTS credit_grants (
+				id INTEGER PRIMARY KEY AUTOINCREMENT,
+				grant_id TEXT NOT NULL,
+				guild_id TEXT NOT NULL,
+				account_id INTEGER NOT NULL,
+				source TEXT NOT NULL,
+				source_id TEXT NOT NULL,
+				pack TEXT NOT NULL DEFAULT '',
+				credits_granted INTEGER NOT NULL,
+				credits_remaining INTEGER NOT NULL,
+				expires_at DATETIME,
+				metadata_json TEXT NOT NULL DEFAULT '{}',
+				created_at DATETIME NOT NULL,
+				updated_at DATETIME NOT NULL,
+				UNIQUE(grant_id),
+				UNIQUE(guild_id, source, source_id)
+			)`,
+			`CREATE INDEX IF NOT EXISTS idx_credit_grants_guild_id ON credit_grants(guild_id)`,
+			`CREATE INDEX IF NOT EXISTS idx_credit_grants_account_id ON credit_grants(account_id)`,
+			`CREATE INDEX IF NOT EXISTS idx_credit_grants_source ON credit_grants(source)`,
+			`CREATE INDEX IF NOT EXISTS idx_credit_grants_source_id ON credit_grants(source_id)`,
+			`CREATE INDEX IF NOT EXISTS idx_credit_grants_pack ON credit_grants(pack)`,
+			`CREATE INDEX IF NOT EXISTS idx_credit_grants_expires_at ON credit_grants(expires_at)`,
+			`CREATE INDEX IF NOT EXISTS idx_credit_grants_created_at ON credit_grants(created_at)`,
+			`CREATE TABLE IF NOT EXISTS credit_reservations (
+				id INTEGER PRIMARY KEY AUTOINCREMENT,
+				reservation_id TEXT NOT NULL,
+				guild_id TEXT NOT NULL,
+				account_id INTEGER NOT NULL,
+				action TEXT NOT NULL,
+				request_id TEXT NOT NULL DEFAULT '',
+				expected_credits INTEGER NOT NULL,
+				max_credits INTEGER NOT NULL,
+				committed_credits INTEGER NOT NULL DEFAULT 0,
+				status TEXT NOT NULL,
+				expires_at DATETIME NOT NULL,
+				metadata_json TEXT NOT NULL DEFAULT '{}',
+				created_at DATETIME NOT NULL,
+				updated_at DATETIME NOT NULL,
+				UNIQUE(reservation_id)
+			)`,
+			`CREATE INDEX IF NOT EXISTS idx_credit_reservations_guild_id ON credit_reservations(guild_id)`,
+			`CREATE INDEX IF NOT EXISTS idx_credit_reservations_account_id ON credit_reservations(account_id)`,
+			`CREATE INDEX IF NOT EXISTS idx_credit_reservations_action ON credit_reservations(action)`,
+			`CREATE INDEX IF NOT EXISTS idx_credit_reservations_request_id ON credit_reservations(request_id)`,
+			`CREATE INDEX IF NOT EXISTS idx_credit_reservations_status ON credit_reservations(status)`,
+			`CREATE INDEX IF NOT EXISTS idx_credit_reservations_expires_at ON credit_reservations(expires_at)`,
+			`CREATE TABLE IF NOT EXISTS credit_ledger_entries (
+				id INTEGER PRIMARY KEY AUTOINCREMENT,
+				entry_id TEXT NOT NULL,
+				guild_id TEXT NOT NULL,
+				account_id INTEGER NOT NULL,
+				reservation_id TEXT NOT NULL DEFAULT '',
+				grant_id TEXT NOT NULL DEFAULT '',
+				type TEXT NOT NULL,
+				action TEXT NOT NULL DEFAULT '',
+				credits INTEGER NOT NULL,
+				balance_after INTEGER NOT NULL DEFAULT 0,
+				request_id TEXT NOT NULL DEFAULT '',
+				metadata_json TEXT NOT NULL DEFAULT '{}',
+				created_at DATETIME NOT NULL,
+				UNIQUE(entry_id)
+			)`,
+			`CREATE INDEX IF NOT EXISTS idx_credit_ledger_entries_guild_id ON credit_ledger_entries(guild_id)`,
+			`CREATE INDEX IF NOT EXISTS idx_credit_ledger_entries_account_id ON credit_ledger_entries(account_id)`,
+			`CREATE INDEX IF NOT EXISTS idx_credit_ledger_entries_reservation_id ON credit_ledger_entries(reservation_id)`,
+			`CREATE INDEX IF NOT EXISTS idx_credit_ledger_entries_grant_id ON credit_ledger_entries(grant_id)`,
+			`CREATE INDEX IF NOT EXISTS idx_credit_ledger_entries_type ON credit_ledger_entries(type)`,
+			`CREATE INDEX IF NOT EXISTS idx_credit_ledger_entries_action ON credit_ledger_entries(action)`,
+			`CREATE INDEX IF NOT EXISTS idx_credit_ledger_entries_request_id ON credit_ledger_entries(request_id)`,
+			`CREATE INDEX IF NOT EXISTS idx_credit_ledger_entries_created_at ON credit_ledger_entries(created_at)`,
+			`INSERT OR IGNORE INTO credit_accounts (
+				guild_id,
+				billing_owner_user_id,
+				status,
+				payment_provider,
+				active_pack,
+				retention_days,
+				knowledge_storage_bytes_limit,
+				storage_rent_grace_until,
+				read_only_at,
+				suspended_at,
+				created_at,
+				updated_at
+			)
+				SELECT
+					guilds.guild_id,
+					COALESCE(NULLIF(subscriptions.billing_owner_user_id, ''), NULLIF(accounts.billing_owner_user_id, ''), guilds.installed_by_user_id, ''),
+					CASE
+						WHEN subscriptions.status IN ('trialing', 'active', 'grace', 'past_due', 'read_only', 'suspended', 'canceled') THEN subscriptions.status
+						WHEN guilds.install_status = 'active' AND guilds.left_at IS NULL THEN 'trialing'
+						ELSE 'read_only'
+					END,
+					COALESCE(NULLIF(subscriptions.payment_provider, ''), 'trial'),
+					CASE
+						WHEN subscriptions.plan IN ('trial', 'starter', 'plus', 'pro', 'business') THEN subscriptions.plan
+						ELSE 'trial'
+					END,
+					CASE subscriptions.plan
+						WHEN 'starter' THEN 30
+						WHEN 'plus' THEN 90
+						WHEN 'pro' THEN 180
+						WHEN 'business' THEN 365
+						ELSE 14
+					END,
+					CASE subscriptions.plan
+						WHEN 'starter' THEN 104857600
+						WHEN 'plus' THEN 524288000
+						WHEN 'pro' THEN 2147483648
+						WHEN 'business' THEN 10737418240
+						ELSE 26214400
+					END,
+					CASE WHEN subscriptions.plan IN ('starter', 'plus', 'pro', 'business') THEN datetime(CURRENT_TIMESTAMP, '+7 days') ELSE NULL END,
+					CASE WHEN subscriptions.status IN ('read_only', 'canceled') THEN CURRENT_TIMESTAMP ELSE NULL END,
+					CASE WHEN subscriptions.status = 'suspended' THEN CURRENT_TIMESTAMP ELSE NULL END,
+					CURRENT_TIMESTAMP,
+					CURRENT_TIMESTAMP
+				FROM guilds
+				LEFT JOIN guild_subscriptions subscriptions ON subscriptions.guild_id = guilds.guild_id
+				LEFT JOIN customer_accounts accounts ON accounts.guild_id = guilds.guild_id
+				WHERE guilds.guild_id <> ''`,
+			`INSERT OR IGNORE INTO credit_accounts (
+				guild_id,
+				billing_owner_user_id,
+				status,
+				payment_provider,
+				active_pack,
+				retention_days,
+				knowledge_storage_bytes_limit,
+				storage_rent_grace_until,
+				read_only_at,
+				suspended_at,
+				created_at,
+				updated_at
+			)
+				SELECT
+					subscriptions.guild_id,
+					COALESCE(NULLIF(subscriptions.billing_owner_user_id, ''), NULLIF(accounts.billing_owner_user_id, ''), ''),
+					subscriptions.status,
+					subscriptions.payment_provider,
+					subscriptions.plan,
+					CASE subscriptions.plan
+						WHEN 'starter' THEN 30
+						WHEN 'plus' THEN 90
+						WHEN 'pro' THEN 180
+						WHEN 'business' THEN 365
+						ELSE 14
+					END,
+					CASE subscriptions.plan
+						WHEN 'starter' THEN 104857600
+						WHEN 'plus' THEN 524288000
+						WHEN 'pro' THEN 2147483648
+						WHEN 'business' THEN 10737418240
+						ELSE 26214400
+					END,
+					CASE WHEN subscriptions.plan IN ('starter', 'plus', 'pro', 'business') THEN datetime(CURRENT_TIMESTAMP, '+7 days') ELSE NULL END,
+					CASE WHEN subscriptions.status IN ('read_only', 'canceled') THEN CURRENT_TIMESTAMP ELSE NULL END,
+					CASE WHEN subscriptions.status = 'suspended' THEN CURRENT_TIMESTAMP ELSE NULL END,
+					CURRENT_TIMESTAMP,
+					CURRENT_TIMESTAMP
+				FROM guild_subscriptions subscriptions
+				LEFT JOIN customer_accounts accounts ON accounts.guild_id = subscriptions.guild_id
+				WHERE subscriptions.guild_id <> ''`,
+			`INSERT OR IGNORE INTO credit_grants (
+				grant_id,
+				guild_id,
+				account_id,
+				source,
+				source_id,
+				pack,
+				credits_granted,
+				credits_remaining,
+				expires_at,
+				metadata_json,
+				created_at,
+				updated_at
+			)
+				SELECT
+					'grant_migration_trial_' || accounts.guild_id,
+					accounts.guild_id,
+					accounts.id,
+					'migration',
+					'trial:' || accounts.guild_id,
+					'trial',
+					1500,
+					1500,
+					COALESCE(subscriptions.trial_ends_at, subscriptions.current_period_end, datetime(CURRENT_TIMESTAMP, '+14 days')),
+					'{"source":"credit_pack_migration","pack":"trial"}',
+					CURRENT_TIMESTAMP,
+					CURRENT_TIMESTAMP
+				FROM credit_accounts accounts
+				LEFT JOIN guild_subscriptions subscriptions ON subscriptions.guild_id = accounts.guild_id
+				WHERE accounts.active_pack = 'trial'`,
+			`INSERT OR IGNORE INTO credit_grants (
+				grant_id,
+				guild_id,
+				account_id,
+				source,
+				source_id,
+				pack,
+				credits_granted,
+				credits_remaining,
+				expires_at,
+				metadata_json,
+				created_at,
+				updated_at
+			)
+				WITH paid AS (
+					SELECT
+						accounts.guild_id,
+						accounts.id AS account_id,
+						subscriptions.id AS subscription_id,
+						subscriptions.plan,
+						subscriptions.current_period_start,
+						subscriptions.current_period_end,
+						CASE subscriptions.plan WHEN 'starter' THEN 10000 WHEN 'plus' THEN 30000 WHEN 'pro' THEN 75000 WHEN 'business' THEN 220000 ELSE 0 END AS pack_credits,
+						CASE subscriptions.plan WHEN 'starter' THEN 2000 WHEN 'plus' THEN 5000 WHEN 'pro' THEN 10000 WHEN 'business' THEN 25000 ELSE 0 END AS ai_limit,
+						CASE subscriptions.plan WHEN 'starter' THEN 100 WHEN 'plus' THEN 400 WHEN 'pro' THEN 1000 WHEN 'business' THEN 2000 ELSE 0 END AS web_limit,
+						CASE subscriptions.plan WHEN 'starter' THEN 25 WHEN 'plus' THEN 100 WHEN 'pro' THEN 250 WHEN 'business' THEN 1000 ELSE 0 END AS image_limit,
+						COALESCE(periods.ai_responses_consumed, 0) + COALESCE(periods.ai_responses_reserved, 0) AS ai_used,
+						COALESCE(periods.web_searches_consumed, 0) + COALESCE(periods.web_searches_reserved, 0) AS web_used,
+						COALESCE(periods.image_generations_consumed, 0) + COALESCE(periods.image_generations_reserved, 0) AS image_used
+					FROM credit_accounts accounts
+					INNER JOIN guild_subscriptions subscriptions ON subscriptions.guild_id = accounts.guild_id
+					LEFT JOIN usage_periods periods
+						ON periods.subscription_id = subscriptions.id
+						AND periods.period_start = subscriptions.current_period_start
+						AND periods.period_end = subscriptions.current_period_end
+					WHERE subscriptions.plan IN ('starter', 'plus', 'pro', 'business')
+				), calculated AS (
+					SELECT
+						guild_id,
+						account_id,
+						subscription_id,
+						plan,
+						current_period_end,
+						pack_credits,
+						MIN(pack_credits,
+							MAX(0, ai_limit - ai_used) * 4
+							+ MAX(0, web_limit - web_used) * 8
+							+ MAX(0, image_limit - image_used) * 150
+						) AS grant_credits
+					FROM paid
+				)
+				SELECT
+					'grant_migration_paid_' || guild_id,
+					guild_id,
+					account_id,
+					'migration',
+					'paid:' || subscription_id,
+					plan,
+					grant_credits,
+					grant_credits,
+					current_period_end,
+					'{"source":"credit_pack_migration","grant_kind":"remaining_old_quota"}',
+					CURRENT_TIMESTAMP,
+					CURRENT_TIMESTAMP
+				FROM calculated
+				WHERE grant_credits > 0`,
+			`UPDATE credit_accounts
+				SET available_credits = COALESCE((
+					SELECT SUM(grants.credits_remaining)
+					FROM credit_grants grants
+					WHERE grants.account_id = credit_accounts.id
+						AND (grants.expires_at IS NULL OR grants.expires_at > CURRENT_TIMESTAMP)
+				), 0),
+				depleted_at = CASE
+					WHEN COALESCE((
+						SELECT SUM(grants.credits_remaining)
+						FROM credit_grants grants
+						WHERE grants.account_id = credit_accounts.id
+							AND (grants.expires_at IS NULL OR grants.expires_at > CURRENT_TIMESTAMP)
+					), 0) <= 0 THEN CURRENT_TIMESTAMP
+					ELSE depleted_at
+				END,
+				updated_at = CURRENT_TIMESTAMP`,
+			`INSERT OR IGNORE INTO credit_ledger_entries (
+				entry_id,
+				guild_id,
+				account_id,
+				grant_id,
+				type,
+				action,
+				credits,
+				balance_after,
+				request_id,
+				metadata_json,
+				created_at
+			)
+				SELECT
+					'ledger_' || grants.grant_id,
+					grants.guild_id,
+					grants.account_id,
+					grants.grant_id,
+					'grant',
+					'pack_grant',
+					grants.credits_granted,
+					accounts.available_credits,
+					'',
+					grants.metadata_json,
+					grants.created_at
+				FROM credit_grants grants
+				INNER JOIN credit_accounts accounts ON accounts.id = grants.account_id`,
+		},
+	},
+	{
+		Version: 39,
+		Name:    "youtube_clips",
+		SQL: []string{
+			`CREATE TABLE IF NOT EXISTS youtube_clips (
+				id TEXT PRIMARY KEY,
+				user_id TEXT NOT NULL,
+				guild_id TEXT NOT NULL DEFAULT '',
+				request_id TEXT NOT NULL DEFAULT '',
+				rank INTEGER NOT NULL DEFAULT 0,
+				title TEXT NOT NULL DEFAULT '',
+				clip_type TEXT NOT NULL DEFAULT '',
+				object_key TEXT NOT NULL,
+				thumbnail_object_key TEXT NOT NULL DEFAULT '',
+				duration_seconds REAL NOT NULL DEFAULT 0,
+				source_start_seconds REAL NOT NULL DEFAULT 0,
+				source_end_seconds REAL NOT NULL DEFAULT 0,
+				video_title TEXT NOT NULL DEFAULT '',
+				video_url TEXT NOT NULL DEFAULT '',
+				video_uploader TEXT NOT NULL DEFAULT '',
+				size_bytes INTEGER NOT NULL DEFAULT 0,
+				virality_score INTEGER NOT NULL DEFAULT 0,
+				hook_score INTEGER NOT NULL DEFAULT 0,
+				retention_score INTEGER NOT NULL DEFAULT 0,
+				shareability_score INTEGER NOT NULL DEFAULT 0,
+				created_at DATETIME NOT NULL
+			)`,
+			`CREATE INDEX IF NOT EXISTS idx_youtube_clips_user_id ON youtube_clips(user_id)`,
+			`CREATE INDEX IF NOT EXISTS idx_youtube_clips_user_created ON youtube_clips(user_id, created_at)`,
+			`CREATE INDEX IF NOT EXISTS idx_youtube_clips_request_id ON youtube_clips(request_id)`,
+		},
+	},
 }
 
 func RunMigrations(db *gorm.DB) error {
