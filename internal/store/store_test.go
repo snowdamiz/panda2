@@ -122,7 +122,7 @@ func TestOpenRunsMigrationsAndPragmas(t *testing.T) {
 		t.Fatalf("expected guilds.feature_flags to be removed, got %d", tableCount)
 	}
 
-	for _, table := range []string{"schedules", "alert_rules", "feedback_targets", "music_queue_items", "music_playlists", "runtime_statuses"} {
+	for _, table := range []string{"schedules", "alert_rules", "feedback_targets", "music_queue_items", "music_playlists", "runtime_statuses", "youtube_clips", "youtube_clip_usages"} {
 		if err := store.DB.Raw("SELECT COUNT(*) FROM sqlite_master WHERE name = ?", table).Scan(&tableCount).Error; err != nil {
 			t.Fatalf("%s table lookup failed: %v", table, err)
 		}

@@ -695,6 +695,16 @@ func TestValidateClipCompositionRejectsMissingCaptionWordReference(t *testing.T)
 	}
 }
 
+func TestValidateClipCompositionAcceptsExpandedCaptionWordIDs(t *testing.T) {
+	request := captionTestCompositionRequest()
+	result := captionTestCompositionResult()
+	result.CaptionPlan.Cues[0].WordIDs = []string{"w_0001", "w_0002", "w_0003", "w_0004"}
+
+	if err := ValidateClipCompositionResult(result, request); err != nil {
+		t.Fatalf("expected expanded word_id list to validate as a first-to-last span, got %v", err)
+	}
+}
+
 func TestValidateClipCompositionRejectsInvalidCaptionStyle(t *testing.T) {
 	request := captionTestCompositionRequest()
 	result := captionTestCompositionResult()

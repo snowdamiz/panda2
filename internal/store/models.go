@@ -80,6 +80,19 @@ type YoutubeClip struct {
 
 func (YoutubeClip) TableName() string { return "youtube_clips" }
 
+// YoutubeClipUsage records accepted clip-generation video requests so beta
+// limits can be enforced across every guild for a user.
+type YoutubeClipUsage struct {
+	ID        string    `gorm:"primaryKey;size:40"`
+	UserID    string    `gorm:"index;not null;size:32"`
+	GuildID   string    `gorm:"index;not null;default:'';size:32"`
+	RequestID string    `gorm:"index;not null;default:''"`
+	UsageDate string    `gorm:"index;not null;size:10"`
+	CreatedAt time.Time `gorm:"index;not null"`
+}
+
+func (YoutubeClipUsage) TableName() string { return "youtube_clip_usages" }
+
 type InstallIntent struct {
 	IntentID                    string    `gorm:"primaryKey;size:64"`
 	StateHash                   string    `gorm:"uniqueIndex;not null;size:96"`
