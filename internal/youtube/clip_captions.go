@@ -26,6 +26,24 @@ const (
 	clipCaptionFontArial               = "arial"
 	clipCaptionFontArialNarrow         = "arial_narrow"
 	clipCaptionFontDejaVuSansCondensed = "dejavu_sans_condensed"
+	clipCaptionFontRoboto              = "roboto"
+	clipCaptionFontRobotoCondensed     = "roboto_condensed"
+	clipCaptionFontOpenSans            = "open_sans"
+	clipCaptionFontNotoSans            = "noto_sans"
+	clipCaptionFontNotoSansDisplay     = "noto_sans_display"
+	clipCaptionFontLiberationSans      = "liberation_sans"
+	clipCaptionFontFreeSans            = "free_sans"
+	clipCaptionFontBebasNeue           = "bebas_neue"
+	clipCaptionFontCantarell           = "cantarell"
+	clipCaptionFontHelvetica           = "helvetica"
+	clipCaptionFontImpact              = "impact"
+	clipCaptionFontFutura              = "futura"
+	clipCaptionFontAvenirNext          = "avenir_next"
+	clipCaptionFontDINCondensed        = "din_condensed"
+	clipCaptionFontVerdana             = "verdana"
+	clipCaptionFontTrebuchetMS         = "trebuchet_ms"
+	clipCaptionFontGeorgia             = "georgia"
+	clipCaptionFontArialBlack          = "arial_black"
 
 	clipCaptionBorderNone       = "none"
 	clipCaptionBorderThin       = "thin"
@@ -39,13 +57,15 @@ const (
 	clipCaptionStyleSourceCreativeMix   = "creative_mix"
 	clipCaptionStyleSourceClipPalette   = "clip_palette"
 
-	opusDefaultCaptionFontFamily        = clipCaptionFontDefault
-	opusDefaultCaptionFontColor         = "white"
-	opusDefaultCaptionHighlightColor    = "yellow"
-	opusDefaultCaptionBorderColor       = "black"
-	opusDefaultCaptionBorderThickness   = clipCaptionBorderThick
-	opusDefaultCaptionBackgroundColor   = "transparent"
-	opusDefaultCaptionBackgroundOpacity = 0
+	clipCaptionAnimationNone       = "none"
+	clipCaptionAnimationPop        = "pop"
+	clipCaptionAnimationBounce     = "bounce"
+	clipCaptionAnimationFade       = "fade"
+	clipCaptionAnimationSlideUp    = "slide_up"
+	clipCaptionAnimationSlideDown  = "slide_down"
+	clipCaptionAnimationSlideLeft  = "slide_left"
+	clipCaptionAnimationSlideRight = "slide_right"
+	clipCaptionAnimationZoomIn     = "zoom_in"
 
 	linuxDefaultCaptionFontPath    = "/usr/share/fonts/truetype/dejavu/DejaVuSansCondensed-Bold.ttf"
 	linuxDefaultCaptionFontFamily  = "DejaVu Sans Condensed"
@@ -75,6 +95,7 @@ type clipCaptionASSStyle struct {
 	BorderThickness int
 	ShadowSize      int
 	Uppercase       bool
+	Animation       string
 }
 
 type clipCaptionReferences struct {
@@ -139,12 +160,15 @@ func newClipCaptionReferences(timeline []ClipCompositionTranscriptSegment) clipC
 }
 
 func validateClipCaptionPlan(result ClipCompositionResult, request ClipCompositionRequest) error {
-	if result.CaptionPlan == nil {
-		return fmt.Errorf("caption_plan is required")
-	}
 	mode, err := normalizeClipCaptionMode(request.CaptionMode)
 	if err != nil {
 		return err
+	}
+	if result.CaptionPlan == nil {
+		if mode == clipCaptionRequestOff {
+			return nil
+		}
+		return fmt.Errorf("caption_plan is required when captions are auto or on")
 	}
 	plan := result.CaptionPlan
 	if invalidCaptionConfidence(plan.Confidence) {
@@ -164,9 +188,6 @@ func validateClipCaptionPlan(result ClipCompositionResult, request ClipCompositi
 	}
 	if strings.TrimSpace(plan.StylePreset) != clipCaptionStyleOpusBold {
 		return fmt.Errorf("caption_plan style_preset must be opus_bold for burned-in captions")
-	}
-	if strings.TrimSpace(request.CaptionInstructions) == "" && strings.TrimSpace(plan.StyleSource) != clipCaptionStyleSourceOpusDefault {
-		return fmt.Errorf("caption_plan style_source must be opus_default when no caption style instructions are provided")
 	}
 	switch strings.TrimSpace(plan.TimingQuality) {
 	case clipCaptionTimingWord, clipCaptionTimingSegment:
@@ -207,11 +228,11 @@ func validateDisabledCaptionPlan(plan ClipCaptionPlan) error {
 }
 
 func validateClipCaptionStyle(plan ClipCaptionPlan, request ClipCompositionRequest) error {
-	styleSource, err := normalizeCaptionStyleSource(plan.StyleSource)
-	if err != nil {
+	if _, err := normalizeCaptionStyleSource(plan.StyleSource); err != nil {
 		return err
 	}
-	if _, err := normalizeCaptionFontKey(plan.FontFamily); err != nil {
+	fontKey, err := normalizeCaptionFontKey(plan.FontFamily)
+	if err != nil {
 		return err
 	}
 	if _, err := captionASSOpaqueColor(plan.FontColor); err != nil {
@@ -225,6 +246,9 @@ func validateClipCaptionStyle(plan ClipCaptionPlan, request ClipCompositionReque
 	}
 	if _, ok := normalizeCaptionBorderThickness(plan.BorderThickness); !ok {
 		return fmt.Errorf("caption_plan border_thickness must be one of none, thin, medium, thick, or extra_thick")
+	}
+	if _, err := normalizeCaptionAnimation(plan.Animation); err != nil {
+		return err
 	}
 	if invalidCaptionOpacity(plan.BackgroundOpacity) {
 		return fmt.Errorf("caption_plan background_opacity must be between 0 and 1")
@@ -240,36 +264,15 @@ func validateClipCaptionStyle(plan ClipCaptionPlan, request ClipCompositionReque
 	}
 	switch strings.TrimSpace(plan.Mode) {
 	case clipCaptionPlanModeDisabled:
-		if styleSource != clipCaptionStyleSourceNone {
-			return fmt.Errorf("disabled caption_plan style_source must be none")
-		}
 	case clipCaptionPlanModeBurnedIn:
-		if styleSource == clipCaptionStyleSourceNone {
-			return fmt.Errorf("burned-in caption_plan style_source must not be none")
+		available, err := captionFontKeyAvailableForRequest(fontKey, request)
+		if err != nil {
+			return err
 		}
-		if styleSource == clipCaptionStyleSourceOpusDefault {
-			if err := validateOpusDefaultCaptionStyle(plan); err != nil {
-				return err
-			}
+		if !available {
+			keys := mustCaptionFontKeysForRequest(request)
+			return fmt.Errorf("caption_plan font_family %q is not available; available font_family values are %s", fontKey, captionFontKeyList(keys))
 		}
-		if strings.TrimSpace(request.CaptionInstructions) == "" && styleSource != clipCaptionStyleSourceOpusDefault {
-			return fmt.Errorf("caption_plan style_source must be opus_default when no caption style instructions are provided")
-		}
-	}
-	return nil
-}
-
-func validateOpusDefaultCaptionStyle(plan ClipCaptionPlan) error {
-	fontFamily, _ := normalizeCaptionFontKey(plan.FontFamily)
-	borderThickness, _ := normalizeCaptionBorderThickness(plan.BorderThickness)
-	if fontFamily != opusDefaultCaptionFontFamily ||
-		strings.TrimSpace(plan.FontColor) != opusDefaultCaptionFontColor ||
-		strings.TrimSpace(plan.HighlightColor) != opusDefaultCaptionHighlightColor ||
-		strings.TrimSpace(plan.BorderColor) != opusDefaultCaptionBorderColor ||
-		borderThickness != opusDefaultCaptionBorderThickness ||
-		strings.TrimSpace(plan.BackgroundColor) != opusDefaultCaptionBackgroundColor ||
-		plan.BackgroundOpacity != opusDefaultCaptionBackgroundOpacity {
-		return fmt.Errorf("caption_plan style_source opus_default requires font_family=default, font_color=white, highlight_color=yellow, border_color=black, border_thickness=thick, background_color=transparent, and background_opacity=0")
 	}
 	return nil
 }
@@ -336,7 +339,7 @@ func validateClipCaptionCues(plan ClipCaptionPlan, request ClipCompositionReques
 			return fmt.Errorf("caption cue %d is outside clip segment timing", index+1)
 		}
 		if !captionCueWithinSingleRenderPlan(startSeconds, endSeconds, renderPlans) {
-			return fmt.Errorf("caption cue %d crosses render plan boundaries", index+1)
+			return fmt.Errorf("caption cue %d crosses render plan boundaries: cue source %.3f-%.3f must fit inside one render plan; overlapping render plans: %s", index+1, startSeconds, endSeconds, captionRenderPlanBoundarySummary(startSeconds, endSeconds, renderPlans))
 		}
 		if previousEnd, exists := previousEndByRegion[regionID]; exists && startSeconds < previousEnd-0.02 {
 			return fmt.Errorf("caption cues overlap in region %q", regionID)
@@ -386,6 +389,36 @@ func captionCueWithinSingleRenderPlan(startSeconds float64, endSeconds float64, 
 		}
 	}
 	return false
+}
+
+func captionRenderPlanBoundarySummary(startSeconds float64, endSeconds float64, plans []ClipFrameRenderPlan) string {
+	overlapping := make([]ClipFrameRenderPlan, 0, len(plans))
+	for _, plan := range plans {
+		if endSeconds < plan.SourceStartSeconds-0.02 || startSeconds > plan.SourceEndSeconds+0.02 {
+			continue
+		}
+		overlapping = append(overlapping, plan)
+	}
+	if len(overlapping) == 0 {
+		overlapping = append(overlapping, plans...)
+	}
+	sort.SliceStable(overlapping, func(i, j int) bool {
+		if overlapping[i].AppliesToSegmentIndex == overlapping[j].AppliesToSegmentIndex {
+			return overlapping[i].SourceStartSeconds < overlapping[j].SourceStartSeconds
+		}
+		return overlapping[i].AppliesToSegmentIndex < overlapping[j].AppliesToSegmentIndex
+	})
+	if len(overlapping) > 6 {
+		overlapping = overlapping[:6]
+	}
+	parts := make([]string, 0, len(overlapping))
+	for _, plan := range overlapping {
+		parts = append(parts, fmt.Sprintf("segment %d %.3f-%.3f", plan.AppliesToSegmentIndex, plan.SourceStartSeconds, plan.SourceEndSeconds))
+	}
+	if len(parts) == 0 {
+		return "none"
+	}
+	return strings.Join(parts, "; ")
 }
 
 func captionCueTiming(cue ClipCaptionCue, timingQuality string, refs clipCaptionReferences) (float64, float64, error) {
@@ -535,6 +568,7 @@ func (s *Service) buildClipCaptionASSStyle(plan ClipCaptionPlan, target ClipReso
 		BorderThickness: captionBorderSize(target, plan.BorderThickness),
 		ShadowSize:      shadowSize,
 		Uppercase:       strings.TrimSpace(plan.StyleSource) == clipCaptionStyleSourceOpusDefault,
+		Animation:       normalizeCaptionAnimationOrDefault(plan.Animation),
 	}, nil
 }
 
@@ -599,7 +633,7 @@ func buildClipASSSubtitle(plan ClipCaptionPlan, renderPlan ClipFrameRenderPlan, 
 				"Dialogue: 0,%s,%s,PandaCaption,,0,0,0,,%s%s\n",
 				formatASSTime(start),
 				formatASSTime(end),
-				captionASSRegionOverride(region, target),
+				captionASSRegionOverride(region, target, style, end-start),
 				event.Text,
 			))
 		}
@@ -930,13 +964,108 @@ func assTokenVisibleRuneCount(token string) int {
 	return visible
 }
 
-func captionASSRegionOverride(region ClipCaptionRegion, target ClipResolution) string {
+func captionASSRegionOverride(region ClipCaptionRegion, target ClipResolution, style clipCaptionASSStyle, durationSeconds float64) string {
 	x, y := captionASSPosition(region, target)
-	return fmt.Sprintf("{\\an%d\\pos(%d,%d)\\q2}",
-		captionASSAlignment(region),
-		x,
-		y,
-	)
+	alignment := captionASSAlignment(region)
+	placement := fmt.Sprintf("\\an%d\\pos(%d,%d)\\q2", alignment, x, y)
+	if move, ok := captionASSMoveOverride(style.Animation, alignment, x, y, target, durationSeconds); ok {
+		placement = move + "\\q2"
+	}
+	return "{" + placement + captionASSAnimationOverride(style.Animation, durationSeconds) + "}"
+}
+
+func captionASSMoveOverride(animation string, alignment int, x int, y int, target ClipResolution, durationSeconds float64) (string, bool) {
+	durationMS := captionAnimationEntryMillis(durationSeconds)
+	if durationMS <= 0 {
+		return "", false
+	}
+	offset := captionAnimationOffset(target)
+	startX, startY := x, y
+	switch normalizeCaptionAnimationOrDefault(animation) {
+	case clipCaptionAnimationSlideUp:
+		startY += offset
+	case clipCaptionAnimationSlideDown:
+		startY -= offset
+	case clipCaptionAnimationSlideLeft:
+		startX += offset
+	case clipCaptionAnimationSlideRight:
+		startX -= offset
+	default:
+		return "", false
+	}
+	return fmt.Sprintf("\\an%d\\move(%d,%d,%d,%d,0,%d)", alignment, startX, startY, x, y, durationMS), true
+}
+
+func captionASSAnimationOverride(animation string, durationSeconds float64) string {
+	entryMS := captionAnimationEntryMillis(durationSeconds)
+	exitMS := captionAnimationExitMillis(durationSeconds)
+	switch normalizeCaptionAnimationOrDefault(animation) {
+	case clipCaptionAnimationPop:
+		if entryMS <= 0 {
+			return ""
+		}
+		return fmt.Sprintf("\\fscx72\\fscy72\\t(0,%d,\\fscx%d\\fscy100)", entryMS, captionStyleScaleX)
+	case clipCaptionAnimationBounce:
+		if entryMS <= 0 {
+			return ""
+		}
+		overshootMS := captionMinInt(entryMS, 90)
+		settleMS := captionMinInt(entryMS+80, 190)
+		return fmt.Sprintf("\\fscx76\\fscy76\\t(0,%d,\\fscx106\\fscy108)\\t(%d,%d,\\fscx%d\\fscy100)", overshootMS, overshootMS, settleMS, captionStyleScaleX)
+	case clipCaptionAnimationFade:
+		if entryMS <= 0 && exitMS <= 0 {
+			return ""
+		}
+		return fmt.Sprintf("\\fad(%d,%d)", entryMS, exitMS)
+	case clipCaptionAnimationZoomIn:
+		if entryMS <= 0 {
+			return ""
+		}
+		return fmt.Sprintf("\\fscx118\\fscy118\\t(0,%d,\\fscx%d\\fscy100)", entryMS, captionStyleScaleX)
+	default:
+		return ""
+	}
+}
+
+func captionAnimationEntryMillis(durationSeconds float64) int {
+	durationMS := int(math.Round(durationSeconds * 1000))
+	if durationMS < 120 {
+		return 0
+	}
+	entry := durationMS / 4
+	if entry < 70 {
+		return 70
+	}
+	if entry > 150 {
+		return 150
+	}
+	return entry
+}
+
+func captionAnimationExitMillis(durationSeconds float64) int {
+	durationMS := int(math.Round(durationSeconds * 1000))
+	if durationMS < 220 {
+		return 0
+	}
+	exit := durationMS / 5
+	if exit < 60 {
+		return 60
+	}
+	if exit > 120 {
+		return 120
+	}
+	return exit
+}
+
+func captionAnimationOffset(target ClipResolution) int {
+	offset := int(math.Round(float64(target.Height) * 0.035))
+	if offset < 28 {
+		return 28
+	}
+	if offset > 72 {
+		return 72
+	}
+	return offset
 }
 
 func captionASSPosition(region ClipCaptionRegion, target ClipResolution) (int, int) {
@@ -1082,7 +1211,10 @@ func (s *Service) resolveCaptionFont(value string) (clipCaptionResolvedFont, err
 	}
 	spec, ok := captionFontSpecs()[key]
 	if !ok {
-		return clipCaptionResolvedFont{}, fmt.Errorf("caption_plan font_family must be one of default, inter, arial, arial_narrow, or dejavu_sans_condensed")
+		return clipCaptionResolvedFont{}, fmt.Errorf("caption_plan font_family must be one of %s", captionFontKeyList(allClipCaptionFontKeys()))
+	}
+	if font, ok := s.configuredCaptionFontForSpec(key, spec); ok {
+		return font, nil
 	}
 	for _, path := range spec.Paths {
 		if err := validateCaptionFontFile(path); err == nil {
@@ -1090,6 +1222,31 @@ func (s *Service) resolveCaptionFont(value string) (clipCaptionResolvedFont, err
 		}
 	}
 	return clipCaptionResolvedFont{}, fmt.Errorf("youtube clip captions requested font %q is unavailable; install the font or configure youtube_clip_caption_font_path/youtube_clip_caption_font_family", spec.Family)
+}
+
+func (s *Service) configuredCaptionFontForSpec(key string, spec clipCaptionFontSpec) (clipCaptionResolvedFont, bool) {
+	font := clipCaptionResolvedFont{
+		Key:    key,
+		Family: strings.TrimSpace(s.captionFontFamily),
+		Path:   strings.TrimSpace(s.captionFontPath),
+	}
+	if font.Family == "" || !strings.EqualFold(font.Family, strings.TrimSpace(spec.Family)) {
+		return clipCaptionResolvedFont{}, false
+	}
+	if err := validateCaptionFontFile(font.Path); err != nil {
+		return clipCaptionResolvedFont{}, false
+	}
+	return font, true
+}
+
+func (s *Service) availableCaptionFontKeys() []string {
+	keys := make([]string, 0, len(allClipCaptionFontKeys()))
+	for _, key := range allClipCaptionFontKeys() {
+		if _, err := s.resolveCaptionFont(key); err == nil {
+			keys = append(keys, key)
+		}
+	}
+	return keys
 }
 
 func validateCaptionFontFile(path string) error {
@@ -1107,20 +1264,107 @@ func validateCaptionFontFile(path string) error {
 	return nil
 }
 
+func allClipCaptionFontKeys() []string {
+	return []string{
+		clipCaptionFontDefault,
+		clipCaptionFontInter,
+		clipCaptionFontArial,
+		clipCaptionFontArialNarrow,
+		clipCaptionFontDejaVuSansCondensed,
+		clipCaptionFontRoboto,
+		clipCaptionFontRobotoCondensed,
+		clipCaptionFontOpenSans,
+		clipCaptionFontNotoSans,
+		clipCaptionFontNotoSansDisplay,
+		clipCaptionFontLiberationSans,
+		clipCaptionFontFreeSans,
+		clipCaptionFontBebasNeue,
+		clipCaptionFontCantarell,
+		clipCaptionFontHelvetica,
+		clipCaptionFontImpact,
+		clipCaptionFontFutura,
+		clipCaptionFontAvenirNext,
+		clipCaptionFontDINCondensed,
+		clipCaptionFontVerdana,
+		clipCaptionFontTrebuchetMS,
+		clipCaptionFontGeorgia,
+		clipCaptionFontArialBlack,
+	}
+}
+
+func captionFontKeysForRequest(request ClipCompositionRequest) ([]string, error) {
+	if len(request.AvailableCaptionFonts) == 0 {
+		return allClipCaptionFontKeys(), nil
+	}
+	seen := map[string]struct{}{}
+	keys := make([]string, 0, len(request.AvailableCaptionFonts))
+	for _, value := range request.AvailableCaptionFonts {
+		key, err := normalizeCaptionFontKey(value)
+		if err != nil {
+			return nil, fmt.Errorf("available_caption_fonts contains unsupported font %q: %w", value, err)
+		}
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		keys = append(keys, key)
+	}
+	if len(keys) == 0 {
+		return nil, fmt.Errorf("available_caption_fonts must include at least one supported font")
+	}
+	return keys, nil
+}
+
+func mustCaptionFontKeysForRequest(request ClipCompositionRequest) []string {
+	keys, err := captionFontKeysForRequest(request)
+	if err != nil || len(keys) == 0 {
+		return []string{clipCaptionFontDefault}
+	}
+	return keys
+}
+
+func captionFontKeyAvailableForRequest(key string, request ClipCompositionRequest) (bool, error) {
+	if len(request.AvailableCaptionFonts) == 0 {
+		return true, nil
+	}
+	keys, err := captionFontKeysForRequest(request)
+	if err != nil {
+		return false, err
+	}
+	for _, available := range keys {
+		if available == key {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func captionFontKeyList(keys []string) string {
+	return strings.Join(keys, ", ")
+}
+
 func captionFontSpecs() map[string]clipCaptionFontSpec {
 	return map[string]clipCaptionFontSpec{
 		clipCaptionFontInter: {
 			Key:    clipCaptionFontInter,
 			Family: "Inter",
 			Paths: []string{
+				"/usr/share/fonts/opentype/inter/InterDisplay-Bold.otf",
+				"/usr/share/fonts/opentype/inter/Inter-Bold.otf",
+				"/usr/share/fonts/opentype/inter/InterDisplay-Regular.otf",
+				"/usr/share/fonts/opentype/inter/Inter-Regular.otf",
 				"/usr/share/fonts/truetype/inter/Inter-roman.var.ttf",
 				"/usr/share/fonts/truetype/inter/Inter.var.ttf",
 				"/usr/share/fonts/truetype/inter/Inter-Bold.ttf",
 				"/usr/share/fonts/truetype/inter-v/Inter.var.ttf",
 				"/Library/Fonts/Inter.ttc",
 				"/Library/Fonts/Inter Bold.ttf",
+				"/Library/Fonts/Inter-Bold.otf",
+				"/Library/Fonts/InterDisplay-Bold.otf",
 				filepath.Join(os.Getenv("HOME"), "Library/Fonts/Inter.ttc"),
 				filepath.Join(os.Getenv("HOME"), "Library/Fonts/Inter Bold.ttf"),
+				filepath.Join(os.Getenv("HOME"), "Library/Fonts/Inter-Bold.otf"),
+				filepath.Join(os.Getenv("HOME"), "Library/Fonts/InterDisplay-Bold.otf"),
 			},
 		},
 		clipCaptionFontArial: {
@@ -1151,6 +1395,207 @@ func captionFontSpecs() map[string]clipCaptionFontSpec {
 				"/opt/homebrew/share/fonts/dejavu/DejaVuSansCondensed-Bold.ttf",
 			},
 		},
+		clipCaptionFontRoboto: {
+			Key:    clipCaptionFontRoboto,
+			Family: "Roboto",
+			Paths: []string{
+				"/usr/share/fonts/truetype/roboto/unhinted/RobotoTTF/Roboto-Bold.ttf",
+				"/usr/share/fonts/truetype/roboto/unhinted/RobotoTTF/Roboto-Medium.ttf",
+				"/usr/share/fonts/truetype/roboto/unhinted/RobotoTTF/Roboto-Regular.ttf",
+				"/Library/Fonts/Roboto-Bold.ttf",
+				"/Library/Fonts/Roboto Bold.ttf",
+				filepath.Join(os.Getenv("HOME"), "Library/Fonts/Roboto-Bold.ttf"),
+				filepath.Join(os.Getenv("HOME"), "Library/Fonts/Roboto Bold.ttf"),
+			},
+		},
+		clipCaptionFontRobotoCondensed: {
+			Key:    clipCaptionFontRobotoCondensed,
+			Family: "Roboto Condensed",
+			Paths: []string{
+				"/usr/share/fonts/truetype/roboto/unhinted/RobotoCondensed-Bold.ttf",
+				"/usr/share/fonts/truetype/roboto/unhinted/RobotoCondensed-Medium.ttf",
+				"/usr/share/fonts/truetype/roboto/unhinted/RobotoCondensed-Regular.ttf",
+				"/Library/Fonts/RobotoCondensed-Bold.ttf",
+				"/Library/Fonts/Roboto Condensed Bold.ttf",
+				filepath.Join(os.Getenv("HOME"), "Library/Fonts/RobotoCondensed-Bold.ttf"),
+				filepath.Join(os.Getenv("HOME"), "Library/Fonts/Roboto Condensed Bold.ttf"),
+			},
+		},
+		clipCaptionFontOpenSans: {
+			Key:    clipCaptionFontOpenSans,
+			Family: "Open Sans",
+			Paths: []string{
+				"/usr/share/fonts/truetype/open-sans/OpenSans-ExtraBold.ttf",
+				"/usr/share/fonts/truetype/open-sans/OpenSans-Bold.ttf",
+				"/usr/share/fonts/truetype/open-sans/OpenSans-Semibold.ttf",
+				"/Library/Fonts/OpenSans-Bold.ttf",
+				"/Library/Fonts/Open Sans Bold.ttf",
+				filepath.Join(os.Getenv("HOME"), "Library/Fonts/OpenSans-Bold.ttf"),
+				filepath.Join(os.Getenv("HOME"), "Library/Fonts/Open Sans Bold.ttf"),
+			},
+		},
+		clipCaptionFontNotoSans: {
+			Key:    clipCaptionFontNotoSans,
+			Family: "Noto Sans",
+			Paths: []string{
+				"/usr/share/fonts/truetype/noto/NotoSans-Bold.ttf",
+				"/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
+				"/Library/Fonts/NotoSans-Bold.ttf",
+				"/Library/Fonts/Noto Sans Bold.ttf",
+				filepath.Join(os.Getenv("HOME"), "Library/Fonts/NotoSans-Bold.ttf"),
+				filepath.Join(os.Getenv("HOME"), "Library/Fonts/Noto Sans Bold.ttf"),
+			},
+		},
+		clipCaptionFontNotoSansDisplay: {
+			Key:    clipCaptionFontNotoSansDisplay,
+			Family: "Noto Sans Display",
+			Paths: []string{
+				"/usr/share/fonts/truetype/noto/NotoSansDisplay-Bold.ttf",
+				"/usr/share/fonts/truetype/noto/NotoSansDisplay-Regular.ttf",
+				"/Library/Fonts/NotoSansDisplay-Bold.ttf",
+				"/Library/Fonts/Noto Sans Display Bold.ttf",
+				filepath.Join(os.Getenv("HOME"), "Library/Fonts/NotoSansDisplay-Bold.ttf"),
+				filepath.Join(os.Getenv("HOME"), "Library/Fonts/Noto Sans Display Bold.ttf"),
+			},
+		},
+		clipCaptionFontLiberationSans: {
+			Key:    clipCaptionFontLiberationSans,
+			Family: "Liberation Sans",
+			Paths: []string{
+				"/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf",
+				"/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
+				"/usr/local/share/fonts/liberation/LiberationSans-Bold.ttf",
+				"/opt/homebrew/share/fonts/liberation/LiberationSans-Bold.ttf",
+				"/Library/Fonts/LiberationSans-Bold.ttf",
+				filepath.Join(os.Getenv("HOME"), "Library/Fonts/LiberationSans-Bold.ttf"),
+			},
+		},
+		clipCaptionFontFreeSans: {
+			Key:    clipCaptionFontFreeSans,
+			Family: "FreeSans",
+			Paths: []string{
+				"/usr/share/fonts/truetype/freefont/FreeSansBold.ttf",
+				"/usr/share/fonts/truetype/freefont/FreeSans.ttf",
+				"/usr/local/share/fonts/freefont/FreeSansBold.ttf",
+				"/opt/homebrew/share/fonts/freefont/FreeSansBold.ttf",
+				"/Library/Fonts/FreeSansBold.ttf",
+				filepath.Join(os.Getenv("HOME"), "Library/Fonts/FreeSansBold.ttf"),
+			},
+		},
+		clipCaptionFontBebasNeue: {
+			Key:    clipCaptionFontBebasNeue,
+			Family: "Bebas Neue",
+			Paths: []string{
+				"/usr/share/fonts/opentype/bebas-neue/BebasNeue-Bold.otf",
+				"/usr/share/fonts/opentype/bebas-neue/BebasNeue-Regular.otf",
+				"/Library/Fonts/BebasNeue-Bold.otf",
+				"/Library/Fonts/Bebas Neue Bold.otf",
+				"/Library/Fonts/BebasNeue-Regular.otf",
+				"/Library/Fonts/Bebas Neue Regular.otf",
+				filepath.Join(os.Getenv("HOME"), "Library/Fonts/BebasNeue-Bold.otf"),
+				filepath.Join(os.Getenv("HOME"), "Library/Fonts/Bebas Neue Bold.otf"),
+				filepath.Join(os.Getenv("HOME"), "Library/Fonts/BebasNeue-Regular.otf"),
+				filepath.Join(os.Getenv("HOME"), "Library/Fonts/Bebas Neue Regular.otf"),
+			},
+		},
+		clipCaptionFontCantarell: {
+			Key:    clipCaptionFontCantarell,
+			Family: "Cantarell",
+			Paths: []string{
+				"/usr/share/fonts/opentype/cantarell/Cantarell-ExtraBold.otf",
+				"/usr/share/fonts/opentype/cantarell/Cantarell-Bold.otf",
+				"/usr/share/fonts/opentype/cantarell/Cantarell-Regular.otf",
+				"/Library/Fonts/Cantarell-Bold.otf",
+				filepath.Join(os.Getenv("HOME"), "Library/Fonts/Cantarell-Bold.otf"),
+			},
+		},
+		clipCaptionFontHelvetica: {
+			Key:    clipCaptionFontHelvetica,
+			Family: "Helvetica",
+			Paths: []string{
+				"/System/Library/Fonts/Helvetica.ttc",
+				"/System/Library/Fonts/HelveticaNeue.ttc",
+				"/Library/Fonts/Helvetica.ttc",
+				filepath.Join(os.Getenv("HOME"), "Library/Fonts/Helvetica.ttc"),
+			},
+		},
+		clipCaptionFontImpact: {
+			Key:    clipCaptionFontImpact,
+			Family: "Impact",
+			Paths: []string{
+				"/System/Library/Fonts/Supplemental/Impact.ttf",
+				"/Library/Fonts/Impact.ttf",
+				filepath.Join(os.Getenv("HOME"), "Library/Fonts/Impact.ttf"),
+			},
+		},
+		clipCaptionFontFutura: {
+			Key:    clipCaptionFontFutura,
+			Family: "Futura",
+			Paths: []string{
+				"/System/Library/Fonts/Supplemental/Futura.ttc",
+				"/Library/Fonts/Futura.ttc",
+				filepath.Join(os.Getenv("HOME"), "Library/Fonts/Futura.ttc"),
+			},
+		},
+		clipCaptionFontAvenirNext: {
+			Key:    clipCaptionFontAvenirNext,
+			Family: "Avenir Next",
+			Paths: []string{
+				"/System/Library/Fonts/Avenir Next.ttc",
+				"/System/Library/Fonts/Avenir Next Condensed.ttc",
+				"/Library/Fonts/Avenir Next.ttc",
+				filepath.Join(os.Getenv("HOME"), "Library/Fonts/Avenir Next.ttc"),
+			},
+		},
+		clipCaptionFontDINCondensed: {
+			Key:    clipCaptionFontDINCondensed,
+			Family: "DIN Condensed",
+			Paths: []string{
+				"/System/Library/Fonts/Supplemental/DIN Condensed Bold.ttf",
+				"/System/Library/Fonts/Supplemental/DIN Alternate Bold.ttf",
+				"/Library/Fonts/DIN Condensed Bold.ttf",
+				filepath.Join(os.Getenv("HOME"), "Library/Fonts/DIN Condensed Bold.ttf"),
+			},
+		},
+		clipCaptionFontVerdana: {
+			Key:    clipCaptionFontVerdana,
+			Family: "Verdana",
+			Paths: []string{
+				"/System/Library/Fonts/Supplemental/Verdana Bold.ttf",
+				"/System/Library/Fonts/Supplemental/Verdana.ttf",
+				"/Library/Fonts/Verdana Bold.ttf",
+				filepath.Join(os.Getenv("HOME"), "Library/Fonts/Verdana Bold.ttf"),
+			},
+		},
+		clipCaptionFontTrebuchetMS: {
+			Key:    clipCaptionFontTrebuchetMS,
+			Family: "Trebuchet MS",
+			Paths: []string{
+				"/System/Library/Fonts/Supplemental/Trebuchet MS Bold.ttf",
+				"/System/Library/Fonts/Supplemental/Trebuchet MS.ttf",
+				"/Library/Fonts/Trebuchet MS Bold.ttf",
+				filepath.Join(os.Getenv("HOME"), "Library/Fonts/Trebuchet MS Bold.ttf"),
+			},
+		},
+		clipCaptionFontGeorgia: {
+			Key:    clipCaptionFontGeorgia,
+			Family: "Georgia",
+			Paths: []string{
+				"/System/Library/Fonts/Supplemental/Georgia Bold.ttf",
+				"/System/Library/Fonts/Supplemental/Georgia.ttf",
+				"/Library/Fonts/Georgia Bold.ttf",
+				filepath.Join(os.Getenv("HOME"), "Library/Fonts/Georgia Bold.ttf"),
+			},
+		},
+		clipCaptionFontArialBlack: {
+			Key:    clipCaptionFontArialBlack,
+			Family: "Arial Black",
+			Paths: []string{
+				"/System/Library/Fonts/Supplemental/Arial Black.ttf",
+				"/Library/Fonts/Arial Black.ttf",
+				filepath.Join(os.Getenv("HOME"), "Library/Fonts/Arial Black.ttf"),
+			},
+		},
 	}
 }
 
@@ -1169,8 +1614,44 @@ func normalizeCaptionFontKey(value string) (string, error) {
 		return clipCaptionFontArialNarrow, nil
 	case clipCaptionFontDejaVuSansCondensed, "dejavu", "dejavu_sans", "dejavu_sans_condensed_bold":
 		return clipCaptionFontDejaVuSansCondensed, nil
+	case clipCaptionFontRoboto:
+		return clipCaptionFontRoboto, nil
+	case clipCaptionFontRobotoCondensed, "robotocondensed":
+		return clipCaptionFontRobotoCondensed, nil
+	case clipCaptionFontOpenSans, "opensans":
+		return clipCaptionFontOpenSans, nil
+	case clipCaptionFontNotoSans, "notosans":
+		return clipCaptionFontNotoSans, nil
+	case clipCaptionFontNotoSansDisplay, "notosansdisplay":
+		return clipCaptionFontNotoSansDisplay, nil
+	case clipCaptionFontLiberationSans, "liberation", "liberation_sans_bold", "liberationsans":
+		return clipCaptionFontLiberationSans, nil
+	case clipCaptionFontFreeSans, "freesans":
+		return clipCaptionFontFreeSans, nil
+	case clipCaptionFontBebasNeue, "bebas", "bebasneue":
+		return clipCaptionFontBebasNeue, nil
+	case clipCaptionFontCantarell:
+		return clipCaptionFontCantarell, nil
+	case clipCaptionFontHelvetica, "helvetica_neue", "helveticaneue":
+		return clipCaptionFontHelvetica, nil
+	case clipCaptionFontImpact:
+		return clipCaptionFontImpact, nil
+	case clipCaptionFontFutura:
+		return clipCaptionFontFutura, nil
+	case clipCaptionFontAvenirNext, "avenir", "avenirnext":
+		return clipCaptionFontAvenirNext, nil
+	case clipCaptionFontDINCondensed, "din", "dincondensed", "din_alternate", "dinalternate":
+		return clipCaptionFontDINCondensed, nil
+	case clipCaptionFontVerdana:
+		return clipCaptionFontVerdana, nil
+	case clipCaptionFontTrebuchetMS, "trebuchet", "trebuchetms":
+		return clipCaptionFontTrebuchetMS, nil
+	case clipCaptionFontGeorgia:
+		return clipCaptionFontGeorgia, nil
+	case clipCaptionFontArialBlack, "arialblack":
+		return clipCaptionFontArialBlack, nil
 	default:
-		return "", fmt.Errorf("caption_plan font_family must be one of default, inter, arial, arial_narrow, or dejavu_sans_condensed")
+		return "", fmt.Errorf("caption_plan font_family must be one of %s", captionFontKeyList(allClipCaptionFontKeys()))
 	}
 }
 
@@ -1198,6 +1679,60 @@ func normalizeCaptionStyleSource(value string) (string, error) {
 	default:
 		return "", fmt.Errorf("caption_plan style_source must be one of none, opus_default, user_specified, creative_mix, or clip_palette")
 	}
+}
+
+func normalizeCaptionAnimation(value string) (string, error) {
+	key := strings.ToLower(strings.TrimSpace(value))
+	key = strings.ReplaceAll(key, "-", "_")
+	key = strings.ReplaceAll(key, " ", "_")
+	switch key {
+	case "", clipCaptionAnimationNone:
+		return clipCaptionAnimationNone, nil
+	case clipCaptionAnimationPop:
+		return clipCaptionAnimationPop, nil
+	case clipCaptionAnimationBounce:
+		return clipCaptionAnimationBounce, nil
+	case clipCaptionAnimationFade:
+		return clipCaptionAnimationFade, nil
+	case clipCaptionAnimationSlideUp, "rise", "rise_up":
+		return clipCaptionAnimationSlideUp, nil
+	case clipCaptionAnimationSlideDown, "drop", "drop_in":
+		return clipCaptionAnimationSlideDown, nil
+	case clipCaptionAnimationSlideLeft:
+		return clipCaptionAnimationSlideLeft, nil
+	case clipCaptionAnimationSlideRight:
+		return clipCaptionAnimationSlideRight, nil
+	case clipCaptionAnimationZoomIn, "zoom":
+		return clipCaptionAnimationZoomIn, nil
+	default:
+		return "", fmt.Errorf("caption_plan animation must be one of %s", captionAnimationList(allClipCaptionAnimations()))
+	}
+}
+
+func normalizeCaptionAnimationOrDefault(value string) string {
+	animation, err := normalizeCaptionAnimation(value)
+	if err != nil {
+		return clipCaptionAnimationNone
+	}
+	return animation
+}
+
+func allClipCaptionAnimations() []string {
+	return []string{
+		clipCaptionAnimationNone,
+		clipCaptionAnimationPop,
+		clipCaptionAnimationBounce,
+		clipCaptionAnimationFade,
+		clipCaptionAnimationSlideUp,
+		clipCaptionAnimationSlideDown,
+		clipCaptionAnimationSlideLeft,
+		clipCaptionAnimationSlideRight,
+		clipCaptionAnimationZoomIn,
+	}
+}
+
+func captionAnimationList(animations []string) string {
+	return strings.Join(animations, ", ")
 }
 
 func captionASSOpaqueColor(value string) (string, error) {
@@ -1335,6 +1870,13 @@ func captionPlanStyleSource(plan *ClipCaptionPlan) string {
 		return ""
 	}
 	return strings.TrimSpace(plan.StyleSource)
+}
+
+func captionPlanAnimation(plan *ClipCaptionPlan) string {
+	if plan == nil {
+		return ""
+	}
+	return strings.TrimSpace(plan.Animation)
 }
 
 func captionPlanTimingQuality(plan *ClipCaptionPlan) string {

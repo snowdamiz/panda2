@@ -1,6 +1,7 @@
 import { commandViews } from '../data/landing';
 import { initAdminConsole } from './admin-console';
 import { initWalletAccount } from './account';
+import { initClipsPortal } from './clips';
 import { initSolPayments } from './sol-payments';
 
 (() => {
@@ -108,4 +109,5 @@ import { initSolPayments } from './sol-payments';
   initWalletAccount();
   initSolPayments();
   initAdminConsole();
+  initClipsPortal();
 })();

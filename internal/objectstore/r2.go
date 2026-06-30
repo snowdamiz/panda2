@@ -12,6 +12,8 @@ import (
 	"net/http"
 	"net/url"
 	"path"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -101,6 +103,149 @@ func (c *R2Client) Configured() bool {
 		c.bucket != "" &&
 		c.publicBaseURL != "" &&
 		c.client != nil
+}
+
+// SigningConfigured reports whether the client can sign requests (presign GET,
+// delete) against the private S3 endpoint. Unlike Configured it does not require
+// a public base URL, so it works even when the bucket has no public access.
+func (c *R2Client) SigningConfigured() bool {
+	return c != nil &&
+		c.endpoint != "" &&
+		c.accessKeyID != "" &&
+		c.secretAccessKey != "" &&
+		c.bucket != "" &&
+		c.client != nil
+}
+
+const r2MaxPresignTTL = 7 * 24 * time.Hour
+
+// PresignGetURL returns a SigV4 query-string presigned GET URL for the given
+// fully-prefixed object key (the value stored as RenderedClip.ObjectKey). The
+// URL targets the private S3 endpoint, not the public CDN base URL.
+func (c *R2Client) PresignGetURL(key string, ttl time.Duration) (string, error) {
+	return c.presignGet(key, ttl, "")
+}
+
+// PresignDownloadURL is like PresignGetURL but adds a Content-Disposition
+// override so the browser downloads the object under the given filename instead
+// of playing it inline.
+func (c *R2Client) PresignDownloadURL(key string, ttl time.Duration, filename string) (string, error) {
+	disposition := ""
+	if name := strings.TrimSpace(filename); name != "" {
+		disposition = `attachment; filename="` + name + `"`
+	} else {
+		disposition = "attachment"
+	}
+	return c.presignGet(key, ttl, disposition)
+}
+
+func (c *R2Client) presignGet(key string, ttl time.Duration, contentDisposition string) (string, error) {
+	if !c.SigningConfigured() {
+		return "", ErrNotConfigured
+	}
+	key = strings.Trim(strings.TrimSpace(key), "/")
+	if key == "" {
+		return "", fmt.Errorf("object key is required")
+	}
+	if ttl <= 0 {
+		ttl = time.Hour
+	}
+	if ttl > r2MaxPresignTTL {
+		ttl = r2MaxPresignTTL
+	}
+	endpoint, err := url.Parse(c.endpoint)
+	if err != nil || endpoint.Scheme == "" || endpoint.Host == "" {
+		return "", fmt.Errorf("invalid r2 endpoint")
+	}
+	objectURL := *endpoint
+	objectURL.Path = joinURLPath(endpoint.Path, c.bucket, key)
+	objectURL.RawQuery = ""
+	objectURL.Fragment = ""
+
+	now := c.now().UTC()
+	date := now.Format("20060102")
+	amzDate := now.Format("20060102T150405Z")
+	credentialScope := strings.Join([]string{date, r2Region, r2Service, "aws4_request"}, "/")
+	credential := c.accessKeyID + "/" + credentialScope
+
+	// Canonical query parameters must be URI-encoded and sorted by key. All the
+	// X-Amz-* keys precede a lowercase "response-content-disposition" override.
+	params := []string{
+		"X-Amz-Algorithm=AWS4-HMAC-SHA256",
+		"X-Amz-Credential=" + awsURIEncode(credential, true),
+		"X-Amz-Date=" + amzDate,
+		"X-Amz-Expires=" + strconv.Itoa(int(ttl/time.Second)),
+		"X-Amz-SignedHeaders=host",
+	}
+	if contentDisposition != "" {
+		params = append(params, "response-content-disposition="+awsURIEncode(contentDisposition, true))
+	}
+	sort.Strings(params)
+	canonicalQuery := strings.Join(params, "&")
+
+	escapedPath := objectURL.EscapedPath()
+	canonicalHeaders := "host:" + objectURL.Host + "\n"
+	canonicalRequest := strings.Join([]string{
+		http.MethodGet,
+		escapedPath,
+		canonicalQuery,
+		canonicalHeaders,
+		"host",
+		"UNSIGNED-PAYLOAD",
+	}, "\n")
+	stringToSign := strings.Join([]string{
+		"AWS4-HMAC-SHA256",
+		amzDate,
+		credentialScope,
+		sha256Hex([]byte(canonicalRequest)),
+	}, "\n")
+	signature := hex.EncodeToString(hmacSHA256(signingKey(c.secretAccessKey, date), stringToSign))
+
+	return objectURL.Scheme + "://" + objectURL.Host + escapedPath + "?" + canonicalQuery + "&X-Amz-Signature=" + signature, nil
+}
+
+// Delete removes the object at the given fully-prefixed key. A missing object is
+// treated as success.
+func (c *R2Client) Delete(ctx context.Context, key string) error {
+	if !c.SigningConfigured() {
+		return ErrNotConfigured
+	}
+	key = strings.Trim(strings.TrimSpace(key), "/")
+	if key == "" {
+		return fmt.Errorf("object key is required")
+	}
+	endpoint, err := url.Parse(c.endpoint)
+	if err != nil || endpoint.Scheme == "" || endpoint.Host == "" {
+		return fmt.Errorf("invalid r2 endpoint")
+	}
+	objectURL := *endpoint
+	objectURL.Path = joinURLPath(endpoint.Path, c.bucket, key)
+	objectURL.RawQuery = ""
+	objectURL.Fragment = ""
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, objectURL.String(), nil)
+	if err != nil {
+		return err
+	}
+	payloadHash := sha256Hex([]byte(""))
+	req.Header.Set("X-Amz-Content-Sha256", payloadHash)
+	now := c.now().UTC()
+	req.Header.Set("X-Amz-Date", now.Format("20060102T150405Z"))
+	req.Header.Set("Authorization", c.authorizationHeader(req, payloadHash, now))
+
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		return nil
+	}
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		data, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return fmt.Errorf("r2 delete failed with status %d: %s", resp.StatusCode, strings.TrimSpace(string(data)))
+	}
+	return nil
 }
 
 func (c *R2Client) Upload(ctx context.Context, request UploadRequest) (UploadResult, error) {
@@ -218,6 +363,26 @@ func joinURLPath(parts ...string) string {
 		return "/"
 	}
 	return "/" + path.Join(cleaned...)
+}
+
+// awsURIEncode percent-encodes a value per the AWS SigV4 canonical rules
+// (RFC 3986): unreserved characters pass through, everything else is encoded.
+// When encodeSlash is false, '/' is left intact (used for path components).
+func awsURIEncode(value string, encodeSlash bool) string {
+	var b strings.Builder
+	for i := 0; i < len(value); i++ {
+		ch := value[i]
+		switch {
+		case (ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9') ||
+			ch == '-' || ch == '_' || ch == '.' || ch == '~':
+			b.WriteByte(ch)
+		case ch == '/' && !encodeSlash:
+			b.WriteByte(ch)
+		default:
+			fmt.Fprintf(&b, "%%%02X", ch)
+		}
+	}
+	return b.String()
 }
 
 func escapeObjectKey(key string) string {

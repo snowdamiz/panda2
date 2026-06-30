@@ -21,6 +21,12 @@ type clipThumbnailSample struct {
 	Transcript        string
 }
 
+type clipThumbnailSwitchPair struct {
+	Before          clipThumbnailSample
+	After           clipThumbnailSample
+	BoundarySeconds float64
+}
+
 func (s *Service) extractClipThumbnails(ctx context.Context, tools ToolPaths, sourcePath string, decision ClipDecision, transcriptTimeline []ClipCompositionTranscriptSegment, tempDir string) ([]ClipThumbnail, error) {
 	samples := clipThumbnailSamples(decision, transcriptTimeline, s.thumbnailMaxCount)
 	if len(samples) == 0 {
@@ -65,40 +71,16 @@ func clipThumbnailSamples(decision ClipDecision, transcriptTimeline []ClipCompos
 	if maxCount <= 0 {
 		maxCount = 12
 	}
-	samples := make([]clipThumbnailSample, 0, maxCount)
-	addSample := func(segmentIndex int, sourceSeconds float64, reason string, transcript string) {
-		if segmentIndex < 0 || segmentIndex >= len(decision.Segments) {
-			return
-		}
-		segment := decision.Segments[segmentIndex]
-		sourceSeconds = clampThumbnailTime(sourceSeconds, segment.StartSeconds, segment.EndSeconds)
-		sample := clipThumbnailSample{
-			SegmentIndex:      segmentIndex,
-			SourceSeconds:     sourceSeconds,
-			ClipOffsetSeconds: sourceSeconds - segment.StartSeconds,
-			Reason:            reason,
-			Transcript:        strings.TrimSpace(transcript),
-		}
-		if sample.Transcript == "" {
-			sample.Transcript = segment.Transcript
-		}
-		for index, existing := range samples {
-			if existing.SegmentIndex == segmentIndex && secondsNear(existing.SourceSeconds, sourceSeconds, 0.25) {
-				if clipThumbnailSamplePriority(sample.Reason) > clipThumbnailSamplePriority(existing.Reason) {
-					samples[index] = sample
-				}
-				return
-			}
-		}
-		if len(samples) >= maxCount {
-			return
-		}
-		samples = append(samples, sample)
-	}
+	strategic := clipStrategicThumbnailSamples(decision)
+	switchPairs := clipThumbnailSwitchPairs(decision, transcriptTimeline)
+	samples := selectClipThumbnailSamples(strategic, switchPairs, len(decision.Segments), maxCount)
+	sortClipThumbnailSamples(samples)
+	return samples
+}
+
+func clipStrategicThumbnailSamples(decision ClipDecision) []clipThumbnailSample {
+	samples := make([]clipThumbnailSample, 0)
 	for segmentIndex, segment := range decision.Segments {
-		if len(samples) >= maxCount {
-			break
-		}
 		duration := segment.EndSeconds - segment.StartSeconds
 		if duration <= 0 {
 			continue
@@ -128,9 +110,16 @@ func clipThumbnailSamples(decision ClipDecision, transcriptTimeline []ClipCompos
 			}
 		}
 		for _, offset := range offsets {
-			addSample(segmentIndex, segment.StartSeconds+offset.offset, offset.reason, segment.Transcript)
+			if sample, ok := newClipThumbnailSample(decision, segmentIndex, segment.StartSeconds+offset.offset, offset.reason, segment.Transcript); ok {
+				samples = append(samples, sample)
+			}
 		}
 	}
+	return samples
+}
+
+func clipThumbnailSwitchPairs(decision ClipDecision, transcriptTimeline []ClipCompositionTranscriptSegment) []clipThumbnailSwitchPair {
+	pairs := make([]clipThumbnailSwitchPair, 0)
 	for segmentIndex, segment := range decision.Segments {
 		turns := transcriptTimelineForClipSegment(transcriptTimeline, segmentIndex)
 		for index := 1; index < len(turns); index++ {
@@ -146,19 +135,148 @@ func clipThumbnailSamples(decision ClipDecision, transcriptTimeline []ClipCompos
 			} else if strings.TrimSpace(next.Text) != "" {
 				nearText = strings.TrimSpace(next.Text)
 			}
-			addSample(segmentIndex, boundary-0.15, "possible_speaker_switch_before", nearText)
-			addSample(segmentIndex, boundary+0.15, "possible_speaker_switch_after", nearText)
+			before, beforeOK := newClipThumbnailSample(decision, segmentIndex, boundary-0.15, "possible_speaker_switch_before", nearText)
+			after, afterOK := newClipThumbnailSample(decision, segmentIndex, boundary+0.15, "possible_speaker_switch_after", nearText)
+			if beforeOK && afterOK {
+				pairs = append(pairs, clipThumbnailSwitchPair{
+					Before:          before,
+					After:           after,
+					BoundarySeconds: boundary,
+				})
+			}
 		}
 	}
-	sortClipThumbnailSamples(samples)
-	return samples
+	return pairs
+}
+
+func newClipThumbnailSample(decision ClipDecision, segmentIndex int, sourceSeconds float64, reason string, transcript string) (clipThumbnailSample, bool) {
+	if segmentIndex < 0 || segmentIndex >= len(decision.Segments) {
+		return clipThumbnailSample{}, false
+	}
+	segment := decision.Segments[segmentIndex]
+	sourceSeconds = clampThumbnailTime(sourceSeconds, segment.StartSeconds, segment.EndSeconds)
+	sample := clipThumbnailSample{
+		SegmentIndex:      segmentIndex,
+		SourceSeconds:     sourceSeconds,
+		ClipOffsetSeconds: sourceSeconds - segment.StartSeconds,
+		Reason:            reason,
+		Transcript:        strings.TrimSpace(transcript),
+	}
+	if sample.Transcript == "" {
+		sample.Transcript = segment.Transcript
+	}
+	return sample, true
+}
+
+func selectClipThumbnailSamples(strategic []clipThumbnailSample, switchPairs []clipThumbnailSwitchPair, segmentCount int, maxCount int) []clipThumbnailSample {
+	if maxCount <= 0 {
+		return nil
+	}
+	selected := make([]clipThumbnailSample, 0, maxCount)
+	pairCount := 0
+	if len(switchPairs) > 0 && maxCount >= 2 {
+		pairBudget := maxCount - clipThumbnailStrategicReserve(segmentCount, maxCount)
+		if pairBudget < 2 {
+			pairBudget = 2
+		}
+		pairCount = min(len(switchPairs), pairBudget/2)
+		for _, pair := range selectClipThumbnailSwitchPairs(switchPairs, pairCount) {
+			addClipThumbnailSample(&selected, pair.Before, maxCount)
+			addClipThumbnailSample(&selected, pair.After, maxCount)
+		}
+	}
+	for _, sample := range strategic {
+		addClipThumbnailSample(&selected, sample, maxCount)
+	}
+	if len(selected) < maxCount && pairCount < len(switchPairs) {
+		for _, pair := range switchPairs {
+			if len(selected) >= maxCount {
+				break
+			}
+			if !clipThumbnailSampleSelected(selected, pair.Before) && len(selected)+2 <= maxCount {
+				addClipThumbnailSample(&selected, pair.Before, maxCount)
+				addClipThumbnailSample(&selected, pair.After, maxCount)
+			}
+		}
+	}
+	return selected
+}
+
+func clipThumbnailStrategicReserve(segmentCount int, maxCount int) int {
+	if maxCount <= 2 {
+		return 0
+	}
+	reserve := 3
+	if segmentCount > 1 {
+		reserve = min(segmentCount, 4)
+	}
+	if maxCount < 8 {
+		reserve = max(1, maxCount/3)
+	}
+	return min(reserve, maxCount-2)
+}
+
+func selectClipThumbnailSwitchPairs(pairs []clipThumbnailSwitchPair, maxPairs int) []clipThumbnailSwitchPair {
+	if maxPairs <= 0 {
+		return nil
+	}
+	if len(pairs) <= maxPairs {
+		return append([]clipThumbnailSwitchPair(nil), pairs...)
+	}
+	if maxPairs == 1 {
+		return []clipThumbnailSwitchPair{pairs[0]}
+	}
+	selected := make([]clipThumbnailSwitchPair, 0, maxPairs)
+	used := make(map[int]bool, maxPairs)
+	for index := 0; index < maxPairs; index++ {
+		pairIndex := index * (len(pairs) - 1) / (maxPairs - 1)
+		for used[pairIndex] && pairIndex < len(pairs)-1 {
+			pairIndex++
+		}
+		for used[pairIndex] && pairIndex > 0 {
+			pairIndex--
+		}
+		used[pairIndex] = true
+		selected = append(selected, pairs[pairIndex])
+	}
+	return selected
+}
+
+func addClipThumbnailSample(samples *[]clipThumbnailSample, sample clipThumbnailSample, maxCount int) bool {
+	for index, existing := range *samples {
+		if existing.SegmentIndex == sample.SegmentIndex && secondsNear(existing.SourceSeconds, sample.SourceSeconds, 0.25) {
+			if clipThumbnailSamplePriority(sample.Reason) > clipThumbnailSamplePriority(existing.Reason) {
+				(*samples)[index] = sample
+			}
+			return true
+		}
+	}
+	if len(*samples) >= maxCount {
+		return false
+	}
+	*samples = append(*samples, sample)
+	return true
+}
+
+func clipThumbnailSampleSelected(samples []clipThumbnailSample, sample clipThumbnailSample) bool {
+	for _, existing := range samples {
+		if existing.SegmentIndex == sample.SegmentIndex && secondsNear(existing.SourceSeconds, sample.SourceSeconds, 0.25) {
+			return true
+		}
+	}
+	return false
 }
 
 func clipThumbnailSamplePriority(reason string) int {
 	if strings.HasPrefix(reason, "possible_speaker_switch") {
-		return 2
+		return 3
 	}
-	return 1
+	switch reason {
+	case "strategic_start", "strategic_end":
+		return 2
+	default:
+		return 1
+	}
 }
 
 func transcriptTimelineForClipSegment(timeline []ClipCompositionTranscriptSegment, segmentIndex int) []ClipCompositionTranscriptSegment {

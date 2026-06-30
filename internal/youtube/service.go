@@ -205,6 +205,7 @@ type RenderedClip struct {
 	CaptionMode              string
 	CaptionStylePreset       string
 	CaptionStyleSource       string
+	CaptionAnimation         string
 	CaptionTimingQuality     string
 	CaptionConfidence        float64
 	CaptionReason            string
@@ -271,11 +272,14 @@ type ClipDecision struct {
 }
 
 type ClipDecisionSegment struct {
-	StartSegmentIndex *int    `json:"start_segment_index,omitempty"`
-	EndSegmentIndex   *int    `json:"end_segment_index,omitempty"`
-	StartSeconds      float64 `json:"start_seconds"`
-	EndSeconds        float64 `json:"end_seconds"`
-	Transcript        string  `json:"transcript"`
+	StartWordID        string  `json:"start_word_id,omitempty"`
+	EndWordID          string  `json:"end_word_id,omitempty"`
+	StartSeconds       float64 `json:"start_seconds"`
+	EndSeconds         float64 `json:"end_seconds"`
+	SpeechStartSeconds float64 `json:"speech_start_seconds,omitempty"`
+	SpeechEndSeconds   float64 `json:"speech_end_seconds,omitempty"`
+	Transcript         string  `json:"transcript"`
+	BoundaryReason     string  `json:"boundary_reason,omitempty"`
 }
 
 type ClipResolution struct {
@@ -284,16 +288,17 @@ type ClipResolution struct {
 }
 
 type ClipCompositionRequest struct {
-	Title               string
-	URL                 string
-	Uploader            string
-	RequestedAspect     string
-	LayoutInstructions  string
-	CaptionMode         string
-	CaptionInstructions string
-	Clip                ClipDecision
-	TranscriptTimeline  []ClipCompositionTranscriptSegment
-	Thumbnails          []ClipThumbnail
+	Title                 string
+	URL                   string
+	Uploader              string
+	RequestedAspect       string
+	LayoutInstructions    string
+	CaptionMode           string
+	CaptionInstructions   string
+	AvailableCaptionFonts []string
+	Clip                  ClipDecision
+	TranscriptTimeline    []ClipCompositionTranscriptSegment
+	Thumbnails            []ClipThumbnail
 }
 
 type ClipThumbnail struct {
@@ -319,12 +324,13 @@ type ClipCompositionTranscriptSegment struct {
 }
 
 type ClipCompositionResult struct {
-	AspectRatio string                `json:"aspect_ratio"`
-	LayoutMode  string                `json:"layout_mode"`
-	Plans       []ClipFrameRenderPlan `json:"plans"`
-	CaptionPlan *ClipCaptionPlan      `json:"caption_plan"`
-	Confidence  float64               `json:"confidence"`
-	Reason      string                `json:"reason"`
+	AspectRatio     string                `json:"aspect_ratio"`
+	LayoutMode      string                `json:"layout_mode"`
+	Plans           []ClipFrameRenderPlan `json:"plans"`
+	SwitchDecisions []ClipSwitchDecision  `json:"switch_decisions"`
+	CaptionPlan     *ClipCaptionPlan      `json:"caption_plan"`
+	Confidence      float64               `json:"confidence"`
+	Reason          string                `json:"reason"`
 }
 
 type ClipFrameRenderPlan struct {
@@ -342,10 +348,19 @@ type ClipRenderRegion struct {
 	ZIndex     int      `json:"z_index"`
 }
 
+type ClipSwitchDecision struct {
+	BeforeThumbnailID string  `json:"before_thumbnail_id"`
+	AfterThumbnailID  string  `json:"after_thumbnail_id"`
+	VisualDecision    string  `json:"visual_decision"`
+	Confidence        float64 `json:"confidence"`
+	Reason            string  `json:"reason"`
+}
+
 type ClipCaptionPlan struct {
 	Mode              string              `json:"mode"`
 	StylePreset       string              `json:"style_preset"`
 	StyleSource       string              `json:"style_source"`
+	Animation         string              `json:"animation"`
 	TimingQuality     string              `json:"timing_quality"`
 	FontFamily        string              `json:"font_family"`
 	FontColor         string              `json:"font_color"`

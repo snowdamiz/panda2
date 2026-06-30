@@ -13,6 +13,7 @@ import (
 	"github.com/sn0w/panda2/internal/alerts"
 	"github.com/sn0w/panda2/internal/assistant"
 	"github.com/sn0w/panda2/internal/billing"
+	"github.com/sn0w/panda2/internal/clipevents"
 	"github.com/sn0w/panda2/internal/commands"
 	"github.com/sn0w/panda2/internal/composed"
 	"github.com/sn0w/panda2/internal/config"
@@ -108,6 +109,8 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 	composedRepo := repository.NewComposedToolRepository(dataStore.DB)
 	runtimeStatuses := repository.NewRuntimeStatusRepository(dataStore.DB)
 	userSafety := repository.NewUserSafetyRepository(dataStore.DB)
+	clips := repository.NewClipRepository(dataStore.DB)
+	clipEvents := clipevents.NewHub()
 	runtimeService := runtimecontrol.NewService(runtimeStatuses)
 	featureService := features.NewService(featureRepo)
 	openRouter := llm.NewOpenRouterClient(openRouterChatConfig(cfg))
@@ -214,6 +217,11 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 		WithGIFFrameExtractor(tools.NewFFmpegGIFFrameExtractor(musicSidecars)).
 		WithUserSafetyRepository(userSafety).
 		WithYouTubeSummarizer(youtubeSummarizer).
+		WithClipRepository(clips).
+		WithClipObjectStore(clipUploader).
+		WithClipEvents(clipEvents).
+		WithClipURLTTL(cfg.R2ClipURLTTL).
+		WithPortalClipsURL(cfg.PortalClipsURL()).
 		WithBilling(billingService).
 		WithOpsManager(opsService)
 	composedService := composed.NewService(composedRepo, toolRegistry, toolExecutor, openRouter, cfg.OpenRouterModel).
@@ -254,6 +262,7 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 			SuccessRedirect: installResultURL(cfg.PublicAppURL, "/install/success/"),
 			FailureRedirect: installResultURL(cfg.PublicAppURL, "/install/failed/"),
 		})
+	portalOAuth := discordbot.NewPortalOAuthClient(cfg.DiscordApplicationID, cfg.DiscordClientSecret, cfg.DiscordPortalRedirectURI)
 	router := commands.NewRouter(adminService, assistantService, opsService, ratelimit.New(cfg.UserRateLimit, cfg.UserRateLimitWindow)).
 		WithRuntimeStatus(runtimeService).
 		WithComposedService(composedService).
@@ -303,7 +312,11 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 			WithDiscordWebhookHandler(installService).
 			WithInstallHandler(installService).
 			WithBillingService(billingService).
-			WithGuildRepository(guilds),
+			WithGuildRepository(guilds).
+			WithClipRepository(clips).
+			WithClipObjectStore(clipUploader).
+			WithClipEvents(clipEvents).
+			WithPortalOAuth(portalOAuth),
 		discord:   discord,
 		worker:    worker,
 		scheduler: schedulerService,

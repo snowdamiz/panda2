@@ -1879,6 +1879,38 @@ var migrations = []Migration{
 				INNER JOIN credit_accounts accounts ON accounts.id = grants.account_id`,
 		},
 	},
+	{
+		Version: 39,
+		Name:    "youtube_clips",
+		SQL: []string{
+			`CREATE TABLE IF NOT EXISTS youtube_clips (
+				id TEXT PRIMARY KEY,
+				user_id TEXT NOT NULL,
+				guild_id TEXT NOT NULL DEFAULT '',
+				request_id TEXT NOT NULL DEFAULT '',
+				rank INTEGER NOT NULL DEFAULT 0,
+				title TEXT NOT NULL DEFAULT '',
+				clip_type TEXT NOT NULL DEFAULT '',
+				object_key TEXT NOT NULL,
+				thumbnail_object_key TEXT NOT NULL DEFAULT '',
+				duration_seconds REAL NOT NULL DEFAULT 0,
+				source_start_seconds REAL NOT NULL DEFAULT 0,
+				source_end_seconds REAL NOT NULL DEFAULT 0,
+				video_title TEXT NOT NULL DEFAULT '',
+				video_url TEXT NOT NULL DEFAULT '',
+				video_uploader TEXT NOT NULL DEFAULT '',
+				size_bytes INTEGER NOT NULL DEFAULT 0,
+				virality_score INTEGER NOT NULL DEFAULT 0,
+				hook_score INTEGER NOT NULL DEFAULT 0,
+				retention_score INTEGER NOT NULL DEFAULT 0,
+				shareability_score INTEGER NOT NULL DEFAULT 0,
+				created_at DATETIME NOT NULL
+			)`,
+			`CREATE INDEX IF NOT EXISTS idx_youtube_clips_user_id ON youtube_clips(user_id)`,
+			`CREATE INDEX IF NOT EXISTS idx_youtube_clips_user_created ON youtube_clips(user_id, created_at)`,
+			`CREATE INDEX IF NOT EXISTS idx_youtube_clips_request_id ON youtube_clips(request_id)`,
+		},
+	},
 }
 
 func RunMigrations(db *gorm.DB) error {

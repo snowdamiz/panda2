@@ -2,13 +2,16 @@ package youtube
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
+	"os"
 	"strings"
 	"testing"
 
 	"github.com/sn0w/panda2/internal/llm"
 )
 
-const testDisabledCaptionPlanJSON = `"caption_plan":{"mode":"disabled","style_preset":"none","style_source":"none","timing_quality":"none","font_family":"default","font_color":"white","highlight_color":"yellow","border_color":"black","border_thickness":"thick","background_color":"transparent","background_opacity":0,"regions":[],"cues":[],"confidence":1,"reason":"Captions were explicitly disabled for this test."}`
+const testDisabledCaptionPlanJSON = `"caption_plan":{"mode":"disabled","style_preset":"none","style_source":"none","animation":"none","timing_quality":"none","font_family":"default","font_color":"white","highlight_color":"yellow","border_color":"black","border_thickness":"thick","background_color":"transparent","background_opacity":0,"regions":[],"cues":[],"confidence":1,"reason":"Captions were explicitly disabled for this test."}`
 
 func TestOpenRouterClipCompositionPlannerRepairsInvalidPlan(t *testing.T) {
 	client := &fakeClipLLM{
@@ -79,7 +82,7 @@ func TestOpenRouterClipCompositionPlannerRepairsInvalidPlan(t *testing.T) {
 		t.Fatalf("expected thumbnail image content part, got %+v", first.Messages[1].ContentParts)
 	}
 	userPrompt := first.Messages[1].ContentParts[0].Text
-	for _, want := range []string{`"sample_reason":"possible_speaker_switch_after"`, `"transcript_timeline"`, `"dynamic_regions"`} {
+	for _, want := range []string{`"sample_reason":"possible_speaker_switch_after"`, `"transcript_timeline"`, `"response_guidance"`} {
 		if !strings.Contains(userPrompt, want) {
 			t.Fatalf("expected composition prompt to contain %s, got %s", want, userPrompt)
 		}
@@ -133,7 +136,10 @@ func TestOpenRouterClipCompositionPlannerExpandsRepairBudgetForTruncatedJSON(t *
 	if err != nil {
 		t.Fatalf("Plan: %v", err)
 	}
-	if result.LayoutMode != "single_crop" || result.Plans[0].Regions[0].Role != "speaker" {
+	if result.LayoutMode != "single_crop" ||
+		result.Plans[0].Regions[0].Role != "speaker" ||
+		result.Plans[0].Regions[0].SourceRect != (ClipRect{X: 0, Y: 0, W: 500, H: 1000}) ||
+		result.Plans[0].Regions[0].Fit != "cover" {
 		t.Fatalf("unexpected repaired result: %+v", result)
 	}
 	if len(client.requests) != 2 {
@@ -148,33 +154,226 @@ func TestOpenRouterClipCompositionPlannerExpandsRepairBudgetForTruncatedJSON(t *
 	}
 }
 
-func TestValidateClipCompositionRejectsUntiledStackedRegions(t *testing.T) {
-	err := ValidateClipCompositionResult(ClipCompositionResult{
+func TestOpenRouterClipCompositionPlannerFailsAfterRepeatedTruncation(t *testing.T) {
+	client := &fakeClipLLM{
+		responses: []llm.ChatResponse{
+			{Content: `{"aspect_ratio":"9:16","layout_mode":"single_crop"`, FinishReason: "length"},
+			{Content: `{"aspect_ratio":"9:16","layout_mode":"single_crop","plans":[`, FinishReason: "length"},
+			{Content: `{"aspect_ratio":"9:16","layout_mode":"single_crop","plans":[{"applies_to_segment_index":0`, FinishReason: "length"},
+		},
+	}
+	planner := NewOpenRouterClipCompositionPlanner(ClipCompositionPlannerConfig{
+		Client: client,
+		Model:  "google/gemini-3.5-flash",
+	})
+	request := captionTestCompositionRequest()
+	request.CaptionInstructions = "random caption styles"
+	request.AvailableCaptionFonts = []string{clipCaptionFontDefault}
+	request.Thumbnails = []ClipThumbnail{{
+		ID:            "thumb_01",
+		SourceSeconds: 10,
+		Width:         1600,
+		Height:        900,
+		MIMEType:      "image/jpeg",
+		Data:          []byte("jpeg bytes"),
+	}}
+
+	_, err := planner.Plan(context.Background(), request)
+	if err == nil || !strings.Contains(err.Error(), "truncated") || !strings.Contains(err.Error(), "after repair") {
+		t.Fatalf("expected repeated truncation to fail after repair attempts, got %v", err)
+	}
+	if len(client.requests) != 2 {
+		t.Fatalf("expected initial request plus one repair attempt, got %d", len(client.requests))
+	}
+}
+
+func TestClipCompositionRepairMessageSummarizesLongInvalidJSON(t *testing.T) {
+	previous := strings.Repeat("x", 1200)
+	message := clipCompositionRepairMessage(errors.New("bad json"), llm.ChatResponse{Content: previous})
+
+	if !strings.Contains(message, "Previous invalid JSON summary") || !strings.Contains(message, "response length 1200 chars") {
+		t.Fatalf("expected compact invalid JSON summary, got %s", message)
+	}
+	if strings.Contains(message, previous) {
+		t.Fatalf("repair prompt should not echo the entire invalid JSON response")
+	}
+}
+
+func TestOpenRouterClipCompositionPlannerRepairsCueCrossingRenderPlanBoundary(t *testing.T) {
+	first := captionTestCompositionResult()
+	first.Plans = []ClipFrameRenderPlan{
+		{
+			AppliesToSegmentIndex: 0,
+			SourceStartSeconds:    10,
+			SourceEndSeconds:      11.55,
+			Regions: []ClipRenderRegion{{
+				Role:       "speaker",
+				SourceRect: ClipRect{X: 0, Y: 0, W: 500, H: 1000},
+				OutputRect: ClipRect{X: 0, Y: 0, W: 1000, H: 1000},
+				Fit:        "cover",
+				ZIndex:     0,
+			}},
+		},
+		{
+			AppliesToSegmentIndex: 0,
+			SourceStartSeconds:    11.55,
+			SourceEndSeconds:      16,
+			Regions: []ClipRenderRegion{{
+				Role:       "speaker",
+				SourceRect: ClipRect{X: 500, Y: 0, W: 500, H: 1000},
+				OutputRect: ClipRect{X: 0, Y: 0, W: 1000, H: 1000},
+				Fit:        "cover",
+				ZIndex:     0,
+			}},
+		},
+	}
+	first.Reason = "Switch speaker crop at the visual handoff."
+	first.CaptionPlan.Cues[0].WordIDs = []string{"w_0001", "w_0005"}
+
+	repaired := first
+	repaired.CaptionPlan = cloneCaptionPlan(first.CaptionPlan)
+	repaired.CaptionPlan.Cues = []ClipCaptionCue{
+		{
+			CaptionRegionID: "bottom_global",
+			WordIDs:         []string{"w_0001", "w_0004"},
+			EmphasisWordIDs: []string{"w_0002"},
+		},
+		{
+			CaptionRegionID: "bottom_global",
+			WordIDs:         []string{"w_0005", "w_0005"},
+			EmphasisWordIDs: []string{},
+		},
+	}
+
+	client := &fakeClipLLM{
+		responses: []llm.ChatResponse{
+			{Content: clipCompositionResponseJSON(t, first)},
+			{Content: clipCompositionResponseJSON(t, repaired)},
+		},
+	}
+	planner := NewOpenRouterClipCompositionPlanner(ClipCompositionPlannerConfig{
+		Client: client,
+		Model:  "google/gemini-3.5-flash",
+	})
+
+	result, err := planner.Plan(context.Background(), ClipCompositionRequest{
+		Title:           "Speaker Switch",
+		URL:             "https://www.youtube.com/watch?v=switch",
+		Uploader:        "Panel",
+		RequestedAspect: "9:16",
+		CaptionMode:     clipCaptionRequestAuto,
+		Clip: ClipDecision{
+			Rank:  1,
+			Title: "Speaker handoff",
+			Type:  "continuous",
+			Segments: []ClipDecisionSegment{{
+				StartSeconds: 10,
+				EndSeconds:   16,
+				Transcript:   "This caption plan is readable.",
+			}},
+			Reason: "Strong handoff.",
+		},
+		TranscriptTimeline: captionTestCompositionRequest().TranscriptTimeline,
+		Thumbnails: []ClipThumbnail{{
+			ID:                  "thumb_01",
+			SourceSeconds:       11.55,
+			ClipSegmentIndex:    0,
+			ClipOffsetSeconds:   1.55,
+			SampleReason:        "possible_speaker_switch_after",
+			Width:               640,
+			Height:              360,
+			MIMEType:            "image/jpeg",
+			Data:                []byte("jpeg bytes"),
+			TranscriptNearFrame: "This caption plan is readable.",
+		}},
+	})
+	if err != nil {
+		t.Fatalf("Plan: %v", err)
+	}
+	if len(result.CaptionPlan.Cues) != 2 {
+		t.Fatalf("expected repaired caption cue split, got %+v", result.CaptionPlan.Cues)
+	}
+	if len(client.requests) != 2 {
+		t.Fatalf("expected one repair attempt, got %d requests", len(client.requests)-1)
+	}
+	firstRepairPrompt := client.requests[1].Messages[1].ContentParts[0].Text
+	for _, want := range []string{
+		"caption cue 1 crosses render plan boundaries",
+		"cue source 10.000-12.050",
+		"segment 0 10.000-11.550",
+		"Previous invalid JSON summary",
+		"response length",
+	} {
+		if !strings.Contains(firstRepairPrompt, want) {
+			t.Fatalf("expected first repair prompt to contain %s, got %s", want, firstRepairPrompt)
+		}
+	}
+}
+
+func TestValidateClipCompositionAllowsStackedSpeakerWithoutPrimaryContent(t *testing.T) {
+	result := ClipCompositionResult{
 		AspectRatio: "9:16",
 		LayoutMode:  "stacked_regions",
 		Confidence:  0.8,
-		Reason:      "Bad stack.",
+		Reason:      "Stack the speaker and source captions without a separate primary panel.",
 		CaptionPlan: disabledTestCaptionPlan(),
 		Plans: []ClipFrameRenderPlan{{
 			AppliesToSegmentIndex: 0,
 			SourceStartSeconds:    10,
 			SourceEndSeconds:      40,
 			Regions: []ClipRenderRegion{
-				{Role: "primary_content", SourceRect: ClipRect{X: 0, Y: 0, W: 1000, H: 700}, OutputRect: ClipRect{X: 0, Y: 0, W: 1000, H: 650}, Fit: "cover"},
-				{Role: "facecam", SourceRect: ClipRect{X: 700, Y: 700, W: 300, H: 300}, OutputRect: ClipRect{X: 0, Y: 650, W: 1000, H: 300}, Fit: "cover", ZIndex: 1},
+				{Role: "speaker", SourceRect: ClipRect{X: 0, Y: 0, W: 633, H: 1000}, OutputRect: ClipRect{X: 0, Y: 0, W: 1000, H: 500}, Fit: "cover"},
+				{Role: "source_captions", SourceRect: ClipRect{X: 367, Y: 0, W: 633, H: 1000}, OutputRect: ClipRect{X: 0, Y: 500, W: 1000, H: 500}, Fit: "cover", ZIndex: 1},
 			},
 		}},
-	}, ClipCompositionRequest{
-		RequestedAspect: "9:16",
-		CaptionMode:     clipCaptionRequestOff,
-		Clip: ClipDecision{Segments: []ClipDecisionSegment{{
-			StartSeconds: 10,
-			EndSeconds:   40,
-			Transcript:   "Clip transcript.",
-		}}},
-	})
-	if err == nil || !strings.Contains(err.Error(), "tile the full output height") {
-		t.Fatalf("expected stacked tiling error, got %v", err)
+	}
+
+	if err := ValidateClipCompositionResult(result, looseCompositionTestRequest()); err != nil {
+		t.Fatalf("expected stacked speaker/source-captions layout to validate without primary_content, got %v", err)
+	}
+}
+
+func TestValidateClipCompositionRequiresCaptionPlanForAutoCaptions(t *testing.T) {
+	result := captionTestCompositionResult()
+	result.CaptionPlan = nil
+
+	err := ValidateClipCompositionResult(result, captionTestCompositionRequest())
+	if err == nil || !strings.Contains(err.Error(), "caption_plan is required") {
+		t.Fatalf("expected missing caption_plan to fail for auto captions, got %v", err)
+	}
+}
+
+func TestValidateClipCompositionAllowsMissingCaptionPlanWhenCaptionsOff(t *testing.T) {
+	request := captionTestCompositionRequest()
+	request.CaptionMode = clipCaptionRequestOff
+	result := captionTestCompositionResult()
+	result.CaptionPlan = nil
+
+	if err := ValidateClipCompositionResult(result, request); err != nil {
+		t.Fatalf("expected missing caption_plan to be allowed when captions are off, got %v", err)
+	}
+}
+
+func TestValidateClipCompositionAllowsLooseStackedRegions(t *testing.T) {
+	result := ClipCompositionResult{
+		AspectRatio: "9:16",
+		LayoutMode:  "stacked_regions",
+		Confidence:  0.8,
+		Reason:      "Let the model decide the stacked visual regions.",
+		CaptionPlan: disabledTestCaptionPlan(),
+		Plans: []ClipFrameRenderPlan{{
+			AppliesToSegmentIndex: 0,
+			SourceStartSeconds:    10,
+			SourceEndSeconds:      40,
+			Regions: []ClipRenderRegion{
+				{Role: "primary_content", SourceRect: ClipRect{X: 0, Y: 0, W: 1000, H: 650}, OutputRect: ClipRect{X: 0, Y: 0, W: 1000, H: 650}, Fit: "cover"},
+				{Role: "facecam", SourceRect: ClipRect{X: 0, Y: 0, W: 1000, H: 650}, OutputRect: ClipRect{X: 40, Y: 660, W: 320, H: 240}, Fit: "contain", ZIndex: 1},
+			},
+		}},
+	}
+
+	if err := ValidateClipCompositionResult(result, looseCompositionTestRequest()); err != nil {
+		t.Fatalf("expected duplicate/non-tiled stacked regions to validate, got %v", err)
 	}
 }
 
@@ -273,7 +472,7 @@ func TestValidateClipCompositionAcceptsDenseCaptionCueForRendererWrapping(t *tes
 }
 
 func TestClipCompositionSchemaUsesCompactCaptionCues(t *testing.T) {
-	schema := string(clipCompositionSchema())
+	schema := string(clipCompositionSchema(ClipCompositionRequest{}))
 	for _, want := range []string{`"word_ids"`, `"source_segment_ids"`, `"emphasis_word_ids"`} {
 		if !strings.Contains(schema, want) {
 			t.Fatalf("expected schema to contain %s, got %s", want, schema)
@@ -283,6 +482,141 @@ func TestClipCompositionSchemaUsesCompactCaptionCues(t *testing.T) {
 		if strings.Contains(schema, legacy) {
 			t.Fatalf("schema still contains legacy cue field %s: %s", legacy, schema)
 		}
+	}
+}
+
+func TestClipCompositionSchemaRequiresCaptionsUnlessOff(t *testing.T) {
+	schema := string(clipCompositionSchema(ClipCompositionRequest{}))
+	for _, want := range []string{`"switch_decisions"`, `"before_thumbnail_id"`, `"after_thumbnail_id"`, `"visual_decision"`, `"same_region"`, `"switch_region"`} {
+		if !strings.Contains(schema, want) {
+			t.Fatalf("expected schema to contain %s, got %s", want, schema)
+		}
+	}
+	var parsed struct {
+		Required []string `json:"required"`
+	}
+	if err := json.Unmarshal([]byte(schema), &parsed); err != nil {
+		t.Fatalf("parse schema: %v", err)
+	}
+	if !containsString(parsed.Required, "caption_plan") {
+		t.Fatalf("caption_plan should be required for auto captions, required=%v", parsed.Required)
+	}
+	if containsString(parsed.Required, "switch_decisions") {
+		t.Fatalf("switch_decisions should stay optional, required=%v", parsed.Required)
+	}
+
+	offSchema := string(clipCompositionSchema(ClipCompositionRequest{CaptionMode: clipCaptionRequestOff}))
+	var offParsed struct {
+		Required []string `json:"required"`
+	}
+	if err := json.Unmarshal([]byte(offSchema), &offParsed); err != nil {
+		t.Fatalf("parse off schema: %v", err)
+	}
+	if containsString(offParsed.Required, "caption_plan") {
+		t.Fatalf("caption_plan should be optional when captions are off, required=%v", offParsed.Required)
+	}
+}
+
+func TestClipCompositionPromptUsesMinimalPolicyPayload(t *testing.T) {
+	prompt := clipCompositionUserPrompt(captionTestCompositionRequest(), "")
+	for _, want := range []string{`"response_guidance"`, `"caption_plan_guidance"`, `"optional_switch_decisions"`} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("expected minimal prompt to contain %s, got %s", want, prompt)
+		}
+	}
+	for _, forbidden := range []string{`"visual_composition_policy"`, `"crop_retention_rules"`, `"caption_style_policy"`, `"switch_points"`, `"dynamic_regions"`} {
+		if strings.Contains(prompt, forbidden) {
+			t.Fatalf("prompt still contains legacy policy key %s: %s", forbidden, prompt)
+		}
+	}
+}
+
+func TestClipCompositionSchemaLimitsCaptionFontsToAvailableFonts(t *testing.T) {
+	request := captionTestCompositionRequest()
+	request.AvailableCaptionFonts = []string{clipCaptionFontDefault}
+
+	schema := string(clipCompositionSchema(request))
+
+	if !strings.Contains(schema, `"enum":["default"]`) {
+		t.Fatalf("expected font_family enum to contain only default, got %s", schema)
+	}
+	if strings.Contains(schema, `"inter"`) {
+		t.Fatalf("schema should not advertise unavailable Inter font, got %s", schema)
+	}
+}
+
+func TestClipCompositionSchemaUsesAvailableCaptionFontCatalog(t *testing.T) {
+	request := captionTestCompositionRequest()
+	request.AvailableCaptionFonts = []string{
+		clipCaptionFontDefault,
+		clipCaptionFontInter,
+		clipCaptionFontRoboto,
+		clipCaptionFontOpenSans,
+		clipCaptionFontBebasNeue,
+	}
+
+	schema := string(clipCompositionSchema(request))
+
+	for _, want := range []string{`"default"`, `"inter"`, `"roboto"`, `"open_sans"`, `"bebas_neue"`} {
+		if !strings.Contains(schema, want) {
+			t.Fatalf("expected schema to advertise %s, got %s", want, schema)
+		}
+	}
+	if strings.Contains(schema, `"impact"`) {
+		t.Fatalf("schema should not advertise fonts omitted from available list, got %s", schema)
+	}
+}
+
+func TestCaptionFontCatalogHasResolverSpecForEveryKey(t *testing.T) {
+	specs := captionFontSpecs()
+	for _, key := range allClipCaptionFontKeys() {
+		if key == clipCaptionFontDefault {
+			continue
+		}
+		spec, ok := specs[key]
+		if !ok {
+			t.Fatalf("caption font %q is missing a resolver spec", key)
+		}
+		if strings.TrimSpace(spec.Family) == "" || len(spec.Paths) == 0 {
+			t.Fatalf("caption font %q has incomplete resolver spec: %+v", key, spec)
+		}
+	}
+}
+
+func TestNormalizeCaptionFontKeyAcceptsCommonAliases(t *testing.T) {
+	tests := map[string]string{
+		"Open Sans":       clipCaptionFontOpenSans,
+		"RobotoCondensed": clipCaptionFontRobotoCondensed,
+		"Noto Sans":       clipCaptionFontNotoSans,
+		"Liberation Sans": clipCaptionFontLiberationSans,
+		"Bebas Neue":      clipCaptionFontBebasNeue,
+		"Avenir":          clipCaptionFontAvenirNext,
+		"DIN Alternate":   clipCaptionFontDINCondensed,
+		"Trebuchet":       clipCaptionFontTrebuchetMS,
+		"Arial Black":     clipCaptionFontArialBlack,
+	}
+	for value, want := range tests {
+		got, err := normalizeCaptionFontKey(value)
+		if err != nil {
+			t.Fatalf("normalizeCaptionFontKey(%q): %v", value, err)
+		}
+		if got != want {
+			t.Fatalf("normalizeCaptionFontKey(%q) = %q, want %q", value, got, want)
+		}
+	}
+}
+
+func TestValidateClipCompositionRejectsUnavailableCaptionFont(t *testing.T) {
+	request := captionTestCompositionRequest()
+	request.CaptionInstructions = "random styled captions"
+	request.AvailableCaptionFonts = []string{clipCaptionFontDefault}
+	result := captionTestCompositionResult()
+	result.CaptionPlan.StyleSource = clipCaptionStyleSourceCreativeMix
+	result.CaptionPlan.FontFamily = clipCaptionFontInter
+
+	err := ValidateClipCompositionResult(result, request)
+	if err == nil || !strings.Contains(err.Error(), `caption_plan font_family "inter" is not available`) {
+		t.Fatalf("expected unavailable caption font error, got %v", err)
 	}
 }
 
@@ -298,18 +632,6 @@ func TestValidateClipCompositionAcceptsRequestedCaptionStyle(t *testing.T) {
 
 	if err := ValidateClipCompositionResult(result, request); err != nil {
 		t.Fatalf("expected requested caption style to validate, got %v", err)
-	}
-}
-
-func TestValidateClipCompositionRequiresOpusStyleWhenCaptionStyleUnspecified(t *testing.T) {
-	request := captionTestCompositionRequest()
-	result := captionTestCompositionResult()
-	result.CaptionPlan.StyleSource = clipCaptionStyleSourceCreativeMix
-	result.CaptionPlan.BorderColor = "green"
-
-	err := ValidateClipCompositionResult(result, request)
-	if err == nil || !strings.Contains(err.Error(), "style_source must be opus_default") {
-		t.Fatalf("expected opus default style requirement, got %v", err)
 	}
 }
 
@@ -423,6 +745,58 @@ func TestBuildClipASSSubtitlePositionsAndHighlightsWords(t *testing.T) {
 	filter := appendClipCaptionFilterGraph("[0:v]scale=1080:1920[vout]", "/tmp/caption one.ass", "/fonts/Caption.ttf")
 	if !strings.Contains(filter, "[vout]subtitles=filename='/tmp/caption one.ass':fontsdir='/fonts',format=yuv420p[vcaption]") {
 		t.Fatalf("unexpected caption filter graph: %s", filter)
+	}
+}
+
+func TestBuildClipASSSubtitleAppliesCaptionAnimation(t *testing.T) {
+	request := captionTestCompositionRequest()
+	result := captionTestCompositionResult()
+	refs := newClipCaptionReferences(request.TranscriptTimeline)
+	style := clipCaptionASSStyle{
+		Font:            clipCaptionResolvedFont{Key: clipCaptionFontInter, Family: "Inter", Path: "/fonts/Inter.ttf"},
+		PrimaryColor:    "&H00FFFFFF",
+		HighlightColor:  "&H0000E6FF",
+		BorderColor:     "&H0000FF00",
+		BackColor:       "&H80000000",
+		BorderStyle:     1,
+		BorderThickness: captionBorderSize(ClipResolution{Width: 1080, Height: 1920}, clipCaptionBorderMedium),
+		ShadowSize:      captionShadowSize(ClipResolution{Width: 1080, Height: 1920}),
+		Animation:       clipCaptionAnimationSlideUp,
+	}
+
+	ass, err := buildClipASSSubtitle(*result.CaptionPlan, result.Plans[0], ClipResolution{Width: 1080, Height: 1920}, refs, style)
+	if err != nil {
+		t.Fatalf("buildClipASSSubtitle: %v", err)
+	}
+	for _, want := range []string{
+		`{\an5\move(540,1603,540,1536,0,150)\q2}`,
+		"Dialogue: 0,0:00:00.00,0:00:01.55",
+	} {
+		if !strings.Contains(ass, want) {
+			t.Fatalf("expected animated ASS to contain %s, got %s", want, ass)
+		}
+	}
+}
+
+func TestResolveCaptionFontUsesConfiguredMatchingNamedFont(t *testing.T) {
+	fontPath := t.TempDir() + "/Inter.ttf"
+	if err := os.WriteFile(fontPath, []byte("test-font"), 0o600); err != nil {
+		t.Fatalf("write test font: %v", err)
+	}
+	service := NewService(Config{
+		CaptionFontPath:   fontPath,
+		CaptionFontFamily: "Inter",
+	})
+
+	font, err := service.resolveCaptionFont(clipCaptionFontInter)
+	if err != nil {
+		t.Fatalf("resolve configured Inter font: %v", err)
+	}
+	if font.Key != clipCaptionFontInter || font.Family != "Inter" || font.Path != fontPath {
+		t.Fatalf("unexpected resolved font: %+v", font)
+	}
+	if !containsString(service.availableCaptionFontKeys(), clipCaptionFontInter) {
+		t.Fatalf("configured Inter font should be advertised as available")
 	}
 }
 
@@ -540,8 +914,10 @@ func disabledTestCaptionPlan() *ClipCaptionPlan {
 func applyTestCaptionStyle(plan *ClipCaptionPlan) *ClipCaptionPlan {
 	if plan.Mode == clipCaptionPlanModeDisabled {
 		plan.StyleSource = clipCaptionStyleSourceNone
+		plan.Animation = clipCaptionAnimationNone
 	} else {
-		plan.StyleSource = clipCaptionStyleSourceOpusDefault
+		plan.StyleSource = clipCaptionStyleSourceCreativeMix
+		plan.Animation = clipCaptionAnimationPop
 	}
 	plan.FontFamily = clipCaptionFontDefault
 	plan.FontColor = "white"
@@ -618,4 +994,58 @@ func captionTestCompositionResult() ClipCompositionResult {
 			Reason:     "Lower captions avoid the speaker's face while staying readable.",
 		}),
 	}
+}
+
+func looseCompositionTestRequest() ClipCompositionRequest {
+	return ClipCompositionRequest{
+		RequestedAspect: "9:16",
+		CaptionMode:     clipCaptionRequestOff,
+		Clip: ClipDecision{Segments: []ClipDecisionSegment{{
+			StartSeconds: 10,
+			EndSeconds:   40,
+			Transcript:   "The speaker explains the post on screen.",
+		}}},
+		Thumbnails: []ClipThumbnail{
+			{
+				ID:            "thumb_01",
+				SourceSeconds: 12,
+				SampleReason:  "strategic_start",
+				Width:         1600,
+				Height:        900,
+			},
+		},
+	}
+}
+
+func clipCompositionResponseJSON(t *testing.T, result ClipCompositionResult) string {
+	t.Helper()
+	data, err := json.Marshal(result)
+	if err != nil {
+		t.Fatalf("marshal composition response: %v", err)
+	}
+	return string(data)
+}
+
+func cloneCaptionPlan(plan *ClipCaptionPlan) *ClipCaptionPlan {
+	if plan == nil {
+		return nil
+	}
+	clone := *plan
+	clone.Regions = append([]ClipCaptionRegion(nil), plan.Regions...)
+	clone.Cues = append([]ClipCaptionCue(nil), plan.Cues...)
+	for index := range clone.Cues {
+		clone.Cues[index].WordIDs = append([]string(nil), clone.Cues[index].WordIDs...)
+		clone.Cues[index].SourceSegmentIDs = append([]string(nil), clone.Cues[index].SourceSegmentIDs...)
+		clone.Cues[index].EmphasisWordIDs = append([]string(nil), clone.Cues[index].EmphasisWordIDs...)
+	}
+	return &clone
+}
+
+func containsString(values []string, target string) bool {
+	for _, value := range values {
+		if value == target {
+			return true
+		}
+	}
+	return false
 }

@@ -13,6 +13,8 @@ import (
 
 type Handler func(context.Context, store.Job) error
 
+const defaultLease = 45 * time.Minute
+
 type Worker struct {
 	jobs       *repository.JobRepository
 	workerID   string
@@ -27,7 +29,7 @@ func NewWorker(jobs *repository.JobRepository, workerID string) *Worker {
 	return &Worker{
 		jobs:       jobs,
 		workerID:   workerID,
-		lease:      time.Minute,
+		lease:      defaultLease,
 		retryAfter: time.Minute,
 		handlers:   map[string]Handler{},
 		now:        time.Now,

@@ -48,6 +48,8 @@ const (
 	defaultImageMaxBytes           = 8 * 1024 * 1024
 	defaultSolanaOrderExpiration   = 30 * time.Minute
 	defaultSolanaActivationKeyTTL  = 48 * time.Hour
+	defaultR2ClipURLTTL            = 7 * 24 * time.Hour
+	defaultR2DownloadURLTTL        = 5 * time.Minute
 )
 
 var paidPackNames = []string{"starter", "plus", "pro", "business"}
@@ -129,6 +131,12 @@ type Config struct {
 	R2Bucket                                 string
 	R2PublicBaseURL                          string
 	R2ClipPrefix                             string
+	R2ClipURLTTL                             time.Duration
+	R2DownloadURLTTL                         time.Duration
+	PortalBaseURL                            string
+	DiscordPortalRedirectURI                 string
+	PortalSessionSecret                      string
+	PortalAllowedOrigins                     []string
 	SQLitePath                               string
 	DataDir                                  string
 	Port                                     string
@@ -148,6 +156,14 @@ type fileConfig struct {
 	Music       fileMusicConfig       `json:"music"`
 	Runtime     fileRuntimeConfig     `json:"runtime"`
 	Storage     fileStorageConfig     `json:"storage"`
+	Portal      filePortalConfig      `json:"portal"`
+}
+
+type filePortalConfig struct {
+	BaseURL            string   `json:"base_url"`
+	SessionSecret      string   `json:"session_secret"`
+	AllowedOrigins     []string `json:"allowed_origins"`
+	DiscordRedirectURI string   `json:"discord_redirect_uri"`
 }
 
 type fileDiscordConfig struct {
@@ -243,6 +259,8 @@ type fileStorageConfig struct {
 	R2Bucket          string `json:"r2_bucket"`
 	R2PublicBaseURL   string `json:"r2_public_base_url"`
 	R2ClipPrefix      string `json:"r2_clip_prefix"`
+	R2ClipURLTTL      string `json:"r2_clip_url_ttl"`
+	R2DownloadURLTTL  string `json:"r2_download_url_ttl"`
 }
 
 func Load() (Config, []string, error) {
@@ -575,6 +593,42 @@ func localLandingOrigins() []string {
 	return []string{"http://localhost:4321", "http://127.0.0.1:4321"}
 }
 
+// PortalCORSOrigins returns the CORS origins permitted to call the clips portal
+// API: any explicitly configured origins, the portal base URL, the public app
+// URL, and the landing origins (plus dev localhost outside production).
+func (c Config) PortalCORSOrigins() []string {
+	origins := append([]string(nil), c.PortalAllowedOrigins...)
+	if strings.TrimSpace(c.PortalBaseURL) != "" {
+		origins = append(origins, c.PortalBaseURL)
+	}
+	if strings.TrimSpace(c.PublicAppURL) != "" {
+		origins = append(origins, c.PublicAppURL)
+	}
+	if !strings.EqualFold(strings.TrimSpace(c.Environment), "production") {
+		origins = append(origins, localLandingOrigins()...)
+	}
+	return normalizeList(origins)
+}
+
+// PortalClipsURL returns the durable portal URL the bot links users to. Empty
+// when no portal base URL is configured.
+func (c Config) PortalClipsURL() string {
+	base := strings.TrimRight(strings.TrimSpace(c.PortalBaseURL), "/")
+	if base == "" {
+		return ""
+	}
+	return base + "/clips"
+}
+
+// PortalConfigured reports whether the Discord-login clips portal can operate:
+// it needs an OAuth app, client secret, redirect URI, and a session secret.
+func (c Config) PortalConfigured() bool {
+	return strings.TrimSpace(c.DiscordApplicationID) != "" &&
+		strings.TrimSpace(c.DiscordClientSecret) != "" &&
+		strings.TrimSpace(c.DiscordPortalRedirectURI) != "" &&
+		strings.TrimSpace(c.PortalSessionSecret) != ""
+}
+
 func (c Config) IsOwner(userID string) bool {
 	_, ok := c.OwnerUserIDs[userID]
 	return ok
@@ -611,6 +665,8 @@ func defaultConfig() Config {
 		YouTubeClipCaptionFontPath:               defaultYouTubeCaptionFontPath(),
 		YouTubeClipCaptionFontFamily:             defaultYouTubeCaptionFontFamily(),
 		R2ClipPrefix:                             "clips",
+		R2ClipURLTTL:                             defaultR2ClipURLTTL,
+		R2DownloadURLTTL:                         defaultR2DownloadURLTTL,
 		SolanaCluster:                            defaultSolanaCluster,
 		SolanaConfirmation:                       defaultSolanaConfirmation,
 		SolanaOrderExpiration:                    defaultSolanaOrderExpiration,
@@ -1092,6 +1148,32 @@ func applyFileConfig(cfg *Config, file fileConfig) error {
 	if value := strings.TrimSpace(file.Storage.R2ClipPrefix); value != "" {
 		cfg.R2ClipPrefix = value
 	}
+	if value := strings.TrimSpace(file.Storage.R2ClipURLTTL); value != "" {
+		parsed, err := parseDuration("storage.r2_clip_url_ttl", value)
+		if err != nil {
+			return err
+		}
+		cfg.R2ClipURLTTL = parsed
+	}
+	if value := strings.TrimSpace(file.Storage.R2DownloadURLTTL); value != "" {
+		parsed, err := parseDuration("storage.r2_download_url_ttl", value)
+		if err != nil {
+			return err
+		}
+		cfg.R2DownloadURLTTL = parsed
+	}
+	if value := strings.TrimSpace(file.Portal.BaseURL); value != "" {
+		cfg.PortalBaseURL = value
+	}
+	if value := strings.TrimSpace(file.Portal.SessionSecret); value != "" {
+		cfg.PortalSessionSecret = value
+	}
+	if value := strings.TrimSpace(file.Portal.DiscordRedirectURI); value != "" {
+		cfg.DiscordPortalRedirectURI = value
+	}
+	if file.Portal.AllowedOrigins != nil {
+		cfg.PortalAllowedOrigins = normalizeList(file.Portal.AllowedOrigins)
+	}
 	return nil
 }
 
@@ -1180,6 +1262,14 @@ func applyEnvValues(cfg *Config, lookup func(string) (string, bool)) {
 	cfg.R2Bucket = nonEmptyStringFromLookup(lookup, "R2_BUCKET", cfg.R2Bucket)
 	cfg.R2PublicBaseURL = nonEmptyStringFromLookup(lookup, "R2_PUBLIC_BASE_URL", cfg.R2PublicBaseURL)
 	cfg.R2ClipPrefix = nonEmptyStringFromLookup(lookup, "R2_CLIP_PREFIX", cfg.R2ClipPrefix)
+	cfg.R2ClipURLTTL = durationFromLookup(lookup, "R2_CLIP_URL_TTL", cfg.R2ClipURLTTL)
+	cfg.R2DownloadURLTTL = durationFromLookup(lookup, "R2_DOWNLOAD_URL_TTL", cfg.R2DownloadURLTTL)
+	cfg.PortalBaseURL = nonEmptyStringFromLookup(lookup, "PORTAL_BASE_URL", cfg.PortalBaseURL)
+	cfg.DiscordPortalRedirectURI = nonEmptyStringFromLookup(lookup, "DISCORD_PORTAL_REDIRECT_URI", cfg.DiscordPortalRedirectURI)
+	cfg.PortalSessionSecret = stringFromLookup(lookup, "PORTAL_SESSION_SECRET", cfg.PortalSessionSecret)
+	if value, ok := csvListFromLookup(lookup, "PORTAL_ALLOWED_ORIGINS"); ok {
+		cfg.PortalAllowedOrigins = value
+	}
 	cfg.Port = nonEmptyStringFromLookup(lookup, "PORT", cfg.Port)
 	cfg.Environment = nonEmptyStringFromLookup(lookup, "ENVIRONMENT", cfg.Environment)
 	cfg.LogLevel = nonEmptyStringFromLookup(lookup, "LOG_LEVEL", cfg.LogLevel)

@@ -108,6 +108,23 @@ func TestAdminSetupToolSchemasExposeNaturalLanguageFields(t *testing.T) {
 	assertToolSchemaContains("panda.manage_composed_tool", "voice_channel_id", "voice_channel_name", "voice_channel")
 }
 
+func TestYouTubeClipCaptionInstructionsMentionRandomStyledCaptions(t *testing.T) {
+	registry, err := NewDefaultRegistry()
+	if err != nil {
+		t.Fatalf("NewDefaultRegistry: %v", err)
+	}
+	definition, ok := registry.Get("panda.clip_youtube")
+	if !ok {
+		t.Fatal("panda.clip_youtube not registered")
+	}
+	schema := string(definition.InputSchema)
+	for _, want := range []string{"random styled captions", "randomized caption style"} {
+		if !strings.Contains(schema, want) || !strings.Contains(definition.Description, want) {
+			t.Fatalf("expected clip tool schema and description to mention %q, schema=%s description=%s", want, schema, definition.Description)
+		}
+	}
+}
+
 func TestYouTubeClipInstructionsAreOptional(t *testing.T) {
 	registry, err := NewDefaultRegistry()
 	if err != nil {
@@ -1396,6 +1413,7 @@ func TestExecutorRunsYouTubeClipper(t *testing.T) {
 					CaptionMode:              "burned_in",
 					CaptionStylePreset:       "opus_bold",
 					CaptionStyleSource:       "user_specified",
+					CaptionAnimation:         "slide_up",
 					CaptionTimingQuality:     "word",
 					CaptionConfidence:        0.88,
 					CaptionReason:            "Bottom captions avoid the webcam.",
@@ -1434,6 +1452,7 @@ func TestExecutorRunsYouTubeClipper(t *testing.T) {
 					CaptionMode:              "burned_in",
 					CaptionStylePreset:       "opus_bold",
 					CaptionStyleSource:       "user_specified",
+					CaptionAnimation:         "pop",
 					CaptionTimingQuality:     "word",
 					CaptionConfidence:        0.83,
 					CaptionReason:            "Captions stay in a safe lower band.",
@@ -1478,7 +1497,7 @@ func TestExecutorRunsYouTubeClipper(t *testing.T) {
 		t.Fatalf("expected YouTube clip result to be terminal")
 	}
 	content := result.Message.Content
-	for _, want := range []string{`"terminal":true`, `"content":"1. [Best explanation]`, `"media":[`, `"thumbnail_url":"https://cdn.example.test/clips/guild-1/request-1/01-best-explanation.jpg"`, `"thumbnail_object_key":"[redacted]"`, `"actions":[`, `"label":"1. Best explanation"`, `"clip_count":2`, `"clips":[`, `"type":"spliced"`, `"watch_url":"https://cdn.example.test/clips/guild-1/request-1/01-best-explanation.mp4"`, `"source_start_seconds":42`, `"source_end_seconds":90`, `"segments":[`, `"start_seconds":42`, `"end_seconds":58`, `"transcript_segment_count":4`, `"virality_score":82`, `"aspect_ratio":"9:16"`, `"layout_mode":"stacked_regions"`, `"caption_rendered":true`, `"caption_mode":"burned_in"`, `"caption_style_source":"user_specified"`, `"caption_timing_quality":"word"`, `"caption_reason":"Bottom captions avoid the webcam."`, `"caption_font_family":"inter"`, `"caption_font_color":"white"`, `"caption_border_color":"green"`, `"caption_border_thickness":"medium"`} {
+	for _, want := range []string{`"terminal":true`, `"content":"1. [Best explanation]`, `"media":[`, `"thumbnail_url":"https://cdn.example.test/clips/guild-1/request-1/01-best-explanation.jpg"`, `"thumbnail_object_key":"[redacted]"`, `"actions":[`, `"label":"1. Best explanation"`, `"clip_count":2`, `"clips":[`, `"type":"spliced"`, `"watch_url":"https://cdn.example.test/clips/guild-1/request-1/01-best-explanation.mp4"`, `"source_start_seconds":42`, `"source_end_seconds":90`, `"segments":[`, `"start_seconds":42`, `"end_seconds":58`, `"transcript_segment_count":4`, `"virality_score":82`, `"aspect_ratio":"9:16"`, `"layout_mode":"stacked_regions"`, `"caption_rendered":true`, `"caption_mode":"burned_in"`, `"caption_style_source":"user_specified"`, `"caption_animation":"slide_up"`, `"caption_timing_quality":"word"`, `"caption_reason":"Bottom captions avoid the webcam."`, `"caption_font_family":"inter"`, `"caption_font_color":"white"`, `"caption_border_color":"green"`, `"caption_border_thickness":"medium"`} {
 		if !strings.Contains(content, want) {
 			t.Fatalf("expected clip result content to contain %s, got %s", want, content)
 		}

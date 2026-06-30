@@ -263,22 +263,30 @@
 /* --- Sidebar footer / account chip ---------------------------------- */
 .dash-sidebar-foot {
   margin-top: auto;
-  padding-top: 16px;
+  padding-top: 14px;
+  border-top: 1px solid color-mix(in oklab, var(--color-white) 8%, transparent);
 }
 
+/* Flat account region — sits in the sidebar rather than floating as a
+   bordered card, so the nested controls no longer read as boxes-in-a-box. */
 .dash-account {
   display: grid;
-  gap: 14px;
-  padding: 14px;
-  border: 1px solid color-mix(in oklab, var(--color-white) 9%, transparent);
-  border-radius: var(--radius-content);
-  background:
-    linear-gradient(
-      160deg,
-      color-mix(in oklab, var(--color-white) 6%, transparent),
-      color-mix(in oklab, var(--color-white) 2%, transparent)
-    );
-  box-shadow: var(--shadow-dash-chip);
+  gap: 12px;
+  padding: 4px 2px 0;
+}
+
+.dash-account .dash-btn,
+.dash-account .dash-icon-btn {
+  border-color: transparent;
+  background: color-mix(in oklab, var(--color-white) 4%, transparent);
+}
+
+.dash-account .dash-btn:hover,
+.dash-account .dash-btn:focus-visible,
+.dash-account .dash-icon-btn:hover,
+.dash-account .dash-icon-btn:focus-visible {
+  border-color: transparent;
+  background: color-mix(in oklab, var(--color-white) 9%, transparent);
 }
 
 .dash-account-id {

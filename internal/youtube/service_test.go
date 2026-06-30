@@ -3,6 +3,7 @@ package youtube
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -278,11 +279,17 @@ esac`)
 			})
 		case 2:
 			_ = json.NewEncoder(w).Encode(map[string]any{
-				"text": "Best part",
+				"text": "Best part begins. Best part lands.",
 				"segments": []map[string]any{
-					{"start": 3.0, "end": 9.0, "text": "Best part", "words": []map[string]any{
+					{"start": 3.0, "end": 6.0, "text": "Best part begins.", "words": []map[string]any{
 						{"start": 3.0, "end": 3.4, "word": "Best"},
 						{"start": 3.45, "end": 3.9, "word": "part"},
+						{"start": 5.6, "end": 6.0, "word": "begins."},
+					}},
+					{"start": 9.0, "end": 12.0, "text": "Best part lands.", "words": []map[string]any{
+						{"start": 9.0, "end": 9.4, "word": "Best"},
+						{"start": 9.45, "end": 9.9, "word": "part"},
+						{"start": 11.6, "end": 12.0, "word": "lands."},
 					}},
 				},
 			})
@@ -300,8 +307,8 @@ esac`)
 					Title: "Best Moment",
 					Type:  "spliced",
 					Segments: []ClipDecisionSegment{
-						{StartSeconds: 63, EndSeconds: 66, Transcript: "Best part begins"},
-						{StartSeconds: 69, EndSeconds: 72, Transcript: "Best part lands"},
+						{StartWordID: "w_0003", EndWordID: "w_0005", StartSeconds: 63, EndSeconds: 66, SpeechStartSeconds: 63, SpeechEndSeconds: 66, Transcript: "Best part begins."},
+						{StartWordID: "w_0006", EndWordID: "w_0008", StartSeconds: 69, EndSeconds: 72, SpeechStartSeconds: 69, SpeechEndSeconds: 72, Transcript: "Best part lands."},
 					},
 					Reason:            "This segment contains the requested moment with dead air removed.",
 					Confidence:        0.9,
@@ -317,7 +324,7 @@ esac`)
 					Title: "Setup Payoff",
 					Type:  "continuous",
 					Segments: []ClipDecisionSegment{
-						{StartSeconds: 60, EndSeconds: 78, Transcript: "A fuller version with setup and payoff."},
+						{StartWordID: "w_0003", EndWordID: "w_0008", StartSeconds: 63, EndSeconds: 72, SpeechStartSeconds: 63, SpeechEndSeconds: 72, Transcript: "Best part begins. Best part lands."},
 					},
 					Reason:            "A fuller version with setup and payoff.",
 					Confidence:        0.82,
@@ -350,12 +357,13 @@ esac`)
 
 	var progress []string
 	result, err := service.Clip(context.Background(), ClipRequest{
-		Query:              "deep dive video",
-		Language:           "en",
-		AspectRatio:        "9:16",
-		LayoutInstructions: "keep the full frame readable",
-		GuildID:            "guild 1",
-		RequestID:          "request 1",
+		Query:               "deep dive video",
+		Language:            "en",
+		AspectRatio:         "9:16",
+		LayoutInstructions:  "keep the full frame readable",
+		CaptionInstructions: "random styled captions",
+		GuildID:             "guild 1",
+		RequestID:           "request 1",
 		Progress: func(update ClipProgress) {
 			progress = append(progress, update.Status)
 		},
@@ -384,7 +392,7 @@ esac`)
 	if len(planner.requests) != 2 {
 		t.Fatalf("expected two composition planner requests, got %d", len(planner.requests))
 	}
-	if planner.requests[0].RequestedAspect != "9:16" || planner.requests[0].LayoutInstructions != "keep the full frame readable" || planner.requests[0].CaptionMode != "auto" || len(planner.requests[0].Thumbnails) == 0 {
+	if planner.requests[0].RequestedAspect != "9:16" || planner.requests[0].LayoutInstructions != "keep the full frame readable" || planner.requests[0].CaptionMode != "auto" || planner.requests[0].CaptionInstructions != "random styled captions" || len(planner.requests[0].Thumbnails) == 0 {
 		t.Fatalf("unexpected composition request: %+v", planner.requests[0])
 	}
 	if len(planner.requests[0].TranscriptTimeline) == 0 || len(planner.requests[0].TranscriptTimeline[0].Words) == 0 || planner.requests[0].TranscriptTimeline[0].Words[0].ID != "w_0003" || planner.requests[0].TranscriptTimeline[0].Words[0].StartSeconds != 63 {
@@ -394,7 +402,7 @@ esac`)
 	if detection.Title != "Deep Dive" || detection.URL != "https://www.youtube.com/watch?v=video-1" || !strings.Contains(detection.Instructions, "viral short-form clips") {
 		t.Fatalf("unexpected detector request: %+v", detection)
 	}
-	if len(detection.Segments) != 3 || detection.Segments[2].StartSeconds != 63 || detection.Segments[2].EndSeconds != 69 {
+	if len(detection.Segments) != 4 || detection.Segments[2].StartSeconds != 63 || detection.Segments[2].EndSeconds != 66 || detection.Segments[3].StartSeconds != 69 || detection.Segments[3].EndSeconds != 72 {
 		t.Fatalf("expected second chunk segments to be offset, got %+v", detection.Segments)
 	}
 	if len(uploader.requests) != 4 {
@@ -416,7 +424,7 @@ esac`)
 	if secondThumbnailUpload.Key != "guild-1/request-1/02-setup-payoff.jpg" || secondThumbnailUpload.ContentType != "image/jpeg" || len(secondThumbnailUpload.Body) == 0 {
 		t.Fatalf("unexpected second thumbnail upload request: %+v", secondThumbnailUpload)
 	}
-	if len(result.Clips) != 2 || result.Clips[0].WatchURL != "https://cdn.example.test/clips/guild-1/request-1/01-best-moment.mp4" || result.Clips[0].ThumbnailURL != "https://cdn.example.test/clips/guild-1/request-1/01-best-moment.jpg" || result.Clips[0].Type != "spliced" || len(result.Clips[0].Segments) != 2 || result.Clips[0].SourceStartSeconds != 63 || result.Clips[0].SourceEndSeconds != 72 || result.Clips[0].Duration != 6*time.Second || result.TranscriptSegmentCount != 3 {
+	if len(result.Clips) != 2 || result.Clips[0].WatchURL != "https://cdn.example.test/clips/guild-1/request-1/01-best-moment.mp4" || result.Clips[0].ThumbnailURL != "https://cdn.example.test/clips/guild-1/request-1/01-best-moment.jpg" || result.Clips[0].Type != "spliced" || len(result.Clips[0].Segments) != 2 || result.Clips[0].SourceStartSeconds != 63 || result.Clips[0].SourceEndSeconds != 72 || result.Clips[0].Duration != 6*time.Second || result.TranscriptSegmentCount != 4 {
 		t.Fatalf("unexpected clip result: %+v", result)
 	}
 	if result.Clips[0].AspectRatio != "9:16" || result.Clips[0].LayoutMode != "full_frame" || result.Clips[0].CompositionConfidence != 0.8 {
@@ -425,8 +433,178 @@ esac`)
 	if !result.Clips[0].CaptionRendered || result.Clips[0].CaptionMode != "burned_in" || result.Clips[0].CaptionTimingQuality == "" || result.Clips[0].CaptionReason == "" {
 		t.Fatalf("expected caption metadata on rendered clip, got %+v", result.Clips[0])
 	}
-	if result.Clips[0].CaptionStyleSource != clipCaptionStyleSourceOpusDefault || result.Clips[0].CaptionFontFamily != clipCaptionFontDefault || result.Clips[0].CaptionFontColor != "white" || result.Clips[0].CaptionBorderThickness != clipCaptionBorderThick {
+	if result.Clips[0].CaptionStyleSource != clipCaptionStyleSourceCreativeMix || result.Clips[0].CaptionAnimation != clipCaptionAnimationPop || result.Clips[0].CaptionFontFamily != clipCaptionFontDefault || result.Clips[0].CaptionFontColor != "cyan" || result.Clips[0].CaptionBorderThickness != clipCaptionBorderThick {
 		t.Fatalf("expected caption style metadata on rendered clip, got %+v", result.Clips[0])
+	}
+}
+
+func TestClipSkipsCandidateWhenCompositionPlanningFails(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell executable fixtures are unix-only")
+	}
+	ytdlpPath := writeShellExecutable(t, "yt-dlp", `case " $* " in
+*" --dump-json "*)
+  printf '%s\n' '{"id":"video-1","title":"Deep Dive","webpage_url":"https://www.youtube.com/watch?v=video-1","uploader":"Teacher","duration":420}'
+  ;;
+*" --format best[ext=mp4]/best "*)
+  out=""
+  previous=""
+  for arg in "$@"; do
+    if [ "$previous" = "--output" ]; then
+      out="$arg"
+    fi
+    previous="$arg"
+  done
+  out="$(printf '%s' "$out" | sed 's/%(ext)s/mp4/g')"
+  printf 'source video bytes' > "$out"
+  ;;
+*" --format bestaudio[ext=m4a]/bestaudio/best "*)
+  out=""
+  previous=""
+  for arg in "$@"; do
+    if [ "$previous" = "--output" ]; then
+      out="$arg"
+    fi
+    previous="$arg"
+  done
+  out="$(printf '%s' "$out" | sed 's/%(ext)s/m4a/g')"
+  printf 'fake audio bytes' > "$out"
+  ;;
+*)
+  printf 'fake media stream'
+  ;;
+esac`)
+	ffmpegPath := writeShellExecutable(t, "ffmpeg", `last=""
+for arg in "$@"; do
+  last="$arg"
+done
+case " $* " in
+*" -filters "*)
+  echo ' ... subtitles         V->V       Render text subtitles onto input video using the libass library.'
+  ;;
+*" -f segment "*)
+  printf 'audio one' > "$(printf "$last" 0)"
+  printf 'audio two' > "$(printf "$last" 1)"
+  ;;
+*" -frames:v 1 "*)
+  if base64 --decode > "$last" 2>/dev/null <<'B64'
+iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=
+B64
+  then
+    :
+  else
+    base64 -D > "$last" <<'B64'
+iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=
+B64
+  fi
+  ;;
+*" +faststart "*)
+  cat >/dev/null
+  printf 'clip bytes' > "$last"
+  ;;
+*)
+  echo "unexpected ffmpeg args: $*" >&2
+  exit 1
+  ;;
+esac`)
+	transcriptionCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		transcriptionCount++
+		switch transcriptionCount {
+		case 1:
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"text": "Intro",
+				"segments": []map[string]any{
+					{"start": 1.0, "end": 3.0, "text": "Intro", "words": []map[string]any{
+						{"start": 1.0, "end": 1.6, "word": "Intro"},
+					}},
+				},
+			})
+		case 2:
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"text": "Best part begins. Best part lands.",
+				"segments": []map[string]any{
+					{"start": 3.0, "end": 6.0, "text": "Best part begins.", "words": []map[string]any{
+						{"start": 3.0, "end": 3.4, "word": "Best"},
+						{"start": 3.45, "end": 3.9, "word": "part"},
+						{"start": 5.6, "end": 6.0, "word": "begins."},
+					}},
+					{"start": 9.0, "end": 12.0, "text": "Best part lands.", "words": []map[string]any{
+						{"start": 9.0, "end": 9.4, "word": "Best"},
+						{"start": 9.45, "end": 9.9, "word": "part"},
+						{"start": 11.6, "end": 12.0, "word": "lands."},
+					}},
+				},
+			})
+		default:
+			t.Fatalf("unexpected transcription count %d", transcriptionCount)
+		}
+	}))
+	defer server.Close()
+	detector := &fakeClipDetector{
+		configured: true,
+		result: ClipDetectionResult{Clips: []ClipDecision{
+			{
+				Rank:  1,
+				Title: "Broken Layout Candidate",
+				Type:  "continuous",
+				Segments: []ClipDecisionSegment{{
+					StartWordID: "w_0002", EndWordID: "w_0004", StartSeconds: 63, EndSeconds: 66, SpeechStartSeconds: 63, SpeechEndSeconds: 66, Transcript: "Best part begins.",
+				}},
+				Reason: "First candidate should be skipped after composition failure.", Confidence: 0.9, ViralityScore: 86, HookScore: 88, RetentionScore: 80, ShareabilityScore: 84, DurationPolicy: "requested_duration",
+			},
+			{
+				Rank:  2,
+				Title: "Setup Payoff",
+				Type:  "continuous",
+				Segments: []ClipDecisionSegment{{
+					StartWordID: "w_0005", EndWordID: "w_0007", StartSeconds: 69, EndSeconds: 72, SpeechStartSeconds: 69, SpeechEndSeconds: 72, Transcript: "Best part lands.",
+				}},
+				Reason: "Second candidate should still render.", Confidence: 0.82, ViralityScore: 78, HookScore: 76, RetentionScore: 79, ShareabilityScore: 77, DurationPolicy: "requested_duration",
+			},
+		}},
+	}
+	planner := &fakeClipPlanner{
+		configured: true,
+		errs:       []error{errors.New("clip composition response failed validation after repair: clip composition segment 0: stacked_regions layout requires two or three regions")},
+	}
+	uploader := &fakeClipUploader{configured: true, baseURL: "https://cdn.example.test/clips"}
+	service := NewService(Config{
+		APIKey:          "lemon-key",
+		BaseURL:         server.URL + "/v1",
+		YTDLPPath:       ytdlpPath,
+		FFmpegPath:      ffmpegPath,
+		ChunkDuration:   time.Minute,
+		ClipDetector:    detector,
+		ClipPlanner:     planner,
+		ClipUploader:    uploader,
+		ClipMinDuration: 2 * time.Second,
+		ClipMaxDuration: 30 * time.Second,
+		ClipMaxBytes:    1 << 20,
+		CaptionFontPath: testCaptionFontPath(t),
+	})
+
+	result, err := service.Clip(context.Background(), ClipRequest{
+		Query:       "deep dive video",
+		Language:    "en",
+		AspectRatio: "9:16",
+		GuildID:     "guild 1",
+		RequestID:   "request 1",
+	})
+	if err != nil {
+		t.Fatalf("Clip: %v", err)
+	}
+	if len(planner.requests) != 2 {
+		t.Fatalf("expected planner to try the second candidate after the first failed, got %d request(s)", len(planner.requests))
+	}
+	if len(result.Clips) != 1 {
+		t.Fatalf("expected one rendered clip after skipping first candidate, got %+v", result.Clips)
+	}
+	if result.Clips[0].Rank != 2 || result.Clips[0].Title != "Setup Payoff" {
+		t.Fatalf("expected second candidate to render, got %+v", result.Clips[0])
+	}
+	if result.Clips[0].ObjectKey != "guild-1/request-1/01-setup-payoff.mp4" || len(uploader.requests) != 2 {
+		t.Fatalf("expected rendered fallback candidate to upload as first output, clip=%+v uploads=%+v", result.Clips[0], uploader.requests)
 	}
 }
 
@@ -446,24 +624,34 @@ func TestResolveCaptionFontUsesConfiguredDefaultFont(t *testing.T) {
 	}
 }
 
-func TestClipCompositionTranscriptTimelineUsesSegmentIndexesWithPaddedBoundaries(t *testing.T) {
-	startIndex := 1
-	endIndex := 1
-	timeline := clipCompositionTranscriptTimeline(ClipDecision{
+func TestClipCompositionTranscriptTimelineUsesSelectedWordsWithPaddedBoundaries(t *testing.T) {
+	timeline, err := clipCompositionTranscriptTimeline(ClipDecision{
 		Segments: []ClipDecisionSegment{{
-			StartSegmentIndex: &startIndex,
-			EndSegmentIndex:   &endIndex,
-			StartSeconds:      9.82,
-			EndSeconds:        18.28,
-			Transcript:        "selected idea",
+			StartWordID:  "w_selected_1",
+			EndWordID:    "w_selected_2",
+			StartSeconds: 9.82,
+			EndSeconds:   18.28,
+			Transcript:   "selected idea",
 		}},
 	}, []TranscriptSegment{
-		{ID: "before", StartSeconds: 8, EndSeconds: 10, Text: "previous idea"},
-		{ID: "selected", StartSeconds: 10, EndSeconds: 18, Text: "selected idea"},
-		{ID: "after", StartSeconds: 18, EndSeconds: 20, Text: "next idea"},
+		{ID: "before", StartSeconds: 8, EndSeconds: 10, Text: "previous idea", Words: []TranscriptWord{
+			testWord("w_before_1", 8.0, 8.4, "previous"),
+			testWord("w_before_2", 9.5, 10.0, "idea"),
+		}},
+		{ID: "selected", StartSeconds: 10, EndSeconds: 18, Text: "selected idea", Words: []TranscriptWord{
+			testWord("w_selected_1", 10.0, 10.5, "selected"),
+			testWord("w_selected_2", 17.5, 18.0, "idea"),
+		}},
+		{ID: "after", StartSeconds: 18, EndSeconds: 20, Text: "next idea", Words: []TranscriptWord{
+			testWord("w_after_1", 18.0, 18.4, "next"),
+			testWord("w_after_2", 19.5, 20.0, "idea"),
+		}},
 	})
+	if err != nil {
+		t.Fatalf("clipCompositionTranscriptTimeline: %v", err)
+	}
 
-	if len(timeline) != 1 || timeline[0].ID != "selected" || timeline[0].Text != "selected idea" {
+	if len(timeline) != 1 || timeline[0].ID != "selected" || timeline[0].Text != "selected idea" || len(timeline[0].Words) != 2 {
 		t.Fatalf("expected padded clip boundary to keep indexed transcript segment only, got %+v", timeline)
 	}
 }
@@ -820,6 +1008,7 @@ type fakeClipPlanner struct {
 	configured bool
 	requests   []ClipCompositionRequest
 	results    []ClipCompositionResult
+	errs       []error
 	err        error
 }
 
@@ -829,6 +1018,13 @@ func (f *fakeClipPlanner) Configured() bool {
 
 func (f *fakeClipPlanner) Plan(_ context.Context, request ClipCompositionRequest) (ClipCompositionResult, error) {
 	f.requests = append(f.requests, request)
+	if len(f.errs) > 0 {
+		err := f.errs[0]
+		f.errs = f.errs[1:]
+		if err != nil {
+			return ClipCompositionResult{}, err
+		}
+	}
 	if f.err != nil {
 		return ClipCompositionResult{}, f.err
 	}
@@ -884,7 +1080,7 @@ func fakeCaptionPlanForRequest(request ClipCompositionRequest) *ClipCaptionPlan 
 		if end > 3 {
 			end = 3
 		}
-		return applyTestCaptionStyle(&ClipCaptionPlan{
+		return applyFakeCaptionStyleForRequest(&ClipCaptionPlan{
 			Mode:          clipCaptionPlanModeBurnedIn,
 			StylePreset:   clipCaptionStyleOpusBold,
 			TimingQuality: clipCaptionTimingWord,
@@ -903,13 +1099,13 @@ func fakeCaptionPlanForRequest(request ClipCompositionRequest) *ClipCaptionPlan 
 			}},
 			Confidence: 0.85,
 			Reason:     "Bottom captions stay clear of the main frame in this fixture.",
-		})
+		}, request)
 	}
 	for _, segment := range request.TranscriptTimeline {
 		if strings.TrimSpace(segment.ID) == "" {
 			continue
 		}
-		return applyTestCaptionStyle(&ClipCaptionPlan{
+		return applyFakeCaptionStyleForRequest(&ClipCaptionPlan{
 			Mode:          clipCaptionPlanModeBurnedIn,
 			StylePreset:   clipCaptionStyleOpusBold,
 			TimingQuality: clipCaptionTimingSegment,
@@ -927,9 +1123,23 @@ func fakeCaptionPlanForRequest(request ClipCompositionRequest) *ClipCaptionPlan 
 			}},
 			Confidence: 0.7,
 			Reason:     "Segment-timed captions are explicit because no words were available in this fixture.",
-		})
+		}, request)
 	}
 	return nil
+}
+
+func applyFakeCaptionStyleForRequest(plan *ClipCaptionPlan, request ClipCompositionRequest) *ClipCaptionPlan {
+	plan = applyTestCaptionStyle(plan)
+	if strings.TrimSpace(request.CaptionInstructions) == "" {
+		return plan
+	}
+	plan.StyleSource = clipCaptionStyleSourceCreativeMix
+	plan.FontColor = "cyan"
+	plan.HighlightColor = "orange"
+	plan.BorderColor = "purple"
+	plan.BackgroundColor = "transparent"
+	plan.BackgroundOpacity = 0
+	return plan
 }
 
 func testCaptionFontPath(t *testing.T) string {

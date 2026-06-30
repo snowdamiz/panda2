@@ -52,8 +52,6 @@ type Bot struct {
 	music       *music.Manager
 	installs    *InstallService
 	closeOnce   sync.Once
-
-	selectionRequestHandler func(applicationID snowflake.ID, token string, request commands.Request)
 }
 
 type AttachmentRecorder interface {
@@ -92,8 +90,6 @@ type commandSyncer interface {
 const maxAttachmentExtractBytes = 1 << 20
 const InteractionJobKind = "discord.interaction"
 const NaturalMessageJobKind = "discord.natural_message"
-const naturalMessageJobMaxAge = 10 * time.Minute
-const deferredProgressInterval = 8 * time.Second
 const typingRefreshInterval = 5 * time.Second
 const discordContentLimit = 2000
 const discordEmbedDescriptionLimit = 4096
@@ -114,11 +110,16 @@ const (
 const billingSlashCommand = "billing"
 
 var naturalMessageReplyPermissions = []string{"VIEW_CHANNEL", "SEND_MESSAGES", "READ_MESSAGE_HISTORY"}
+var errInteractionQueueUnavailable = errors.New("discord interaction queue is not configured")
 
 type interactionJobPayload struct {
-	ApplicationID string                  `json:"application_id"`
-	Token         string                  `json:"token"`
-	Task          commands.BackgroundTask `json:"task"`
+	ApplicationID    string                            `json:"application_id"`
+	Token            string                            `json:"token"`
+	Kind             string                            `json:"kind,omitempty"`
+	Request          *commands.Request                 `json:"request,omitempty"`
+	Task             *commands.BackgroundTask          `json:"task,omitempty"`
+	ToolConfirmation *commands.ToolConfirmationRequest `json:"tool_confirmation,omitempty"`
+	Feedback         *commands.FeedbackRequest         `json:"feedback,omitempty"`
 }
 
 type naturalMessageJobPayload struct {
@@ -579,165 +580,98 @@ func (b *Bot) handleMessageCommand(event *events.ApplicationCommandInteractionCr
 
 func (b *Bot) respondToInteraction(event *events.ApplicationCommandInteractionCreate, request commands.Request) {
 	requestID := interactionID(event)
+	if b.jobs != nil {
+		if err := event.DeferCreateMessage(shouldDeferEphemeral(request)); err != nil {
+			b.logger.Warn("failed to defer interaction", slog.Any("err", err), slog.String("request_id", requestID), slog.String("command", request.Command))
+			return
+		}
+		response := b.queueInteractionRequest(context.Background(), b.client.ApplicationID, event.Token(), request)
+		if err := b.updateInteractionResponse(b.client.ApplicationID, event.Token(), response); err != nil {
+			b.logger.Warn("failed to update queued interaction response", slog.Any("err", err), slog.String("request_id", requestID), slog.String("command", request.Command))
+		}
+		return
+	}
+
+	response := queueUnavailableResponse()
 	if shouldDefer(request.Command) {
 		if err := event.DeferCreateMessage(shouldDeferEphemeral(request)); err != nil {
 			b.logger.Warn("failed to defer interaction", slog.Any("err", err), slog.String("request_id", requestID), slog.String("command", request.Command))
 			return
 		}
-		request = b.prepareDeferredRequest(request)
-		response := b.runDeferredInteraction(context.Background(), b.client.ApplicationID, event.Token(), requestID, request)
-		if response.Background != nil {
-			response = b.queueBackgroundInteraction(context.Background(), b.client.ApplicationID, event.Token(), request.GuildID, *response.Background)
-			err := b.updateInteractionResponse(b.client.ApplicationID, event.Token(), response)
-			if err != nil {
-				b.logger.Warn("failed to update queued interaction response", slog.Any("err", err), slog.String("request_id", requestID), slog.String("command", request.Command))
-			}
+		if err := b.updateInteractionResponse(b.client.ApplicationID, event.Token(), response); err != nil {
+			b.logger.Warn("failed to update queue unavailable interaction response", slog.Any("err", err), slog.String("request_id", requestID), slog.String("command", request.Command))
 			return
 		}
-		if request.Command == "chat" && response.ThreadID != "" {
-			if b.postThreadResponse(response) {
-				b.commitResponseUsage(context.Background(), response, requestID, request.Command)
-				_, err := b.client.Rest.UpdateInteractionResponse(
-					b.client.ApplicationID,
-					event.Token(),
-					webhookMessageUpdateFromResponse(threadNoticeResponse(response)),
-				)
-				if err != nil {
-					b.logger.Warn("failed to update thread interaction response", slog.Any("err", err), slog.String("request_id", requestID), slog.String("command", request.Command))
-				}
-				return
-			}
-		}
-		err := b.updateInteractionResponse(b.client.ApplicationID, event.Token(), response)
-		if err != nil {
-			b.logger.Warn("failed to update interaction response", slog.Any("err", err), slog.String("request_id", requestID), slog.String("command", request.Command))
-			b.releaseResponseUsage(context.Background(), response, requestID, request.Command)
-			return
-		}
-		b.commitResponseUsage(context.Background(), response, requestID, request.Command)
 		return
 	}
 
-	response := b.router.Handle(context.Background(), request)
-	if response.Modal != nil {
-		if err := event.Modal(modalCreateFromResponse(response.Modal)); err != nil {
-			b.logger.Warn("failed to open modal", slog.Any("err", err), slog.String("request_id", requestID), slog.String("command", request.Command))
-		}
-		return
-	}
 	if !hasChannelResponsePayload(response) {
 		return
 	}
 	chunks := splitDiscordContent(response.Content)
 	if err := event.CreateMessage(messageCreateFromResponsePart(response, chunks[0], len(chunks) == 1)); err != nil {
-		b.logger.Warn("failed to respond to command", slog.Any("err", err), slog.String("request_id", requestID), slog.String("command", request.Command))
-		b.releaseResponseUsage(context.Background(), response, requestID, request.Command)
+		b.logger.Warn("failed to respond with queue unavailable message", slog.Any("err", err), slog.String("request_id", requestID), slog.String("command", request.Command))
 		return
 	}
 	if err := b.createInteractionFollowups(b.client.ApplicationID, event.Token(), response, chunks, 1); err != nil {
-		b.logger.Warn("failed to send command followup", slog.Any("err", err), slog.String("request_id", requestID), slog.String("command", request.Command))
-		b.releaseResponseUsage(context.Background(), response, requestID, request.Command)
+		b.logger.Warn("failed to send queue unavailable followup", slog.Any("err", err), slog.String("request_id", requestID), slog.String("command", request.Command))
 		return
 	}
 	if err := b.createResponseFollowups(b.client.ApplicationID, event.Token(), response.Followups); err != nil {
-		b.logger.Warn("failed to send command response followup", slog.Any("err", err), slog.String("request_id", requestID), slog.String("command", request.Command))
-		b.releaseResponseUsage(context.Background(), response, requestID, request.Command)
+		b.logger.Warn("failed to send queue unavailable response followup", slog.Any("err", err), slog.String("request_id", requestID), slog.String("command", request.Command))
 		return
 	}
-	b.commitResponseUsage(context.Background(), response, requestID, request.Command)
 }
 
-func (b *Bot) runDeferredInteraction(ctx context.Context, applicationID snowflake.ID, token, requestID string, request commands.Request) commands.Response {
-	done := make(chan commands.Response, 1)
-	go func() {
-		done <- b.router.Handle(ctx, request)
-	}()
-
-	ticker := time.NewTicker(deferredProgressInterval)
-	defer ticker.Stop()
-	progressCount := 0
-	for {
-		select {
-		case response := <-done:
-			return response
-		case <-ticker.C:
-			progressCount++
-			_, _ = b.client.Rest.UpdateInteractionResponse(
-				applicationID,
-				token,
-				webhookMessageUpdateFromResponse(deferredProgressResponse(request.Command, progressCount)),
-			)
-		case <-ctx.Done():
-			return commands.Response{Content: "Request cancelled before Panda could finish.", Ephemeral: true}
-		}
-	}
-}
-
-func deferredProgressContent(command string, count int) string {
-	action := "Working"
-	switch strings.ToLower(strings.TrimSpace(command)) {
-	case "summarize":
-		action = "Summarizing"
-	case "explain":
-		action = "Explaining"
-	case "rewrite":
-		action = "Rewriting"
-	case "translate":
-		action = "Translating"
-	case "chat":
-		action = "Continuing chat"
-	case "ask":
-		action = "Thinking"
-	}
-	if count <= 1 {
-		return action + "..."
-	}
-	return fmt.Sprintf("%s... still working", action)
-}
-
-func deferredProgressResponse(command string, count int) commands.Response {
-	return commands.Response{
-		Content: deferredProgressContent(command, count),
-		Presentation: commands.Presentation{
-			Title:  "Working on it",
-			Accent: commands.AccentInfo,
-		},
-	}
-}
-
-func (b *Bot) prepareDeferredRequest(request commands.Request) commands.Request {
-	if b.jobs == nil || strings.ToLower(strings.TrimSpace(request.Command)) != "summarize" {
-		return request
-	}
-	if request.Options == nil {
-		request.Options = map[string]string{}
-	}
-	request.Options["_async"] = "true"
-	return request
-}
-
-func (b *Bot) queueBackgroundInteraction(ctx context.Context, applicationID snowflake.ID, token, guildID string, task commands.BackgroundTask) commands.Response {
-	if b.jobs == nil {
-		return commands.Response{Content: "Long summary queue is not configured. Please try a smaller request.", Ephemeral: true}
-	}
-	payload, err := json.Marshal(interactionJobPayload{
+func (b *Bot) queueInteractionRequest(ctx context.Context, applicationID snowflake.ID, token string, request commands.Request) commands.Response {
+	return b.enqueueInteractionJob(ctx, request.GuildID, interactionJobPayload{
 		ApplicationID: applicationID.String(),
 		Token:         token,
-		Task:          task,
+		Kind:          "request",
+		Request:       &request,
 	})
+}
+
+func (b *Bot) queueInteractionToolConfirmation(ctx context.Context, applicationID snowflake.ID, token string, request commands.ToolConfirmationRequest) commands.Response {
+	return b.enqueueInteractionJob(ctx, request.Request.GuildID, interactionJobPayload{
+		ApplicationID:    applicationID.String(),
+		Token:            token,
+		Kind:             "tool_confirmation",
+		ToolConfirmation: &request,
+	})
+}
+
+func (b *Bot) queueInteractionFeedback(ctx context.Context, applicationID snowflake.ID, token string, request commands.FeedbackRequest) commands.Response {
+	return b.enqueueInteractionJob(ctx, request.Request.GuildID, interactionJobPayload{
+		ApplicationID: applicationID.String(),
+		Token:         token,
+		Kind:          "feedback",
+		Feedback:      &request,
+	})
+}
+
+func (b *Bot) enqueueInteractionJob(ctx context.Context, guildID string, payload interactionJobPayload) commands.Response {
+	if b.jobs == nil {
+		return queueUnavailableResponse()
+	}
+	rawPayload, err := json.Marshal(payload)
 	if err != nil {
-		return commands.Response{Content: "Long summary could not be queued.", Ephemeral: true}
+		return commands.Response{Content: "That request could not be queued.", Ephemeral: true, Presentation: commands.Presentation{Title: "Queue failed", Accent: commands.AccentWarning}}
 	}
 	job, err := b.jobs.Enqueue(ctx, store.Job{
 		Kind:        InteractionJobKind,
 		GuildID:     guildID,
-		Payload:     string(payload),
-		MaxAttempts: 2,
+		Payload:     string(rawPayload),
+		MaxAttempts: 3,
 	})
 	if err != nil {
-		return commands.Response{Content: "Long summary could not be queued.", Ephemeral: true}
+		return commands.Response{Content: "That request could not be queued.", Ephemeral: true, Presentation: commands.Presentation{Title: "Queue failed", Accent: commands.AccentWarning}}
 	}
-	return commands.Response{Content: fmt.Sprintf("Queued long summary job #%d. This response will update when the result is ready.", job.ID), Presentation: commands.Presentation{Title: "Summary queued", Accent: commands.AccentInfo}}
+	return commands.Response{Content: fmt.Sprintf("Queued request job #%d. This response will update when the result is ready.", job.ID), Presentation: commands.Presentation{Title: "Request queued", Accent: commands.AccentInfo}}
+}
+
+func queueUnavailableResponse() commands.Response {
+	return commands.Response{Content: "Panda's queue is not configured. Please try again later.", Ephemeral: true, Presentation: commands.Presentation{Title: "Queue unavailable", Accent: commands.AccentWarning}}
 }
 
 func (b *Bot) HandleInteractionJob(ctx context.Context, job store.Job) error {
@@ -755,32 +689,82 @@ func (b *Bot) HandleInteractionJob(ctx context.Context, job store.Job) error {
 	_, _ = b.client.Rest.UpdateInteractionResponse(
 		applicationID,
 		payload.Token,
-		webhookMessageUpdateFromResponse(commands.Response{Content: fmt.Sprintf("Running long summary job #%d...", job.ID), Presentation: commands.Presentation{Title: "Summary running", Accent: commands.AccentInfo}}),
+		webhookMessageUpdateFromResponse(commands.Response{Content: fmt.Sprintf("Running queued request job #%d...", job.ID), Presentation: commands.Presentation{Title: "Request running", Accent: commands.AccentInfo}}),
 	)
-	response := b.router.HandleBackgroundTask(ctx, payload.Task)
+	response, command := b.handleInteractionJobPayload(ctx, payload)
 	err = b.updateInteractionResponse(applicationID, payload.Token, response)
 	if err != nil {
-		b.logger.Warn("failed to update background interaction response", slog.Any("err", err), slog.Uint64("job_id", uint64(job.ID)), slog.String("command", payload.Task.Command))
-		b.releaseResponseUsage(ctx, response, fmt.Sprintf("job-%d", job.ID), payload.Task.Command)
+		b.logger.Warn("failed to update queued interaction response", slog.Any("err", err), slog.Uint64("job_id", uint64(job.ID)), slog.String("command", command))
+		if delivered, fallbackErr := b.deliverInteractionJobFallback(payload, response); delivered && fallbackErr == nil {
+			b.commitResponseUsage(ctx, response, fmt.Sprintf("job-%d", job.ID), command)
+			return nil
+		} else if fallbackErr != nil {
+			b.logger.Warn("failed queued interaction channel fallback", slog.Any("err", fallbackErr), slog.Uint64("job_id", uint64(job.ID)), slog.String("command", command))
+		}
+		b.releaseResponseUsage(ctx, response, fmt.Sprintf("job-%d", job.ID), command)
 	} else {
-		b.commitResponseUsage(ctx, response, fmt.Sprintf("job-%d", job.ID), payload.Task.Command)
+		b.commitResponseUsage(ctx, response, fmt.Sprintf("job-%d", job.ID), command)
 	}
 	return err
 }
 
-func (b *Bot) HandleNaturalMessageJob(ctx context.Context, job store.Job) error {
-	if staleNaturalMessageJob(job, time.Now().UTC()) {
-		if b.logger != nil {
-			b.logger.Warn("dropping stale natural message job",
-				slog.Uint64("job_id", uint64(job.ID)),
-				slog.String("guild_id", job.GuildID),
-				slog.Time("created_at", job.CreatedAt),
-				slog.Int("attempts", job.Attempts),
-				slog.Int("max_attempts", job.MaxAttempts),
-			)
+func (b *Bot) handleInteractionJobPayload(ctx context.Context, payload interactionJobPayload) (commands.Response, string) {
+	switch {
+	case payload.Request != nil:
+		response := b.router.Handle(ctx, *payload.Request)
+		if response.Background != nil {
+			response = b.router.HandleBackgroundTask(ctx, *response.Background)
 		}
-		return nil
+		return interactionJobResponse(response), payload.Request.Command
+	case payload.Task != nil:
+		return interactionJobResponse(b.router.HandleBackgroundTask(ctx, *payload.Task)), payload.Task.Command
+	case payload.ToolConfirmation != nil:
+		return interactionJobResponse(b.router.HandleToolConfirmation(ctx, *payload.ToolConfirmation)), payload.ToolConfirmation.Request.Command
+	case payload.Feedback != nil:
+		return interactionJobResponse(b.router.HandleFeedback(ctx, *payload.Feedback)), payload.Feedback.Request.Command
+	default:
+		return commands.Response{Content: "Queued request payload was empty.", Ephemeral: true, Presentation: commands.Presentation{Title: "Queue payload invalid", Accent: commands.AccentWarning}}, ""
 	}
+}
+
+func interactionJobResponse(response commands.Response) commands.Response {
+	if response.Modal == nil {
+		return response
+	}
+	return commands.Response{Content: "That action needs a Discord modal and must be started again.", Ephemeral: true, Presentation: commands.Presentation{Title: "Modal expired", Accent: commands.AccentWarning}}
+}
+
+func (b *Bot) deliverInteractionJobFallback(payload interactionJobPayload, response commands.Response) (bool, error) {
+	if response.Ephemeral || !hasChannelResponsePayload(response) {
+		return false, nil
+	}
+	channelIDRaw := interactionJobChannelID(payload)
+	if strings.TrimSpace(channelIDRaw) == "" {
+		return false, nil
+	}
+	channelID, err := snowflake.Parse(channelIDRaw)
+	if err != nil {
+		return false, err
+	}
+	return true, b.sendChannelResponse(channelID, response)
+}
+
+func interactionJobChannelID(payload interactionJobPayload) string {
+	switch {
+	case payload.Request != nil:
+		return payload.Request.ChannelID
+	case payload.Task != nil:
+		return payload.Task.ChannelID
+	case payload.ToolConfirmation != nil:
+		return payload.ToolConfirmation.Request.ChannelID
+	case payload.Feedback != nil:
+		return payload.Feedback.Request.ChannelID
+	default:
+		return ""
+	}
+}
+
+func (b *Bot) HandleNaturalMessageJob(ctx context.Context, job store.Job) error {
 	if b.client == nil {
 		return errors.New("discord client is not configured")
 	}
@@ -808,13 +792,6 @@ func (b *Bot) HandleNaturalMessageJob(ctx context.Context, job store.Job) error 
 		return err
 	}
 	return b.respondToNaturalMessage(ctx, channelID, reference, payload.Request)
-}
-
-func staleNaturalMessageJob(job store.Job, now time.Time) bool {
-	if job.CreatedAt.IsZero() {
-		return false
-	}
-	return now.UTC().Sub(job.CreatedAt.UTC()) > naturalMessageJobMaxAge
 }
 
 func naturalMessageReferencePayloadFrom(reference *disgoDiscord.MessageReference) *naturalMessageReferencePayload {
@@ -893,16 +870,24 @@ func (b *Bot) onButtonInteraction(event *events.ComponentInteractionCreate) {
 	}
 
 	if feedbackRequest, ok := commands.RequestFromFeedbackID(customID, baseRequest); ok {
-		response := b.router.HandleFeedback(context.Background(), feedbackRequest)
-		if err := event.CreateMessage(messageCreateFromResponse(response)); err != nil {
-			b.logger.Warn("failed to respond to feedback", slog.Any("err", err))
+		if err := event.DeferCreateMessage(true); err != nil {
+			b.logger.Warn("failed to defer feedback", slog.Any("err", err), slog.String("request_id", feedbackRequest.Request.RequestID))
+			return
+		}
+		response := b.queueInteractionFeedback(context.Background(), event.ApplicationID(), event.Token(), feedbackRequest)
+		if err := b.updateInteractionResponse(event.ApplicationID(), event.Token(), response); err != nil {
+			b.logger.Warn("failed to update queued feedback response", slog.Any("err", err), slog.String("request_id", feedbackRequest.Request.RequestID))
 		}
 		return
 	}
 	if confirmedToolRequest, ok := commands.RequestFromToolConfirmationID(customID, baseRequest); ok {
-		response := b.router.HandleToolConfirmation(context.Background(), confirmedToolRequest)
-		if err := event.UpdateMessage(messageUpdateFromResponse(response)); err != nil {
-			b.logger.Warn("failed to update tool confirmation response", slog.Any("err", err))
+		if err := event.DeferUpdateMessage(); err != nil {
+			b.logger.Warn("failed to defer tool confirmation", slog.Any("err", err), slog.String("request_id", confirmedToolRequest.Request.RequestID))
+			return
+		}
+		response := b.queueInteractionToolConfirmation(context.Background(), event.ApplicationID(), event.Token(), confirmedToolRequest)
+		if err := b.updateInteractionResponse(event.ApplicationID(), event.Token(), response); err != nil {
+			b.logger.Warn("failed to update queued tool confirmation response", slog.Any("err", err), slog.String("request_id", confirmedToolRequest.Request.RequestID))
 		}
 		return
 	}
@@ -915,9 +900,13 @@ func (b *Bot) onButtonInteraction(event *events.ComponentInteractionCreate) {
 		return
 	}
 
-	response := b.router.Handle(context.Background(), confirmedRequest)
-	if err := event.UpdateMessage(messageUpdateFromResponse(response)); err != nil {
-		b.logger.Warn("failed to update confirmation response", slog.Any("err", err))
+	if err := event.DeferUpdateMessage(); err != nil {
+		b.logger.Warn("failed to defer confirmation", slog.Any("err", err), slog.String("request_id", confirmedRequest.RequestID))
+		return
+	}
+	response := b.queueInteractionRequest(context.Background(), event.ApplicationID(), event.Token(), confirmedRequest)
+	if err := b.updateInteractionResponse(event.ApplicationID(), event.Token(), response); err != nil {
+		b.logger.Warn("failed to update queued confirmation response", slog.Any("err", err), slog.String("request_id", confirmedRequest.RequestID))
 	}
 }
 
@@ -935,35 +924,10 @@ func (b *Bot) onStringSelectInteraction(event *events.ComponentInteractionCreate
 		b.logger.Warn("failed to defer selection", slog.Any("err", err), slog.String("request_id", selectedRequest.RequestID))
 		return
 	}
-	b.handleSelectionRequestAsync(event.ApplicationID(), event.Token(), selectedRequest)
-}
-
-func (b *Bot) handleSelectionRequestAsync(applicationID snowflake.ID, token string, request commands.Request) {
-	handler := b.handleSelectionRequest
-	if b.selectionRequestHandler != nil {
-		handler = b.selectionRequestHandler
+	response := b.queueInteractionRequest(context.Background(), event.ApplicationID(), event.Token(), selectedRequest)
+	if err := b.updateInteractionResponse(event.ApplicationID(), event.Token(), response); err != nil {
+		b.logger.Warn("failed to update queued selection response", slog.Any("err", err), slog.String("request_id", selectedRequest.RequestID))
 	}
-	go handler(applicationID, token, request)
-}
-
-func (b *Bot) handleSelectionRequest(applicationID snowflake.ID, token string, selectedRequest commands.Request) {
-	working := commands.Response{
-		Content: "Working on the selected result...",
-		Presentation: commands.Presentation{
-			Title:  "Selection received",
-			Accent: commands.AccentInfo,
-		},
-	}
-	if err := b.updateInteractionResponse(applicationID, token, working); err != nil {
-		b.logger.Warn("failed to update selection working response", slog.Any("err", err), slog.String("request_id", selectedRequest.RequestID))
-	}
-	response := b.router.Handle(context.Background(), selectedRequest)
-	if err := b.updateInteractionResponse(applicationID, token, response); err != nil {
-		b.logger.Warn("failed to update selection response", slog.Any("err", err), slog.String("request_id", selectedRequest.RequestID))
-		b.releaseResponseUsage(context.Background(), response, selectedRequest.RequestID, selectedRequest.Command)
-		return
-	}
-	b.commitResponseUsage(context.Background(), response, selectedRequest.RequestID, selectedRequest.Command)
 }
 
 func (b *Bot) requestFromComponentEvent(event *events.ComponentInteractionCreate) commands.Request {
@@ -1000,9 +964,13 @@ func (b *Bot) onModalSubmit(event *events.ModalSubmitInteractionCreate) {
 		return
 	}
 
-	response := b.router.Handle(context.Background(), request)
-	if err := event.CreateMessage(messageCreateFromResponse(response)); err != nil {
-		b.logger.Warn("failed to respond to modal submit", slog.Any("err", err))
+	if err := event.DeferCreateMessage(shouldDeferEphemeral(request)); err != nil {
+		b.logger.Warn("failed to defer modal submit", slog.Any("err", err), slog.String("request_id", request.RequestID))
+		return
+	}
+	response := b.queueInteractionRequest(context.Background(), event.ApplicationID(), event.Token(), request)
+	if err := b.updateInteractionResponse(event.ApplicationID(), event.Token(), response); err != nil {
+		b.logger.Warn("failed to update queued modal response", slog.Any("err", err), slog.String("request_id", request.RequestID))
 	}
 }
 
@@ -2001,6 +1969,9 @@ func shouldDefer(command string) bool {
 }
 
 func shouldDeferEphemeral(request commands.Request) bool {
+	if strings.EqualFold(strings.TrimSpace(request.Command), billingSlashCommand) {
+		return true
+	}
 	return false
 }
 
@@ -2091,23 +2062,23 @@ func (b *Bot) onMessageCreate(event *events.MessageCreate) {
 	}
 	reference := messageReferenceFromMessage(event.Message)
 	if err := b.queueNaturalMessage(ctx, event.ChannelID, reference, request); err != nil {
-		b.logger.Warn("failed to queue natural message; responding inline",
+		b.logger.Warn("failed to queue natural message",
 			slog.Any("err", err),
 			slog.String("guild_id", request.GuildID),
 			slog.String("channel_id", request.ChannelID),
 			slog.String("request_id", request.RequestID),
 		)
-		b.respondToNaturalMessageAsync(ctx, event.ChannelID, reference, request)
+		b.notifyNaturalMessageQueueFailure(event.ChannelID, reference)
 	}
 }
 
 func (b *Bot) queueNaturalMessage(ctx context.Context, channelID snowflake.ID, reference *disgoDiscord.MessageReference, request commands.Request) error {
 	if b == nil {
-		return nil
+		return errInteractionQueueUnavailable
 	}
 	if b.jobs == nil {
 		if b.logger != nil {
-			b.logger.Info("natural message handling inline without queue",
+			b.logger.Warn("natural message queue unavailable",
 				slog.String("guild_id", request.GuildID),
 				slog.String("channel_id", request.ChannelID),
 				slog.String("request_id", request.RequestID),
@@ -2116,8 +2087,7 @@ func (b *Bot) queueNaturalMessage(ctx context.Context, channelID snowflake.ID, r
 				slog.Any("image_ref_ids", imageReferenceIDs(request.ImageReferences)),
 			)
 		}
-		b.respondToNaturalMessageAsync(ctx, channelID, reference, request)
-		return nil
+		return errInteractionQueueUnavailable
 	}
 	payload, err := json.Marshal(naturalMessageJobPayload{
 		ChannelID: channelID.String(),
@@ -2131,7 +2101,7 @@ func (b *Bot) queueNaturalMessage(ctx context.Context, channelID snowflake.ID, r
 		Kind:        NaturalMessageJobKind,
 		GuildID:     request.GuildID,
 		Payload:     string(payload),
-		MaxAttempts: 1,
+		MaxAttempts: 3,
 	})
 	if err != nil {
 		return err
@@ -2149,17 +2119,20 @@ func (b *Bot) queueNaturalMessage(ctx context.Context, channelID snowflake.ID, r
 	return nil
 }
 
-func (b *Bot) respondToNaturalMessageAsync(ctx context.Context, channelID snowflake.ID, reference *disgoDiscord.MessageReference, request commands.Request) {
-	go func() {
-		if err := b.respondToNaturalMessage(ctx, channelID, reference, request); err != nil && b.logger != nil {
-			b.logger.Warn("natural message response failed",
-				slog.Any("err", err),
-				slog.String("guild_id", request.GuildID),
-				slog.String("channel_id", request.ChannelID),
-				slog.String("request_id", request.RequestID),
-			)
-		}
-	}()
+func (b *Bot) notifyNaturalMessageQueueFailure(channelID snowflake.ID, reference *disgoDiscord.MessageReference) {
+	if b == nil || b.client == nil {
+		return
+	}
+	response := commands.Response{
+		Content: "Panda's queue is unavailable right now, so I did not start that request. Please try again in a moment.",
+		Presentation: commands.Presentation{
+			Title:  "Queue unavailable",
+			Accent: commands.AccentWarning,
+		},
+	}
+	if err := b.sendChannelResponse(channelID, response, reference); err != nil && b.logger != nil {
+		b.logger.Warn("failed to send natural message queue failure", slog.Any("err", err))
+	}
 }
 
 func (b *Bot) respondToNaturalMessage(ctx context.Context, channelID snowflake.ID, reference *disgoDiscord.MessageReference, request commands.Request) error {

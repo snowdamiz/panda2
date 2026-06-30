@@ -21,12 +21,15 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gofiber/contrib/websocket"
 	"github.com/gofiber/fiber/v2"
 	"github.com/gofiber/fiber/v2/middleware/cors"
 	"github.com/sn0w/panda2/internal/billing"
+	"github.com/sn0w/panda2/internal/clipevents"
 	"github.com/sn0w/panda2/internal/config"
 	discordbot "github.com/sn0w/panda2/internal/discord"
 	"github.com/sn0w/panda2/internal/features"
+	"github.com/sn0w/panda2/internal/objectstore"
 	"github.com/sn0w/panda2/internal/ratelimit"
 	"github.com/sn0w/panda2/internal/repository"
 	"github.com/sn0w/panda2/internal/runtimecontrol"
@@ -43,6 +46,10 @@ type Server struct {
 	billing        *billing.Service
 	guilds         *repository.GuildRepository
 	knowledge      *repository.KnowledgeRepository
+	clips          *repository.ClipRepository
+	clipStore      *objectstore.R2Client
+	clipEvents     *clipevents.Hub
+	portalOAuth    *discordbot.PortalOAuthClient
 	runtime        *runtimecontrol.Service
 	paymentLimiter *ratelimit.Limiter
 	adminAuth      adminAuthStore
@@ -132,6 +139,26 @@ func (s *Server) WithGuildRepository(guilds *repository.GuildRepository) *Server
 	return s
 }
 
+func (s *Server) WithClipRepository(clips *repository.ClipRepository) *Server {
+	s.clips = clips
+	return s
+}
+
+func (s *Server) WithClipObjectStore(store *objectstore.R2Client) *Server {
+	s.clipStore = store
+	return s
+}
+
+func (s *Server) WithClipEvents(hub *clipevents.Hub) *Server {
+	s.clipEvents = hub
+	return s
+}
+
+func (s *Server) WithPortalOAuth(client *discordbot.PortalOAuthClient) *Server {
+	s.portalOAuth = client
+	return s
+}
+
 func (s *Server) WithRuntimeStatus(service *runtimecontrol.Service) *Server {
 	s.runtime = service
 	return s
@@ -187,6 +214,21 @@ func (s *Server) routes() {
 			MaxAge:       300,
 		}))
 	}
+	if origins := s.cfg.PortalCORSOrigins(); len(origins) > 0 {
+		s.app.Use("/portal", cors.New(cors.Config{
+			AllowOrigins: strings.Join(origins, ","),
+			AllowMethods: strings.Join([]string{
+				fiber.MethodGet,
+				fiber.MethodDelete,
+				fiber.MethodOptions,
+			}, ","),
+			AllowHeaders: strings.Join([]string{
+				fiber.HeaderAuthorization,
+				fiber.HeaderContentType,
+			}, ","),
+			MaxAge: 300,
+		}))
+	}
 
 	s.app.Get("/healthz", s.health)
 	s.app.Get("/readyz", s.ready)
@@ -201,6 +243,17 @@ func (s *Server) routes() {
 	s.app.Get("/install/features", s.installFeatures)
 	s.app.Post("/install/intents", s.createInstallIntent)
 	s.app.Get("/discord/install/callback", s.discordInstallCallback)
+	s.app.Get("/auth/discord/login", s.discordPortalLogin)
+	s.app.Get("/auth/discord/callback", s.discordPortalCallback)
+	s.app.Get("/portal/me", s.portalMe)
+	s.app.Get("/portal/clips", s.portalListClips)
+	// Live updates: the browser can't set an Authorization header on a WebSocket,
+	// so the session token is passed as a query param and verified before the
+	// upgrade. Registered before the :id routes so "ws" is never read as an id.
+	s.app.Use("/portal/clips/ws", s.portalClipsWSUpgrade)
+	s.app.Get("/portal/clips/ws", websocket.New(s.portalClipsWS))
+	s.app.Get("/portal/clips/:id/url", s.portalClipURL)
+	s.app.Delete("/portal/clips/:id", s.portalDeleteClip)
 	s.app.Post("/admin/auth/challenge", s.createAdminAuthChallenge)
 	s.app.Post("/admin/auth/sessions", s.createAdminSession)
 	s.app.Get("/admin/runtime", s.getAdminRuntimeStatus)

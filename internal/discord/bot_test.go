@@ -233,7 +233,7 @@ func TestGuildCommandRegistrationClearsGlobalCommandsAfterGuildSync(t *testing.T
 	}
 }
 
-func TestStringSelectInteractionDispatchesSelectionAsync(t *testing.T) {
+func TestStringSelectInteractionQueuesSelection(t *testing.T) {
 	userID := "100000000000000101"
 	selection := commands.PrepareSelectionForUser(userID, &commands.Selection{
 		Options: []commands.SelectionOption{{
@@ -256,43 +256,52 @@ func TestStringSelectInteractionDispatchesSelectionAsync(t *testing.T) {
 		return nil
 	}
 
-	started := make(chan commands.Request, 1)
-	release := make(chan struct{})
-	t.Cleanup(func() {
-		close(release)
-	})
+	queue := &fakeInteractionJobQueue{}
+	var updates int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			http.NotFound(w, r)
+			return
+		}
+		if r.Method != http.MethodPatch {
+			t.Fatalf("expected queued selection update to patch original response, got %s %s", r.Method, r.URL.Path)
+		}
+		updates++
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprintf(w, `{"id":"100000000000000501","channel_id":"100000000000000301","author":{"id":"100000000000000200","username":"Panda","discriminator":"0001","bot":true},"timestamp":"2026-06-27T00:00:00Z","type":0,"content":""}`)
+	}))
+	defer server.Close()
+	restClient := rest.NewClient("test-token", rest.WithHTTPClient(server.Client()), rest.WithRateLimiter(rest.NewNoopRateLimiter()), rest.WithURL(server.URL))
 	bot := &Bot{
-		cfg: config.Config{OwnerUserIDs: map[string]struct{}{userID: {}}},
+		cfg:  config.Config{OwnerUserIDs: map[string]struct{}{userID: {}}},
+		jobs: queue,
 		client: &disgoBot.Client{
 			ApplicationID: applicationID,
-		},
-		selectionRequestHandler: func(_ snowflake.ID, _ string, request commands.Request) {
-			started <- request
-			<-release
+			Rest:          rest.New(restClient),
 		},
 	}
 
-	done := make(chan struct{})
-	go func() {
-		bot.onStringSelectInteraction(event)
-		close(done)
-	}()
+	bot.onStringSelectInteraction(event)
 
-	select {
-	case <-done:
-	case <-time.After(100 * time.Millisecond):
-		t.Fatal("select interaction handler blocked on selected request work")
-	}
-	select {
-	case request := <-started:
-		if request.Command != "chat" || request.Options["question"] != "Play this exact YouTube result: https://www.youtube.com/watch?v=track" || request.VoiceChannelID != "100000000000000404" {
-			t.Fatalf("unexpected selected request: %+v", request)
-		}
-	case <-time.After(100 * time.Millisecond):
-		t.Fatal("expected selected request worker to start")
-	}
 	if len(responseTypes) != 1 || responseTypes[0] != disgoDiscord.InteractionResponseTypeDeferredUpdateMessage {
 		t.Fatalf("expected one deferred update response, got %+v", responseTypes)
+	}
+	if updates != 1 {
+		t.Fatalf("expected queued response update, got %d", updates)
+	}
+	if len(queue.jobs) != 1 || queue.jobs[0].Kind != InteractionJobKind || queue.jobs[0].GuildID != "100000000000000300" || queue.jobs[0].MaxAttempts != 3 {
+		t.Fatalf("unexpected queued selection job: %+v", queue.jobs)
+	}
+	var payload interactionJobPayload
+	if err := json.Unmarshal([]byte(queue.jobs[0].Payload), &payload); err != nil {
+		t.Fatalf("decode queued selection payload: %v", err)
+	}
+	if payload.Kind != "request" || payload.Request == nil {
+		t.Fatalf("expected queued request payload, got %+v", payload)
+	}
+	request := *payload.Request
+	if request.Command != "chat" || request.Options["question"] != "Play this exact YouTube result: https://www.youtube.com/watch?v=track" || request.VoiceChannelID != "100000000000000404" {
+		t.Fatalf("unexpected selected request: %+v", request)
 	}
 }
 
@@ -766,29 +775,29 @@ func TestImageReferencesFromMessageIncludesStickerMediaReferences(t *testing.T) 
 	}
 }
 
-func TestQueueBackgroundInteractionStoresPayload(t *testing.T) {
+func TestQueueInteractionRequestStoresPayload(t *testing.T) {
 	queue := &fakeInteractionJobQueue{}
 	bot := (&Bot{}).WithJobQueue(queue)
 	applicationID := snowflake.MustParse("100000000000000010")
 
-	response := bot.queueBackgroundInteraction(context.Background(), applicationID, "token-1", "guild-1", commands.BackgroundTask{
+	response := bot.queueInteractionRequest(context.Background(), applicationID, "token-1", commands.Request{
 		GuildID:   "guild-1",
 		UserID:    "user-1",
 		ChannelID: "channel-1",
-		Command:   "summarize",
-		Input:     "long text",
+		Command:   "chat",
+		Options:   map[string]string{"question": "make a clip"},
 	})
 	if !strings.Contains(response.Content, "job #1") {
 		t.Fatalf("expected queued job response, got %+v", response)
 	}
-	if len(queue.jobs) != 1 || queue.jobs[0].Kind != InteractionJobKind || queue.jobs[0].GuildID != "guild-1" {
+	if len(queue.jobs) != 1 || queue.jobs[0].Kind != InteractionJobKind || queue.jobs[0].GuildID != "guild-1" || queue.jobs[0].MaxAttempts != 3 {
 		t.Fatalf("unexpected queued jobs: %+v", queue.jobs)
 	}
 	var payload interactionJobPayload
 	if err := json.Unmarshal([]byte(queue.jobs[0].Payload), &payload); err != nil {
 		t.Fatalf("decode job payload: %v", err)
 	}
-	if payload.ApplicationID != applicationID.String() || payload.Token != "token-1" || payload.Task.Command != "summarize" || payload.Task.Input != "long text" {
+	if payload.ApplicationID != applicationID.String() || payload.Token != "token-1" || payload.Kind != "request" || payload.Request == nil || payload.Request.Command != "chat" || payload.Request.Options["question"] != "make a clip" {
 		t.Fatalf("unexpected payload: %+v", payload)
 	}
 }
@@ -822,7 +831,7 @@ func TestQueueNaturalMessageStoresPayload(t *testing.T) {
 	if err := bot.queueNaturalMessage(context.Background(), channelID, reference, request); err != nil {
 		t.Fatalf("queueNaturalMessage: %v", err)
 	}
-	if len(queue.jobs) != 1 || queue.jobs[0].Kind != NaturalMessageJobKind || queue.jobs[0].GuildID != guildID.String() || queue.jobs[0].MaxAttempts != 1 {
+	if len(queue.jobs) != 1 || queue.jobs[0].Kind != NaturalMessageJobKind || queue.jobs[0].GuildID != guildID.String() || queue.jobs[0].MaxAttempts != 3 {
 		t.Fatalf("unexpected queued jobs: %+v", queue.jobs)
 	}
 	var payload naturalMessageJobPayload
@@ -837,37 +846,6 @@ func TestQueueNaturalMessageStoresPayload(t *testing.T) {
 	}
 	if len(payload.Request.ImageReferences) != 1 || payload.Request.ImageReferences[0].ID != "reply:100000000000000004" {
 		t.Fatalf("expected queued natural message to preserve image references, got %+v", payload.Request.ImageReferences)
-	}
-}
-
-func TestHandleNaturalMessageJobDropsStaleJobBeforeClientWork(t *testing.T) {
-	bot := &Bot{}
-	err := bot.HandleNaturalMessageJob(context.Background(), store.Job{
-		ID:          42,
-		Kind:        NaturalMessageJobKind,
-		GuildID:     "guild-1",
-		Payload:     "not-json",
-		Attempts:    2,
-		MaxAttempts: 3,
-		CreatedAt:   time.Now().UTC().Add(-naturalMessageJobMaxAge - time.Minute),
-	})
-	if err != nil {
-		t.Fatalf("stale natural message job should be dropped without client or payload work: %v", err)
-	}
-}
-
-func TestStaleNaturalMessageJobUsesMaxAge(t *testing.T) {
-	now := time.Date(2026, 6, 28, 12, 0, 0, 0, time.UTC)
-	if staleNaturalMessageJob(store.Job{}, now) {
-		t.Fatal("zero CreatedAt should not be treated as stale")
-	}
-	fresh := store.Job{CreatedAt: now.Add(-naturalMessageJobMaxAge + time.Second)}
-	if staleNaturalMessageJob(fresh, now) {
-		t.Fatal("job inside max age should not be stale")
-	}
-	stale := store.Job{CreatedAt: now.Add(-naturalMessageJobMaxAge - time.Second)}
-	if !staleNaturalMessageJob(stale, now) {
-		t.Fatal("job older than max age should be stale")
 	}
 }
 
@@ -1071,15 +1049,6 @@ func TestUnsupportedDiscordEventDoesNotEnqueueComposedEvent(t *testing.T) {
 	}
 	if len(queue.jobs) != 0 {
 		t.Fatalf("unsupported event should not enqueue composed job, got %+v", queue.jobs)
-	}
-}
-
-func TestDeferredProgressContentUsesCommandAction(t *testing.T) {
-	if got := deferredProgressContent("summarize", 1); got != "Summarizing..." {
-		t.Fatalf("unexpected summarize progress %q", got)
-	}
-	if got := deferredProgressContent("ask", 2); got != "Thinking... still working" {
-		t.Fatalf("unexpected ask progress %q", got)
 	}
 }
 

@@ -16,7 +16,7 @@ import (
 	"github.com/sn0w/panda2/internal/objectstore"
 )
 
-const defaultViralClipInstructions = "Find the strongest viral short-form clips in this video. Prioritize hook-first moments with clear emotional spike, humor, surprise, debate, stakes, quotable soundbites, or satisfying setup/payoff. Return ranked continuous or spliced clips only when the transcript supports them."
+const defaultViralClipInstructions = "Find the strongest viral short-form clips in this video. Prioritize hook-first moments with clear emotional spike, humor, surprise, debate, stakes, quotable soundbites, or satisfying setup/payoff. Return ranked continuous or spliced clips only when the transcript supports them; do not fill slots with generic summaries."
 
 const (
 	clipProgressSearching    = "Searching"
@@ -45,6 +45,13 @@ func (s *Service) Clip(ctx context.Context, request ClipRequest) (ClipResult, er
 	captionMode, err := normalizeClipCaptionMode(request.Captions)
 	if err != nil {
 		return ClipResult{}, err
+	}
+	availableCaptionFonts := []string(nil)
+	if captionMode != clipCaptionRequestOff {
+		availableCaptionFonts = s.availableCaptionFontKeys()
+		if len(availableCaptionFonts) == 0 {
+			return ClipResult{}, fmt.Errorf("youtube clip captions failed: no caption fonts are available; configure youtube_clip_caption_font_path/youtube_clip_caption_font_family")
+		}
 	}
 	instructions := normalizedClipInstructions(request.Instructions)
 	reportClipProgress(request, clipProgressSearching)
@@ -124,63 +131,89 @@ func (s *Service) Clip(ctx context.Context, request ClipRequest) (ClipResult, er
 	)
 
 	rendered := make([]RenderedClip, 0, len(detection.Clips))
+	candidateFailures := make([]string, 0)
 	for index, decision := range detection.Clips {
-		outputPath := filepath.Join(tempDir, fmt.Sprintf("clip-%02d.mp4", index+1))
 		reportClipProgress(request, countedClipProgress(clipProgressPlanning, index+1, len(detection.Clips)))
-		transcriptTimeline := clipCompositionTranscriptTimeline(decision, segments)
+		transcriptTimeline, err := clipCompositionTranscriptTimeline(decision, segments)
+		if err != nil {
+			if ctx.Err() != nil {
+				return ClipResult{}, ctx.Err()
+			}
+			candidateFailures = append(candidateFailures, logClipCandidateSkipped(request, index, decision, "timeline", err))
+			continue
+		}
 		thumbnails, err := s.extractClipThumbnails(ctx, tools, sourceVideoPath, decision, transcriptTimeline, filepath.Join(tempDir, fmt.Sprintf("clip-%02d", index+1)))
 		if err != nil {
-			return ClipResult{}, err
+			if ctx.Err() != nil {
+				return ClipResult{}, ctx.Err()
+			}
+			candidateFailures = append(candidateFailures, logClipCandidateSkipped(request, index, decision, "thumbnail extraction", err))
+			continue
 		}
-		composition, err := s.clipPlanner.Plan(ctx, ClipCompositionRequest{
-			Title:               strings.TrimSpace(metadata.Title),
-			URL:                 strings.TrimSpace(firstNonEmpty(metadata.WebpageURL, metadata.OriginalURL, source)),
-			Uploader:            strings.TrimSpace(metadata.Uploader),
-			RequestedAspect:     requestedAspect,
-			LayoutInstructions:  strings.TrimSpace(request.LayoutInstructions),
-			CaptionMode:         captionMode,
-			CaptionInstructions: strings.TrimSpace(request.CaptionInstructions),
-			Clip:                decision,
-			TranscriptTimeline:  transcriptTimeline,
-			Thumbnails:          thumbnails,
-		})
+		compositionRequest := ClipCompositionRequest{
+			Title:                 strings.TrimSpace(metadata.Title),
+			URL:                   strings.TrimSpace(firstNonEmpty(metadata.WebpageURL, metadata.OriginalURL, source)),
+			Uploader:              strings.TrimSpace(metadata.Uploader),
+			RequestedAspect:       requestedAspect,
+			LayoutInstructions:    strings.TrimSpace(request.LayoutInstructions),
+			CaptionMode:           captionMode,
+			CaptionInstructions:   strings.TrimSpace(request.CaptionInstructions),
+			AvailableCaptionFonts: availableCaptionFonts,
+			Clip:                  decision,
+			TranscriptTimeline:    transcriptTimeline,
+			Thumbnails:            thumbnails,
+		}
+		composition, err := s.clipPlanner.Plan(ctx, compositionRequest)
 		if err != nil {
-			return ClipResult{}, err
+			if ctx.Err() != nil {
+				return ClipResult{}, ctx.Err()
+			}
+			candidateFailures = append(candidateFailures, logClipCandidateSkipped(request, index, decision, "composition planning", err))
+			continue
 		}
-		if err := ValidateClipCompositionResult(composition, ClipCompositionRequest{
-			RequestedAspect:    requestedAspect,
-			CaptionMode:        captionMode,
-			Clip:               decision,
-			TranscriptTimeline: transcriptTimeline,
-		}); err != nil {
-			return ClipResult{}, fmt.Errorf("clip composition response failed validation: %w", err)
+		validationRequest := compositionRequest
+		validationRequest.Thumbnails = clipThumbnailDimensionsOnly(compositionRequest.Thumbnails)
+		if err := ValidateClipCompositionResult(composition, validationRequest); err != nil {
+			candidateFailures = append(candidateFailures, logClipCandidateSkipped(request, index, decision, "composition validation", fmt.Errorf("clip composition response failed validation: %w", err)))
+			continue
 		}
 		reportClipProgress(request, countedClipProgress(clipProgressRendering, index+1, len(detection.Clips)))
+		outputRank := len(rendered) + 1
+		outputPath := filepath.Join(tempDir, fmt.Sprintf("clip-%02d.mp4", outputRank))
 		slog.Info("youtube clip render started",
 			slog.String("guild_id", request.GuildID),
 			slog.String("request_id", request.RequestID),
-			slog.Int("rank", index+1),
+			slog.Int("rank", outputRank),
+			slog.Int("candidate_rank", index+1),
 			slog.Int("segment_count", len(decision.Segments)),
 			slog.String("aspect_ratio", composition.AspectRatio),
 			slog.String("layout_mode", composition.LayoutMode),
 		)
 		if err := s.renderVideoClip(ctx, tools, sourceVideoPath, decision, composition, transcriptTimeline, tempDir, outputPath); err != nil {
-			return ClipResult{}, err
+			if ctx.Err() != nil {
+				return ClipResult{}, ctx.Err()
+			}
+			candidateFailures = append(candidateFailures, logClipCandidateSkipped(request, index, decision, "render", err))
+			continue
 		}
 		info, err := os.Stat(outputPath)
 		if err != nil {
-			return ClipResult{}, fmt.Errorf("clip render failed: %w", err)
+			candidateFailures = append(candidateFailures, logClipCandidateSkipped(request, index, decision, "render", fmt.Errorf("clip render failed: %w", err)))
+			continue
 		}
 		if info.Size() <= 0 {
-			return ClipResult{}, fmt.Errorf("clip render produced an empty file")
+			candidateFailures = append(candidateFailures, logClipCandidateSkipped(request, index, decision, "render", fmt.Errorf("clip render produced an empty file")))
+			continue
 		}
 		if info.Size() > s.clipMaxBytes {
-			return ClipResult{}, fmt.Errorf("clip render exceeded maximum size of %d bytes", s.clipMaxBytes)
+			candidateFailures = append(candidateFailures, logClipCandidateSkipped(request, index, decision, "render", fmt.Errorf("clip render exceeded maximum size of %d bytes", s.clipMaxBytes)))
+			continue
 		}
 		slog.Info("youtube clip render completed",
 			slog.String("guild_id", request.GuildID),
 			slog.String("request_id", request.RequestID),
-			slog.Int("rank", index+1),
+			slog.Int("rank", outputRank),
+			slog.Int("candidate_rank", index+1),
 			slog.Int64("size_bytes", info.Size()),
 			slog.String("aspect_ratio", composition.AspectRatio),
 			slog.String("layout_mode", composition.LayoutMode),
@@ -191,7 +224,7 @@ func (s *Service) Clip(ctx context.Context, request ClipRequest) (ClipResult, er
 		}
 		reportClipProgress(request, countedClipProgress(clipProgressUploading, index+1, len(detection.Clips)))
 		upload, err := s.clipUploader.Upload(ctx, objectstore.UploadRequest{
-			Key:         clipObjectKey(request, index+1, decision.Title),
+			Key:         clipObjectKey(request, outputRank, decision.Title),
 			ContentType: "video/mp4",
 			Body:        data,
 		})
@@ -201,11 +234,12 @@ func (s *Service) Clip(ctx context.Context, request ClipRequest) (ClipResult, er
 		slog.Info("youtube clip upload completed",
 			slog.String("guild_id", request.GuildID),
 			slog.String("request_id", request.RequestID),
-			slog.Int("rank", index+1),
+			slog.Int("rank", outputRank),
+			slog.Int("candidate_rank", index+1),
 			slog.String("object_key", upload.Key),
 			slog.Int64("size_bytes", upload.SizeBytes),
 		)
-		thumbnailUpload, err := s.uploadRenderedClipThumbnail(ctx, tools, outputPath, request, decision, index+1, filepath.Join(tempDir, fmt.Sprintf("clip-%02d-thumbnail.jpg", index+1)))
+		thumbnailUpload, err := s.uploadRenderedClipThumbnail(ctx, tools, outputPath, request, decision, outputRank, filepath.Join(tempDir, fmt.Sprintf("clip-%02d-thumbnail.jpg", outputRank)))
 		if err != nil {
 			return ClipResult{}, err
 		}
@@ -238,6 +272,7 @@ func (s *Service) Clip(ctx context.Context, request ClipRequest) (ClipResult, er
 			CaptionMode:              captionPlanMode(composition.CaptionPlan),
 			CaptionStylePreset:       captionPlanStylePreset(composition.CaptionPlan),
 			CaptionStyleSource:       captionPlanStyleSource(composition.CaptionPlan),
+			CaptionAnimation:         captionPlanAnimation(composition.CaptionPlan),
 			CaptionTimingQuality:     captionPlanTimingQuality(composition.CaptionPlan),
 			CaptionConfidence:        captionPlanConfidence(composition.CaptionPlan),
 			CaptionReason:            captionPlanReason(composition.CaptionPlan),
@@ -250,6 +285,13 @@ func (s *Service) Clip(ctx context.Context, request ClipRequest) (ClipResult, er
 			CaptionBackgroundOpacity: captionPlanBackgroundOpacity(composition.CaptionPlan),
 		})
 	}
+	if len(rendered) == 0 {
+		detail := "no candidate failure details were recorded"
+		if len(candidateFailures) > 0 {
+			detail = strings.Join(candidateFailures, "; ")
+		}
+		return ClipResult{}, fmt.Errorf("youtube clipping produced no renderable clips after trying %d detected candidate(s): %s", len(detection.Clips), detail)
+	}
 	return ClipResult{
 		Title:                  strings.TrimSpace(metadata.Title),
 		URL:                    strings.TrimSpace(firstNonEmpty(metadata.WebpageURL, metadata.OriginalURL, source)),
@@ -260,40 +302,74 @@ func (s *Service) Clip(ctx context.Context, request ClipRequest) (ClipResult, er
 	}, nil
 }
 
-func clipCompositionTranscriptTimeline(decision ClipDecision, transcript []TranscriptSegment) []ClipCompositionTranscriptSegment {
+func logClipCandidateSkipped(request ClipRequest, index int, decision ClipDecision, stage string, err error) string {
+	title := strings.TrimSpace(decision.Title)
+	if title == "" {
+		title = "untitled"
+	}
+	detail := fmt.Sprintf("candidate %d %q %s failed: %v", index+1, title, stage, err)
+	slog.Warn("youtube clip candidate skipped",
+		slog.String("guild_id", request.GuildID),
+		slog.String("request_id", request.RequestID),
+		slog.Int("candidate_rank", index+1),
+		slog.String("title", title),
+		slog.String("stage", stage),
+		slog.String("error", err.Error()),
+	)
+	return detail
+}
+
+func clipCompositionTranscriptTimeline(decision ClipDecision, transcript []TranscriptSegment) ([]ClipCompositionTranscriptSegment, error) {
 	timeline := make([]ClipCompositionTranscriptSegment, 0)
+	refs, refsByID, err := transcriptWordReferences(transcript)
+	if err != nil {
+		return nil, err
+	}
 	for segmentIndex, clipSegment := range decision.Segments {
-		sourceSegments := transcriptSegmentsForClipDecisionSegment(clipSegment, transcript)
-		for _, sourceSegment := range sourceSegments {
-			if sourceSegment.EndSeconds < clipSegment.StartSeconds-0.05 || sourceSegment.StartSeconds > clipSegment.EndSeconds+0.05 {
+		startWordID := strings.TrimSpace(clipSegment.StartWordID)
+		endWordID := strings.TrimSpace(clipSegment.EndWordID)
+		if startWordID == "" || endWordID == "" {
+			return nil, fmt.Errorf("clip composition transcript timeline requires word-backed clip segments")
+		}
+		startRef, startOK := refsByID[startWordID]
+		endRef, endOK := refsByID[endWordID]
+		if !startOK || !endOK {
+			return nil, fmt.Errorf("clip composition transcript timeline references missing word IDs")
+		}
+		if endRef.Index < startRef.Index {
+			return nil, fmt.Errorf("clip composition transcript timeline end word precedes start word")
+		}
+		for sourceSegmentIndex := startRef.SegmentIndex; sourceSegmentIndex <= endRef.SegmentIndex; sourceSegmentIndex++ {
+			segmentWords := make([]transcriptWordRef, 0)
+			for _, ref := range refs[startRef.Index : endRef.Index+1] {
+				if ref.SegmentIndex != sourceSegmentIndex {
+					continue
+				}
+				segmentWords = append(segmentWords, ref)
+			}
+			if len(segmentWords) == 0 {
 				continue
 			}
-			text := cleanTranscriptText(sourceSegment.Text)
+			text := joinedTranscriptWords(segmentWords)
 			if text == "" {
 				continue
 			}
+			sourceSegment := transcript[sourceSegmentIndex]
+			words := make([]TranscriptWord, 0, len(segmentWords))
+			for _, word := range segmentWords {
+				words = append(words, word.Word)
+			}
 			timeline = append(timeline, ClipCompositionTranscriptSegment{
 				ClipSegmentIndex: segmentIndex,
-				ID:               sourceSegment.ID,
-				StartSeconds:     sourceSegment.StartSeconds,
-				EndSeconds:       sourceSegment.EndSeconds,
+				ID:               transcriptSegmentID(sourceSegment, sourceSegmentIndex),
+				StartSeconds:     segmentWords[0].Word.StartSeconds,
+				EndSeconds:       segmentWords[len(segmentWords)-1].Word.EndSeconds,
 				Text:             text,
-				Words:            append([]TranscriptWord(nil), sourceSegment.Words...),
+				Words:            words,
 			})
 		}
 	}
-	return timeline
-}
-
-func transcriptSegmentsForClipDecisionSegment(clipSegment ClipDecisionSegment, transcript []TranscriptSegment) []TranscriptSegment {
-	if clipSegment.StartSegmentIndex != nil && clipSegment.EndSegmentIndex != nil {
-		start := *clipSegment.StartSegmentIndex
-		end := *clipSegment.EndSegmentIndex
-		if start >= 0 && end >= start && end < len(transcript) {
-			return transcript[start : end+1]
-		}
-	}
-	return transcript
+	return timeline, nil
 }
 
 func reportClipProgress(request ClipRequest, status string) {
@@ -406,9 +482,6 @@ func (word transcriptionWord) captionText() string {
 func validateClipDetectionResult(result ClipDetectionResult, videoDuration time.Duration, minDuration time.Duration, maxDuration time.Duration, maxClips int) error {
 	if len(result.Clips) == 0 {
 		return fmt.Errorf("clip detection response contained no clips")
-	}
-	if len(result.Clips) < defaultClipDetectionMinClips {
-		return fmt.Errorf("clip detection response returned %d clips, minimum is %d", len(result.Clips), defaultClipDetectionMinClips)
 	}
 	if maxClips > 0 && len(result.Clips) > maxClips {
 		return fmt.Errorf("clip detection response returned %d clips, maximum is %d", len(result.Clips), maxClips)
@@ -622,6 +695,20 @@ func orderedClipRenderPlans(composition ClipCompositionResult, segmentCount int)
 	return ordered
 }
 
+func clipThumbnailDimensionsOnly(thumbnails []ClipThumbnail) []ClipThumbnail {
+	if len(thumbnails) == 0 {
+		return nil
+	}
+	copied := make([]ClipThumbnail, len(thumbnails))
+	for index, thumbnail := range thumbnails {
+		copied[index] = ClipThumbnail{
+			Width:  thumbnail.Width,
+			Height: thumbnail.Height,
+		}
+	}
+	return copied
+}
+
 func (s *Service) clipResolutionForAspect(aspect string) ClipResolution {
 	switch strings.TrimSpace(aspect) {
 	case clipAspectVertical:
@@ -702,7 +789,7 @@ func buildClipRenderFilterGraph(layout string, regions []ClipRenderRegion, targe
 		return fmt.Sprintf("[0:v]scale=%d:%d:force_original_aspect_ratio=decrease,pad=%d:%d:(ow-iw)/2:(oh-ih)/2,setsar=1,format=yuv420p[vout]", target.Width, target.Height, target.Width, target.Height), nil
 	case clipLayoutSingleCrop:
 		if len(regions) != 1 {
-			return "", fmt.Errorf("youtube clip render failed: single_crop requires one region")
+			return buildCompositeClipRenderFilterGraph(regions, target, durationSeconds), nil
 		}
 		return fmt.Sprintf("[0:v]%s,setsar=1,format=yuv420p[vout]", clipRegionVideoFilter(regions[0], target)), nil
 	case clipLayoutStacked, clipLayoutFaceOverlay:
