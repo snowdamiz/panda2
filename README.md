@@ -34,7 +34,7 @@ Trials do not auto-convert without payment approval. Servers spend prepaid credi
 
 The installer becomes the billing owner for that server. The Discord server owner retains management access.
 
-Implementation planning for feature-based pre-install customization lives in [Feature-Based Discord Install Customization Plan](FEATURE_INSTALL_CUSTOMIZATION_PLAN.md).
+Implementation planning for full Discord server setup automation lives in [Discord Server Setup Automation Plan](DISCORD_SERVER_SETUP_PLAN.md).
 
 ## Buy A Pack
 

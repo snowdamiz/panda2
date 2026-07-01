@@ -106,6 +106,15 @@ func assertComposedPromptMetadata(t *testing.T, content string) {
 	}
 }
 
+func TestNaturalDraftSystemPromptSupportsScheduledAutomations(t *testing.T) {
+	prompt := naturalDraftSystemPrompt()
+	for _, want := range []string{`"post Hello every 5 minutes"`, `"type":"scheduled"`, "actual schedule creation happens after approval"} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("natural draft prompt missing scheduled automation guidance %q:\n%s", want, prompt)
+		}
+	}
+}
+
 func memberJoinWelcomeSpec() Spec {
 	return NormalizeSpec(Spec{
 		SchemaVersion: 1,

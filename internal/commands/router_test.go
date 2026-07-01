@@ -477,6 +477,20 @@ func memberWelcomeSpecJSON() string {
 	}`
 }
 
+func scheduledHelloSpecJSON(channelID string) string {
+	return strings.ReplaceAll(`{
+		"schema_version": 1,
+		"name": "scheduled_hello",
+		"description": "Posts Hello in the bot test channel on a recurring schedule.",
+		"input_schema": {"type":"object","additionalProperties":false,"properties":{}},
+		"output_schema": {"type":"object","additionalProperties":false,"properties":{"sent":{"type":"boolean"},"message_id":{"type":"string"}},"required":["sent"]},
+		"runner": {"type":"deterministic","system_prompt":"Post only the approved scheduled message.","temperature":0.2,"max_tokens":300,"tool_allowlist":["discord.send_message"]},
+		"steps": [{"id":"send_message","type":"tool_call","tool":"discord.send_message","arguments":{"channel_id":"CHANNEL_ID","content_template":"Hello","allowed_mentions":{"users":false,"roles":false,"everyone":false}}}],
+		"invocations": [{"type":"scheduled","cron":"every 5 minutes"},{"type":"chat_tool"}],
+		"safety": {"requires_approval":true,"requires_confirmation_on_write":false,"max_nested_depth":2,"cooldown_seconds":240,"max_runs_per_hour":12,"dedupe_window_seconds":240}
+	}`, "CHANNEL_ID", channelID)
+}
+
 func voiceRickrollSpecJSON() string {
 	return `{
 		"schema_version": 1,
@@ -3592,6 +3606,70 @@ func TestNaturalMessageDraftsEveryTimeEventAutomationThroughAgentTool(t *testing
 	}
 	if !strings.Contains(joinRequestMessages(client.requests[1]), "Every time a new user enters") {
 		t.Fatalf("expected draft request to include every-time instruction, got:\n%s", joinRequestMessages(client.requests[1]))
+	}
+}
+
+func TestNaturalMessageDraftsRecurringScheduledAutomationThroughAgentTool(t *testing.T) {
+	const channelID = "1517943356074889276"
+	client := &fakeLLM{responses: []llm.ChatResponse{
+		{ToolCalls: []llm.ToolCall{{
+			ID:   "call-composed-draft",
+			Type: "function",
+			Function: llm.ToolCallFunction{
+				Name:      "panda_manage_composed_tool",
+				Arguments: `{"action":"draft","request":"Every 5 minutes, post Hello in the bot-test channel.","channel_id":"` + channelID + `"}`,
+			},
+		}}},
+		{Content: scheduledHelloSpecJSON(channelID)},
+		{Content: "Drafted `scheduled_hello` version 1. Approve it, then schedule it to run every 5 minutes."},
+	}}
+	router := newTestRouter(t, client, 20)
+
+	response := router.HandleNaturalMessage(context.Background(), Request{
+		UserID:       "admin",
+		GuildID:      "guild-1",
+		ChannelID:    "source-channel",
+		IsGuildAdmin: true,
+		Options: map[string]string{
+			"message":       "panda make a new automation, post \"Hello\" in <#" + channelID + "> every 5 minutes",
+			"bot_mentioned": "true",
+		},
+	})
+	if response.Confirmation == nil || !strings.Contains(response.Content, "Drafted `scheduled_hello` version 1") || !strings.Contains(response.Content, "every 5 minutes") {
+		t.Fatalf("expected scheduled automation draft confirmation, got %+v", response)
+	}
+	if len(client.requests) != 3 {
+		t.Fatalf("expected streamed composed-tool call, draft LLM, and final response, got %d LLM request(s)", len(client.requests))
+	}
+	if !requestToolNames(client.requests[0])["panda_manage_composed_tool"] {
+		t.Fatalf("expected composed tool manager to be available, got %+v", requestToolNames(client.requests[0]))
+	}
+	if !strings.Contains(joinRequestMessages(client.requests[1]), "Every 5 minutes") {
+		t.Fatalf("expected draft request to include recurring schedule instruction, got:\n%s", joinRequestMessages(client.requests[1]))
+	}
+
+	confirmationRequest, ok := RequestFromToolConfirmationID(response.Confirmation.ID, Request{
+		UserID:       "admin",
+		GuildID:      "guild-1",
+		ChannelID:    "source-channel",
+		IsGuildAdmin: true,
+	})
+	if !ok || confirmationRequest.Action != toolActionComposedToolApprove || confirmationRequest.Options["tool_name"] != "scheduled_hello" {
+		t.Fatalf("unexpected scheduled automation confirmation request: request=%+v ok=%t", confirmationRequest, ok)
+	}
+	approved := router.HandleToolConfirmation(context.Background(), confirmationRequest)
+	if !strings.Contains(approved.Content, "Approved `scheduled_hello` version 1") {
+		t.Fatalf("expected scheduled automation approval, got %+v", approved)
+	}
+	spec, ok, err := router.composed.ExportSpec(context.Background(), "guild-1", "scheduled_hello")
+	if err != nil || !ok {
+		t.Fatalf("export approved spec: ok=%t err=%v", ok, err)
+	}
+	if len(spec.Invocations) == 0 || spec.Invocations[0].Type != composed.InvocationScheduled {
+		t.Fatalf("expected scheduled invocation, got %+v", spec.Invocations)
+	}
+	if got := spec.Steps[0].Arguments["channel_id"]; got != channelID {
+		t.Fatalf("expected channel mention to resolve to channel_id %s, got %+v", channelID, got)
 	}
 }
 
