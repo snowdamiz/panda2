@@ -962,6 +962,7 @@ Use schema_version 1 and lower_snake_case names. Prefer deterministic runners wi
 Currently supported event triggers for composed automations:
 %s
 
+For recurring or one-off scheduled automations such as "post Hello every 5 minutes", use invocations [{"type":"scheduled"},{"type":"chat_tool"}]. If the user gives an interval, include it as invocations[].cron only as a human review hint; actual schedule creation happens after approval through Panda's scheduling flow.
 Event filters can match top-level fields guild_id, event_id, event_type, user_id, channel_id, message_id, plus event metadata such as emoji, answer_id, role_id, rule_id, scheduled_event_id, code, name, trigger_type, last_pin_at, username, effective_name, and user_is_bot.
 Use filters for noisy triggers like message_update, reaction_add, reaction_remove, poll_vote_add, poll_vote_remove, and voice_state_update. Role-added and role-removed triggers must include filters.role_id after resolving role names. Voice-state triggers must include filters.channel_id or filters.channel_name for the target voice/stage channel, and filters.user_id when the user names a specific member.
 message_create is not exposed as a composed automation trigger because it is high-volume; use normal chat behavior or explicit tools for message-response workflows.

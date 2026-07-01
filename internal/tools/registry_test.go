@@ -108,6 +108,20 @@ func TestAdminSetupToolSchemasExposeNaturalLanguageFields(t *testing.T) {
 	assertToolSchemaContains("panda.manage_composed_tool", "voice_channel_id", "voice_channel_name", "voice_channel")
 }
 
+func TestComposedToolManagerTimeoutAllowsNaturalDraftLLM(t *testing.T) {
+	registry, err := NewDefaultRegistry()
+	if err != nil {
+		t.Fatalf("NewDefaultRegistry: %v", err)
+	}
+	definition, ok := registry.Get("panda.manage_composed_tool")
+	if !ok {
+		t.Fatal("panda.manage_composed_tool not registered")
+	}
+	if definition.Timeout <= 30*time.Second {
+		t.Fatalf("composed tool manager timeout %s must exceed the nested OpenRouter chat timeout", definition.Timeout)
+	}
+}
+
 func TestYouTubeClipCaptionInstructionsMentionRandomStyledCaptions(t *testing.T) {
 	registry, err := NewDefaultRegistry()
 	if err != nil {
