@@ -76,6 +76,8 @@ const (
 	toolActionComposedToolDelete           = "composed_tool.delete"
 	toolActionDiscordPollCreate            = "discord_poll.create"
 	toolActionDiscordWriteExecute          = "discord_write.execute"
+	toolActionServerSetupApply             = "server_setup.apply"
+	toolActionServerSetupRollback          = "server_setup.rollback"
 	toolActionOwnerOpsDrain                = "owner_ops.drain"
 	toolActionOwnerOpsResume               = "owner_ops.resume"
 	toolActionOwnerOpsIncidentEnable       = "owner_ops.incident_enable"
@@ -159,7 +161,9 @@ func pendingToolConfirmationAction(action string) bool {
 	case toolActionDiscordPollCreate,
 		toolActionDiscordRoleCreate,
 		toolActionToolAccessOpen,
-		toolActionDiscordWriteExecute:
+		toolActionDiscordWriteExecute,
+		toolActionServerSetupApply,
+		toolActionServerSetupRollback:
 		return true
 	default:
 		return ownerOpsConfirmationAction(action)

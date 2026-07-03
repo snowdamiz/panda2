@@ -466,6 +466,21 @@ func TestShouldHandleNaturalMessageUsesWakeWordMentionOrReply(t *testing.T) {
 	}
 }
 
+func TestSetupWizardStartIntentRequiresWakeWordAndSetupServerIntent(t *testing.T) {
+	if !isSetupWizardStartIntent("panda setup wizard for this server", nil) {
+		t.Fatal("expected explicit setup wizard request to start the wizard")
+	}
+	if !isSetupWizardStartIntent("set up this server", map[string]string{"bot_mentioned": "true"}) {
+		t.Fatal("expected direct mention with setup server request to start the wizard")
+	}
+	if isSetupWizardStartIntent("server setup sounds useful", nil) {
+		t.Fatal("expected setup wording without wake word, mention, or reply context to be ignored")
+	}
+	if isSetupWizardStartIntent("panda what setup templates exist?", nil) {
+		t.Fatal("expected generic template question not to start the wizard")
+	}
+}
+
 func TestTypingIndicatorSendsImmediatelyAndRefreshes(t *testing.T) {
 	sender := &fakeTypingSender{}
 	channelID := snowflake.MustParse("100000000000000002")

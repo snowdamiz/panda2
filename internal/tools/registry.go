@@ -536,6 +536,48 @@ func DefaultDefinitions() []Definition {
 			BypassToolPolicy:      true,
 		},
 		{
+			Name:                  "panda.manage_server_setup",
+			Description:           "List Discord server setup templates, preview a template diff, check setup project status, or prepare a confirmed server setup application. Always preview before apply. Use this when an admin asks Panda to set up, scaffold, build, configure, or turn a server into a community, support desk, creator hub, gaming server, product community, or course.",
+			RequiredPermission:    admin.PermissionAdminConfigWrite,
+			FeatureID:             features.AdminSetup,
+			ToolClass:             ToolClassAdminWrite,
+			InputSchema:           serverSetupManagementSchema(),
+			OutputSchema:          objectSchema("result"),
+			Timeout:               30 * time.Second,
+			Redaction:             RedactContent,
+			Audit:                 AuditSensitive,
+			IncludeInModelContext: true,
+			SupportsDryRun:        true,
+		},
+		{
+			Name:                  "panda.manage_ticket",
+			Description:           "List, show, claim, close, reopen, or archive first-class Panda support tickets. Use this for ticket lifecycle/status requests, not general Discord threads.",
+			RequiredPermission:    admin.PermissionAdminConfigWrite,
+			FeatureID:             features.AdminSetup,
+			ToolClass:             ToolClassAdminWrite,
+			InputSchema:           ticketManagementSchema(),
+			OutputSchema:          objectSchema("result"),
+			Timeout:               10 * time.Second,
+			Redaction:             RedactContent,
+			Audit:                 AuditSensitive,
+			IncludeInModelContext: true,
+			SupportsDryRun:        true,
+		},
+		{
+			Name:                  "panda.manage_onboarding",
+			Description:           "List onboarding flows, pause/resume onboarding, or inspect member onboarding state for this server.",
+			RequiredPermission:    admin.PermissionAdminConfigWrite,
+			FeatureID:             features.AdminSetup,
+			ToolClass:             ToolClassAdminWrite,
+			InputSchema:           onboardingManagementSchema(),
+			OutputSchema:          objectSchema("result"),
+			Timeout:               10 * time.Second,
+			Redaction:             RedactContent,
+			Audit:                 AuditSensitive,
+			IncludeInModelContext: true,
+			SupportsDryRun:        true,
+		},
+		{
 			Name:                  "panda.summarize_youtube",
 			Description:           "Watch and summarize a YouTube video from an exact URL. Use this when the user asks Panda to summarize, recap, watch, explain, outline, or get key points from a YouTube video and the user provided an exact YouTube URL, or after the user selected an exact URL from panda.search_youtube. For title/name-only requests, including a title plus channel/creator, call panda.search_youtube first so Discord can show the top choices; only call this tool with the selected/exact URL afterward unless the user explicitly asks to use the top result without choosing. This tool extracts audio in chunks, transcribes it with Lemonfox Whisper, and returns a plain text transcript for Panda's final summary. Do not use this for music playback; use panda.manage_music for play/queue/control requests.",
 			RequiredPermission:    admin.PermissionAssistantUse,
@@ -677,7 +719,14 @@ func DefaultDefinitions() []Definition {
 		threadWrite("discord.remove_thread_member", "Remove a user from a thread after confirmation.", []string{"thread_id", "user_id"}, "VIEW_CHANNEL", "MANAGE_THREADS"),
 		pollWrite("discord.create_poll", "Create a native Discord poll after confirmation.", []string{"channel_id", "question", "answers"}, "VIEW_CHANNEL", "SEND_MESSAGES", "SEND_POLLS"),
 		pollWrite("discord.end_poll", "End a Panda-authored native Discord poll after confirmation.", []string{"channel_id", "message_id"}, "VIEW_CHANNEL", "SEND_MESSAGES"),
-		adminDiscordWrite(features.DiscordRoleManagement, "discord.create_role", "Create a Discord role with no elevated permissions after confirmation.", []string{"name"}, "MANAGE_ROLES"),
+		adminDiscordWrite(features.DiscordRoleManagement, "discord.create_role", "Create a Discord role after confirmation. Supports name, color, hoist, mentionable, and explicit non-Administrator permissions.", []string{"name"}, "MANAGE_ROLES"),
+		adminDiscordWrite(features.DiscordRoleManagement, "discord.update_role", "Update a Discord role after confirmation, including name, color, hoist, mentionability, and non-Administrator permissions.", []string{"role_id"}, "MANAGE_ROLES"),
+		adminDiscordWrite(features.DiscordRoleManagement, "discord.delete_role", "Delete a Discord role after confirmation.", []string{"role_id"}, "MANAGE_ROLES"),
+		adminDiscordWrite(features.DiscordRoleManagement, "discord.position_roles", "Reorder Discord roles after confirmation using an array of role IDs and positions.", []string{"positions"}, "MANAGE_ROLES"),
+		adminDiscordWrite(features.DiscordChannelTools, "discord.create_channel", "Create a Discord text, announcement, voice, stage, forum, media, or category channel after confirmation.", []string{"name", "type"}, "MANAGE_CHANNELS"),
+		adminDiscordWrite(features.DiscordChannelTools, "discord.update_channel", "Update a Discord channel or category after confirmation, including parent, topic, slowmode, NSFW flag, voice limits, and overwrites.", []string{"channel_id"}, "MANAGE_CHANNELS"),
+		adminDiscordWrite(features.DiscordChannelTools, "discord.delete_channel", "Delete a Discord channel or category after confirmation.", []string{"channel_id"}, "MANAGE_CHANNELS"),
+		adminDiscordWrite(features.DiscordChannelTools, "discord.position_channels", "Reorder Discord channels/categories after confirmation using an array of channel IDs, positions, and optional parent IDs.", []string{"positions"}, "MANAGE_CHANNELS"),
 		adminDiscordWrite(features.DiscordRoleManagement, "discord.add_member_role", "Assign a Discord role to a user after confirmation.", []string{"user_id", "role_id"}, "MANAGE_ROLES"),
 		adminDiscordWrite(features.DiscordRoleManagement, "discord.remove_member_role", "Remove a Discord role from a user after confirmation.", []string{"user_id", "role_id"}, "MANAGE_ROLES"),
 		adminDiscordWrite(features.DiscordRoleManagement, "discord.set_member_nick", "Set a member nickname after confirmation.", []string{"user_id", "nick"}, "MANAGE_NICKNAMES"),
@@ -1135,6 +1184,69 @@ func musicManagementSchema() json.RawMessage {
 	})
 }
 
+func serverSetupManagementSchema() json.RawMessage {
+	return schemaWithProperties([]string{"action"}, map[string]any{
+		"action": map[string]any{
+			"type":        "string",
+			"enum":        []string{"list", "preview", "apply", "status", "rollback", "export", "import"},
+			"description": "list templates, preview a setup diff, apply a confirmed project, roll back created resources, export/import a template, or check setup status.",
+		},
+		"template_id":             map[string]string{"type": "string", "description": "Preset/template id such as minimal_community, support_desk, creator_hub, gaming_server, saas_product_community, or study_course."},
+		"preset":                  map[string]string{"type": "string", "description": "Alias for template_id."},
+		"project_id":              map[string]string{"type": "string", "description": "Setup project id for apply or status."},
+		"id":                      map[string]string{"type": "string", "description": "Alias for project_id."},
+		"text":                    map[string]string{"type": "string", "description": "Natural-language setup intent for conversational setup drafting."},
+		"request":                 map[string]string{"type": "string", "description": "Alias for text."},
+		"template_json":           map[string]string{"type": "string", "description": "Complete setup template JSON for import."},
+		"json":                    map[string]string{"type": "string", "description": "Alias for template_json."},
+		"variables":               map[string]string{"type": "object", "description": "Template variable overrides such as server_purpose, support_role, rules_copy, welcome_copy, and verification_strictness."},
+		"server_purpose":          map[string]string{"type": "string"},
+		"member_role":             map[string]string{"type": "string"},
+		"verified_role":           map[string]string{"type": "string"},
+		"newcomer_role":           map[string]string{"type": "string"},
+		"moderator_role":          map[string]string{"type": "string"},
+		"admin_role":              map[string]string{"type": "string"},
+		"support_role":            map[string]string{"type": "string"},
+		"triage_role":             map[string]string{"type": "string"},
+		"rules_copy":              map[string]string{"type": "string"},
+		"welcome_copy":            map[string]string{"type": "string"},
+		"ticket_panel_title":      map[string]string{"type": "string"},
+		"ticket_panel_body":       map[string]string{"type": "string"},
+		"verification_strictness": map[string]any{"type": "string", "enum": []string{"rules", "role_selection", "rules_and_roles"}},
+		"dry_run":                 map[string]string{"type": "boolean"},
+	})
+}
+
+func ticketManagementSchema() json.RawMessage {
+	return schemaWithProperties([]string{"action"}, map[string]any{
+		"action":         map[string]any{"type": "string", "enum": []string{"list", "show", "claim", "close", "reopen", "archive", "add_participant", "remove_participant"}},
+		"panel_id":       map[string]string{"type": "string"},
+		"ticket_id":      map[string]string{"type": "string"},
+		"id":             map[string]string{"type": "string", "description": "Alias for ticket_id."},
+		"department_id":  map[string]string{"type": "string"},
+		"user_id":        map[string]string{"type": "string", "description": "Member user id for add_participant/remove_participant or admin completion actions."},
+		"priority":       map[string]string{"type": "string"},
+		"tags":           map[string]any{"type": "array", "items": map[string]string{"type": "string"}},
+		"reason":         map[string]string{"type": "string"},
+		"close_reason":   map[string]string{"type": "string", "description": "Alias for reason when closing."},
+		"limit":          map[string]any{"type": "integer", "minimum": 1, "maximum": 100},
+		"include_closed": map[string]string{"type": "boolean"},
+		"dry_run":        map[string]string{"type": "boolean"},
+	})
+}
+
+func onboardingManagementSchema() json.RawMessage {
+	return schemaWithProperties([]string{"action"}, map[string]any{
+		"action":  map[string]any{"type": "string", "enum": []string{"list", "pause", "resume", "complete"}},
+		"flow_id": map[string]string{"type": "string"},
+		"id":      map[string]string{"type": "string", "description": "Alias for flow_id."},
+		"user_id": map[string]string{"type": "string"},
+		"paused":  map[string]string{"type": "boolean"},
+		"limit":   map[string]any{"type": "integer", "minimum": 1, "maximum": 100},
+		"dry_run": map[string]string{"type": "boolean"},
+	})
+}
+
 func youtubeSummarySchema() json.RawMessage {
 	return schemaWithProperties([]string{"query"}, map[string]any{
 		"query": map[string]any{
@@ -1335,7 +1447,10 @@ func toolInputSchema(required []string) json.RawMessage {
 		"max_uses", "temporary", "unique", "enabled", "channel_ids",
 		"author_ids", "user_ids", "message_ids", "role_ids", "webhook_id",
 		"keyword_filter", "custom_message", "reason", "answer_emojis",
-		"allow_multiselect", "answer_id",
+		"allow_multiselect", "answer_id", "type", "topic", "parent_id",
+		"position", "positions", "color", "color_hex", "hoist",
+		"mentionable", "permissions", "slowmode_seconds",
+		"rate_limit_per_user", "nsfw", "bitrate", "user_limit", "overwrites",
 	} {
 		if _, exists := properties[name]; !exists {
 			properties[name] = toolInputProperty(name)
@@ -1346,16 +1461,20 @@ func toolInputSchema(required []string) json.RawMessage {
 
 func toolInputProperty(name string) any {
 	switch name {
-	case "dry_run", "include_author_ids", "include_attachments", "locked", "private", "archived", "temporary", "unique", "enabled", "allow_multiselect":
+	case "dry_run", "include_author_ids", "include_attachments", "locked", "private", "archived", "temporary", "unique", "enabled", "allow_multiselect", "hoist", "mentionable", "nsfw":
 		return map[string]string{"type": "boolean"}
-	case "limit", "seconds", "delete_message_seconds", "max_age", "max_uses", "auto_archive_duration", "duration_hours", "answer_id":
+	case "limit", "seconds", "delete_message_seconds", "max_age", "max_uses", "auto_archive_duration", "duration_hours", "answer_id", "position", "color", "slowmode_seconds", "rate_limit_per_user", "bitrate", "user_limit":
 		return map[string]any{"type": "integer", "minimum": 0}
 	case "answers":
 		return map[string]any{"type": "array", "items": map[string]string{"type": "string"}, "minItems": 2, "maxItems": 10}
 	case "allowed_mentions", "rule_json", "event_json":
 		return map[string]string{"type": "object"}
-	case "channel_ids", "author_ids", "user_ids", "message_ids", "role_ids", "keyword_filter", "answer_emojis":
+	case "channel_ids", "author_ids", "user_ids", "message_ids", "role_ids", "keyword_filter", "answer_emojis", "permissions":
 		return map[string]any{"type": "array", "items": map[string]string{"type": "string"}}
+	case "positions":
+		return map[string]any{"type": "array", "items": map[string]any{"type": "object"}}
+	case "overwrites":
+		return map[string]any{"type": "array", "items": map[string]any{"type": "object"}}
 	default:
 		return map[string]string{"type": "string"}
 	}
