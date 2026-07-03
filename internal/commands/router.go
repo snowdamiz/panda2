@@ -30,6 +30,7 @@ import (
 	"github.com/sn0w/panda2/internal/runtimecontrol"
 	"github.com/sn0w/panda2/internal/scheduler"
 	"github.com/sn0w/panda2/internal/security"
+	setupsvc "github.com/sn0w/panda2/internal/setup"
 	"github.com/sn0w/panda2/internal/store"
 	"github.com/sn0w/panda2/internal/textutil"
 	toolsvc "github.com/sn0w/panda2/internal/tools"
@@ -52,6 +53,7 @@ type Router struct {
 	billing     *billing.Service
 	data        *repository.GuildDataRepository
 	setup       SetupChecker
+	serverSetup ServerSetupManager
 	tools       *toolsvc.Executor
 	rateLimit   *ratelimit.Limiter
 	features    *features.Service
@@ -82,6 +84,11 @@ type MusicService interface {
 
 type SetupChecker interface {
 	CheckSetup(ctx context.Context, guildID, channelID string) (SetupCheckResult, error)
+}
+
+type ServerSetupManager interface {
+	Confirm(ctx context.Context, projectID, actorID string, enqueue bool) (store.GuildSetupProject, error)
+	RollbackProject(ctx context.Context, projectID, actorID string) (setupsvc.ApplyResult, error)
 }
 
 type SetupCheckResult struct {
@@ -204,6 +211,11 @@ func (r *Router) WithDataRepository(dataRepository *repository.GuildDataReposito
 
 func (r *Router) WithSetupChecker(checker SetupChecker) *Router {
 	r.setup = checker
+	return r
+}
+
+func (r *Router) WithServerSetupManager(manager ServerSetupManager) *Router {
+	r.serverSetup = manager
 	return r
 }
 
@@ -2288,6 +2300,10 @@ func (r *Router) HandleToolConfirmation(ctx context.Context, request ToolConfirm
 		return r.handleDiscordPollConfirmation(ctx, request)
 	case toolActionDiscordWriteExecute:
 		return r.handleDiscordWriteConfirmation(ctx, request)
+	case toolActionServerSetupApply:
+		return r.handleServerSetupApplyConfirmation(ctx, request)
+	case toolActionServerSetupRollback:
+		return r.handleServerSetupRollbackConfirmation(ctx, request)
 	case toolActionMemberRoleAdd, toolActionMemberRoleRemove:
 		if denied := r.ensureGuildControl(ctx, request.Request, "Only the Panda owner, server owner or administrator, or the current Panda admin role or user can assign Discord roles."); denied.Content != "" {
 			return denied
@@ -2561,6 +2577,9 @@ func toolConfirmationFeature(action string) string {
 		return features.DiscordRoleManagement
 	case toolActionDiscordPollCreate:
 		return features.Polls
+	case toolActionServerSetupApply,
+		toolActionServerSetupRollback:
+		return features.AdminSetup
 	case toolActionComposedToolApprove,
 		toolActionComposedToolRollback,
 		toolActionComposedToolDelete:
@@ -2773,6 +2792,64 @@ func (r *Router) handleDiscordWriteConfirmation(ctx context.Context, request Too
 		return Response{Content: "Discord write could not be completed: " + message, Ephemeral: true, Presentation: Presentation{Title: "Discord write failed", Accent: AccentWarning}}
 	}
 	return Response{Content: fmt.Sprintf("Completed `%s`.", toolName), Ephemeral: true, Presentation: Presentation{Title: "Discord write completed", Accent: AccentSuccess}}
+}
+
+func (r *Router) handleServerSetupApplyConfirmation(ctx context.Context, request ToolConfirmationRequest) Response {
+	if denied := r.ensureToolConfirmationPermission(ctx, request.Request, r.admin.CanWriteConfig, "You do not have permission to apply server setup."); denied.Content != "" {
+		return denied
+	}
+	if r.serverSetup == nil {
+		return Response{Content: "Server setup is not configured for this runtime.", Ephemeral: true, Presentation: Presentation{Title: "Setup unavailable", Accent: AccentWarning}}
+	}
+	projectID := strings.TrimSpace(request.Options["project_id"])
+	if projectID == "" {
+		return Response{Content: "That setup confirmation is invalid.", Ephemeral: true, Presentation: Presentation{Title: "Setup confirmation invalid", Accent: AccentWarning}}
+	}
+	project, err := r.serverSetup.Confirm(ctx, projectID, request.Request.UserID, true)
+	if err != nil {
+		if errors.Is(err, repository.ErrNotFound) {
+			return Response{Content: "That setup project was not found.", Ephemeral: true, Presentation: Presentation{Title: "Setup not found", Accent: AccentWarning}}
+		}
+		message := "Setup could not be queued."
+		if strings.TrimSpace(err.Error()) != "" {
+			message += " " + err.Error()
+		}
+		return Response{Content: message, Ephemeral: true, Presentation: Presentation{Title: "Setup not queued", Accent: AccentWarning}}
+	}
+	status := firstNonEmpty(project.Status, "confirmed")
+	if status == "queued" {
+		return Response{Content: fmt.Sprintf("Setup project `%s` is queued. Panda will apply it in the background.", project.ID), Ephemeral: true, Presentation: Presentation{Title: "Setup queued", Accent: AccentSuccess}}
+	}
+	return Response{Content: fmt.Sprintf("Setup project `%s` is confirmed. Apply it from the setup status screen once the worker is available.", project.ID), Ephemeral: true, Presentation: Presentation{Title: "Setup confirmed", Accent: AccentInfo}}
+}
+
+func (r *Router) handleServerSetupRollbackConfirmation(ctx context.Context, request ToolConfirmationRequest) Response {
+	if denied := r.ensureToolConfirmationPermission(ctx, request.Request, r.admin.CanWriteConfig, "You do not have permission to roll back server setup."); denied.Content != "" {
+		return denied
+	}
+	if r.serverSetup == nil {
+		return Response{Content: "Server setup is not configured for this runtime.", Ephemeral: true, Presentation: Presentation{Title: "Setup unavailable", Accent: AccentWarning}}
+	}
+	projectID := strings.TrimSpace(request.Options["project_id"])
+	if projectID == "" {
+		return Response{Content: "That setup rollback confirmation is invalid.", Ephemeral: true, Presentation: Presentation{Title: "Setup confirmation invalid", Accent: AccentWarning}}
+	}
+	result, err := r.serverSetup.RollbackProject(ctx, projectID, request.Request.UserID)
+	if err != nil {
+		if errors.Is(err, repository.ErrNotFound) {
+			return Response{Content: "That setup project was not found.", Ephemeral: true, Presentation: Presentation{Title: "Setup not found", Accent: AccentWarning}}
+		}
+		message := "Setup rollback could not be completed."
+		if strings.TrimSpace(err.Error()) != "" {
+			message += " " + err.Error()
+		}
+		return Response{Content: message, Ephemeral: true, Presentation: Presentation{Title: "Setup rollback failed", Accent: AccentWarning}}
+	}
+	content := fmt.Sprintf("Setup project `%s` was rolled back.", result.ProjectID)
+	if len(result.Warnings) > 0 {
+		content += " Some items need manual cleanup; check setup status for details."
+	}
+	return Response{Content: content, Ephemeral: true, Presentation: Presentation{Title: "Setup rolled back", Accent: AccentSuccess}}
 }
 
 func (r *Router) handleQuietModeConfirmation(ctx context.Context, request ToolConfirmationRequest) Response {

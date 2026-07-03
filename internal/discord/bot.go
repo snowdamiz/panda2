@@ -34,6 +34,7 @@ import (
 	"github.com/sn0w/panda2/internal/polls"
 	"github.com/sn0w/panda2/internal/scheduler"
 	"github.com/sn0w/panda2/internal/security"
+	setupsvc "github.com/sn0w/panda2/internal/setup"
 	"github.com/sn0w/panda2/internal/store"
 )
 
@@ -51,6 +52,7 @@ type Bot struct {
 	httpClient  *http.Client
 	music       *music.Manager
 	installs    *InstallService
+	setup       SetupComponentHandler
 	closeOnce   sync.Once
 }
 
@@ -68,6 +70,20 @@ type InteractionJobQueue interface {
 
 type DiscordAlertHandler interface {
 	HandleDiscordEvent(ctx context.Context, event store.DiscordEvent)
+}
+
+type SetupComponentHandler interface {
+	StartSetupWizard(ctx context.Context, request setupsvc.ComponentRequest) (setupsvc.ComponentResponse, error)
+	HandleSetupWizardAction(ctx context.Context, request setupsvc.ComponentRequest) (setupsvc.ComponentResponse, error)
+	HandleSetupWizardTemplateSelection(ctx context.Context, request setupsvc.ComponentRequest) (setupsvc.ComponentResponse, error)
+	HandleSetupWizardVerificationSelection(ctx context.Context, request setupsvc.ComponentRequest) (setupsvc.ComponentResponse, error)
+	HandleSetupWizardScratchSelection(ctx context.Context, request setupsvc.ComponentRequest) (setupsvc.ComponentResponse, error)
+	HandleSetupWizardModal(ctx context.Context, request setupsvc.ComponentRequest) (setupsvc.ComponentResponse, error)
+	OpenTicket(ctx context.Context, request setupsvc.ComponentRequest) (setupsvc.ComponentResponse, error)
+	HandleTicketAction(ctx context.Context, request setupsvc.ComponentRequest) (setupsvc.ComponentResponse, error)
+	HandleTicketCloseModal(ctx context.Context, request setupsvc.ComponentRequest) (setupsvc.ComponentResponse, error)
+	CompleteOnboarding(ctx context.Context, request setupsvc.ComponentRequest) (setupsvc.ComponentResponse, error)
+	HandleOnboardingRoleSelection(ctx context.Context, request setupsvc.ComponentRequest) (setupsvc.ComponentResponse, error)
 }
 
 type typingSender interface {
@@ -292,6 +308,11 @@ func (b *Bot) WithMusicRepository(repo music.MusicStore) *Bot {
 
 func (b *Bot) WithInstallService(service *InstallService) *Bot {
 	b.installs = service
+	return b
+}
+
+func (b *Bot) WithSetupComponents(handler SetupComponentHandler) *Bot {
+	b.setup = handler
 	return b
 }
 
@@ -869,6 +890,11 @@ func (b *Bot) onButtonInteraction(event *events.ComponentInteractionCreate) {
 		return
 	}
 
+	if setupsvc.IsPersistentComponentID(customID) {
+		b.onSetupButtonInteraction(event, baseRequest, customID)
+		return
+	}
+
 	if feedbackRequest, ok := commands.RequestFromFeedbackID(customID, baseRequest); ok {
 		if err := event.DeferCreateMessage(true); err != nil {
 			b.logger.Warn("failed to defer feedback", slog.Any("err", err), slog.String("request_id", feedbackRequest.Request.RequestID))
@@ -910,9 +936,112 @@ func (b *Bot) onButtonInteraction(event *events.ComponentInteractionCreate) {
 	}
 }
 
+func (b *Bot) onSetupButtonInteraction(event *events.ComponentInteractionCreate, baseRequest commands.Request, customID string) {
+	if b.setup == nil {
+		if err := event.CreateMessage(messageCreateFromResponse(commands.Response{Content: "That setup action is not available in this runtime.", Ephemeral: true, Presentation: commands.Presentation{Title: "Setup unavailable", Accent: commands.AccentWarning}})); err != nil {
+			b.logger.Warn("failed to reject setup component", slog.Any("err", err))
+		}
+		return
+	}
+	request := setupComponentRequest(baseRequest, customID, event.Message.ID.String())
+	if _, action, ok := setupsvc.ParseWizardActionCustomID(customID); ok {
+		if setupsvc.WizardActionOpensModal(action) {
+			response, err := b.setup.HandleSetupWizardAction(context.Background(), request)
+			if err != nil {
+				b.respondSetupComponentError(event, err)
+				return
+			}
+			if response.Modal == nil {
+				if err := event.UpdateMessage(messageUpdateFromSetupResponse(response)); err != nil {
+					b.logger.Warn("failed to update setup wizard message", slog.Any("err", err), slog.String("request_id", baseRequest.RequestID))
+				}
+				return
+			}
+			if err := event.Modal(modalCreateFromResponse(commandModalFromSetup(response.Modal))); err != nil {
+				b.logger.Warn("failed to open setup wizard modal", slog.Any("err", err), slog.String("request_id", baseRequest.RequestID))
+			}
+			return
+		}
+		if err := event.DeferUpdateMessage(); err != nil {
+			b.logger.Warn("failed to defer setup wizard action", slog.Any("err", err), slog.String("request_id", baseRequest.RequestID))
+			return
+		}
+		setupResponse, err := b.setup.HandleSetupWizardAction(context.Background(), request)
+		if err != nil {
+			setupResponse = setupsvc.ComponentResponse{Content: "Setup action could not be completed: " + err.Error(), Ephemeral: true, Title: "Setup action failed", Accent: "warning"}
+		}
+		if err := b.updateSetupInteractionResponse(event.ApplicationID(), event.Token(), setupResponse); err != nil {
+			b.logger.Warn("failed to update setup wizard action response", slog.Any("err", err), slog.String("request_id", baseRequest.RequestID))
+		}
+		return
+	}
+	if action, _, ok := setupsvc.ParseTicketActionCustomID(customID); ok && action == "close" {
+		response, err := b.setup.HandleTicketAction(context.Background(), request)
+		if err != nil {
+			b.respondSetupComponentError(event, err)
+			return
+		}
+		if response.Modal == nil {
+			if err := event.CreateMessage(messageCreateFromResponse(commandResponseFromSetup(response))); err != nil {
+				b.logger.Warn("failed to send setup component response", slog.Any("err", err))
+			}
+			return
+		}
+		if err := event.Modal(modalCreateFromResponse(commandModalFromSetup(response.Modal))); err != nil {
+			b.logger.Warn("failed to open setup modal", slog.Any("err", err), slog.String("request_id", baseRequest.RequestID))
+		}
+		return
+	}
+
+	ephemeral := true
+	if action, _, ok := setupsvc.ParseTicketActionCustomID(customID); ok && action == "claim" {
+		ephemeral = false
+	}
+	if err := event.DeferCreateMessage(ephemeral); err != nil {
+		b.logger.Warn("failed to defer setup component", slog.Any("err", err), slog.String("request_id", baseRequest.RequestID))
+		return
+	}
+	setupResponse, err := b.handleSetupButton(context.Background(), request)
+	var response commands.Response
+	if err != nil {
+		response = commands.Response{Content: "Setup action could not be completed: " + err.Error(), Ephemeral: true, Presentation: commands.Presentation{Title: "Setup action failed", Accent: commands.AccentWarning}}
+	} else {
+		response = commandResponseFromSetup(setupResponse)
+	}
+	if err := b.updateInteractionResponse(event.ApplicationID(), event.Token(), response); err != nil {
+		b.logger.Warn("failed to update setup component response", slog.Any("err", err), slog.String("request_id", baseRequest.RequestID))
+	}
+}
+
+func (b *Bot) handleSetupButton(ctx context.Context, request setupsvc.ComponentRequest) (setupsvc.ComponentResponse, error) {
+	if _, _, ok := setupsvc.ParseTicketOpenCustomID(request.CustomID); ok {
+		return b.setup.OpenTicket(ctx, request)
+	}
+	if _, _, ok := setupsvc.ParseTicketActionCustomID(request.CustomID); ok {
+		return b.setup.HandleTicketAction(ctx, request)
+	}
+	if _, ok := setupsvc.ParseOnboardingAcknowledgeCustomID(request.CustomID); ok {
+		return b.setup.CompleteOnboarding(ctx, request)
+	}
+	return setupsvc.ComponentResponse{Content: "That setup action is no longer supported.", Ephemeral: true, Title: "Setup action expired", Accent: "warning"}, nil
+}
+
+func (b *Bot) respondSetupComponentError(event *events.ComponentInteractionCreate, err error) {
+	if err == nil {
+		return
+	}
+	if responseErr := event.CreateMessage(messageCreateFromResponse(commands.Response{Content: "Setup action could not be completed: " + err.Error(), Ephemeral: true, Presentation: commands.Presentation{Title: "Setup action failed", Accent: commands.AccentWarning}})); responseErr != nil {
+		b.logger.Warn("failed to send setup component error", slog.Any("err", responseErr))
+	}
+}
+
 func (b *Bot) onStringSelectInteraction(event *events.ComponentInteractionCreate) {
 	data := event.StringSelectMenuInteractionData()
 	baseRequest := b.requestFromComponentEvent(event)
+	if setupsvc.IsPersistentComponentID(data.CustomID()) {
+		b.onSetupStringSelectInteraction(event, baseRequest, data.CustomID(), data.Values)
+		return
+	}
 	selectedRequest, ok := commands.RequestFromSelectionID(data.CustomID(), data.Values, baseRequest)
 	if !ok {
 		if err := event.CreateMessage(messageCreateFromResponse(commands.Response{Content: "That selection is no longer valid for this user.", Ephemeral: true, Presentation: commands.Presentation{Title: "Selection expired", Accent: commands.AccentWarning}})); err != nil {
@@ -927,6 +1056,79 @@ func (b *Bot) onStringSelectInteraction(event *events.ComponentInteractionCreate
 	response := b.queueInteractionRequest(context.Background(), event.ApplicationID(), event.Token(), selectedRequest)
 	if err := b.updateInteractionResponse(event.ApplicationID(), event.Token(), response); err != nil {
 		b.logger.Warn("failed to update queued selection response", slog.Any("err", err), slog.String("request_id", selectedRequest.RequestID))
+	}
+}
+
+func (b *Bot) onSetupStringSelectInteraction(event *events.ComponentInteractionCreate, baseRequest commands.Request, customID string, values []string) {
+	if b.setup == nil {
+		if err := event.CreateMessage(messageCreateFromResponse(commands.Response{Content: "That setup action is not available in this runtime.", Ephemeral: true, Presentation: commands.Presentation{Title: "Setup unavailable", Accent: commands.AccentWarning}})); err != nil {
+			b.logger.Warn("failed to reject setup selection", slog.Any("err", err))
+		}
+		return
+	}
+	request := setupComponentRequest(baseRequest, customID, event.Message.ID.String())
+	request.Values = append([]string(nil), values...)
+	if _, ok := setupsvc.ParseWizardTemplateSelectCustomID(customID); ok {
+		if err := event.DeferUpdateMessage(); err != nil {
+			b.logger.Warn("failed to defer setup wizard template selection", slog.Any("err", err), slog.String("request_id", baseRequest.RequestID))
+			return
+		}
+		setupResponse, err := b.setup.HandleSetupWizardTemplateSelection(context.Background(), request)
+		if err != nil {
+			setupResponse = setupsvc.ComponentResponse{Content: "Setup action could not be completed: " + err.Error(), Ephemeral: true, Title: "Setup action failed", Accent: "warning"}
+		}
+		if err := b.updateSetupInteractionResponse(event.ApplicationID(), event.Token(), setupResponse); err != nil {
+			b.logger.Warn("failed to update setup wizard template selection", slog.Any("err", err), slog.String("request_id", baseRequest.RequestID))
+		}
+		return
+	}
+	if _, ok := setupsvc.ParseWizardVerificationSelectCustomID(customID); ok {
+		if err := event.DeferUpdateMessage(); err != nil {
+			b.logger.Warn("failed to defer setup wizard verification selection", slog.Any("err", err), slog.String("request_id", baseRequest.RequestID))
+			return
+		}
+		setupResponse, err := b.setup.HandleSetupWizardVerificationSelection(context.Background(), request)
+		if err != nil {
+			setupResponse = setupsvc.ComponentResponse{Content: "Setup action could not be completed: " + err.Error(), Ephemeral: true, Title: "Setup action failed", Accent: "warning"}
+		}
+		if err := b.updateSetupInteractionResponse(event.ApplicationID(), event.Token(), setupResponse); err != nil {
+			b.logger.Warn("failed to update setup wizard verification selection", slog.Any("err", err), slog.String("request_id", baseRequest.RequestID))
+		}
+		return
+	}
+	if _, _, ok := setupsvc.ParseWizardScratchSelectCustomID(customID); ok {
+		if err := event.DeferUpdateMessage(); err != nil {
+			b.logger.Warn("failed to defer setup wizard scratch selection", slog.Any("err", err), slog.String("request_id", baseRequest.RequestID))
+			return
+		}
+		setupResponse, err := b.setup.HandleSetupWizardScratchSelection(context.Background(), request)
+		if err != nil {
+			setupResponse = setupsvc.ComponentResponse{Content: "Setup action could not be completed: " + err.Error(), Ephemeral: true, Title: "Setup action failed", Accent: "warning"}
+		}
+		if err := b.updateSetupInteractionResponse(event.ApplicationID(), event.Token(), setupResponse); err != nil {
+			b.logger.Warn("failed to update setup wizard scratch selection", slog.Any("err", err), slog.String("request_id", baseRequest.RequestID))
+		}
+		return
+	}
+	if _, _, ok := setupsvc.ParseOnboardingRoleSelectCustomID(customID); !ok {
+		if err := event.CreateMessage(messageCreateFromResponse(commands.Response{Content: "That setup selection is no longer supported.", Ephemeral: true, Presentation: commands.Presentation{Title: "Selection expired", Accent: commands.AccentWarning}})); err != nil {
+			b.logger.Warn("failed to reject setup selection", slog.Any("err", err))
+		}
+		return
+	}
+	if err := event.DeferCreateMessage(true); err != nil {
+		b.logger.Warn("failed to defer setup selection", slog.Any("err", err), slog.String("request_id", baseRequest.RequestID))
+		return
+	}
+	setupResponse, err := b.setup.HandleOnboardingRoleSelection(context.Background(), request)
+	var response commands.Response
+	if err != nil {
+		response = commands.Response{Content: "Setup action could not be completed: " + err.Error(), Ephemeral: true, Presentation: commands.Presentation{Title: "Setup action failed", Accent: commands.AccentWarning}}
+	} else {
+		response = commandResponseFromSetup(setupResponse)
+	}
+	if err := b.updateInteractionResponse(event.ApplicationID(), event.Token(), response); err != nil {
+		b.logger.Warn("failed to update setup selection response", slog.Any("err", err), slog.String("request_id", baseRequest.RequestID))
 	}
 }
 
@@ -949,12 +1151,37 @@ func (b *Bot) requestFromComponentEvent(event *events.ComponentInteractionCreate
 	return request
 }
 
+func setupComponentRequest(base commands.Request, customID, messageID string) setupsvc.ComponentRequest {
+	return setupsvc.ComponentRequest{
+		CustomID:  strings.TrimSpace(customID),
+		GuildID:   base.GuildID,
+		ChannelID: base.ChannelID,
+		MessageID: strings.TrimSpace(messageID),
+		UserID:    base.UserID,
+		RoleIDs:   append([]string(nil), base.RoleIDs...),
+		IsAdmin:   base.IsGuildAdmin || base.IsOwner,
+	}
+}
+
+func setupComponentRequestWithFields(base commands.Request, customID string, fields map[string]string) setupsvc.ComponentRequest {
+	request := setupComponentRequest(base, customID, "")
+	request.Fields = map[string]string{}
+	for key, value := range fields {
+		request.Fields[key] = value
+	}
+	return request
+}
+
 func (b *Bot) onModalSubmit(event *events.ModalSubmitInteractionCreate) {
 	values := map[string]string{}
 	for component := range event.Data.AllComponents() {
 		if input, ok := component.(disgoDiscord.TextInputComponent); ok {
 			values[input.CustomID] = input.Value
 		}
+	}
+	if setupsvc.IsPersistentComponentID(event.Data.CustomID) {
+		b.onSetupModalSubmit(event, values)
+		return
 	}
 	request, ok := commands.RequestFromModalID(event.Data.CustomID, values, b.requestFromModalEvent(event))
 	if !ok {
@@ -971,6 +1198,50 @@ func (b *Bot) onModalSubmit(event *events.ModalSubmitInteractionCreate) {
 	response := b.queueInteractionRequest(context.Background(), event.ApplicationID(), event.Token(), request)
 	if err := b.updateInteractionResponse(event.ApplicationID(), event.Token(), response); err != nil {
 		b.logger.Warn("failed to update queued modal response", slog.Any("err", err), slog.String("request_id", request.RequestID))
+	}
+}
+
+func (b *Bot) onSetupModalSubmit(event *events.ModalSubmitInteractionCreate, values map[string]string) {
+	if b.setup == nil {
+		if err := event.CreateMessage(messageCreateFromResponse(commands.Response{Content: "That setup action is not available in this runtime.", Ephemeral: true, Presentation: commands.Presentation{Title: "Setup unavailable", Accent: commands.AccentWarning}})); err != nil {
+			b.logger.Warn("failed to reject setup modal", slog.Any("err", err))
+		}
+		return
+	}
+	baseRequest := b.requestFromModalEvent(event)
+	if _, _, ok := setupsvc.ParseWizardModalCustomID(event.Data.CustomID); ok {
+		if err := event.DeferUpdateMessage(); err != nil {
+			b.logger.Warn("failed to defer setup wizard modal submit", slog.Any("err", err), slog.String("request_id", baseRequest.RequestID))
+			return
+		}
+		response, err := b.setup.HandleSetupWizardModal(context.Background(), setupComponentRequestWithFields(baseRequest, event.Data.CustomID, values))
+		if err != nil {
+			response = setupsvc.ComponentResponse{Content: "Setup action could not be completed: " + err.Error(), Ephemeral: true, Title: "Setup action failed", Accent: "warning"}
+		}
+		if err := b.updateSetupInteractionResponse(event.ApplicationID(), event.Token(), response); err != nil {
+			b.logger.Warn("failed to update setup wizard modal response", slog.Any("err", err), slog.String("request_id", baseRequest.RequestID))
+		}
+		return
+	}
+	if _, ok := setupsvc.ParseTicketCloseModalID(event.Data.CustomID); !ok {
+		if err := event.CreateMessage(messageCreateFromResponse(commands.Response{Content: "That setup modal is no longer supported.", Ephemeral: true, Presentation: commands.Presentation{Title: "Setup modal expired", Accent: commands.AccentWarning}})); err != nil {
+			b.logger.Warn("failed to reject setup modal submit", slog.Any("err", err))
+		}
+		return
+	}
+	if err := event.DeferCreateMessage(false); err != nil {
+		b.logger.Warn("failed to defer setup modal submit", slog.Any("err", err), slog.String("request_id", baseRequest.RequestID))
+		return
+	}
+	response, err := b.setup.HandleTicketCloseModal(context.Background(), setupComponentRequestWithFields(baseRequest, event.Data.CustomID, values))
+	if err != nil {
+		if err := b.updateInteractionResponse(event.ApplicationID(), event.Token(), commands.Response{Content: "Setup action could not be completed: " + err.Error(), Ephemeral: true, Presentation: commands.Presentation{Title: "Setup action failed", Accent: commands.AccentWarning}}); err != nil {
+			b.logger.Warn("failed to update setup modal error", slog.Any("err", err), slog.String("request_id", baseRequest.RequestID))
+		}
+		return
+	}
+	if err := b.updateInteractionResponse(event.ApplicationID(), event.Token(), commandResponseFromSetup(response)); err != nil {
+		b.logger.Warn("failed to update setup modal response", slog.Any("err", err), slog.String("request_id", baseRequest.RequestID))
 	}
 }
 
@@ -1015,6 +1286,14 @@ func (b *Bot) recordGatewayGuild(ctx context.Context, source string, guild disgo
 
 func messageCreateFromResponse(response commands.Response) disgoDiscord.MessageCreate {
 	return messageCreateFromResponsePartWithFiles(response, firstDiscordContentChunk(response.Content), true, true)
+}
+
+func messageCreateFromSetupResponse(response setupsvc.ComponentResponse) disgoDiscord.MessageCreate {
+	message := messageCreateFromResponse(commandResponseFromSetup(response))
+	if response.Components != nil {
+		message = message.WithComponents(messageComponents(response.Components)...)
+	}
+	return message
 }
 
 func messageCreateFromResponsePart(response commands.Response, content string, includeComponents bool) disgoDiscord.MessageCreate {
@@ -1212,6 +1491,59 @@ func modalCreateFromResponse(response *commands.Modal) disgoDiscord.ModalCreate 
 	return modal
 }
 
+func commandResponseFromSetup(response setupsvc.ComponentResponse) commands.Response {
+	result := commands.Response{
+		Content:   response.Content,
+		Ephemeral: response.Ephemeral,
+		Presentation: commands.Presentation{
+			Title:  response.Title,
+			Accent: commandAccentFromSetup(response.Accent),
+		},
+	}
+	if response.Modal != nil {
+		result.Modal = commandModalFromSetup(response.Modal)
+	}
+	return result
+}
+
+func commandModalFromSetup(modal *setupsvc.ComponentModal) *commands.Modal {
+	if modal == nil {
+		return nil
+	}
+	result := &commands.Modal{
+		ID:     modal.ID,
+		Title:  modal.Title,
+		Inputs: make([]commands.ModalInput, 0, len(modal.Fields)),
+	}
+	for _, field := range modal.Fields {
+		result.Inputs = append(result.Inputs, commands.ModalInput{
+			ID:          field.ID,
+			Label:       field.Label,
+			Placeholder: field.Placeholder,
+			Value:       field.Value,
+			Required:    field.Required,
+			MaxLength:   field.MaxLength,
+			Paragraph:   field.Paragraph,
+		})
+	}
+	return result
+}
+
+func commandAccentFromSetup(accent string) commands.Accent {
+	switch strings.ToLower(strings.TrimSpace(accent)) {
+	case "success":
+		return commands.AccentSuccess
+	case "warning":
+		return commands.AccentWarning
+	case "danger", "error":
+		return commands.AccentDanger
+	case "info":
+		return commands.AccentInfo
+	default:
+		return commands.AccentDefault
+	}
+}
+
 func webhookMessageUpdateFromResponse(response commands.Response) disgoDiscord.MessageUpdate {
 	return webhookMessageUpdateFromResponsePartWithFiles(response, firstDiscordContentChunk(response.Content), true, true)
 }
@@ -1240,6 +1572,20 @@ func messageUpdateFromResponse(response commands.Response) disgoDiscord.MessageU
 	return webhookMessageUpdateFromResponse(response)
 }
 
+func messageUpdateFromSetupResponse(response setupsvc.ComponentResponse) disgoDiscord.MessageUpdate {
+	message := webhookMessageUpdateFromResponse(commandResponseFromSetup(response))
+	message = message.WithComponents(messageComponents(response.Components)...)
+	return message
+}
+
+func webhookMessageUpdateFromSetupResponsePart(response setupsvc.ComponentResponse, content string, includeComponents bool) disgoDiscord.MessageUpdate {
+	message := webhookMessageUpdateFromResponsePartWithFiles(commandResponseFromSetup(response), content, false, true)
+	if includeComponents {
+		message = message.WithComponents(messageComponents(response.Components)...)
+	}
+	return message
+}
+
 func (b *Bot) updateInteractionResponse(applicationID snowflake.ID, token string, response commands.Response) error {
 	if !hasChannelResponsePayload(response) {
 		return b.client.Rest.DeleteInteractionResponse(applicationID, token)
@@ -1257,6 +1603,23 @@ func (b *Bot) updateInteractionResponse(applicationID snowflake.ID, token string
 		return err
 	}
 	return b.createResponseFollowups(applicationID, token, response.Followups)
+}
+
+func (b *Bot) updateSetupInteractionResponse(applicationID snowflake.ID, token string, response setupsvc.ComponentResponse) error {
+	commandResponse := commandResponseFromSetup(response)
+	if !hasChannelResponsePayload(commandResponse) && len(response.Components) == 0 {
+		return b.client.Rest.DeleteInteractionResponse(applicationID, token)
+	}
+	chunks := splitDiscordContent(response.Content)
+	_, err := b.client.Rest.UpdateInteractionResponse(
+		applicationID,
+		token,
+		webhookMessageUpdateFromSetupResponsePart(response, chunks[0], len(chunks) == 1),
+	)
+	if err != nil {
+		return err
+	}
+	return b.createInteractionFollowups(applicationID, token, commandResponse, chunks, 1)
 }
 
 func (b *Bot) createInteractionFollowups(applicationID snowflake.ID, token string, response commands.Response, chunks []string, start int) error {
@@ -1319,6 +1682,16 @@ func (b *Bot) sendChannelResponse(channelID snowflake.ID, response commands.Resp
 		}
 	}
 	return nil
+}
+
+func (b *Bot) sendSetupChannelResponse(channelID snowflake.ID, response setupsvc.ComponentResponse, reference *disgoDiscord.MessageReference) error {
+	if b == nil || b.client == nil {
+		return nil
+	}
+	message := channelMessageCreateFromResponsePartWithReferenceAndFiles(commandResponseFromSetup(response), firstDiscordContentChunk(response.Content), false, reference, true)
+	message = message.WithComponents(messageComponents(response.Components)...)
+	_, err := b.client.Rest.CreateMessage(channelID, message)
+	return err
 }
 
 func (p *naturalMessageProgress) Start(ctx context.Context, toolName string) bool {
@@ -2061,6 +2434,10 @@ func (b *Bot) onMessageCreate(event *events.MessageCreate) {
 		ImageReferences: imageReferences,
 	}
 	reference := messageReferenceFromMessage(event.Message)
+	if isSetupWizardStartIntent(content, options) {
+		b.startSetupWizardFromMessage(ctx, event.ChannelID, reference, request)
+		return
+	}
 	if err := b.queueNaturalMessage(ctx, event.ChannelID, reference, request); err != nil {
 		b.logger.Warn("failed to queue natural message",
 			slog.Any("err", err),
@@ -2117,6 +2494,40 @@ func (b *Bot) queueNaturalMessage(ctx context.Context, channelID snowflake.ID, r
 		)
 	}
 	return nil
+}
+
+func (b *Bot) startSetupWizardFromMessage(ctx context.Context, channelID snowflake.ID, reference *disgoDiscord.MessageReference, request commands.Request) {
+	if b.setup == nil {
+		_ = b.sendChannelResponse(channelID, commands.Response{
+			Content:      "Server setup wizard is not available in this runtime.",
+			Presentation: commands.Presentation{Title: "Setup unavailable", Accent: commands.AccentWarning},
+		}, reference)
+		return
+	}
+	if !request.IsGuildAdmin && !request.IsOwner {
+		_ = b.sendChannelResponse(channelID, commands.Response{
+			Content:      "Only server admins can start the server setup wizard.",
+			Presentation: commands.Presentation{Title: "Admin required", Accent: commands.AccentWarning},
+		}, reference)
+		return
+	}
+	response, err := b.setup.StartSetupWizard(ctx, setupsvc.ComponentRequest{
+		GuildID:   request.GuildID,
+		ChannelID: request.ChannelID,
+		UserID:    request.UserID,
+		RoleIDs:   append([]string(nil), request.RoleIDs...),
+		IsAdmin:   true,
+	})
+	if err != nil {
+		_ = b.sendChannelResponse(channelID, commands.Response{
+			Content:      "Server setup wizard could not be started: " + err.Error(),
+			Presentation: commands.Presentation{Title: "Setup unavailable", Accent: commands.AccentWarning},
+		}, reference)
+		return
+	}
+	if err := b.sendSetupChannelResponse(channelID, response, reference); err != nil && b.logger != nil {
+		b.logger.Warn("failed to send setup wizard response", slog.Any("err", err), slog.String("guild_id", request.GuildID), slog.String("request_id", request.RequestID))
+	}
 }
 
 func (b *Bot) notifyNaturalMessageQueueFailure(channelID snowflake.ID, reference *disgoDiscord.MessageReference) {
@@ -2576,6 +2987,30 @@ func (b *Bot) setReplyContextOptions(options map[string]string, referenced disgo
 func shouldHandleNaturalMessage(content string, options map[string]string) bool {
 	return strings.TrimSpace(content) != "" &&
 		(containsPandaWord(content) || truthyDiscordOption(options["bot_mentioned"]) || truthyDiscordOption(options["reply_author_is_bot"]))
+}
+
+func isSetupWizardStartIntent(content string, options map[string]string) bool {
+	if !shouldHandleNaturalMessage(content, options) {
+		return false
+	}
+	text := strings.ToLower(strings.TrimSpace(content))
+	hasSetup := strings.Contains(text, "setup") || strings.Contains(text, "set up") || strings.Contains(text, "configure")
+	hasServer := strings.Contains(text, "server") || strings.Contains(text, "discord")
+	if !hasSetup || !hasServer {
+		return false
+	}
+	if strings.Contains(text, "wizard") ||
+		strings.Contains(text, "step by step") ||
+		strings.Contains(text, "walk me through") ||
+		strings.Contains(text, "guided") {
+		return true
+	}
+	return strings.Contains(text, "set up this server") ||
+		strings.Contains(text, "setup this server") ||
+		strings.Contains(text, "set up my server") ||
+		strings.Contains(text, "setup my server") ||
+		strings.Contains(text, "server setup") ||
+		strings.Contains(text, "discord setup")
 }
 
 func truthyDiscordOption(value string) bool {

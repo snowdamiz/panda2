@@ -7,18 +7,18 @@ import BaseLayout from '../../layouts/BaseLayout.astro';
 const setupSteps = [
   {
     number: '01',
-    title: 'Talk to Panda',
-    body: 'Open your server and ask Panda to help set itself up. It can inspect current settings, then ask what roles, channels, and tools you want configured.',
+    title: 'Open Discord',
+    body: 'Open the server from here, then ask Panda to start the setup wizard in the channel where admins coordinate.',
   },
   {
     number: '02',
-    title: 'Confirm the setup',
-    body: 'Choose Panda admin and moderator roles, allowed operating channels, per-tool role access, and the prompt or personality you want Panda to use.',
+    title: 'Walk through setup',
+    body: 'Panda will use Discord buttons, menus, and modals to choose a template, tune copy and roles, and preview changes.',
   },
   {
     number: '03',
-    title: 'Use slash commands only when needed',
-    body: 'Most setup can happen in chat. Use `/billing` when you need to paste an activation key or review pack, credits, and account status.',
+    title: 'Apply in Discord',
+    body: 'Press the native confirmation button after checking the diff. Panda applies the setup in the background and records progress.',
   },
 ] as const;
 ---
@@ -30,7 +30,7 @@ const setupSteps = [
       <div class="install-result-copy">
         <span>INSTALL DETECTED</span>
         <h1>Panda is installed.</h1>
-        <p>Open Discord and configure Panda by chatting with it. Roles, channels, tool access, prompt, and personality can all be handled conversationally.</p>
+        <p>Open Discord and finish setup with Panda's native admin wizard. Panda can build roles, channels, tickets, onboarding, and its own access controls after confirmation.</p>
         <div class="install-result-actions">
           <a href="https://discord.com/channels/@me" data-discord-server-link>Open Discord</a>
           <a href={siteMeta.accountUrl}>Account</a>
@@ -48,8 +48,8 @@ const setupSteps = [
           </article>
         ))}
         <div class="install-command-strip" aria-label="Suggested setup prompts">
-          <span>Panda help me set you up</span>
-          <span>allow #panda</span>
+          <span>Panda start server setup wizard</span>
+          <span>Panda walk me through Discord setup</span>
           <span>/billing</span>
         </div>
       </div>

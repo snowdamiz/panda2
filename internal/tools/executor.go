@@ -95,6 +95,12 @@ type MusicManager interface {
 	ManageMusic(ctx context.Context, request MusicManagementRequest) (any, error)
 }
 
+type SetupManager interface {
+	ManageServerSetup(ctx context.Context, request ServerSetupManagementRequest) (any, error)
+	ManageTicket(ctx context.Context, request TicketManagementRequest) (any, error)
+	ManageOnboarding(ctx context.Context, request OnboardingManagementRequest) (any, error)
+}
+
 type YouTubeSummarizer interface {
 	Configured() bool
 	Search(ctx context.Context, request youtube.SearchRequest) ([]youtube.VideoCandidate, error)
@@ -226,6 +232,7 @@ type Executor struct {
 	schedule    ScheduleManager
 	reminder    ReminderManager
 	music       MusicManager
+	setup       SetupManager
 	youtube     YouTubeSummarizer
 	safety      UserSafetyReader
 	ops         OpsManager
@@ -375,6 +382,57 @@ type MusicManagementRequest struct {
 	Volume         int
 }
 
+type ServerSetupManagementRequest struct {
+	GuildID        string
+	ChannelID      string
+	ActorID        string
+	RequestID      string
+	InvocationType string
+	Access         ToolAccess
+	Action         string
+	TemplateID     string
+	ProjectID      string
+	Text           string
+	TemplateJSON   string
+	Variables      map[string]string
+	DryRun         bool
+}
+
+type TicketManagementRequest struct {
+	GuildID        string
+	ChannelID      string
+	ActorID        string
+	RequestID      string
+	InvocationType string
+	Access         ToolAccess
+	Action         string
+	PanelID        string
+	TicketID       string
+	DepartmentID   string
+	UserID         string
+	Priority       string
+	Tags           []string
+	Reason         string
+	Limit          int
+	IncludeClosed  bool
+	DryRun         bool
+}
+
+type OnboardingManagementRequest struct {
+	GuildID        string
+	ChannelID      string
+	ActorID        string
+	RequestID      string
+	InvocationType string
+	Access         ToolAccess
+	Action         string
+	FlowID         string
+	UserID         string
+	Paused         bool
+	Limit          int
+	DryRun         bool
+}
+
 type InteractionConfirmation struct {
 	Action       string
 	Arguments    map[string]string
@@ -459,6 +517,11 @@ func (e *Executor) WithReminderManager(manager ReminderManager) *Executor {
 
 func (e *Executor) WithMusicManager(manager MusicManager) *Executor {
 	e.music = manager
+	return e
+}
+
+func (e *Executor) WithSetupManager(manager SetupManager) *Executor {
+	e.setup = manager
 	return e
 }
 
@@ -707,6 +770,12 @@ func (e *Executor) Execute(ctx context.Context, request ExecutionRequest) (Execu
 		payload, err = e.manageReminder(toolCtx, request, arguments)
 	case "panda.manage_music":
 		payload, err = e.manageMusic(toolCtx, request, arguments)
+	case "panda.manage_server_setup":
+		payload, err = e.manageServerSetup(toolCtx, request, arguments)
+	case "panda.manage_ticket":
+		payload, err = e.manageTicket(toolCtx, request, arguments)
+	case "panda.manage_onboarding":
+		payload, err = e.manageOnboarding(toolCtx, request, arguments)
 	case "panda.search_youtube":
 		payload, err = e.searchYouTube(toolCtx, request, arguments)
 	case "panda.summarize_youtube":
@@ -4674,6 +4743,88 @@ func (e *Executor) recordSafetyAudit(ctx context.Context, request ExecutionReque
 	})
 }
 
+func (e *Executor) manageServerSetup(ctx context.Context, request ExecutionRequest, arguments string) (any, error) {
+	if e.setup == nil {
+		return nil, fmt.Errorf("server setup manager is not configured")
+	}
+	args, err := parseArguments(arguments)
+	if err != nil {
+		return nil, err
+	}
+	action := normalizeSetupAction(stringArgument(args, "action"))
+	if action == "" {
+		return nil, fmt.Errorf("action is required")
+	}
+	return e.setup.ManageServerSetup(ctx, ServerSetupManagementRequest{
+		GuildID:        request.GuildID,
+		ChannelID:      request.ChannelID,
+		ActorID:        request.ActorID,
+		RequestID:      request.RequestID,
+		InvocationType: request.InvocationType,
+		Access:         request.Access,
+		Action:         action,
+		TemplateID:     firstNonEmpty(stringArgument(args, "template_id"), stringArgument(args, "preset")),
+		ProjectID:      firstNonEmpty(stringArgument(args, "project_id"), stringArgument(args, "id")),
+		Text:           firstNonEmpty(stringArgument(args, "text"), stringArgument(args, "request")),
+		TemplateJSON:   firstNonEmpty(stringArgument(args, "template_json"), stringArgument(args, "json")),
+		Variables:      setupVariablesArgument(args),
+		DryRun:         boolArgument(args, "dry_run") || action == "preview" || action == "draft",
+	})
+}
+
+func (e *Executor) manageTicket(ctx context.Context, request ExecutionRequest, arguments string) (any, error) {
+	if e.setup == nil {
+		return nil, fmt.Errorf("ticket manager is not configured")
+	}
+	args, err := parseArguments(arguments)
+	if err != nil {
+		return nil, err
+	}
+	return e.setup.ManageTicket(ctx, TicketManagementRequest{
+		GuildID:        request.GuildID,
+		ChannelID:      request.ChannelID,
+		ActorID:        request.ActorID,
+		RequestID:      request.RequestID,
+		InvocationType: request.InvocationType,
+		Access:         request.Access,
+		Action:         normalizeTicketAction(stringArgument(args, "action")),
+		PanelID:        stringArgument(args, "panel_id"),
+		TicketID:       firstNonEmpty(stringArgument(args, "ticket_id"), stringArgument(args, "id")),
+		DepartmentID:   stringArgument(args, "department_id"),
+		UserID:         stringArgument(args, "user_id"),
+		Priority:       stringArgument(args, "priority"),
+		Tags:           stringListArgument(args, "tags"),
+		Reason:         firstNonEmpty(stringArgument(args, "reason"), stringArgument(args, "close_reason")),
+		Limit:          intArgument(args, "limit", 25),
+		IncludeClosed:  boolArgument(args, "include_closed"),
+		DryRun:         boolArgument(args, "dry_run"),
+	})
+}
+
+func (e *Executor) manageOnboarding(ctx context.Context, request ExecutionRequest, arguments string) (any, error) {
+	if e.setup == nil {
+		return nil, fmt.Errorf("onboarding manager is not configured")
+	}
+	args, err := parseArguments(arguments)
+	if err != nil {
+		return nil, err
+	}
+	return e.setup.ManageOnboarding(ctx, OnboardingManagementRequest{
+		GuildID:        request.GuildID,
+		ChannelID:      request.ChannelID,
+		ActorID:        request.ActorID,
+		RequestID:      request.RequestID,
+		InvocationType: request.InvocationType,
+		Access:         request.Access,
+		Action:         normalizeOnboardingAction(stringArgument(args, "action")),
+		FlowID:         firstNonEmpty(stringArgument(args, "flow_id"), stringArgument(args, "id")),
+		UserID:         stringArgument(args, "user_id"),
+		Paused:         boolArgument(args, "paused"),
+		Limit:          intArgument(args, "limit", 25),
+		DryRun:         boolArgument(args, "dry_run"),
+	})
+}
+
 func safetyTimeoutDurationArgument(args map[string]any) (time.Duration, error) {
 	for _, name := range []string{"duration_seconds", "timeout_seconds", "seconds"} {
 		if value, ok := args[name]; ok && value != nil {
@@ -5501,6 +5652,8 @@ func (e *Executor) canExecute(name string) bool {
 		return e.reminder != nil
 	case "panda.manage_music":
 		return e.music != nil
+	case "panda.manage_server_setup", "panda.manage_ticket", "panda.manage_onboarding":
+		return e.setup != nil
 	case "panda.search_youtube", "panda.summarize_youtube":
 		return e.youtube != nil && e.youtube.Configured()
 	case "panda.clip_youtube":
@@ -5667,6 +5820,8 @@ func confirmationArguments(action string, preview map[string]any) map[string]str
 		return discordPollConfirmationArguments(preview)
 	case "discord_write.execute":
 		return discordWriteConfirmationArguments(preview)
+	case "server_setup.apply", "server_setup.rollback":
+		return stringArguments(preview, "project_id")
 	case "member_role.add", "member_role.remove":
 		return stringArgumentsWithOptional(preview, []string{"user_id", "role_id"}, "user_display", "role_display")
 	case "tool_access.add", "tool_access.remove", "tool_access.deny":
@@ -5825,6 +5980,10 @@ func confirmationCopy(action string, arguments map[string]string) (string, strin
 		return fmt.Sprintf("Panda prepared a native Discord poll for <#%s>.", arguments["channel_id"]), "Send poll"
 	case "discord_write.execute":
 		return fmt.Sprintf("Panda prepared `%s`.", arguments["tool_name"]), "Confirm write"
+	case "server_setup.apply":
+		return fmt.Sprintf("Panda prepared server setup project `%s`.", arguments["project_id"]), "Apply setup"
+	case "server_setup.rollback":
+		return fmt.Sprintf("Panda prepared rollback of server setup project `%s`.", arguments["project_id"]), "Roll back setup"
 	case "member_role.add":
 		return fmt.Sprintf("Panda prepared assignment of %s to %s.", roleConfirmationDisplay(arguments), userConfirmationDisplay(arguments)), "Assign role"
 	case "member_role.remove":
@@ -6471,6 +6630,82 @@ func boolArgument(arguments map[string]any, name string) bool {
 	default:
 		return false
 	}
+}
+
+func normalizeSetupAction(action string) string {
+	switch strings.ToLower(strings.TrimSpace(action)) {
+	case "list", "templates", "catalog":
+		return "list"
+	case "preview", "draft", "plan":
+		return "preview"
+	case "apply", "confirm":
+		return "apply"
+	case "rollback", "cleanup", "clean_up":
+		return "rollback"
+	case "export":
+		return "export"
+	case "import":
+		return "import"
+	case "status", "show":
+		return "status"
+	default:
+		return strings.ToLower(strings.TrimSpace(action))
+	}
+}
+
+func normalizeTicketAction(action string) string {
+	switch strings.ToLower(strings.TrimSpace(action)) {
+	case "list", "status":
+		return "list"
+	case "show", "get":
+		return "show"
+	case "claim", "assign", "close", "reopen", "archive":
+		return strings.ToLower(strings.TrimSpace(action))
+	case "add", "add_user", "add_member", "participant_add", "add_participant":
+		return "add_participant"
+	case "remove", "remove_user", "remove_member", "participant_remove", "remove_participant":
+		return "remove_participant"
+	default:
+		return strings.ToLower(strings.TrimSpace(action))
+	}
+}
+
+func normalizeOnboardingAction(action string) string {
+	switch strings.ToLower(strings.TrimSpace(action)) {
+	case "list", "status":
+		return "list"
+	case "pause":
+		return "pause"
+	case "resume":
+		return "resume"
+	case "complete":
+		return "complete"
+	default:
+		return strings.ToLower(strings.TrimSpace(action))
+	}
+}
+
+func setupVariablesArgument(args map[string]any) map[string]string {
+	variables := map[string]string{}
+	if raw, ok := args["variables"].(map[string]any); ok {
+		for key, value := range raw {
+			key = strings.TrimSpace(key)
+			if key != "" && value != nil {
+				variables[key] = strings.TrimSpace(fmt.Sprint(value))
+			}
+		}
+	}
+	for _, key := range []string{
+		"server_purpose", "member_role", "verified_role", "newcomer_role",
+		"moderator_role", "admin_role", "support_role", "triage_role",
+		"rules_copy", "welcome_copy", "ticket_panel_title",
+		"ticket_panel_body", "verification_strictness",
+	} {
+		if value := strings.TrimSpace(stringArgument(args, key)); value != "" {
+			variables[key] = value
+		}
+	}
+	return variables
 }
 
 func safePreviewArguments(arguments map[string]any) map[string]any {

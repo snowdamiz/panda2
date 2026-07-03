@@ -127,6 +127,147 @@ type GuildFeature struct {
 	UpdatedAt             time.Time `gorm:"not null"`
 }
 
+type SetupTemplate struct {
+	ID               string     `gorm:"primaryKey;size:96"`
+	SchemaVersion    int        `gorm:"not null"`
+	TemplateVersion  int        `gorm:"not null"`
+	Name             string     `gorm:"not null"`
+	Description      string     `gorm:"not null;default:''"`
+	ReleaseState     string     `gorm:"index;not null;default:'stable';size:32"`
+	DefaultVariables string     `gorm:"not null;default:'{}'"`
+	TemplateJSON     string     `gorm:"not null"`
+	BuiltIn          bool       `gorm:"index;not null;default:false"`
+	CreatedBy        string     `gorm:"index;not null;default:'';size:32"`
+	CreatedAt        time.Time  `gorm:"not null"`
+	UpdatedAt        time.Time  `gorm:"not null"`
+	ArchivedAt       *time.Time `gorm:"index"`
+}
+
+type GuildSetupProject struct {
+	ID                  string     `gorm:"primaryKey;size:40"`
+	GuildID             string     `gorm:"index;not null;size:32"`
+	TemplateID          string     `gorm:"index;not null;size:96"`
+	TemplateVersion     int        `gorm:"not null"`
+	SchemaVersion       int        `gorm:"not null"`
+	VariablesJSON       string     `gorm:"not null;default:'{}'"`
+	PreviewJSON         string     `gorm:"not null;default:'{}'"`
+	ApplyPlanJSON       string     `gorm:"not null;default:'[]'"`
+	Status              string     `gorm:"index;not null;default:'draft';size:32"`
+	ActorID             string     `gorm:"index;not null;default:'';size:32"`
+	ConfirmationID      string     `gorm:"index;not null;default:'';size:96"`
+	CurrentStep         string     `gorm:"not null;default:''"`
+	ProgressJSON        string     `gorm:"not null;default:'{}'"`
+	FailedStepsJSON     string     `gorm:"not null;default:'[]'"`
+	RecoveryJSON        string     `gorm:"not null;default:'{}'"`
+	LastError           string     `gorm:"not null;default:''"`
+	SourceInstallIntent string     `gorm:"index;not null;default:'';size:64"`
+	CreatedAt           time.Time  `gorm:"not null"`
+	UpdatedAt           time.Time  `gorm:"not null"`
+	ConfirmedAt         *time.Time `gorm:"index"`
+	StartedAt           *time.Time `gorm:"index"`
+	FinishedAt          *time.Time `gorm:"index"`
+}
+
+type GuildSetupResource struct {
+	ID              uint      `gorm:"primaryKey"`
+	GuildID         string    `gorm:"uniqueIndex:idx_setup_resources_guild_alias;index;not null;size:32"`
+	ProjectID       string    `gorm:"index;not null;default:'';size:40"`
+	ManagedAlias    string    `gorm:"uniqueIndex:idx_setup_resources_guild_alias;index;not null;size:128"`
+	ObjectType      string    `gorm:"index;not null;size:32"`
+	ObjectID        string    `gorm:"index;not null;default:'';size:64"`
+	TemplateID      string    `gorm:"index;not null;default:'';size:96"`
+	TemplateVersion int       `gorm:"not null;default:0"`
+	LastAppliedHash string    `gorm:"index;not null;default:'';size:96"`
+	DisplayName     string    `gorm:"not null;default:''"`
+	CreatedAt       time.Time `gorm:"not null"`
+	UpdatedAt       time.Time `gorm:"not null"`
+}
+
+type TicketPanel struct {
+	ID               string    `gorm:"primaryKey;size:40"`
+	GuildID          string    `gorm:"index;not null;size:32"`
+	ProjectID        string    `gorm:"index;not null;default:'';size:40"`
+	ManagedAlias     string    `gorm:"index;not null;default:'';size:128"`
+	PanelChannelID   string    `gorm:"index;not null;size:32"`
+	PanelMessageID   string    `gorm:"index;not null;default:'';size:32"`
+	Title            string    `gorm:"not null;default:''"`
+	Body             string    `gorm:"not null;default:''"`
+	DepartmentsJSON  string    `gorm:"not null;default:'[]'"`
+	StaffRoleIDsJSON string    `gorm:"not null;default:'[]'"`
+	TargetCategoryID string    `gorm:"not null;default:'';size:32"`
+	ThreadMode       bool      `gorm:"not null;default:false"`
+	Enabled          bool      `gorm:"index;not null;default:true"`
+	CreatedBy        string    `gorm:"index;not null;default:'';size:32"`
+	CreatedAt        time.Time `gorm:"not null"`
+	UpdatedAt        time.Time `gorm:"not null"`
+}
+
+type Ticket struct {
+	ID              string     `gorm:"primaryKey;size:40"`
+	GuildID         string     `gorm:"index;not null;size:32"`
+	PanelID         string     `gorm:"index;not null;default:'';size:40"`
+	DepartmentID    string     `gorm:"index;not null;default:'';size:64"`
+	RequesterUserID string     `gorm:"index;not null;size:32"`
+	ChannelID       string     `gorm:"index;not null;default:'';size:32"`
+	ThreadID        string     `gorm:"index;not null;default:'';size:32"`
+	Status          string     `gorm:"index;not null;default:'open';size:32"`
+	AssigneeUserID  string     `gorm:"index;not null;default:'';size:32"`
+	Priority        string     `gorm:"index;not null;default:'normal';size:32"`
+	TagsJSON        string     `gorm:"not null;default:'[]'"`
+	CloseReason     string     `gorm:"not null;default:''"`
+	TranscriptJSON  string     `gorm:"not null;default:'{}'"`
+	OpenedAt        time.Time  `gorm:"index;not null"`
+	ClosedAt        *time.Time `gorm:"index"`
+	ArchivedAt      *time.Time `gorm:"index"`
+	CreatedAt       time.Time  `gorm:"not null"`
+	UpdatedAt       time.Time  `gorm:"not null"`
+}
+
+type TicketEvent struct {
+	ID           uint      `gorm:"primaryKey"`
+	TicketID     string    `gorm:"index;not null;size:40"`
+	GuildID      string    `gorm:"index;not null;size:32"`
+	ActorID      string    `gorm:"index;not null;default:'';size:32"`
+	EventType    string    `gorm:"index;not null;size:64"`
+	MetadataJSON string    `gorm:"not null;default:'{}'"`
+	CreatedAt    time.Time `gorm:"index;not null"`
+}
+
+type OnboardingFlow struct {
+	ID                string    `gorm:"primaryKey;size:40"`
+	GuildID           string    `gorm:"index;not null;size:32"`
+	ProjectID         string    `gorm:"index;not null;default:'';size:40"`
+	ManagedAlias      string    `gorm:"index;not null;default:'';size:128"`
+	WelcomeChannelID  string    `gorm:"index;not null;default:'';size:32"`
+	RulesChannelID    string    `gorm:"index;not null;default:'';size:32"`
+	VerifiedRoleID    string    `gorm:"index;not null;default:'';size:32"`
+	NewcomerRoleID    string    `gorm:"index;not null;default:'';size:32"`
+	VerificationMode  string    `gorm:"not null;default:'rules';size:32"`
+	StepsJSON         string    `gorm:"not null;default:'[]'"`
+	Enabled           bool      `gorm:"index;not null;default:true"`
+	Paused            bool      `gorm:"index;not null;default:false"`
+	CompletionMessage string    `gorm:"not null;default:''"`
+	IntroPrompt       string    `gorm:"not null;default:''"`
+	CreatedBy         string    `gorm:"index;not null;default:'';size:32"`
+	CreatedAt         time.Time `gorm:"not null"`
+	UpdatedAt         time.Time `gorm:"not null"`
+}
+
+type OnboardingSession struct {
+	ID                  string     `gorm:"primaryKey;size:40"`
+	FlowID              string     `gorm:"index;not null;size:40"`
+	GuildID             string     `gorm:"index;not null;size:32"`
+	UserID              string     `gorm:"index;not null;size:32"`
+	Status              string     `gorm:"index;not null;default:'in_progress';size:32"`
+	CurrentStep         string     `gorm:"not null;default:'';size:64"`
+	SelectedRoleIDsJSON string     `gorm:"not null;default:'[]'"`
+	AssignedRoleIDsJSON string     `gorm:"not null;default:'[]'"`
+	CompletedAt         *time.Time `gorm:"index"`
+	LastInteractionAt   time.Time  `gorm:"index;not null"`
+	CreatedAt           time.Time  `gorm:"not null"`
+	UpdatedAt           time.Time  `gorm:"not null"`
+}
+
 type GuildRole struct {
 	ID         uint      `gorm:"primaryKey"`
 	GuildID    string    `gorm:"index;not null;size:32"`

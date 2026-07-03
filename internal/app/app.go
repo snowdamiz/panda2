@@ -33,6 +33,7 @@ import (
 	"github.com/sn0w/panda2/internal/repository"
 	"github.com/sn0w/panda2/internal/runtimecontrol"
 	"github.com/sn0w/panda2/internal/scheduler"
+	setupsvc "github.com/sn0w/panda2/internal/setup"
 	"github.com/sn0w/panda2/internal/store"
 	"github.com/sn0w/panda2/internal/tools"
 	"github.com/sn0w/panda2/internal/websearch"
@@ -109,6 +110,7 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 	composedRepo := repository.NewComposedToolRepository(dataStore.DB)
 	runtimeStatuses := repository.NewRuntimeStatusRepository(dataStore.DB)
 	userSafety := repository.NewUserSafetyRepository(dataStore.DB)
+	setupRepo := repository.NewSetupRepository(dataStore.DB)
 	clips := repository.NewClipRepository(dataStore.DB)
 	clipEvents := clipevents.NewHub()
 	runtimeService := runtimecontrol.NewService(runtimeStatuses)
@@ -203,6 +205,11 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 	adminService := admin.NewService(guildConfigs, usage, audit, memoryService, access, budgets, members).
 		WithGuildRepository(guilds).
 		WithBilling(billingService)
+	setupService := setupsvc.NewService(setupRepo, nil).
+		WithAdminApplier(adminService).
+		WithFeatureApplier(featureRepo).
+		WithJobQueue(jobs).
+		WithAuditRecorder(audit)
 	toolRegistry, err := tools.NewDefaultRegistry()
 	if err != nil {
 		_ = dataStore.Close()
@@ -223,7 +230,8 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 		WithClipURLTTL(cfg.R2ClipURLTTL).
 		WithPortalClipsURL(cfg.PortalClipsURL()).
 		WithBilling(billingService).
-		WithOpsManager(opsService)
+		WithOpsManager(opsService).
+		WithSetupManager(setupService)
 	composedService := composed.NewService(composedRepo, toolRegistry, toolExecutor, openRouter, cfg.OpenRouterModel).
 		WithAuditRecorder(audit).
 		WithBilling(billingService).
@@ -273,6 +281,7 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 		WithDataRepository(dataRepo).
 		WithFeedbackService(feedbackService).
 		WithToolExecutor(toolExecutor).
+		WithServerSetupManager(setupService).
 		WithFeatureService(featureService).
 		WithFeatureInstallIntents(commandInstallIntentAdapter{service: installService})
 
@@ -286,7 +295,9 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 		WithJobQueue(jobs).
 		WithAlertHandler(alertService).
 		WithMusicRepository(musicRepo).
-		WithInstallService(installService)
+		WithInstallService(installService).
+		WithSetupComponents(setupService)
+	setupService.WithDiscordAdapter(discord.SetupAdapter())
 	toolExecutor.WithMusicManager(discord.MusicManager())
 	schedulerService.WithDeliverySender(discord)
 	alertService.WithDeliverySender(discord)
@@ -302,6 +313,7 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 	worker.Register(discordbot.NaturalMessageJobKind, discord.HandleNaturalMessageJob)
 	worker.Register(composed.EventJobKind, composedService.HandleEventJob)
 	worker.Register(scheduler.JobKind, schedulerService.HandleJob)
+	worker.Register(setupsvc.JobKindApplySetup, setupService.HandleApplyJob)
 
 	return &App{
 		cfg:    cfg,
@@ -316,7 +328,8 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 			WithClipRepository(clips).
 			WithClipObjectStore(clipUploader).
 			WithClipEvents(clipEvents).
-			WithPortalOAuth(portalOAuth),
+			WithPortalOAuth(portalOAuth).
+			WithSetupService(setupService),
 		discord:   discord,
 		worker:    worker,
 		scheduler: schedulerService,

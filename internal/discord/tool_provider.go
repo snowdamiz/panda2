@@ -18,6 +18,7 @@ import (
 	"github.com/sn0w/panda2/internal/polls"
 	"github.com/sn0w/panda2/internal/repository"
 	"github.com/sn0w/panda2/internal/security"
+	"github.com/sn0w/panda2/internal/setup"
 	"github.com/sn0w/panda2/internal/store"
 	"github.com/sn0w/panda2/internal/textutil"
 	"github.com/sn0w/panda2/internal/tools"
@@ -92,6 +93,13 @@ func (p *ToolProvider) discordToolHandlers() map[string]discordToolHandler {
 		"discord.unpin_message":               p.withoutContext(p.unpinMessage),
 		"discord.search_messages":             p.searchMessages,
 		"discord.create_role":                 p.withoutContext(p.createRole),
+		"discord.update_role":                 p.withoutContext(p.updateRole),
+		"discord.delete_role":                 p.withoutContext(p.deleteRole),
+		"discord.position_roles":              p.withoutContext(p.positionRoles),
+		"discord.create_channel":              p.withoutContext(p.createGuildChannel),
+		"discord.update_channel":              p.withoutContext(p.updateGuildChannel),
+		"discord.delete_channel":              p.withoutContext(p.deleteGuildChannel),
+		"discord.position_channels":           p.withoutContext(p.positionGuildChannels),
 		"discord.list_members":                p.withoutContext(p.listMembers),
 		"discord.list_bans":                   p.withoutContext(p.listBans),
 		"discord.get_invite":                  p.withoutContext(p.getInvite),
@@ -796,10 +804,26 @@ func (p *ToolProvider) createRole(request tools.DiscordToolRequest) (any, error)
 	if err != nil {
 		return nil, err
 	}
-	permissions := disgoDiscord.PermissionsNone
+	permissions, err := optionalPermissionsArg(request.Arguments, "permissions")
+	if err != nil {
+		return nil, err
+	}
+	if permissions.Has(disgoDiscord.PermissionAdministrator) {
+		return nil, fmt.Errorf("Administrator permission is refused by default")
+	}
+	color := intArg(request.Arguments, "color", 0)
+	if color == 0 && strings.TrimSpace(stringArg(request.Arguments, "color_hex", "")) != "" {
+		color, err = setupColorArg(request.Arguments, "color_hex")
+		if err != nil {
+			return nil, err
+		}
+	}
 	role, err := p.rest.CreateRole(guildID, disgoDiscord.RoleCreate{
 		Name:        name,
 		Permissions: &permissions,
+		Color:       color,
+		Hoist:       boolArg(request.Arguments, "hoist"),
+		Mentionable: boolArg(request.Arguments, "mentionable"),
 	}, reasonOpt(request)...)
 	if err != nil {
 		if isRoleSetupError(err) {
@@ -810,8 +834,146 @@ func (p *ToolProvider) createRole(request tools.DiscordToolRequest) (any, error)
 	return map[string]any{
 		"created": true,
 		"role":    roleSummary(*role),
-		"note":    "Created with no elevated permissions. Role management still depends on Panda's Manage Roles permission and role hierarchy.",
+		"note":    "Role management still depends on Panda's Manage Roles permission and role hierarchy.",
 	}, nil
+}
+
+func (p *ToolProvider) updateRole(request tools.DiscordToolRequest) (any, error) {
+	guildID, err := guildIDArg(request)
+	if err != nil {
+		return nil, err
+	}
+	roleID, err := snowflakeArg(request.Arguments, "role_id")
+	if err != nil {
+		return nil, err
+	}
+	update := disgoDiscord.RoleUpdate{}
+	if name := strings.TrimSpace(stringArg(request.Arguments, "name", "")); name != "" {
+		update.Name = &name
+	}
+	if _, ok := request.Arguments["permissions"]; ok {
+		permissions, err := permissionsArg(request.Arguments, "permissions")
+		if err != nil {
+			return nil, err
+		}
+		if permissions.Has(disgoDiscord.PermissionAdministrator) {
+			return nil, fmt.Errorf("Administrator permission is refused by default")
+		}
+		update.Permissions = &permissions
+	}
+	if _, ok := request.Arguments["color"]; ok {
+		color := intArg(request.Arguments, "color", 0)
+		update.Color = &color
+	}
+	if strings.TrimSpace(stringArg(request.Arguments, "color_hex", "")) != "" {
+		color, err := setupColorArg(request.Arguments, "color_hex")
+		if err != nil {
+			return nil, err
+		}
+		update.Color = &color
+	}
+	if _, ok := request.Arguments["hoist"]; ok {
+		hoist := boolArg(request.Arguments, "hoist")
+		update.Hoist = &hoist
+	}
+	if _, ok := request.Arguments["mentionable"]; ok {
+		mentionable := boolArg(request.Arguments, "mentionable")
+		update.Mentionable = &mentionable
+	}
+	if update.Name == nil && update.Permissions == nil && update.Color == nil && update.Hoist == nil && update.Mentionable == nil {
+		return nil, fmt.Errorf("at least one role field is required")
+	}
+	role, err := p.rest.UpdateRole(guildID, roleID, update, reasonOpt(request)...)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"updated": true, "role": roleSummary(*role)}, nil
+}
+
+func (p *ToolProvider) deleteRole(request tools.DiscordToolRequest) (any, error) {
+	guildID, err := guildIDArg(request)
+	if err != nil {
+		return nil, err
+	}
+	roleID, err := snowflakeArg(request.Arguments, "role_id")
+	if err != nil {
+		return nil, err
+	}
+	if err := p.rest.DeleteRole(guildID, roleID, reasonOpt(request)...); err != nil {
+		return nil, err
+	}
+	return map[string]any{"deleted": true, "role_id": roleID.String()}, nil
+}
+
+func (p *ToolProvider) positionRoles(request tools.DiscordToolRequest) (any, error) {
+	guildID, err := guildIDArg(request)
+	if err != nil {
+		return nil, err
+	}
+	positions, err := rolePositionUpdatesArg(request.Arguments)
+	if err != nil {
+		return nil, err
+	}
+	roles, err := p.rest.UpdateRolePositions(guildID, positions, reasonOpt(request)...)
+	if err != nil {
+		return nil, err
+	}
+	summaries := make([]map[string]any, 0, len(roles))
+	for _, role := range roles {
+		summaries = append(summaries, roleSummary(role))
+	}
+	return map[string]any{"updated": true, "roles": summaries}, nil
+}
+
+func (p *ToolProvider) createGuildChannel(request tools.DiscordToolRequest) (any, error) {
+	adapter := NewSetupAdapter(p.rest)
+	channel, err := adapter.CreateChannel(context.Background(), channelApplyRequestFromTool(request))
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"created": true, "channel": map[string]any{"id": channel.ID, "name": channel.Name, "type": channel.Type}}, nil
+}
+
+func (p *ToolProvider) updateGuildChannel(request tools.DiscordToolRequest) (any, error) {
+	adapter := NewSetupAdapter(p.rest)
+	apply := channelApplyRequestFromTool(request)
+	channelID, err := snowflakeArg(request.Arguments, "channel_id")
+	if err != nil {
+		return nil, err
+	}
+	apply.ChannelID = channelID.String()
+	channel, err := adapter.UpdateChannel(context.Background(), apply)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"updated": true, "channel": map[string]any{"id": channel.ID, "name": channel.Name, "type": channel.Type}}, nil
+}
+
+func (p *ToolProvider) deleteGuildChannel(request tools.DiscordToolRequest) (any, error) {
+	channelID, err := snowflakeArg(request.Arguments, "channel_id")
+	if err != nil {
+		return nil, err
+	}
+	if err := p.rest.DeleteChannel(channelID, reasonOpt(request)...); err != nil {
+		return nil, err
+	}
+	return map[string]any{"deleted": true, "channel_id": channelID.String()}, nil
+}
+
+func (p *ToolProvider) positionGuildChannels(request tools.DiscordToolRequest) (any, error) {
+	adapter := NewSetupAdapter(p.rest)
+	guildID, err := guildIDArg(request)
+	if err != nil {
+		return nil, err
+	}
+	positions, err := setupPositionUpdatesArg(request.Arguments, "positions")
+	if err != nil {
+		return nil, err
+	}
+	if err := adapter.MoveChannels(context.Background(), guildID.String(), positions, stringArg(request.Arguments, "reason", "")); err != nil {
+		return nil, err
+	}
+	return map[string]any{"updated": true, "positions": positions}, nil
 }
 
 func (p *ToolProvider) getMember(request tools.DiscordToolRequest) (any, error) {
@@ -1903,6 +2065,111 @@ func permissionsArg(arguments map[string]any, name string) (disgoDiscord.Permiss
 	default:
 		return disgoDiscord.PermissionsNone, fmt.Errorf("%s must be a permission bitset or names", name)
 	}
+}
+
+func optionalPermissionsArg(arguments map[string]any, name string) (disgoDiscord.Permissions, error) {
+	if _, ok := arguments[name]; !ok {
+		return disgoDiscord.PermissionsNone, nil
+	}
+	return permissionsArg(arguments, name)
+}
+
+func setupColorArg(arguments map[string]any, name string) (int, error) {
+	value := strings.TrimPrefix(strings.TrimSpace(stringArg(arguments, name, "")), "#")
+	if value == "" {
+		return 0, nil
+	}
+	if len(value) != 6 {
+		return 0, fmt.Errorf("%s must be #RRGGBB", name)
+	}
+	parsed, err := strconv.ParseInt(value, 16, 32)
+	if err != nil {
+		return 0, err
+	}
+	return int(parsed), nil
+}
+
+func channelApplyRequestFromTool(request tools.DiscordToolRequest) setup.ChannelApplyRequest {
+	return setup.ChannelApplyRequest{
+		GuildID:         stringArg(request.Arguments, "guild_id", request.GuildID),
+		Type:            firstNonEmptyText(stringArg(request.Arguments, "type", ""), "text"),
+		Name:            stringArg(request.Arguments, "name", ""),
+		Topic:           stringArg(request.Arguments, "topic", ""),
+		ParentID:        stringArg(request.Arguments, "parent_id", ""),
+		Position:        intArg(request.Arguments, "position", 0),
+		NSFW:            boolArg(request.Arguments, "nsfw"),
+		SlowmodeSeconds: intArg(request.Arguments, "slowmode_seconds", intArg(request.Arguments, "rate_limit_per_user", 0)),
+		Bitrate:         intArg(request.Arguments, "bitrate", 0),
+		UserLimit:       intArg(request.Arguments, "user_limit", 0),
+		Overwrites:      resolvedOverwritesArg(request.Arguments),
+		Reason:          stringArg(request.Arguments, "reason", ""),
+	}
+}
+
+func resolvedOverwritesArg(arguments map[string]any) []setup.ResolvedOverwrite {
+	raw, ok := arguments["overwrites"].([]any)
+	if !ok {
+		return nil
+	}
+	result := make([]setup.ResolvedOverwrite, 0, len(raw))
+	for _, item := range raw {
+		row, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		targetID := firstNonEmptyText(stringArg(row, "target_id", ""), stringArg(row, "id", ""))
+		if targetID == "" {
+			continue
+		}
+		result = append(result, setup.ResolvedOverwrite{
+			TargetID:   targetID,
+			TargetType: firstNonEmptyText(stringArg(row, "target_type", ""), stringArg(row, "type", "role")),
+			Allow:      stringListArg(row, "allow"),
+			Deny:       stringListArg(row, "deny"),
+		})
+	}
+	return result
+}
+
+func rolePositionUpdatesArg(arguments map[string]any) ([]disgoDiscord.RolePositionUpdate, error) {
+	positions, err := setupPositionUpdatesArg(arguments, "positions")
+	if err != nil {
+		return nil, err
+	}
+	updates := make([]disgoDiscord.RolePositionUpdate, 0, len(positions))
+	for _, position := range positions {
+		id, err := snowflake.Parse(strings.TrimSpace(position.ID))
+		if err != nil {
+			return nil, err
+		}
+		pos := position.Position
+		updates = append(updates, disgoDiscord.RolePositionUpdate{ID: id, Position: &pos})
+	}
+	return updates, nil
+}
+
+func setupPositionUpdatesArg(arguments map[string]any, name string) ([]setup.PositionUpdate, error) {
+	raw, ok := arguments[name].([]any)
+	if !ok || len(raw) == 0 {
+		return nil, fmt.Errorf("%s is required", name)
+	}
+	updates := make([]setup.PositionUpdate, 0, len(raw))
+	for _, item := range raw {
+		row, ok := item.(map[string]any)
+		if !ok {
+			return nil, fmt.Errorf("%s entries must be objects", name)
+		}
+		id := firstNonEmptyText(stringArg(row, "id", ""), stringArg(row, "channel_id", stringArg(row, "role_id", "")))
+		if id == "" {
+			return nil, fmt.Errorf("%s entry id is required", name)
+		}
+		updates = append(updates, setup.PositionUpdate{
+			ID:       id,
+			Position: intArg(row, "position", 0),
+			ParentID: stringArg(row, "parent_id", ""),
+		})
+	}
+	return updates, nil
 }
 
 func autoModerationCreateArg(arguments map[string]any) (disgoDiscord.AutoModerationRuleCreate, error) {

@@ -51,6 +51,7 @@ type Server struct {
 	clipEvents     *clipevents.Hub
 	portalOAuth    *discordbot.PortalOAuthClient
 	runtime        *runtimecontrol.Service
+	setup          SetupHandler
 	paymentLimiter *ratelimit.Limiter
 	adminAuth      adminAuthStore
 }
@@ -203,7 +204,7 @@ func (s *Server) routes() {
 		}))
 	}
 	if origins := s.cfg.InstallAllowedOrigins(); len(origins) > 0 {
-		s.app.Use("/install", cors.New(cors.Config{
+		installCORS := cors.New(cors.Config{
 			AllowOrigins: strings.Join(origins, ","),
 			AllowMethods: strings.Join([]string{
 				fiber.MethodGet,
@@ -212,7 +213,9 @@ func (s *Server) routes() {
 			}, ","),
 			AllowHeaders: fiber.HeaderContentType,
 			MaxAge:       300,
-		}))
+		})
+		s.app.Use("/install", installCORS)
+		s.app.Use("/setup", installCORS)
 	}
 	if origins := s.cfg.PortalCORSOrigins(); len(origins) > 0 {
 		s.app.Use("/portal", cors.New(cors.Config{
@@ -240,12 +243,19 @@ func (s *Server) routes() {
 		return c.SendString(s.metrics(c.Context()))
 	})
 	s.app.Post("/discord/webhook-events", s.discordWebhookEvents)
+	s.app.Get("/setup/templates", s.setupTemplates)
 	s.app.Get("/install/features", s.installFeatures)
 	s.app.Post("/install/intents", s.createInstallIntent)
 	s.app.Get("/discord/install/callback", s.discordInstallCallback)
 	s.app.Get("/auth/discord/login", s.discordPortalLogin)
 	s.app.Get("/auth/discord/callback", s.discordPortalCallback)
 	s.app.Get("/portal/me", s.portalMe)
+	s.app.Post("/portal/setup/preview", s.portalSetupPreview)
+	s.app.Get("/portal/setup/projects/:project_id", s.portalSetupProject)
+	s.app.Post("/portal/setup/projects/:project_id/apply", s.portalSetupApply)
+	s.app.Post("/portal/setup/projects/:project_id/rollback", s.portalSetupRollback)
+	s.app.Get("/portal/setup/tickets", s.portalSetupTickets)
+	s.app.Get("/portal/setup/onboarding", s.portalSetupOnboarding)
 	s.app.Get("/portal/clips", s.portalListClips)
 	// Live updates: the browser can't set an Authorization header on a WebSocket,
 	// so the session token is passed as a query param and verified before the
