@@ -2916,7 +2916,7 @@ func TestChatUsesAssistantService(t *testing.T) {
 	}
 }
 
-func TestChatEmptyAssistantResponseReleasesBillingReservation(t *testing.T) {
+func TestChatEmptyAssistantResponseFailureReleasesBillingReservation(t *testing.T) {
 	ctx := context.Background()
 	router := newTestRouter(t, &fakeLLM{response: llm.ChatResponse{Model: "fixture/model"}}, 20)
 	billingService, entitlement := attachTestBilling(t, router, "guild-1")
@@ -2929,8 +2929,8 @@ func TestChatEmptyAssistantResponseReleasesBillingReservation(t *testing.T) {
 		IsGuildAdmin: true,
 		Options:      map[string]string{"question": "hello"},
 	}, false, false)
-	if !response.Ephemeral || !strings.Contains(response.Content, "empty response") {
-		t.Fatalf("expected empty response guard, got %+v", response)
+	if !response.Ephemeral || !strings.Contains(response.Content, "having trouble with AI responses") {
+		t.Fatalf("expected AI failure response, got %+v", response)
 	}
 	reservation, err := billingService.BeginUsage(ctx, "guild-1", billing.MetricAIResponse, entitlement.Pack.Credits/4-1)
 	if err != nil {
@@ -2941,7 +2941,7 @@ func TestChatEmptyAssistantResponseReleasesBillingReservation(t *testing.T) {
 	}
 }
 
-func TestBackgroundTaskEmptyAssistantResponseReleasesBillingReservation(t *testing.T) {
+func TestBackgroundTaskEmptyAssistantResponseFailureReleasesBillingReservation(t *testing.T) {
 	ctx := context.Background()
 	router := newTestRouter(t, &fakeLLM{response: llm.ChatResponse{Model: "fixture/model"}}, 20)
 	billingService, entitlement := attachTestBilling(t, router, "guild-1")
@@ -2954,8 +2954,8 @@ func TestBackgroundTaskEmptyAssistantResponseReleasesBillingReservation(t *testi
 		UserID:    "admin",
 		Input:     "summarize this",
 	})
-	if !response.Ephemeral || !strings.Contains(response.Content, "empty response") {
-		t.Fatalf("expected empty response guard, got %+v", response)
+	if !response.Ephemeral || !strings.Contains(response.Content, "having trouble with AI responses") {
+		t.Fatalf("expected AI failure response, got %+v", response)
 	}
 	reservation, err := billingService.BeginUsage(ctx, "guild-1", billing.MetricAIResponse, entitlement.Pack.Credits/4-1)
 	if err != nil {

@@ -1792,7 +1792,7 @@ func (r *Router) handleAsk(ctx context.Context, request Request, command string)
 	}
 	if !assistantAnswerHasPayload(answer) {
 		r.releaseAIUsage(ctx, reservation)
-		return Response{Content: "Panda returned an empty response. Please try again.", Ephemeral: true}
+		return assistantError(assistant.ErrEmptyResponse)
 	}
 	r.commitAIUsage(ctx, reservation, answer.Usage)
 	return r.responseFromAssistantAnswer(ctx, request, answer, "", "")
@@ -1945,7 +1945,7 @@ func (r *Router) handleChatModeWithOptionsResult(ctx context.Context, request Re
 	}
 	if !assistantAnswerHasPayload(answer) {
 		r.releaseAIUsage(ctx, reservation)
-		return Response{Content: "Panda returned an empty response. Please try again.", Ephemeral: true}, nil
+		return assistantError(assistant.ErrEmptyResponse), nil
 	}
 	r.commitAIUsage(ctx, reservation, answer.Usage)
 	return r.responseFromAssistantAnswer(ctx, request, answer, threadID, threadName), nil
@@ -2060,7 +2060,7 @@ func (r *Router) HandleBackgroundTask(ctx context.Context, task BackgroundTask) 
 	}
 	if !assistantAnswerHasPayload(answer) {
 		r.releaseAIUsage(ctx, reservation)
-		return Response{Content: "Panda returned an empty response. Please try again.", Ephemeral: true}
+		return assistantError(assistant.ErrEmptyResponse)
 	}
 	r.commitAIUsage(ctx, reservation, answer.Usage)
 	return r.responseFromAssistantAnswer(ctx, Request{
