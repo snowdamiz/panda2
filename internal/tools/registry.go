@@ -56,7 +56,7 @@ const (
 
 const ToolNamePandaChat = "panda.chat"
 
-const composedToolManagementTimeout = time.Minute
+const composedToolManagementTimeout = 90 * time.Second
 
 type ToolAccess struct {
 	Policy                       string
@@ -537,7 +537,7 @@ func DefaultDefinitions() []Definition {
 		},
 		{
 			Name:                  "panda.manage_server_setup",
-			Description:           "List Discord server setup templates, preview a template diff, check setup project status, or prepare a confirmed server setup application. Always preview before apply. Use this when an admin asks Panda to set up, scaffold, build, configure, or turn a server into a community, support desk, creator hub, gaming server, product community, or course.",
+			Description:           "List Discord server setup templates, preview a template diff, check setup project status, or prepare a confirmed server setup application. Always preview before apply. Use this when an admin asks Panda to set up, scaffold, build, configure, or turn a server into a community, support desk, creator hub, gaming server, product community, or course. Use this for Discord onboarding/rules acknowledgement setup requests, including welcome or rules messages with buttons that grant a verified/member role after acceptance.",
 			RequiredPermission:    admin.PermissionAdminConfigWrite,
 			FeatureID:             features.AdminSetup,
 			ToolClass:             ToolClassAdminWrite,
@@ -565,7 +565,7 @@ func DefaultDefinitions() []Definition {
 		},
 		{
 			Name:                  "panda.manage_onboarding",
-			Description:           "List onboarding flows, pause/resume onboarding, or inspect member onboarding state for this server.",
+			Description:           "List onboarding flows, pause/resume onboarding, or inspect/complete member onboarding state for this server. Use this for existing onboarding flows, not to create a new rules acknowledgement flow.",
 			RequiredPermission:    admin.PermissionAdminConfigWrite,
 			FeatureID:             features.AdminSetup,
 			ToolClass:             ToolClassAdminWrite,
@@ -662,7 +662,7 @@ func DefaultDefinitions() []Definition {
 		channelRuleManagementTool(),
 		{
 			Name:                  "panda.manage_composed_tool",
-			Description:           "Preview, draft, list, show, approve, run, simulate, export, pause, resume, disable, archive, delete, or roll back composed tools. Use draft when an admin asks to create a new event-triggered or scheduled automation/workflow, including recurring channel posts; approval is required before it can run. Use list for explicit questions about installed, existing, current, default, or pre-built composed tools/automations in this server; do not answer those from broad capability examples alone. Use archive for reversible removal from active use when the user asks to remove or stop using a composed tool. Use delete only when the user explicitly asks for permanent deletion. When a draft request names a text channel, voice channel, stage channel, or thread by plain name, use discord.list_channels first if available to resolve the exact channel ID and type before drafting; ask for clarification only when lookup is unavailable, missing, or ambiguous.",
+			Description:           "Preview, draft, list, show, approve, run, simulate, export, pause, resume, disable, archive, delete, or roll back composed tools. Use draft when an admin asks to create a new event-triggered or scheduled automation/workflow, including recurring channel posts; approval is required before it can run. Do not use draft for Discord server setup/onboarding/rules acknowledgement flows such as welcome or rules messages with buttons that grant verified/member roles; use panda.manage_server_setup for new setup and panda.manage_onboarding only for existing onboarding flows. Use list for explicit questions about installed, existing, current, default, or pre-built composed tools/automations in this server; do not answer those from broad capability examples alone. Use archive for reversible removal from active use when the user asks to remove or stop using a composed tool. Use delete only when the user explicitly asks for permanent deletion. When a draft request names a text channel, voice channel, stage channel, or thread by plain name, use discord.list_channels first if available to resolve the exact channel ID and type before drafting; ask for clarification only when lookup is unavailable, missing, or ambiguous.",
 			RequiredPermission:    admin.PermissionToolComposeDraft,
 			AlternatePermissions:  []string{admin.PermissionToolComposeApprove, admin.PermissionToolComposeInvoke, admin.PermissionToolComposeAudit},
 			FeatureID:             features.ComposedTools,

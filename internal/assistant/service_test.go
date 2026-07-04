@@ -273,6 +273,20 @@ func workflowToolCallResponse(id string) llm.ChatResponse {
 	}
 }
 
+func dynamicToolCallResponse(id, name string) llm.ChatResponse {
+	return llm.ChatResponse{
+		Model: "fixture/model",
+		ToolCalls: []llm.ToolCall{{
+			ID:   id,
+			Type: "function",
+			Function: llm.ToolCallFunction{
+				Name:      name,
+				Arguments: `{}`,
+			},
+		}},
+	}
+}
+
 func TestAskUsesGuildPromptAndMemory(t *testing.T) {
 	ctx := context.Background()
 	client := &fakeClient{response: llm.ChatResponse{Model: "fixture/model", Content: "Use @everyone key sk-123456789012"}}
@@ -3007,6 +3021,59 @@ func TestAskStopsRunawayToolCallRounds(t *testing.T) {
 	}
 	if len(client.requests) != maxToolCallRounds+1 {
 		t.Fatalf("runaway tool loop should stop at the round cap, got %d requests", len(client.requests))
+	}
+}
+
+func TestAskStopsRepeatedToolPayloadFailures(t *testing.T) {
+	ctx := context.Background()
+	client := &fakeClient{responses: []llm.ChatResponse{
+		dynamicToolCallResponse("call-flaky-1", "flaky_tool"),
+		dynamicToolCallResponse("call-flaky-2", "flaky_tool"),
+		{Model: "fixture/model", Content: "This should not be reached."},
+	}}
+	service, db := newTestService(t, client)
+	configs := repository.NewGuildConfigRepository(db.DB)
+	registry, err := tools.NewDefaultRegistry()
+	if err != nil {
+		t.Fatalf("NewDefaultRegistry: %v", err)
+	}
+	executor := tools.NewExecutor(registry, nil, configs).WithDynamicToolProvider(fakeAssistantDynamicTools{
+		tools: []llm.Tool{{
+			Type: "function",
+			Function: llm.ToolFunction{
+				Name:        "flaky_tool",
+				Description: "Fixture tool that fails.",
+				Parameters:  []byte(`{"type":"object","additionalProperties":false,"properties":{}}`),
+			},
+		}},
+		result: tools.ExecutionResult{
+			Message: llm.Message{Role: "tool", Content: `{"error":"context deadline exceeded"}`},
+			Payload: map[string]any{
+				"error": "context deadline exceeded",
+			},
+		},
+	})
+	service.WithToolExecutor(executor)
+
+	if _, err := configs.EnsureDefault(ctx, "guild-1"); err != nil {
+		t.Fatalf("EnsureDefault: %v", err)
+	}
+
+	_, err = service.Ask(ctx, AskRequest{
+		GuildID:   "guild-1",
+		UserID:    "user-1",
+		ChannelID: "channel-1",
+		Question:  "Keep retrying the flaky tool.",
+		AllowedPermissions: map[string]struct{}{
+			admin.PermissionAssistantUse: {},
+		},
+		AllowedTools: map[string]struct{}{"flaky_tool": {}},
+	})
+	if err == nil || !strings.Contains(err.Error(), "assistant tool flaky_tool failed repeatedly") {
+		t.Fatalf("expected repeated tool failure error, got %v", err)
+	}
+	if len(client.requests) != maxRepeatedToolFailures {
+		t.Fatalf("repeated tool failure should stop after %d model requests, got %d", maxRepeatedToolFailures, len(client.requests))
 	}
 }
 

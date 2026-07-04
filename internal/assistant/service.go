@@ -216,6 +216,9 @@ const (
 	// turn totals so prompt-injected recursive requests cannot fan out unchecked.
 	maxToolCallsPerRound = 8
 	maxToolCallsTotal    = 32
+	// Tool runtime errors are returned to the model once so it can correct bad
+	// arguments. Repeating the same failing tool is treated as a stuck loop.
+	maxRepeatedToolFailures = 2
 )
 
 const (
@@ -843,6 +846,8 @@ func (s *Service) completeWithToolsWithOptions(ctx context.Context, config store
 	emptyResponseRetryUsed := false
 	naturalGateEmptyRetryPending := false
 	totalToolCalls := 0
+	repeatedToolFailureName := ""
+	repeatedToolFailureCount := 0
 	retryEmptyResponse := func(response llm.ChatResponse, round int) (bool, error) {
 		if !assistantResponseNeedsVisiblePayloadRetry(response, card, generatedFiles, confirmations) {
 			return false, nil
@@ -1110,6 +1115,30 @@ func (s *Service) completeWithToolsWithOptions(ctx context.Context, config store
 			} else if result.Terminal {
 				terminalToolRound = true
 			}
+			if failureMessage := toolExecutionFailureMessage(err, result.Payload, message.Content); failureMessage != "" {
+				if call.Function.Name == repeatedToolFailureName {
+					repeatedToolFailureCount++
+				} else {
+					repeatedToolFailureName = call.Function.Name
+					repeatedToolFailureCount = 1
+				}
+				if repeatedToolFailureCount >= maxRepeatedToolFailures {
+					slog.Warn("assistant repeated tool failure stopping loop",
+						slog.String("guild_id", config.GuildID),
+						slog.String("channel_id", toolContext.ChannelID),
+						slog.String("request_id", toolContext.RequestID),
+						slog.String("user_id", toolContext.ActorID),
+						slog.Int("round", round),
+						slog.String("tool_name", call.Function.Name),
+						slog.Int("failure_count", repeatedToolFailureCount),
+						slog.String("failure", failureMessage),
+					)
+					return response, confirmations, card, sourceLinks, generatedFiles, usageReservations, usedWebSearch, false, false, fmt.Errorf("assistant tool %s failed repeatedly: %s", call.Function.Name, failureMessage)
+				}
+			} else {
+				repeatedToolFailureName = ""
+				repeatedToolFailureCount = 0
+			}
 			if err == nil {
 				slog.Info("assistant tool call completed",
 					slog.String("guild_id", config.GuildID),
@@ -1193,6 +1222,40 @@ func toolProgressReporter(toolName string, onToolProgress func(string, string)) 
 		}
 		onToolProgress(toolName, status)
 	}
+}
+
+func toolExecutionFailureMessage(execErr error, payload any, content string) string {
+	if execErr != nil {
+		return security.RedactSecrets(strings.TrimSpace(execErr.Error()))
+	}
+	if message := toolPayloadFailureMessage(payload); message != "" {
+		return message
+	}
+	content = strings.TrimSpace(content)
+	if content == "" {
+		return ""
+	}
+	var decoded any
+	if err := json.Unmarshal([]byte(content), &decoded); err != nil {
+		return ""
+	}
+	return toolPayloadFailureMessage(decoded)
+}
+
+func toolPayloadFailureMessage(payload any) string {
+	switch typed := payload.(type) {
+	case map[string]any:
+		if value, ok := typed["error"]; ok {
+			if message := strings.TrimSpace(fmt.Sprint(value)); message != "" && message != "<nil>" {
+				return security.RedactSecrets(message)
+			}
+		}
+	case map[string]string:
+		if value := strings.TrimSpace(typed["error"]); value != "" {
+			return security.RedactSecrets(value)
+		}
+	}
+	return ""
 }
 
 type naturalStreamGate struct {
