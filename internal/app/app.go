@@ -50,6 +50,8 @@ type App struct {
 	scheduler  *scheduler.Service
 }
 
+const openRouterChatTimeout = 75 * time.Second
+
 type commandInstallIntentAdapter struct {
 	service *discordbot.InstallService
 }
@@ -355,6 +357,7 @@ func openRouterChatConfig(cfg config.Config) llm.OpenRouterConfig {
 		AppTitle:                       cfg.OpenRouterAppTitle,
 		ProviderOrder:                  cfg.OpenRouterProviderOrder,
 		AllowProviderFallbacks:         cfg.OpenRouterAllowProviderFallbacks,
+		Timeout:                        openRouterChatTimeout,
 		MaxRetries:                     2,
 		CircuitBreakerFailureThreshold: cfg.OpenRouterCircuitBreakerFailureThreshold,
 		CircuitBreakerCooldown:         cfg.OpenRouterCircuitBreakerCooldown,

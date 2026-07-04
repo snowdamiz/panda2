@@ -38,6 +38,9 @@ func TestOpenRouterClipDetectionConfigUsesDefaultProviderRouting(t *testing.T) {
 	if chatConfig.AllowProviderFallbacks {
 		t.Fatal("chat config should keep configured provider fallback setting")
 	}
+	if chatConfig.Timeout != openRouterChatTimeout {
+		t.Fatalf("chat config should use the extended chat timeout, got %s", chatConfig.Timeout)
+	}
 
 	clipConfig := openRouterClipDetectionConfig(cfg)
 	if len(clipConfig.ProviderOrder) != 0 {

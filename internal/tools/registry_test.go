@@ -117,7 +117,7 @@ func TestComposedToolManagerTimeoutAllowsNaturalDraftLLM(t *testing.T) {
 	if !ok {
 		t.Fatal("panda.manage_composed_tool not registered")
 	}
-	if definition.Timeout <= 30*time.Second {
+	if definition.Timeout <= 75*time.Second {
 		t.Fatalf("composed tool manager timeout %s must exceed the nested OpenRouter chat timeout", definition.Timeout)
 	}
 }
