@@ -29,6 +29,7 @@ import (
 )
 
 var ErrAssistantDisabled = errors.New("assistant is disabled for this guild")
+var ErrEmptyResponse = errors.New("assistant returned an empty response")
 
 type Service struct {
 	llm                   llm.Client
@@ -253,11 +254,12 @@ type chatOptions struct {
 }
 
 type completionOptions struct {
-	RequestID      string
-	NaturalGate    bool
-	OnRespond      func()
-	OnToolStart    func(string)
-	OnToolProgress func(string, string)
+	RequestID        string
+	NaturalGate      bool
+	ForceNaturalGate bool
+	OnRespond        func()
+	OnToolStart      func(string)
+	OnToolProgress   func(string, string)
 }
 
 func (s *Service) Ask(ctx context.Context, request AskRequest) (AskResponse, error) {
@@ -815,6 +817,17 @@ func (s *Service) completeWithToolsWithOptions(ctx context.Context, config store
 	if musicRuntimeMessage := musicRuntimeContextMessage(config.GuildID, toolContext, request.Tools, musicRuntime); musicRuntimeMessage != "" {
 		request.Messages = insertSystemBeforeLatestUser(request.Messages, musicRuntimeMessage)
 	}
+	if options.OnRespond != nil {
+		onRespond := options.OnRespond
+		responded := false
+		options.OnRespond = func() {
+			if responded {
+				return
+			}
+			responded = true
+			onRespond()
+		}
+	}
 
 	var confirmations []InteractionConfirmation
 	var card *ToolCard
@@ -827,15 +840,60 @@ func (s *Service) completeWithToolsWithOptions(ctx context.Context, config store
 	imageToolRoutingRetryUsed := false
 	musicCapabilityRetryUsed := false
 	youtubeSelectionRetryUsed := false
+	emptyResponseRetryUsed := false
+	naturalGateEmptyRetryPending := false
 	totalToolCalls := 0
+	retryEmptyResponse := func(response llm.ChatResponse, round int) (bool, error) {
+		if !assistantResponseNeedsVisiblePayloadRetry(response, card, generatedFiles, confirmations) {
+			return false, nil
+		}
+		if !emptyResponseRetryUsed {
+			emptyResponseRetryUsed = true
+			slog.Warn("assistant empty response retrying",
+				slog.String("guild_id", config.GuildID),
+				slog.String("channel_id", toolContext.ChannelID),
+				slog.String("request_id", toolContext.RequestID),
+				slog.String("user_id", toolContext.ActorID),
+				slog.Int("round", round),
+				slog.Bool("natural_gate", options.NaturalGate),
+			)
+			request.Messages = append(append([]llm.Message{}, request.Messages...), llm.Message{Role: "system", Content: emptyResponseRetryPrompt(options.NaturalGate)})
+			naturalGateEmptyRetryPending = options.NaturalGate
+			return true, nil
+		}
+		slog.Warn("assistant empty response after retry",
+			slog.String("guild_id", config.GuildID),
+			slog.String("channel_id", toolContext.ChannelID),
+			slog.String("request_id", toolContext.RequestID),
+			slog.String("user_id", toolContext.ActorID),
+			slog.Int("round", round),
+			slog.Bool("natural_gate", options.NaturalGate),
+		)
+		return false, ErrEmptyResponse
+	}
 
 	for round := 0; ; round++ {
-		response, silent, err := s.chatCompletionForRound(ctx, config, request, round, options)
+		roundOptions := options
+		roundOptions.ForceNaturalGate = naturalGateEmptyRetryPending
+		naturalGateEmptyRetryPending = false
+		response, silent, err := s.chatCompletionForRound(ctx, config, request, round, roundOptions)
 		if silent {
 			return response, confirmations, card, sourceLinks, generatedFiles, usageReservations, usedWebSearch, true, false, nil
 		}
-		if err != nil || s.toolExecutor == nil {
+		if err != nil {
 			return response, confirmations, card, sourceLinks, generatedFiles, usageReservations, usedWebSearch, false, false, err
+		}
+		if len(response.ToolCalls) == 0 {
+			emptyRetry, emptyErr := retryEmptyResponse(response, round)
+			if emptyRetry {
+				continue
+			}
+			if emptyErr != nil {
+				return response, confirmations, card, sourceLinks, generatedFiles, usageReservations, usedWebSearch, false, false, emptyErr
+			}
+		}
+		if s.toolExecutor == nil {
+			return response, confirmations, card, sourceLinks, generatedFiles, usageReservations, usedWebSearch, false, false, nil
 		}
 		if len(response.ToolCalls) == 0 {
 			if containsTextToolCallMarkup(response.Content) {
@@ -1102,7 +1160,7 @@ func (s *Service) completeWithToolsWithOptions(ctx context.Context, config store
 }
 
 func (s *Service) chatCompletionForRound(ctx context.Context, config store.GuildConfig, request llm.ChatRequest, round int, options completionOptions) (llm.ChatResponse, bool, error) {
-	if !options.NaturalGate || round > 0 {
+	if !options.NaturalGate || (round > 0 && !options.ForceNaturalGate) {
 		response, err := s.chatWithFallback(ctx, config, modelTaskResponse, options.RequestID, request)
 		return response, false, err
 	}
@@ -1181,10 +1239,25 @@ func (g *naturalStreamGate) Finalize(response llm.ChatResponse) (llm.ChatRespons
 		g.ignored = true
 		return response, true, nil
 	case strings.TrimSpace(content) == "":
-		return response, true, nil
+		return response, false, nil
 	default:
 		return response, true, fmt.Errorf("natural gate response missing %s or %s marker", naturalRespondMarker, naturalIgnoreMarker)
 	}
+}
+
+func assistantResponseNeedsVisiblePayloadRetry(response llm.ChatResponse, card *ToolCard, generatedFiles []generated.File, confirmations []InteractionConfirmation) bool {
+	return strings.TrimSpace(response.Content) == "" &&
+		len(response.ToolCalls) == 0 &&
+		card == nil &&
+		len(generatedFiles) == 0 &&
+		len(confirmations) == 0
+}
+
+func emptyResponseRetryPrompt(naturalGate bool) string {
+	if naturalGate {
+		return fmt.Sprintf("The previous assistant turn was empty. Decide again for this natural Discord message. If no response is needed, output exactly `%s` and stop. If a response is needed, begin with exactly `%s` on the first line, then write the user-facing answer. If a function tool is needed, call the tool directly. Do not return empty content.", naturalIgnoreMarker, naturalRespondMarker)
+	}
+	return "The previous assistant turn was empty. Return a concise user-visible answer, request a needed tool, or explain why the request cannot be completed. Do not return empty content."
 }
 
 func (g *naturalStreamGate) evaluateBuffer(final bool) {

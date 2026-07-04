@@ -1025,6 +1025,65 @@ func TestChatNaturalMessageStreamsGateAndStripsMarker(t *testing.T) {
 	}
 }
 
+func TestChatNaturalMessageRetriesEmptyGateResponse(t *testing.T) {
+	ctx := context.Background()
+	client := &fakeClient{responses: []llm.ChatResponse{
+		{Model: "fixture/model"},
+		{Model: "fixture/model", Content: naturalRespondMarker + "\nI'll post the rules panel."},
+	}}
+	service, _ := newTestService(t, client)
+	respondStarted := 0
+
+	response, err := service.ChatNaturalMessage(ctx, AskRequest{
+		GuildID:      "guild-1",
+		UserID:       "user-1",
+		ChannelID:    "channel-1",
+		Question:     "panda add a rules message",
+		BotMentioned: true,
+	}, func() {
+		respondStarted++
+	})
+	if err != nil {
+		t.Fatalf("ChatNaturalMessage: %v", err)
+	}
+	if response.Silent || response.Content != "I'll post the rules panel." {
+		t.Fatalf("unexpected natural response after empty retry: %+v", response)
+	}
+	if respondStarted != 1 {
+		t.Fatalf("expected one streamed response start, got %d", respondStarted)
+	}
+	if len(client.requests) != 2 {
+		t.Fatalf("expected retry after empty response, got %d request(s)", len(client.requests))
+	}
+	retryMessages := joinMessages(client.requests[1].Messages)
+	if !strings.Contains(retryMessages, "previous assistant turn was empty") || !strings.Contains(retryMessages, naturalRespondMarker) || !strings.Contains(retryMessages, naturalIgnoreMarker) {
+		t.Fatalf("retry prompt missing natural gate instructions:\n%s", retryMessages)
+	}
+}
+
+func TestChatNaturalMessageRepeatedEmptyGateResponseReturnsError(t *testing.T) {
+	ctx := context.Background()
+	client := &fakeClient{responses: []llm.ChatResponse{
+		{Model: "fixture/model"},
+		{Model: "fixture/model"},
+	}}
+	service, _ := newTestService(t, client)
+
+	_, err := service.ChatNaturalMessage(ctx, AskRequest{
+		GuildID:      "guild-1",
+		UserID:       "user-1",
+		ChannelID:    "channel-1",
+		Question:     "panda add a rules message",
+		BotMentioned: true,
+	}, nil)
+	if !errors.Is(err, ErrEmptyResponse) {
+		t.Fatalf("expected ErrEmptyResponse, got %v", err)
+	}
+	if len(client.requests) != 2 {
+		t.Fatalf("expected exactly one empty response retry, got %d request(s)", len(client.requests))
+	}
+}
+
 func TestChatNaturalMessageGateTreatsDirectCasualSummonAsResponseWorthy(t *testing.T) {
 	ctx := context.Background()
 	client := &fakeClient{response: llm.ChatResponse{Content: naturalRespondMarker + "\nYo, I'm here."}}
@@ -1298,9 +1357,12 @@ func TestChatNaturalMessageDeclinesWhenPandaIsDiscussedNotAddressed(t *testing.T
 	}
 }
 
-func TestChatNaturalMessageRespondMarkerWithoutAnswerIsNotSilent(t *testing.T) {
+func TestChatNaturalMessageRespondMarkerWithoutAnswerRetries(t *testing.T) {
 	ctx := context.Background()
-	client := &fakeClient{response: llm.ChatResponse{Content: naturalRespondMarker}}
+	client := &fakeClient{responses: []llm.ChatResponse{
+		{Content: naturalRespondMarker},
+		{Content: naturalRespondMarker + "\nYep, I'm here."},
+	}}
 	service, _ := newTestService(t, client)
 	respondStarted := 0
 
@@ -1315,11 +1377,14 @@ func TestChatNaturalMessageRespondMarkerWithoutAnswerIsNotSilent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ChatNaturalMessage: %v", err)
 	}
-	if response.Silent || response.Content != "" {
-		t.Fatalf("marker-only response should be empty but not silent, got %+v", response)
+	if response.Silent || response.Content != "Yep, I'm here." {
+		t.Fatalf("marker-only response should recover with visible content, got %+v", response)
 	}
 	if respondStarted != 1 {
 		t.Fatalf("respond marker should start response indicator once, got %d", respondStarted)
+	}
+	if len(client.requests) != 2 {
+		t.Fatalf("expected marker-only response retry, got %d request(s)", len(client.requests))
 	}
 }
 
