@@ -10,6 +10,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/sn0w/panda2/internal/billing"
 	"github.com/sn0w/panda2/internal/config"
 	"github.com/sn0w/panda2/internal/maintenance"
 	"github.com/sn0w/panda2/internal/observability"
@@ -44,7 +45,20 @@ func main() {
 	conversations := repository.NewConversationRepository(dataStore.DB)
 	attachments := repository.NewAttachmentRepository(dataStore.DB)
 	jobs := repository.NewJobRepository(dataStore.DB)
-	maintenanceService := maintenance.NewService(conversations, attachments, dataStore)
+	billingService := billing.NewService(repository.NewBillingRepository(dataStore.DB), billing.Config{
+		PublicURL:              cfg.PublicAppURL,
+		SolanaRPCURL:           cfg.SolanaRPCURL,
+		SolanaCluster:          cfg.SolanaCluster,
+		SolanaTreasuryWallet:   cfg.SolanaTreasuryWallet,
+		SolanaConfirmation:     cfg.SolanaConfirmation,
+		SolanaPlanLamports:     cfg.SolanaPlanLamports,
+		SolanaPackLamports:     cfg.SolanaPackLamports,
+		SolanaUSDCentsPerSOL:   cfg.SolanaUSDCentsPerSOL,
+		SolanaOrderExpiration:  cfg.SolanaOrderExpiration,
+		SolanaActivationKeyTTL: cfg.SolanaActivationKeyTTL,
+	})
+	maintenanceService := maintenance.NewService(conversations, attachments, dataStore).
+		WithCreditExpirer(billingService)
 	worker := queue.NewWorker(jobs, "panda-worker")
 	worker.Register("maintenance.cleanup", func(ctx context.Context, _ store.Job) error {
 		_, err := maintenanceService.Cleanup(ctx, time.Now().UTC())
