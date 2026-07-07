@@ -226,6 +226,9 @@ func (r *BillingRepository) BeginCreditReservation(ctx context.Context, request 
 		if err := releaseExpiredCreditReservationsTx(tx, request.GuildID, now); err != nil {
 			return err
 		}
+		if _, err := expireCreditGrantsTx(tx, request.GuildID, now); err != nil {
+			return err
+		}
 		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("guild_id = ?", request.GuildID).First(&account).Error; err != nil {
 			return err
 		}
@@ -443,53 +446,64 @@ func (r *BillingRepository) ExpireCreditGrants(ctx context.Context, now time.Tim
 	}
 	var expired int64
 	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		var grants []store.CreditGrant
-		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
-			Where("credits_remaining > 0 AND expires_at IS NOT NULL AND expires_at <= ?", now).
-			Find(&grants).Error; err != nil {
-			return err
-		}
-		for _, grant := range grants {
-			var account store.CreditAccount
-			if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id = ?", grant.AccountID).First(&account).Error; err != nil {
-				return err
-			}
-			credits := grant.CreditsRemaining
-			if err := tx.Model(&grant).Updates(map[string]any{
-				"credits_remaining": 0,
-				"updated_at":        now,
-			}).Error; err != nil {
-				return err
-			}
-			if err := tx.Model(&account).Updates(map[string]any{
-				"available_credits": gorm.Expr("CASE WHEN available_credits >= ? THEN available_credits - ? ELSE 0 END", credits, credits),
-				"depleted_at":       depletedAtExpression(now),
-				"updated_at":        now,
-			}).Error; err != nil {
-				return err
-			}
-			if err := tx.Where("id = ?", account.ID).First(&account).Error; err != nil {
-				return err
-			}
-			if err := createCreditLedgerEntry(tx, store.CreditLedgerEntry{
-				EntryID:      fmt.Sprintf("ledger_expiry_%s_%d", grant.GrantID, now.UnixNano()),
-				GuildID:      grant.GuildID,
-				AccountID:    grant.AccountID,
-				GrantID:      grant.GrantID,
-				Type:         "expiry",
-				Action:       "credit_expiry",
-				Credits:      -credits,
-				BalanceAfter: account.AvailableCredits,
-				MetadataJSON: `{"reason":"grant_expired"}`,
-				CreatedAt:    now,
-			}); err != nil {
-				return err
-			}
-			expired++
-		}
-		return nil
+		var err error
+		expired, err = expireCreditGrantsTx(tx, "", now)
+		return err
 	})
 	return expired, err
+}
+
+func expireCreditGrantsTx(tx *gorm.DB, guildID string, now time.Time) (int64, error) {
+	var grants []store.CreditGrant
+	query := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+		Where("credits_remaining > 0 AND expires_at IS NOT NULL AND expires_at <= ?", now)
+	if guildID = strings.TrimSpace(guildID); guildID != "" {
+		query = query.Where("guild_id = ?", guildID)
+	}
+	if err := query.Find(&grants).Error; err != nil {
+		return 0, err
+	}
+
+	var expired int64
+	for _, grant := range grants {
+		var account store.CreditAccount
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id = ?", grant.AccountID).First(&account).Error; err != nil {
+			return expired, err
+		}
+		credits := grant.CreditsRemaining
+		if err := tx.Model(&grant).Updates(map[string]any{
+			"credits_remaining": 0,
+			"updated_at":        now,
+		}).Error; err != nil {
+			return expired, err
+		}
+		if err := tx.Model(&account).Updates(map[string]any{
+			"available_credits": gorm.Expr("CASE WHEN available_credits >= ? THEN available_credits - ? ELSE 0 END", credits, credits),
+			"depleted_at":       depletedAtExpression(now),
+			"updated_at":        now,
+		}).Error; err != nil {
+			return expired, err
+		}
+		if err := tx.Where("id = ?", account.ID).First(&account).Error; err != nil {
+			return expired, err
+		}
+		if err := createCreditLedgerEntry(tx, store.CreditLedgerEntry{
+			EntryID:      fmt.Sprintf("ledger_expiry_%s_%d", grant.GrantID, now.UnixNano()),
+			GuildID:      grant.GuildID,
+			AccountID:    grant.AccountID,
+			GrantID:      grant.GrantID,
+			Type:         "expiry",
+			Action:       "credit_expiry",
+			Credits:      -credits,
+			BalanceAfter: account.AvailableCredits,
+			MetadataJSON: `{"reason":"grant_expired"}`,
+			CreatedAt:    now,
+		}); err != nil {
+			return expired, err
+		}
+		expired++
+	}
+	return expired, nil
 }
 
 func reserveCreditsFromGrantsTx(tx *gorm.DB, accountID uint, guildID string, credits int64, now time.Time) ([]creditAllocation, bool, error) {

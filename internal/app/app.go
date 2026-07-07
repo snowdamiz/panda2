@@ -194,7 +194,8 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 		WithAuditRecorder(audit).
 		WithBilling(billingService)
 	maintenanceService := maintenance.NewService(conversations, attachments, dataStore).
-		WithComposedTools(composedRepo)
+		WithComposedTools(composedRepo).
+		WithCreditExpirer(billingService)
 	worker := queue.NewWorker(jobs, "panda-main")
 	worker.Register("maintenance.cleanup", func(ctx context.Context, _ store.Job) error {
 		if _, err := maintenanceService.Cleanup(ctx, time.Now().UTC()); err != nil {

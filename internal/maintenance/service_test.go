@@ -23,7 +23,10 @@ func TestCleanupExpiresConversationsAndAttachments(t *testing.T) {
 	conversations := repository.NewConversationRepository(db.DB)
 	attachments := repository.NewAttachmentRepository(db.DB)
 	composedTools := repository.NewComposedToolRepository(db.DB)
-	service := NewService(conversations, attachments, db).WithComposedTools(composedTools)
+	creditExpirer := &fakeCreditExpirer{expired: 2}
+	service := NewService(conversations, attachments, db).
+		WithComposedTools(composedTools).
+		WithCreditExpirer(creditExpirer)
 
 	now := time.Date(2026, 6, 19, 12, 0, 0, 0, time.UTC)
 	conversation, err := conversations.GetOrCreateActive(ctx, repository.ConversationKey{
@@ -109,8 +112,11 @@ func TestCleanupExpiresConversationsAndAttachments(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Cleanup: %v", err)
 	}
-	if stats.ExpiredConversations != 1 || stats.CleanedAttachments != 1 || stats.DeletedComposedRuns != 1 || stats.DeletedComposedDedupe != 1 {
+	if stats.ExpiredConversations != 1 || stats.ExpiredCredits != 2 || stats.CleanedAttachments != 1 || stats.DeletedComposedRuns != 1 || stats.DeletedComposedDedupe != 1 {
 		t.Fatalf("unexpected cleanup stats: %+v", stats)
+	}
+	if !creditExpirer.calledAt.Equal(now) {
+		t.Fatalf("expected credit expirer called at cleanup time, got %s", creditExpirer.calledAt)
 	}
 	if _, err := os.Stat(tempPath); !os.IsNotExist(err) {
 		t.Fatalf("expected temp file removed, stat err=%v", err)
@@ -131,4 +137,14 @@ func TestCleanupExpiresConversationsAndAttachments(t *testing.T) {
 	if savedAttachment.CleanupDoneAt == nil || savedAttachment.TempPath != "" {
 		t.Fatalf("expected cleaned attachment, got %+v", savedAttachment)
 	}
+}
+
+type fakeCreditExpirer struct {
+	expired  int64
+	calledAt time.Time
+}
+
+func (f *fakeCreditExpirer) ExpireCredits(_ context.Context, now time.Time) (int64, error) {
+	f.calledAt = now
+	return f.expired, nil
 }

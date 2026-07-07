@@ -16,12 +16,18 @@ type Service struct {
 	conversations *repository.ConversationRepository
 	attachments   *repository.AttachmentRepository
 	composed      *repository.ComposedToolRepository
+	credits       CreditExpirer
 	store         *store.Store
 	removeFile    func(string) error
 }
 
+type CreditExpirer interface {
+	ExpireCredits(context.Context, time.Time) (int64, error)
+}
+
 type CleanupStats struct {
 	ExpiredConversations  int64
+	ExpiredCredits        int64
 	CleanedAttachments    int
 	DeletedComposedRuns   int64
 	DeletedComposedDedupe int64
@@ -46,18 +52,31 @@ func (s *Service) WithComposedTools(composed *repository.ComposedToolRepository)
 	return s
 }
 
+func (s *Service) WithCreditExpirer(credits CreditExpirer) *Service {
+	s.credits = credits
+	return s
+}
+
 func (s *Service) Cleanup(ctx context.Context, now time.Time) (CleanupStats, error) {
 	now = now.UTC()
 	expired, err := s.conversations.CloseExpired(ctx, now)
 	if err != nil {
 		return CleanupStats{}, err
 	}
+	stats := CleanupStats{ExpiredConversations: expired}
+
+	if s.credits != nil {
+		expiredCredits, err := s.credits.ExpireCredits(ctx, now)
+		if err != nil {
+			return stats, err
+		}
+		stats.ExpiredCredits = expiredCredits
+	}
 
 	due, err := s.attachments.DueForCleanup(ctx, now, 100)
 	if err != nil {
 		return CleanupStats{}, err
 	}
-	stats := CleanupStats{ExpiredConversations: expired}
 	for _, attachment := range due {
 		if attachment.TempPath != "" {
 			if err := s.removeFile(attachment.TempPath); err != nil && !errors.Is(err, os.ErrNotExist) {

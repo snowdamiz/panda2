@@ -1298,10 +1298,12 @@ func TestExecutorAllowsTrialMusicPlayback(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = dataStore.Close() })
 	billingService := billing.NewService(repository.NewBillingRepository(dataStore.DB), billing.Config{})
+	trialStart := time.Date(2026, 6, 22, 12, 0, 0, 0, time.UTC)
+	billingService.SetClock(func() time.Time { return trialStart.Add(time.Hour) })
 	if _, err := billingService.EnsureTrial(ctx, billing.TrialSeed{
 		GuildID:            "guild-1",
 		BillingOwnerUserID: "owner-1",
-		AuthorizedAt:       time.Date(2026, 6, 22, 12, 0, 0, 0, time.UTC),
+		AuthorizedAt:       trialStart,
 	}); err != nil {
 		t.Fatalf("EnsureTrial: %v", err)
 	}

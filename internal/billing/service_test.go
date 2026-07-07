@@ -57,6 +57,45 @@ func TestEnsureTrialMetersCreditsAndDeniesOverBalance(t *testing.T) {
 	}
 }
 
+func TestBeginUsageExpiresGrantBeforeReservation(t *testing.T) {
+	ctx := context.Background()
+	service, database := newBillingTestService(t)
+	defer database.Close()
+
+	now := time.Date(2026, 6, 21, 12, 0, 0, 0, time.UTC)
+	service.SetClock(func() time.Time { return now })
+
+	if _, err := service.EnsureTrial(ctx, TrialSeed{
+		GuildID:            "guild-1",
+		BillingOwnerUserID: "owner-1",
+		AuthorizedAt:       now,
+	}); err != nil {
+		t.Fatalf("EnsureTrial: %v", err)
+	}
+
+	now = now.Add(TrialDuration + time.Minute)
+	_, err := service.BeginCreditUsage(ctx, "guild-1", CreditQuote{
+		Action:          ActionAssistantModelRound,
+		ExpectedCredits: 4,
+		MaxCredits:      4,
+	})
+	var creditErr CreditError
+	if !errors.As(err, &creditErr) {
+		t.Fatalf("expected CreditError after grant expiry, got %T %v", err, err)
+	}
+	if creditErr.AvailableCredits != 0 || creditErr.RequiredCredits != 4 {
+		t.Fatalf("expired grants should refresh reported availability, got %+v", creditErr)
+	}
+
+	entitlement, err := service.Resolve(ctx, "guild-1")
+	if err != nil {
+		t.Fatalf("Resolve after expiry: %v", err)
+	}
+	if entitlement.AvailableCredits != 0 || entitlement.CanUsePaidFeatures || !entitlement.ReadOnly || entitlement.Status != StatusDepleted {
+		t.Fatalf("expected depleted entitlement after grant expiry, got %+v", entitlement)
+	}
+}
+
 func TestSolPaymentOrderVerificationRevealAndActivation(t *testing.T) {
 	ctx := context.Background()
 	service, database := newBillingTestService(t)
