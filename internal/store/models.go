@@ -742,6 +742,7 @@ type BillingOrder struct {
 	Status                       string     `gorm:"index;not null;size:32"`
 	Cluster                      string     `gorm:"index;not null;size:32"`
 	ConfirmationThreshold        string     `gorm:"not null;size:16"`
+	SubmittedSignature           string     `gorm:"column:submitted_transaction_signature;uniqueIndex:idx_billing_orders_submitted_signature,where:submitted_transaction_signature <> '';not null;default:'';size:128"`
 	VerifiedTransactionSignature string     `gorm:"uniqueIndex:idx_billing_orders_verified_signature,where:verified_transaction_signature <> '';not null;default:'';size:128"`
 	VerifiedAt                   *time.Time `gorm:"index"`
 	ActivationKeyRevealedAt      *time.Time `gorm:"index"`

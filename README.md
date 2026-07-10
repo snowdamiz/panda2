@@ -40,7 +40,7 @@ Implementation planning for full Discord server setup automation lives in [Disco
 
 The billing owner purchases from the Panda landing page:
 
-- Connect a Solana wallet from a browser extension, or open the Solana Pay link in a mobile wallet.
+- Connect a Solana wallet through a Wallet Standard-compatible browser extension.
 - Panda creates a server-side payment order with the exact pack, credits, treasury wallet, native SOL amount, memo, reference, and expiration.
 - After the transaction is verified, the landing page reveals a one-time activation key.
 - Run `/billing action:activate api_key:<key>` in the Discord server to grant the pack credits.
@@ -55,9 +55,9 @@ The production path has three separate identities: the wallet payer, the Discord
 2. Panda creates a trial for the Discord server. Members can use Panda within trial limits after admins finish setup.
 3. When the server needs more paid usage, the billing owner opens the landing page and chooses a pack.
 4. The landing page calls the Panda API to create a SOL payment order. The API returns the exact pack, credits, lamports, treasury wallet, memo/reference, cluster, and expiration.
-5. The payer connects a Solana wallet through Wallet Standard-compatible extension discovery, or opens the Solana Pay/mobile wallet link.
-6. The wallet signs and sends the exact native SOL transfer. The landing page submits the resulting transaction signature to Panda.
-7. Panda verifies the transaction server-side against Solana RPC. It must match the treasury wallet, native SOL amount, memo/reference, order, guild, pack, expiration, and confirmation threshold.
+5. The payer connects a Solana wallet through Wallet Standard-compatible extension discovery.
+6. Panda builds the exact native SOL transfer, the wallet signs it, and the backend submits it through Solana RPC.
+7. Panda tracks the submitted signature and verifies the finalized transaction server-side. It must match the treasury wallet, native SOL amount, memo/reference, order, guild, pack, expiration, and confirmation threshold.
 8. After verification, the landing page reveals a one-time activation key. The key is displayed once, stored only as a hash, scoped to the payment order, and can be revoked before use.
 9. The billing owner, a guild admin claiming an unclaimed server, or a Panda operator runs `/billing action:activate api_key:<key>` in Discord.
 10. Panda consumes the key atomically, records the SOL payment event, grants the pack credits once, and marks the order activated.

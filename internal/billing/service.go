@@ -8,6 +8,7 @@ import (
 	"math"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/sn0w/panda2/internal/repository"
@@ -38,11 +39,30 @@ type Config struct {
 }
 
 type Service struct {
-	repo   *repository.BillingRepository
-	audit  *repository.AuditRepository
-	cfg    Config
-	solana SolanaRPCClient
-	now    func() time.Time
+	repo                 *repository.BillingRepository
+	audit                *repository.AuditRepository
+	cfg                  Config
+	solana               SolanaRPCClient
+	now                  func() time.Time
+	solSubmissionLocks   [64]sync.Mutex
+	solVerificationLocks [64]sync.Mutex
+}
+
+func (s *Service) solSubmissionLock(orderID string) *sync.Mutex {
+	return solOrderLock(&s.solSubmissionLocks, orderID)
+}
+
+func (s *Service) solVerificationLock(orderID string) *sync.Mutex {
+	return solOrderLock(&s.solVerificationLocks, orderID)
+}
+
+func solOrderLock(locks *[64]sync.Mutex, orderID string) *sync.Mutex {
+	hash := uint32(2166136261)
+	for index := 0; index < len(orderID); index++ {
+		hash ^= uint32(orderID[index])
+		hash *= 16777619
+	}
+	return &locks[hash%uint32(len(locks))]
 }
 
 type TrialSeed struct {

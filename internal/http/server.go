@@ -1636,6 +1636,9 @@ func (s *Server) submitSolPaymentTransaction(c *fiber.Ctx) error {
 			return writeSolBillingError(c, err)
 		}
 	}
+	if result.FailureCode == "pending_confirmation" {
+		return c.Status(fiber.StatusAccepted).JSON(result)
+	}
 	return c.JSON(result)
 }
 

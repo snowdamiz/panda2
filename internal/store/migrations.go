@@ -2128,6 +2128,14 @@ var migrations = []Migration{
 			`CREATE UNIQUE INDEX IF NOT EXISTS idx_onboarding_sessions_flow_user ON onboarding_sessions(flow_id, user_id)`,
 		},
 	},
+	{
+		Version: 42,
+		Name:    "bind_submitted_sol_transactions",
+		SQL: []string{
+			`ALTER TABLE billing_orders ADD COLUMN submitted_transaction_signature TEXT NOT NULL DEFAULT ''`,
+			`CREATE UNIQUE INDEX IF NOT EXISTS idx_billing_orders_submitted_signature ON billing_orders(submitted_transaction_signature) WHERE submitted_transaction_signature <> ''`,
+		},
+	},
 }
 
 func RunMigrations(db *gorm.DB) error {

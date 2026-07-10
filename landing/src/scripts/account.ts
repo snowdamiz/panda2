@@ -22,6 +22,13 @@ export type AccountBillingOrder = {
   status: string;
   expires_at?: string;
   updated_at?: string;
+  submitted_transaction_signature?: string;
+};
+
+type AccountPaymentVerification = {
+  order: AccountBillingOrder;
+  verified: boolean;
+  failure_code?: string;
 };
 
 export type AccountUsageMetric = {
@@ -58,6 +65,7 @@ export type StoredBillingOrder = {
   amount_sol: string;
   status: string;
   expires_at: string;
+  submitted_transaction_signature: string;
   updatedAt: string;
 };
 
@@ -124,6 +132,7 @@ export const readStoredBillingOrder = (): StoredBillingOrder | null => {
       amount_sol: order.amount_sol || '',
       status: order.status,
       expires_at: order.expires_at || '',
+      submitted_transaction_signature: order.submitted_transaction_signature || '',
       updatedAt: order.updatedAt || new Date().toISOString(),
     };
   } catch {
@@ -151,6 +160,7 @@ export const rememberBillingOrder = (order: AccountBillingOrder): StoredBillingO
   const status = stringValue(order.status);
   if (!orderID || !status) return null;
 
+  const previous = readStoredBillingOrder();
   const snapshot: StoredBillingOrder = {
     order_id: orderID,
     pack: stringValue(order.pack),
@@ -158,6 +168,8 @@ export const rememberBillingOrder = (order: AccountBillingOrder): StoredBillingO
     amount_sol: stringValue(order.amount_sol),
     status,
     expires_at: stringValue(order.expires_at),
+    submitted_transaction_signature: stringValue(order.submitted_transaction_signature) ||
+      (previous?.order_id === orderID ? previous.submitted_transaction_signature : ''),
     updatedAt: stringValue(order.updated_at) || new Date().toISOString(),
   };
   window.localStorage.setItem(billingOrderStorageKey, JSON.stringify(snapshot));
@@ -431,7 +443,15 @@ class WalletAccountController {
     if (!storedOrder) return;
 
     try {
-      const order = await requestJSON<AccountBillingOrder>(this.apiURL(`/billing/sol/orders/${encodeURIComponent(storedOrder.order_id)}`));
+      let order = await requestJSON<AccountBillingOrder>(this.apiURL(`/billing/sol/orders/${encodeURIComponent(storedOrder.order_id)}`));
+      const signature = order.submitted_transaction_signature || storedOrder.submitted_transaction_signature;
+      if (order.status === 'pending' && signature) {
+        const verification = await requestJSON<AccountPaymentVerification>(
+          this.apiURL(`/billing/sol/orders/${encodeURIComponent(storedOrder.order_id)}/verify`),
+          { method: 'POST', body: JSON.stringify({ signature }) },
+        );
+        order = verification.order;
+      }
       this.renderPaymentOrder(rememberBillingOrder(order));
       this.setStatus('Payment status refreshed.');
     } catch (error) {
