@@ -122,11 +122,12 @@ func TestInstallServiceRecordsGatewayGuildAndStartsTrial(t *testing.T) {
 	}
 	defer db.Close()
 
+	joinedAt := time.Date(2026, 6, 24, 19, 0, 0, 0, time.UTC)
 	guilds := repository.NewGuildRepository(db.DB)
 	billingService := billing.NewService(repository.NewBillingRepository(db.DB), billing.Config{})
+	billingService.SetClock(func() time.Time { return joinedAt })
 	service := NewInstallService(guilds, repository.NewAuditRepository(db.DB)).
 		WithBilling(billingService)
-	joinedAt := time.Date(2026, 6, 24, 19, 0, 0, 0, time.UTC)
 	guildID := snowflake.MustParse("1489749058179432480")
 	ownerID := snowflake.MustParse("100000000000000001")
 
