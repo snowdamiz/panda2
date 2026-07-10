@@ -13,6 +13,7 @@ type PaymentOrder = {
   cluster: string;
   status: string;
   expires_at: string;
+  submitted_transaction_signature?: string;
 };
 
 type VerificationResult = {
@@ -169,7 +170,10 @@ class SolPaymentController {
         this.apiURL(`/billing/sol/orders/${prepared.order.order_id}/submit`),
         bytesToBase64(signedTransaction),
       );
-      this.setOrder(result.order);
+      this.setOrder({
+        ...result.order,
+        submitted_transaction_signature: result.submitted_signature || result.order.submitted_transaction_signature,
+      });
       if (result.verified) {
         await this.revealActivationKey();
         return;
@@ -223,8 +227,9 @@ class SolPaymentController {
       this.setStatus('Payment was submitted. Panda is waiting for confirmation.');
       return;
     }
-    for (let attempt = 0; attempt < 5; attempt += 1) {
-      await delay(2200);
+    const delays = [2000, 4000, 8000, 16000, 30000];
+    for (const wait of delays) {
+      await delay(wait);
       const result = await requestVerification(this.apiURL(`/billing/sol/orders/${this.order.order_id}/verify`), signature);
       this.setOrder(result.order);
       if (result.verified) {
@@ -235,7 +240,7 @@ class SolPaymentController {
         throw new Error(verificationMessage(result));
       }
     }
-    this.setStatus('Payment submitted. Panda is still waiting for chain confirmation.');
+    this.setStatus('Payment submitted. Final confirmation is taking longer than usual; use Refresh payment status on your account page.');
   }
 
   private async revealActivationKey() {

@@ -74,7 +74,15 @@ func TestBeginUsageExpiresGrantBeforeReservation(t *testing.T) {
 	}
 
 	now = now.Add(TrialDuration + time.Minute)
-	_, err := service.BeginCreditUsage(ctx, "guild-1", CreditQuote{
+	entitlement, err := service.Resolve(ctx, "guild-1")
+	if err != nil {
+		t.Fatalf("Resolve after expiry: %v", err)
+	}
+	if entitlement.AvailableCredits != 0 || entitlement.CanUsePaidFeatures || !entitlement.ReadOnly || entitlement.Status != StatusDepleted {
+		t.Fatalf("expected depleted entitlement after grant expiry, got %+v", entitlement)
+	}
+
+	_, err = service.BeginCreditUsage(ctx, "guild-1", CreditQuote{
 		Action:          ActionAssistantModelRound,
 		ExpectedCredits: 4,
 		MaxCredits:      4,
@@ -85,14 +93,6 @@ func TestBeginUsageExpiresGrantBeforeReservation(t *testing.T) {
 	}
 	if creditErr.AvailableCredits != 0 || creditErr.RequiredCredits != 4 {
 		t.Fatalf("expired grants should refresh reported availability, got %+v", creditErr)
-	}
-
-	entitlement, err := service.Resolve(ctx, "guild-1")
-	if err != nil {
-		t.Fatalf("Resolve after expiry: %v", err)
-	}
-	if entitlement.AvailableCredits != 0 || entitlement.CanUsePaidFeatures || !entitlement.ReadOnly || entitlement.Status != StatusDepleted {
-		t.Fatalf("expected depleted entitlement after grant expiry, got %+v", entitlement)
 	}
 }
 
@@ -115,13 +115,14 @@ func TestSolPaymentOrderVerificationRevealAndActivation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateSolPaymentOrder: %v", err)
 	}
-	if order.ExpectedLamports != 49_000_000 || order.DestinationWallet != "treasury-wallet" || order.Reference == "" || order.PaymentURL != "" {
+	if order.ExpectedLamports != 49_000_000 || order.DestinationWallet != "treasury-wallet" || order.Reference == "" {
 		t.Fatalf("unexpected order view: %+v", order)
 	}
 	if order.GuildID != "" {
 		t.Fatalf("account-level payment order should not be guild-bound before activation: %+v", order)
 	}
 
+	bindSubmittedSignature(t, service, order.OrderID, "sig-1")
 	service.WithSolanaRPCClient(fakeSolanaRPCClient{transaction: verifiedTransaction(order, "payer-wallet", 50_000_000)})
 	result, err := service.VerifySolPayment(ctx, VerifySolPaymentRequest{OrderID: order.OrderID, Signature: "sig-1"})
 	if err != nil {
@@ -195,6 +196,7 @@ func TestSolVerificationRejectsWrongWalletAndKeepsOrderClosed(t *testing.T) {
 	}
 	bad := order
 	bad.DestinationWallet = "wrong-wallet"
+	bindSubmittedSignature(t, service, order.OrderID, "sig-wrong-wallet")
 	service.WithSolanaRPCClient(fakeSolanaRPCClient{transaction: verifiedTransaction(bad, "payer-wallet", 19_000_000)})
 
 	result, err := service.VerifySolPayment(ctx, VerifySolPaymentRequest{OrderID: order.OrderID, Signature: "sig-wrong-wallet"})
@@ -232,6 +234,7 @@ func TestActivationKeyRevocationIsOperatorOnlyAndAudited(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateSolPaymentOrder: %v", err)
 	}
+	bindSubmittedSignature(t, service, order.OrderID, "sig-revoked")
 	service.WithSolanaRPCClient(fakeSolanaRPCClient{transaction: verifiedTransaction(order, "payer-wallet", 99_000_000)})
 	if _, err := service.VerifySolPayment(ctx, VerifySolPaymentRequest{OrderID: order.OrderID, Signature: "sig-revoked"}); err != nil {
 		t.Fatalf("VerifySolPayment: %v", err)
@@ -426,11 +429,13 @@ func TestPaidCouponOrderVerifiesDueLamports(t *testing.T) {
 	if order.DueLamports != 39_000_000 {
 		t.Fatalf("expected discounted due lamports, got %+v", order)
 	}
+	bindSubmittedSignature(t, service, order.OrderID, "sig-underpay")
 	service.WithSolanaRPCClient(fakeSolanaRPCClient{transaction: verifiedTransaction(order, "payer-wallet", 38_999_999)})
 	if _, err := service.VerifySolPayment(ctx, VerifySolPaymentRequest{OrderID: order.OrderID, Signature: "sig-underpay"}); !errors.Is(err, ErrSolPaymentVerificationFailed) {
 		t.Fatalf("expected underpay failure against due amount, got %v", err)
 	}
 
+	bindSubmittedSignature(t, service, order.OrderID, "sig-discounted")
 	service.WithSolanaRPCClient(fakeSolanaRPCClient{transaction: verifiedTransaction(order, "payer-wallet", 39_000_000)})
 	result, err := service.VerifySolPayment(ctx, VerifySolPaymentRequest{OrderID: order.OrderID, Signature: "sig-discounted"})
 	if err != nil {
@@ -461,8 +466,7 @@ func TestServerPreparedSolTransactionAndSubmission(t *testing.T) {
 			Blockhash:            "11111111111111111111111111111111",
 			LastValidBlockHeight: 12345,
 		},
-		sentSignature: "sig-server-submitted",
-		transaction:   verifiedTransaction(order, "2gRg3JMJkJkWb85fh3RqNCQgbmGYRpa1Gk5o84Y84ve1", 19_000_000),
+		transaction: verifiedTransaction(order, "2gRg3JMJkJkWb85fh3RqNCQgbmGYRpa1Gk5o84Y84ve1", 19_000_000),
 	}
 	service.WithSolanaRPCClient(rpc)
 
@@ -473,22 +477,65 @@ func TestServerPreparedSolTransactionAndSubmission(t *testing.T) {
 	if err != nil {
 		t.Fatalf("PrepareSolPaymentTransaction: %v", err)
 	}
-	if prepared.Transaction == "" || prepared.LastValidBlockHeight != 12345 || prepared.Order.PaymentURL != "" {
+	if prepared.Transaction == "" || prepared.LastValidBlockHeight != 12345 {
 		t.Fatalf("unexpected prepared transaction: %+v", prepared)
 	}
 	if _, err := base64.StdEncoding.DecodeString(prepared.Transaction); err != nil {
 		t.Fatalf("prepared transaction should be base64: %v", err)
 	}
+	signedTransaction, submittedSignature := signPreparedTransaction(t, prepared.Transaction)
+	sendCalls := 0
+	rpc.sentSignature = submittedSignature
+	rpc.sendCalls = &sendCalls
+	service.WithSolanaRPCClient(rpc)
 
 	result, err := service.SubmitSolPaymentTransaction(ctx, SubmitSolPaymentTransactionRequest{
 		OrderID:           order.OrderID,
-		SignedTransaction: prepared.Transaction,
+		SignedTransaction: signedTransaction,
 	})
 	if err != nil {
 		t.Fatalf("SubmitSolPaymentTransaction: %v result=%+v", err, result)
 	}
-	if !result.Verified || result.SubmittedSignature != "sig-server-submitted" {
+	if result.Verified || result.SubmittedSignature != submittedSignature || result.FailureCode != "pending_confirmation" {
 		t.Fatalf("unexpected submit result: %+v", result)
+	}
+	result, err = service.SubmitSolPaymentTransaction(ctx, SubmitSolPaymentTransactionRequest{
+		OrderID:           order.OrderID,
+		SignedTransaction: signedTransaction,
+	})
+	if err != nil || result.SubmittedSignature != submittedSignature || sendCalls != 1 {
+		t.Fatalf("duplicate submission should reuse the recorded signature without another RPC call: err=%v calls=%d result=%+v", err, sendCalls, result)
+	}
+	result, err = service.VerifySolPayment(ctx, VerifySolPaymentRequest{OrderID: order.OrderID, Signature: submittedSignature})
+	if err != nil || !result.Verified {
+		t.Fatalf("VerifySolPayment submitted transaction: err=%v result=%+v", err, result)
+	}
+}
+
+func TestSolVerificationWaitsForCommitmentBeforeFetchingTransaction(t *testing.T) {
+	ctx := context.Background()
+	service, database := newBillingTestService(t)
+	defer database.Close()
+
+	order, err := service.CreateSolPaymentOrder(ctx, CreateSolPaymentOrderRequest{GuildID: "guild-1", Plan: PackStarter})
+	if err != nil {
+		t.Fatalf("CreateSolPaymentOrder: %v", err)
+	}
+	bindSubmittedSignature(t, service, order.OrderID, "sig-pending")
+	statusCalls := 0
+	transactionCalls := 0
+	service.WithSolanaRPCClient(fakeSolanaRPCClient{
+		signatureStatus:  SolanaSignatureStatus{ConfirmationStatus: "confirmed"},
+		statusCalls:      &statusCalls,
+		transactionCalls: &transactionCalls,
+	})
+
+	result, err := service.VerifySolPayment(ctx, VerifySolPaymentRequest{OrderID: order.OrderID, Signature: "sig-pending"})
+	if !errors.Is(err, ErrSolPaymentVerificationFailed) || result.FailureCode != "pending_confirmation" {
+		t.Fatalf("expected pending finalized confirmation, got err=%v result=%+v", err, result)
+	}
+	if statusCalls != 1 || transactionCalls != 0 {
+		t.Fatalf("expected one status RPC and no full transaction fetch, got status=%d transaction=%d", statusCalls, transactionCalls)
 	}
 }
 
@@ -521,7 +568,7 @@ func TestFreeCouponOrderRevealsAndActivatesWithoutSolana(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateSolPaymentOrder free coupon: %v", err)
 	}
-	if order.DueLamports != 0 || order.Status != SolOrderStatusVerified || order.DestinationWallet != "" || order.PaymentURL != "" {
+	if order.DueLamports != 0 || order.Status != SolOrderStatusVerified || order.DestinationWallet != "" {
 		t.Fatalf("unexpected free coupon order: %+v", order)
 	}
 	reveal, err := service.RevealActivationKey(ctx, order.OrderID)
@@ -619,14 +666,57 @@ func newBillingTestService(t *testing.T) (*Service, *storepkg.Store) {
 }
 
 type fakeSolanaRPCClient struct {
-	transaction     SolanaTransaction
-	latestBlockhash SolanaLatestBlockhash
-	sentSignature   string
-	err             error
-	sendErr         error
+	transaction      SolanaTransaction
+	signatureStatus  SolanaSignatureStatus
+	latestBlockhash  SolanaLatestBlockhash
+	sentSignature    string
+	err              error
+	sendErr          error
+	sendCalls        *int
+	statusCalls      *int
+	transactionCalls *int
+}
+
+func bindSubmittedSignature(t *testing.T, service *Service, orderID, signature string) {
+	t.Helper()
+	if err := service.repo.UpdateBillingOrder(t.Context(), orderID, map[string]any{"submitted_transaction_signature": signature}); err != nil {
+		t.Fatalf("bind submitted transaction signature: %v", err)
+	}
+}
+
+func signPreparedTransaction(t *testing.T, transaction string) (string, string) {
+	t.Helper()
+	decoded, err := base64.StdEncoding.DecodeString(transaction)
+	if err != nil {
+		t.Fatalf("decode prepared transaction: %v", err)
+	}
+	count, offset, err := readCompactLength(decoded)
+	if err != nil || count != 1 || len(decoded) < offset+64 {
+		t.Fatalf("unexpected prepared transaction signature layout: count=%d offset=%d err=%v", count, offset, err)
+	}
+	for index := 0; index < 64; index++ {
+		decoded[offset+index] = byte(index + 1)
+	}
+	return base64.StdEncoding.EncodeToString(decoded), encodeBase58(decoded[offset : offset+64])
+}
+
+func (f fakeSolanaRPCClient) GetSignatureStatus(context.Context, string) (SolanaSignatureStatus, error) {
+	if f.statusCalls != nil {
+		*f.statusCalls++
+	}
+	if f.err != nil {
+		return SolanaSignatureStatus{}, f.err
+	}
+	if f.signatureStatus.ConfirmationStatus != "" || f.signatureStatus.Err != nil {
+		return f.signatureStatus, nil
+	}
+	return SolanaSignatureStatus{ConfirmationStatus: "finalized"}, nil
 }
 
 func (f fakeSolanaRPCClient) GetTransaction(context.Context, string, string) (SolanaTransaction, error) {
+	if f.transactionCalls != nil {
+		*f.transactionCalls++
+	}
 	if f.err != nil {
 		return SolanaTransaction{}, f.err
 	}
@@ -644,6 +734,9 @@ func (f fakeSolanaRPCClient) GetLatestBlockhash(context.Context, string) (Solana
 }
 
 func (f fakeSolanaRPCClient) SendTransaction(context.Context, string, string) (string, error) {
+	if f.sendCalls != nil {
+		*f.sendCalls++
+	}
 	if f.sendErr != nil {
 		return "", f.sendErr
 	}

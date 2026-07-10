@@ -3564,7 +3564,20 @@ func (r *Router) checkAIUsageAvailable(ctx context.Context, request Request) Res
 	entitlement, err := r.billing.Resolve(ctx, request.GuildID)
 	if err == nil {
 		if !entitlement.CanUsePaidFeatures || entitlement.ReadOnly {
-			err = billing.ErrReadOnly
+			if entitlement.Depleted() {
+				err = billing.CreditError{
+					Action:           quote.Action,
+					Used:             entitlement.Pack.Credits - entitlement.AvailableCredits,
+					Reserved:         entitlement.ReservedCredits,
+					Limit:            entitlement.Pack.Credits,
+					Pack:             entitlement.Pack.Pack,
+					RequiredCredits:  quote.MaxCredits,
+					AvailableCredits: entitlement.AvailableCredits,
+					UpgradeURL:       entitlement.UpgradeURL,
+				}
+			} else {
+				err = billing.ErrReadOnly
+			}
 		} else if entitlement.AvailableCredits < quote.MaxCredits {
 			err = billing.CreditError{
 				Action:           quote.Action,

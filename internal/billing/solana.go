@@ -43,6 +43,8 @@ const (
 	CouponRedemptionStatusPending  = "pending"
 	CouponRedemptionStatusConsumed = "consumed"
 	CouponRedemptionStatusReleased = "released"
+
+	maxSolanaTransactionBytes = 1232
 )
 
 var (
@@ -98,7 +100,7 @@ type SolPaymentOrderView struct {
 	Cluster                      string    `json:"cluster"`
 	ConfirmationThreshold        string    `json:"confirmation_threshold"`
 	Status                       string    `json:"status"`
-	PaymentURL                   string    `json:"payment_url"`
+	SubmittedSignature           string    `json:"submitted_transaction_signature,omitempty"`
 	VerifiedTransactionSignature string    `json:"verified_transaction_signature,omitempty"`
 	ExpiresAt                    time.Time `json:"expires_at"`
 	CreatedAt                    time.Time `json:"created_at"`
@@ -237,6 +239,7 @@ type CouponView struct {
 }
 
 type SolanaRPCClient interface {
+	GetSignatureStatus(ctx context.Context, signature string) (SolanaSignatureStatus, error)
 	GetTransaction(ctx context.Context, signature string, commitment string) (SolanaTransaction, error)
 	GetLatestBlockhash(ctx context.Context, commitment string) (SolanaLatestBlockhash, error)
 	SendTransaction(ctx context.Context, signedTransaction string, commitment string) (string, error)
@@ -252,6 +255,29 @@ type SolanaLatestBlockhash struct {
 	LastValidBlockHeight uint64
 }
 
+type SolanaSignatureStatus struct {
+	ConfirmationStatus string `json:"confirmationStatus"`
+	Err                any    `json:"err"`
+}
+
+func confirmationAtLeast(actual, required string) bool {
+	rank := func(commitment string) int {
+		switch strings.ToLower(strings.TrimSpace(commitment)) {
+		case "processed":
+			return 1
+		case "confirmed":
+			return 2
+		case "finalized":
+			return 3
+		default:
+			return 0
+		}
+	}
+	actualRank := rank(actual)
+	requiredRank := rank(required)
+	return actualRank > 0 && requiredRank > 0 && actualRank >= requiredRank
+}
+
 func NewHTTPSolanaRPCClient(endpoint string) *HTTPSolanaRPCClient {
 	return &HTTPSolanaRPCClient{
 		endpoint: strings.TrimSpace(endpoint),
@@ -263,12 +289,16 @@ func (c *HTTPSolanaRPCClient) GetTransaction(ctx context.Context, signature stri
 	if c == nil || strings.TrimSpace(c.endpoint) == "" {
 		return SolanaTransaction{}, ErrSolPaymentsNotConfigured
 	}
+	signature = strings.TrimSpace(signature)
+	if _, err := decodeBase58Fixed(signature, 64); err != nil {
+		return SolanaTransaction{}, fmt.Errorf("invalid solana transaction signature: %w", err)
+	}
 	payload := map[string]any{
 		"jsonrpc": "2.0",
 		"id":      1,
 		"method":  "getTransaction",
 		"params": []any{
-			strings.TrimSpace(signature),
+			signature,
 			map[string]any{
 				"commitment":                     strings.TrimSpace(commitment),
 				"encoding":                       "jsonParsed",
@@ -320,6 +350,38 @@ func (c *HTTPSolanaRPCClient) GetTransaction(ctx context.Context, signature stri
 	return *response.Result, nil
 }
 
+func (c *HTTPSolanaRPCClient) GetSignatureStatus(ctx context.Context, signature string) (SolanaSignatureStatus, error) {
+	if c == nil || strings.TrimSpace(c.endpoint) == "" {
+		return SolanaSignatureStatus{}, ErrSolPaymentsNotConfigured
+	}
+	signature = strings.TrimSpace(signature)
+	if _, err := decodeBase58Fixed(signature, 64); err != nil {
+		return SolanaSignatureStatus{}, fmt.Errorf("invalid solana transaction signature: %w", err)
+	}
+	var response struct {
+		Result *struct {
+			Value []*SolanaSignatureStatus `json:"value"`
+		} `json:"result"`
+		Error *struct {
+			Code    int    `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := c.rpc(ctx, "getSignatureStatuses", []any{
+		[]string{signature},
+		map[string]any{"searchTransactionHistory": true},
+	}, &response); err != nil {
+		return SolanaSignatureStatus{}, err
+	}
+	if response.Error != nil {
+		return SolanaSignatureStatus{}, fmt.Errorf("solana rpc error (%d): %s", response.Error.Code, response.Error.Message)
+	}
+	if response.Result == nil || len(response.Result.Value) != 1 || response.Result.Value[0] == nil {
+		return SolanaSignatureStatus{}, ErrSolanaTransactionUnavailable
+	}
+	return *response.Result.Value[0], nil
+}
+
 func (c *HTTPSolanaRPCClient) GetLatestBlockhash(ctx context.Context, commitment string) (SolanaLatestBlockhash, error) {
 	if c == nil || strings.TrimSpace(c.endpoint) == "" {
 		return SolanaLatestBlockhash{}, ErrSolPaymentsNotConfigured
@@ -355,6 +417,14 @@ func (c *HTTPSolanaRPCClient) SendTransaction(ctx context.Context, signedTransac
 	if c == nil || strings.TrimSpace(c.endpoint) == "" {
 		return "", ErrSolPaymentsNotConfigured
 	}
+	signedTransaction = strings.TrimSpace(signedTransaction)
+	decoded, err := base64.StdEncoding.DecodeString(signedTransaction)
+	if err != nil {
+		return "", fmt.Errorf("signed transaction must be base64: %w", err)
+	}
+	if len(decoded) == 0 || len(decoded) > maxSolanaTransactionBytes {
+		return "", fmt.Errorf("signed transaction must be between 1 and %d bytes", maxSolanaTransactionBytes)
+	}
 	var response struct {
 		Result string `json:"result"`
 		Error  *struct {
@@ -363,7 +433,7 @@ func (c *HTTPSolanaRPCClient) SendTransaction(ctx context.Context, signedTransac
 		} `json:"error"`
 	}
 	if err := c.rpc(ctx, "sendTransaction", []any{
-		strings.TrimSpace(signedTransaction),
+		signedTransaction,
 		map[string]any{
 			"encoding":            "base64",
 			"skipPreflight":       false,
@@ -376,10 +446,14 @@ func (c *HTTPSolanaRPCClient) SendTransaction(ctx context.Context, signedTransac
 	if response.Error != nil {
 		return "", fmt.Errorf("solana rpc error (%d): %s", response.Error.Code, response.Error.Message)
 	}
-	if strings.TrimSpace(response.Result) == "" {
+	signature := strings.TrimSpace(response.Result)
+	if signature == "" {
 		return "", ErrSolanaTransactionUnavailable
 	}
-	return strings.TrimSpace(response.Result), nil
+	if _, err := decodeBase58Fixed(signature, 64); err != nil {
+		return "", fmt.Errorf("solana rpc returned an invalid transaction signature: %w", err)
+	}
+	return signature, nil
 }
 
 func (c *HTTPSolanaRPCClient) rpc(ctx context.Context, method string, params []any, response any) error {
@@ -902,9 +976,21 @@ func (s *Service) SubmitSolPaymentTransaction(ctx context.Context, request Submi
 	if signedTransaction == "" {
 		return SolPaymentVerificationResult{}, fmt.Errorf("signed_transaction is required")
 	}
-	if _, err := base64.StdEncoding.DecodeString(signedTransaction); err != nil {
+	decodedTransaction, err := base64.StdEncoding.DecodeString(signedTransaction)
+	if err != nil {
 		return SolPaymentVerificationResult{}, fmt.Errorf("signed_transaction must be base64")
 	}
+	if len(decodedTransaction) == 0 || len(decodedTransaction) > maxSolanaTransactionBytes {
+		return SolPaymentVerificationResult{}, fmt.Errorf("signed_transaction must be between 1 and %d bytes", maxSolanaTransactionBytes)
+	}
+	signedSignature, err := solanaTransactionSignature(decodedTransaction)
+	if err != nil {
+		return SolPaymentVerificationResult{}, fmt.Errorf("invalid signed_transaction: %w", err)
+	}
+	submissionLock := s.solSubmissionLock(strings.TrimSpace(request.OrderID))
+	submissionLock.Lock()
+	defer submissionLock.Unlock()
+
 	order, ok, err := s.repo.GetBillingOrder(ctx, request.OrderID)
 	if err != nil {
 		return SolPaymentVerificationResult{}, err
@@ -922,16 +1008,39 @@ func (s *Service) SubmitSolPaymentTransaction(ctx context.Context, request Submi
 	if order.DueLamports <= 0 {
 		return SolPaymentVerificationResult{Order: s.solPaymentOrderView(order)}, ErrSolPaymentNotRequired
 	}
+	if order.Status == SolOrderStatusActivated || order.Status == SolOrderStatusVerified {
+		return SolPaymentVerificationResult{
+			Order:              s.solPaymentOrderView(order),
+			Verified:           true,
+			SubmittedSignature: firstNonEmpty(order.SubmittedSignature, order.VerifiedTransactionSignature),
+		}, nil
+	}
+	if order.SubmittedSignature != "" {
+		if order.SubmittedSignature != signedSignature {
+			return SolPaymentVerificationResult{Order: s.solPaymentOrderView(order), FailureCode: "verification_failed", FailureError: "a different transaction was already submitted for this order"}, ErrSolPaymentVerificationFailed
+		}
+		return SolPaymentVerificationResult{
+			Order:              s.solPaymentOrderView(order),
+			SubmittedSignature: signedSignature,
+			FailureCode:        "pending_confirmation",
+		}, nil
+	}
 	signature, err := s.solana.SendTransaction(ctx, signedTransaction, order.ConfirmationThreshold)
 	if err != nil {
 		return SolPaymentVerificationResult{Order: s.solPaymentOrderView(order), FailureCode: "rpc_unavailable", FailureError: err.Error()}, ErrSolPaymentVerificationFailed
 	}
-	result, err := s.VerifySolPayment(ctx, VerifySolPaymentRequest{OrderID: order.OrderID, Signature: signature})
-	result.SubmittedSignature = signature
-	if err != nil {
-		return result, err
+	if signature != signedSignature {
+		return SolPaymentVerificationResult{Order: s.solPaymentOrderView(order), FailureCode: "rpc_unavailable", FailureError: "RPC returned a signature that did not match the submitted transaction"}, ErrSolPaymentVerificationFailed
 	}
-	return result, nil
+	if err := s.repo.UpdateBillingOrder(ctx, order.OrderID, map[string]any{"submitted_transaction_signature": signature}); err != nil {
+		return SolPaymentVerificationResult{Order: s.solPaymentOrderView(order), SubmittedSignature: signature, FailureCode: "submission_record_failed", FailureError: err.Error()}, err
+	}
+	order.SubmittedSignature = signature
+	return SolPaymentVerificationResult{
+		Order:              s.solPaymentOrderView(order),
+		SubmittedSignature: signature,
+		FailureCode:        "pending_confirmation",
+	}, nil
 }
 
 func (s *Service) VerifySolPayment(ctx context.Context, request VerifySolPaymentRequest) (SolPaymentVerificationResult, error) {
@@ -964,6 +1073,43 @@ func (s *Service) VerifySolPayment(ctx context.Context, request VerifySolPayment
 	}
 	if order.Status == SolOrderStatusVerified && order.VerifiedTransactionSignature == signature {
 		return SolPaymentVerificationResult{Order: s.solPaymentOrderView(order), Verified: true}, nil
+	}
+	if order.SubmittedSignature == "" || order.SubmittedSignature != signature {
+		return SolPaymentVerificationResult{
+			Order:        s.solPaymentOrderView(order),
+			FailureCode:  "verification_failed",
+			FailureError: "transaction signature was not submitted for this order",
+		}, ErrSolPaymentVerificationFailed
+	}
+	verificationLock := s.solVerificationLock(order.OrderID)
+	if !verificationLock.TryLock() {
+		return SolPaymentVerificationResult{
+			Order:        s.solPaymentOrderView(order),
+			FailureCode:  "pending_confirmation",
+			FailureError: "payment verification is already in progress",
+		}, ErrSolPaymentVerificationFailed
+	}
+	defer verificationLock.Unlock()
+
+	status, err := s.solana.GetSignatureStatus(ctx, signature)
+	if err != nil {
+		code := "rpc_unavailable"
+		if errors.Is(err, ErrSolanaTransactionUnavailable) {
+			code = "pending_confirmation"
+		}
+		return SolPaymentVerificationResult{Order: s.solPaymentOrderView(order), FailureCode: code, FailureError: err.Error()}, ErrSolPaymentVerificationFailed
+	}
+	if status.Err != nil {
+		err := fmt.Errorf("transaction execution failed")
+		_ = s.recordFailedSolVerification(ctx, order, signature, "transaction_failed", err)
+		return SolPaymentVerificationResult{Order: s.solPaymentOrderView(order), FailureCode: "verification_failed", FailureError: err.Error()}, ErrSolPaymentVerificationFailed
+	}
+	if !confirmationAtLeast(status.ConfirmationStatus, order.ConfirmationThreshold) {
+		return SolPaymentVerificationResult{
+			Order:        s.solPaymentOrderView(order),
+			FailureCode:  "pending_confirmation",
+			FailureError: ErrSolanaTransactionUnavailable.Error(),
+		}, ErrSolPaymentVerificationFailed
 	}
 
 	transaction, err := s.solana.GetTransaction(ctx, signature, order.ConfirmationThreshold)
@@ -1648,7 +1794,7 @@ func (s *Service) solPaymentOrderView(order store.BillingOrder) SolPaymentOrderV
 		Cluster:                      order.Cluster,
 		ConfirmationThreshold:        order.ConfirmationThreshold,
 		Status:                       order.Status,
-		PaymentURL:                   solanaPayURL(order),
+		SubmittedSignature:           order.SubmittedSignature,
 		VerifiedTransactionSignature: order.VerifiedTransactionSignature,
 		ExpiresAt:                    order.ExpiresAt.UTC(),
 		CreatedAt:                    order.CreatedAt.UTC(),
@@ -1772,10 +1918,6 @@ func firstSigner(transaction SolanaTransaction) string {
 	return ""
 }
 
-func solanaPayURL(order store.BillingOrder) string {
-	return ""
-}
-
 func buildSolPaymentTransactionBase64(order store.BillingOrder, payerWallet string, blockhash string) (string, error) {
 	payer, err := decodeBase58Fixed(payerWallet, 32)
 	if err != nil {
@@ -1813,6 +1955,45 @@ func buildSolPaymentTransactionBase64(order store.BillingOrder, payerWallet stri
 	transaction.Write(make([]byte, 64))
 	transaction.Write(message.Bytes())
 	return base64.StdEncoding.EncodeToString(transaction.Bytes()), nil
+}
+
+func solanaTransactionSignature(transaction []byte) (string, error) {
+	count, offset, err := readCompactLength(transaction)
+	if err != nil {
+		return "", err
+	}
+	if count != 1 {
+		return "", fmt.Errorf("expected one transaction signature, got %d", count)
+	}
+	if len(transaction) < offset+64 {
+		return "", fmt.Errorf("transaction signature is truncated")
+	}
+	signature := transaction[offset : offset+64]
+	nonZero := false
+	for _, value := range signature {
+		if value != 0 {
+			nonZero = true
+			break
+		}
+	}
+	if !nonZero {
+		return "", fmt.Errorf("transaction is not signed")
+	}
+	return encodeBase58(signature), nil
+}
+
+func readCompactLength(input []byte) (int, int, error) {
+	value := 0
+	shift := 0
+	for index := 0; index < len(input) && index < 3; index++ {
+		current := input[index]
+		value |= int(current&0x7f) << shift
+		if current&0x80 == 0 {
+			return value, index + 1, nil
+		}
+		shift += 7
+	}
+	return 0, 0, fmt.Errorf("invalid compact length")
 }
 
 func writeCompiledInstruction(buffer *bytes.Buffer, programIndex byte, accounts []byte, data []byte) {

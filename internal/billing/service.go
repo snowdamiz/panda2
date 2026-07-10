@@ -8,6 +8,7 @@ import (
 	"math"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/sn0w/panda2/internal/repository"
@@ -38,11 +39,30 @@ type Config struct {
 }
 
 type Service struct {
-	repo   *repository.BillingRepository
-	audit  *repository.AuditRepository
-	cfg    Config
-	solana SolanaRPCClient
-	now    func() time.Time
+	repo                 *repository.BillingRepository
+	audit                *repository.AuditRepository
+	cfg                  Config
+	solana               SolanaRPCClient
+	now                  func() time.Time
+	solSubmissionLocks   [64]sync.Mutex
+	solVerificationLocks [64]sync.Mutex
+}
+
+func (s *Service) solSubmissionLock(orderID string) *sync.Mutex {
+	return solOrderLock(&s.solSubmissionLocks, orderID)
+}
+
+func (s *Service) solVerificationLock(orderID string) *sync.Mutex {
+	return solOrderLock(&s.solVerificationLocks, orderID)
+}
+
+func solOrderLock(locks *[64]sync.Mutex, orderID string) *sync.Mutex {
+	hash := uint32(2166136261)
+	for index := 0; index < len(orderID); index++ {
+		hash ^= uint32(orderID[index])
+		hash *= 16777619
+	}
+	return &locks[hash%uint32(len(locks))]
 }
 
 type TrialSeed struct {
@@ -246,12 +266,16 @@ func (s *Service) Resolve(ctx context.Context, guildID string) (Entitlement, err
 	if s == nil || s.repo == nil {
 		return Entitlement{}, ErrNoCreditAccount
 	}
+	guildID = strings.TrimSpace(guildID)
+	if _, err := s.repo.ExpireCreditGrantsForGuild(ctx, guildID, s.currentTime()); err != nil {
+		return Entitlement{GuildID: guildID, UpgradeURL: s.upgradeURL(guildID)}, err
+	}
 	account, ok, err := s.repo.GetCreditAccountByGuild(ctx, guildID)
 	if err != nil {
 		return Entitlement{}, err
 	}
 	if !ok {
-		return Entitlement{GuildID: strings.TrimSpace(guildID), UpgradeURL: s.upgradeURL(guildID)}, ErrNoCreditAccount
+		return Entitlement{GuildID: guildID, UpgradeURL: s.upgradeURL(guildID)}, ErrNoCreditAccount
 	}
 	return s.entitlementFromCreditAccount(account), nil
 }
@@ -308,6 +332,9 @@ func (s *Service) Check(ctx context.Context, guildID, metric string, units int64
 		return entitlement, err
 	}
 	if !entitlement.CanUsePaidFeatures || entitlement.ReadOnly {
+		if entitlement.Depleted() {
+			return entitlement, creditError(entitlement, quote, metric)
+		}
 		return entitlement, ErrReadOnly
 	}
 	if entitlement.AvailableCredits < quote.MaxCredits {
@@ -342,6 +369,9 @@ func (s *Service) BeginCreditUsage(ctx context.Context, guildID string, quote Cr
 		return Reservation{GuildID: strings.TrimSpace(guildID), Action: quote.Action, Credits: quote.ExpectedCredits, MaxCredits: quote.MaxCredits, Entitlement: entitlement}, err
 	}
 	if !entitlement.CanUsePaidFeatures || entitlement.ReadOnly {
+		if entitlement.Depleted() {
+			return Reservation{GuildID: entitlement.GuildID, Action: quote.Action, Credits: quote.ExpectedCredits, MaxCredits: quote.MaxCredits, Entitlement: entitlement}, creditError(entitlement, quote, "")
+		}
 		return Reservation{GuildID: entitlement.GuildID, Action: quote.Action, Credits: quote.ExpectedCredits, MaxCredits: quote.MaxCredits, Entitlement: entitlement}, ErrReadOnly
 	}
 	if entitlement.AvailableCredits < quote.MaxCredits {
@@ -631,6 +661,10 @@ func creditError(entitlement Entitlement, quote CreditQuote, metric string) Cred
 		AvailableCredits: entitlement.AvailableCredits,
 		UpgradeURL:       entitlement.UpgradeURL,
 	}
+}
+
+func (e Entitlement) Depleted() bool {
+	return e.Status == StatusDepleted || e.GraceState == GraceDepleted || (e.AvailableCredits <= 0 && e.ReservedCredits <= 0)
 }
 
 func statusForPack(pack string) string {

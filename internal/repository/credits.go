@@ -453,6 +453,25 @@ func (r *BillingRepository) ExpireCreditGrants(ctx context.Context, now time.Tim
 	return expired, err
 }
 
+func (r *BillingRepository) ExpireCreditGrantsForGuild(ctx context.Context, guildID string, now time.Time) (int64, error) {
+	guildID = strings.TrimSpace(guildID)
+	if guildID == "" {
+		return 0, nil
+	}
+	if now.IsZero() {
+		now = time.Now().UTC()
+	} else {
+		now = now.UTC()
+	}
+	var expired int64
+	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var err error
+		expired, err = expireCreditGrantsTx(tx, guildID, now)
+		return err
+	})
+	return expired, err
+}
+
 func expireCreditGrantsTx(tx *gorm.DB, guildID string, now time.Time) (int64, error) {
 	var grants []store.CreditGrant
 	query := tx.Clauses(clause.Locking{Strength: "UPDATE"}).

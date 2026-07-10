@@ -2941,6 +2941,37 @@ func TestChatEmptyAssistantResponseFailureReleasesBillingReservation(t *testing.
 	}
 }
 
+func TestCheckAIUsageAvailableExpiresStaleCreditCache(t *testing.T) {
+	ctx := context.Background()
+	router := newTestRouter(t, &fakeLLM{response: llm.ChatResponse{Content: "unused"}}, 20)
+
+	db, err := store.Open(ctx, filepath.Join(t.TempDir(), "billing.db"))
+	if err != nil {
+		t.Fatalf("open billing store: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	billingService := billing.NewService(repository.NewBillingRepository(db.DB), billing.Config{})
+	now := time.Date(2026, 6, 21, 12, 0, 0, 0, time.UTC)
+	billingService.SetClock(func() time.Time { return now })
+	if _, err := billingService.EnsureTrial(ctx, billing.TrialSeed{
+		GuildID:            "guild-1",
+		BillingOwnerUserID: "owner-1",
+		AuthorizedAt:       now,
+	}); err != nil {
+		t.Fatalf("EnsureTrial: %v", err)
+	}
+	router.WithBilling(billingService)
+
+	now = now.Add(billing.TrialDuration + time.Minute)
+	response := router.checkAIUsageAvailable(ctx, Request{GuildID: "guild-1", RequestID: "request-1"})
+	if response.Presentation.Title != "Credits depleted" {
+		t.Fatalf("expected credits depleted response, got %+v", response)
+	}
+	if !strings.Contains(response.Content, "needs 4 credits") || !strings.Contains(response.Content, "only has 0 credits available") {
+		t.Fatalf("expected refreshed depleted balance in response, got %q", response.Content)
+	}
+}
+
 func TestBackgroundTaskEmptyAssistantResponseFailureReleasesBillingReservation(t *testing.T) {
 	ctx := context.Background()
 	router := newTestRouter(t, &fakeLLM{response: llm.ChatResponse{Model: "fixture/model"}}, 20)
